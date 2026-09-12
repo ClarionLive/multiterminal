@@ -94,7 +94,11 @@ namespace MultiTerminal.Services
         /// <param name="appName">The App's name; its slug becomes the <c>name[bot]</c> on every comment.</param>
         /// <param name="redirectUrl">Where GitHub returns the temporary code.</param>
         /// <param name="homepageUrl">Shown on the App's public page.</param>
-        internal static string BuildManifest(string appName, string redirectUrl, string homepageUrl)
+        /// <param name="setupUrl">
+        /// Where GitHub sends the Owner AFTER they install the App, carrying <c>installation_id</c>.
+        /// Optional, and omitted from the manifest when absent rather than sent empty.
+        /// </param>
+        internal static string BuildManifest(string appName, string redirectUrl, string homepageUrl, string setupUrl = null)
         {
             if (string.IsNullOrWhiteSpace(appName)) throw new ArgumentException("App name is required.", nameof(appName));
             if (string.IsNullOrWhiteSpace(redirectUrl)) throw new ArgumentException("Redirect URL is required.", nameof(redirectUrl));
@@ -151,7 +155,35 @@ namespace MultiTerminal.Services
                 default_events = Array.Empty<string>(),
             };
 
-            return JsonSerializer.Serialize(manifest);
+            if (string.IsNullOrWhiteSpace(setupUrl))
+                return JsonSerializer.Serialize(manifest);
+
+            // ⚠️ setup_url is the ONLY way an installation id can arrive from the one-click flow, and it
+            // is why it is here at all (task b42b1883, item 10). redirect_url fires at CONVERSION, which
+            // happens BEFORE the App is installed anywhere — at that moment no installation exists and no
+            // id can be known. setup_url fires AFTER installation and carries installation_id, closing
+            // the loop that otherwise ends with a human hand-copying a number out of a settings page.
+            //
+            // It is NOT retrofittable: this is a manifest field, so it reaches a FUTURE registration and
+            // does nothing for an App that already exists. That is precisely why discovery
+            // (GitHubAppTokenService.ResolveInstallationIdAsync) is the primary fix and this is the
+            // belt-and-braces half — do not reverse the two when reading this later.
+            //
+            // setup_on_update is deliberately left unset (GitHub defaults it off): an installation being
+            // edited does not change its id, so redirecting on update would add a browser round trip that
+            // learns nothing.
+            var withSetup = new
+            {
+                manifest.name,
+                manifest.url,
+                manifest.redirect_url,
+                setup_url = setupUrl,
+                manifest.@public,
+                manifest.default_permissions,
+                manifest.default_events,
+            };
+
+            return JsonSerializer.Serialize(withSetup);
         }
 
         /// <summary>

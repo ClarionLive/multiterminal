@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
@@ -70,10 +71,12 @@ namespace MultiTerminal.API.Controllers
             // Derived from the request so it stays correct if MT is not on the default port. GitHub
             // permits http for localhost redirect targets.
             string redirectUrl = $"{Request.Scheme}://{Request.Host}/api/github/app/callback";
+            string setupUrl = $"{Request.Scheme}://{Request.Host}/api/github/app/setup";
             string manifestJson = GitHubAppManifestService.BuildManifest(
                 appName,
                 redirectUrl,
-                homepageUrl: "https://github.com/ClarionLive/multiterminal");
+                homepageUrl: "https://github.com/ClarionLive/multiterminal",
+                setupUrl: setupUrl);
 
             string state = _manifest.IssueState();
 
@@ -155,6 +158,110 @@ it to an agent. Agents receive tokens that expire within the hour.</p>
             slug = _settings.GetGitHubAppSlug(),
             defaultInstallationId = _settings.GetGitHubAppDefaultInstallationId(),
         });
+
+        /// <summary>
+        /// GitHub's POST-INSTALL redirect target: where the installation id finally becomes knowable
+        /// (task b42b1883, item 10).
+        ///
+        /// <para>This is the endpoint <see cref="Callback"/> could never be. Conversion happens BEFORE
+        /// the App is installed on anything, so the registration callback has no installation to learn
+        /// about — a fact that is easy to read as an oversight and is actually the shape of GitHub's
+        /// flow. Installing is a separate, later act, and this is where it reports back.</para>
+        ///
+        /// <para><b>The id is verified against GitHub, not trusted.</b> Anything that can reach loopback
+        /// can call this with a number of its choosing, and MT's REST API is unauthenticated by design
+        /// (task c9285d2a). <see cref="GitHubAppTokenService.SetDefaultInstallationIdAsync"/> accepts
+        /// only an id GitHub lists for THIS App, so the worst a caller can do is select among
+        /// installations the Owner already made.</para>
+        /// </summary>
+        [HttpGet("setup")]
+        public async Task<IActionResult> Setup(
+            [FromQuery(Name = "installation_id")] string installationId,
+            [FromQuery(Name = "setup_action")] string setupAction,
+            CancellationToken ct)
+        {
+            if (string.IsNullOrWhiteSpace(installationId))
+            {
+                return Content(Page(
+                    "Nothing to record",
+                    "GitHub did not include an installation id in this redirect.",
+                    "If you have just installed the App, open its installation settings and try again."),
+                    "text/html; charset=utf-8");
+            }
+
+            try
+            {
+                string account = await _tokens.SetDefaultInstallationIdAsync(installationId, ct).ConfigureAwait(false);
+                return Content(Page(
+                    "Installation recorded",
+                    $"Agents will act through installation <code>{WebUtility.HtmlEncode(installationId)}</code> "
+                    + $"on <code>{WebUtility.HtmlEncode(account)}</code>.",
+                    $"Setup action: {WebUtility.HtmlEncode(setupAction ?? "install")}. You can close this tab."),
+                    "text/html; charset=utf-8");
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Content(Page("Could not record the installation", WebUtility.HtmlEncode(ex.Message),
+                    "Nothing was changed."), "text/html; charset=utf-8");
+            }
+        }
+
+        /// <summary>
+        /// Every installation of this App. Ids and account names only — no key material, no tokens.
+        /// <para>Exists because <see cref="SetInstallation"/>'s caller has to be able to SEE the choice
+        /// before making it, which matters exactly when there is more than one and MT refuses to guess.</para>
+        /// </summary>
+        [HttpGet("installations")]
+        public async Task<IActionResult> Installations(CancellationToken ct)
+        {
+            try
+            {
+                var found = await _tokens.ListInstallationsAsync(ct).ConfigureAwait(false);
+                return Ok(new
+                {
+                    installations = found.Select(i => new { id = i.Id, account = i.Account }),
+                    defaultInstallationId = _settings.GetGitHubAppDefaultInstallationId(),
+                });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return StatusCode(503, new { error = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Chooses which installation agents act through, for the case discovery deliberately refuses:
+        /// more than one installation, where picking automatically would bind the bot to an account
+        /// nobody chose.
+        /// <para>POST because it changes what every future agent comment is published as — and POST puts
+        /// it behind <see cref="SecFetchSiteWriteGuardMiddleware"/>, so a browser-driven cross-site call
+        /// is refused before it arrives.</para>
+        /// </summary>
+        [HttpPost("installation")]
+        public async Task<IActionResult> SetInstallation(
+            [FromBody] SetInstallationRequest request,
+            CancellationToken ct)
+        {
+            try
+            {
+                string account = await _tokens
+                    .SetDefaultInstallationIdAsync(request?.InstallationId, ct)
+                    .ConfigureAwait(false);
+
+                return Ok(new { installationId = request.InstallationId.Trim(), account });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return StatusCode(503, new { error = ex.Message });
+            }
+        }
+
+        /// <summary>Body of <see cref="SetInstallation"/>.</summary>
+        public sealed class SetInstallationRequest
+        {
+            /// <summary>The installation to act through. Verified against GitHub before it is stored.</summary>
+            public string InstallationId { get; set; }
+        }
 
         /// <summary>
         /// Mints a short-lived installation token for the terminal that presents its launch nonce

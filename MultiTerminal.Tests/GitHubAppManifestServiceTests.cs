@@ -44,6 +44,62 @@ namespace MultiTerminal.Tests
             JsonDocument.Parse(GitHubAppManifestService.BuildManifest(
                 "clarionlive-agent", CallbackUrl, "https://github.com/ClarionLive/multiterminal")).RootElement;
 
+        private const string SetupUrl = "http://localhost:5050/api/github/app/setup";
+
+        private static JsonElement ManifestWithSetup() =>
+            JsonDocument.Parse(GitHubAppManifestService.BuildManifest(
+                "clarionlive-agent", CallbackUrl, "https://github.com/ClarionLive/multiterminal", SetupUrl)).RootElement;
+
+        // ─── Where the installation id can come from (item 10) ───────────────────────────────
+
+        [Fact]
+        public void The_manifest_carries_a_setup_url_so_a_future_registration_learns_its_installation_id()
+        {
+            // redirect_url fires at CONVERSION, which happens BEFORE the App is installed anywhere — so
+            // at that moment there is no installation and no id to learn. setup_url fires AFTER
+            // installation and carries installation_id, and it is the ONLY point in the one-click flow
+            // where that number becomes knowable without a human copying it out of a settings page.
+            //
+            // Its absence is what left this ticket with a registered App that could not mint (item 10).
+            JsonElement m = ManifestWithSetup();
+
+            Assert.Equal(SetupUrl, m.GetProperty("setup_url").GetString());
+
+            // The redirect is unchanged and still separate — these are two different moments, not two
+            // spellings of one.
+            Assert.Equal(CallbackUrl, m.GetProperty("redirect_url").GetString());
+        }
+
+        [Fact]
+        public void Adding_the_setup_url_changes_nothing_else_about_what_is_requested()
+        {
+            // The permission set is an Owner decision with its own test above. This asserts the setup_url
+            // branch did not quietly rebuild the manifest with a different one — the branch reconstructs
+            // the object, which is exactly the shape of change that silently drops a field.
+            JsonElement m = ManifestWithSetup();
+            JsonElement perms = m.GetProperty("default_permissions");
+
+            Assert.Equal("write", perms.GetProperty("issues").GetString());
+            Assert.Equal("write", perms.GetProperty("pull_requests").GetString());
+            Assert.Equal("write", perms.GetProperty("contents").GetString());
+            Assert.Equal("read", perms.GetProperty("metadata").GetString());
+
+            Assert.False(m.GetProperty("public").GetBoolean());
+            Assert.Empty(m.GetProperty("default_events").EnumerateArray());
+
+            // Still no webhook: the two-failed-clicks rule above is not weakened by this branch.
+            Assert.False(m.TryGetProperty("hook_attributes", out _));
+        }
+
+        [Fact]
+        public void An_absent_setup_url_is_omitted_rather_than_sent_empty()
+        {
+            // GitHub validates the fields a manifest actually contains. An empty setup_url would be a
+            // declared redirect target that goes nowhere — the same class of mistake as the localhost
+            // webhook url, where supplying the field was worse than leaving it out.
+            Assert.False(Manifest().TryGetProperty("setup_url", out _));
+        }
+
         // ─── What we actually ask GitHub for ─────────────────────────────────────────────────
 
         [Fact]

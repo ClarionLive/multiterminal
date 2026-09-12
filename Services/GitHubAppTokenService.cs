@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
@@ -55,6 +57,7 @@ namespace MultiTerminal.Services
         private readonly SettingsService _settings;
         private readonly Func<DateTimeOffset> _now;
         private readonly Func<string, string, CancellationToken, Task<InstallationToken>> _exchange;
+        private readonly Func<string, CancellationToken, Task<IReadOnlyList<Installation>>> _listInstallations;
 
         private readonly ConcurrentDictionary<string, CachedToken> _cache = new(StringComparer.Ordinal);
 
@@ -66,9 +69,19 @@ namespace MultiTerminal.Services
         /// </summary>
         private readonly ConcurrentDictionary<string, SemaphoreSlim> _mintGates = new(StringComparer.Ordinal);
 
+        /// <summary>
+        /// The gate key for installation DISCOVERY, which has no installation id of its own to be keyed
+        /// by — discovery is precisely what runs when no id is known yet. It reuses
+        /// <see cref="_mintGates"/> rather than adding a second <see cref="SemaphoreSlim"/> field,
+        /// because a lone disposable field would make this type owe a Dispose it has no lifecycle for
+        /// (CA1001), and a gate is a gate. A space is not legal in a GitHub installation id, so this key
+        /// can never collide with a real one.
+        /// </summary>
+        private const string DiscoveryGateKey = " discovery ";
+
         /// <summary>Production constructor: real clock, real GitHub exchange.</summary>
         public GitHubAppTokenService(SettingsService settings)
-            : this(settings, () => DateTimeOffset.UtcNow, exchange: null)
+            : this(settings, () => DateTimeOffset.UtcNow, exchange: null, listInstallations: null)
         {
         }
 
@@ -79,11 +92,13 @@ namespace MultiTerminal.Services
         internal GitHubAppTokenService(
             SettingsService settings,
             Func<DateTimeOffset> now,
-            Func<string, string, CancellationToken, Task<InstallationToken>> exchange)
+            Func<string, string, CancellationToken, Task<InstallationToken>> exchange,
+            Func<string, CancellationToken, Task<IReadOnlyList<Installation>>> listInstallations = null)
         {
             _settings = settings ?? throw new ArgumentNullException(nameof(settings));
             _now = now ?? throw new ArgumentNullException(nameof(now));
             _exchange = exchange ?? ExchangeWithGitHubAsync;
+            _listInstallations = listInstallations ?? ListWithGitHubAsync;
         }
 
         /// <summary>An installation token and the moment it stops being valid.</summary>
@@ -98,6 +113,24 @@ namespace MultiTerminal.Services
             public string Token { get; }
 
             public DateTimeOffset ExpiresAt { get; }
+        }
+
+        /// <summary>
+        /// One installation of this App: the id a token is minted against, plus the account it sits on
+        /// for display. <see cref="Account"/> is never used to CHOOSE an installation — a name is not an
+        /// identity, and picking by it would silently follow a rename.
+        /// </summary>
+        internal sealed class Installation
+        {
+            public Installation(string id, string account)
+            {
+                Id = id;
+                Account = account;
+            }
+
+            public string Id { get; }
+
+            public string Account { get; }
         }
 
         private sealed class CachedToken
@@ -121,16 +154,7 @@ namespace MultiTerminal.Services
         /// <exception cref="InvalidOperationException">No App is configured, or no installation id.</exception>
         public async Task<string> GetInstallationTokenAsync(string installationId, CancellationToken ct = default)
         {
-            string installation = string.IsNullOrWhiteSpace(installationId)
-                ? _settings.GetGitHubAppDefaultInstallationId()
-                : installationId;
-
-            if (string.IsNullOrWhiteSpace(installation))
-            {
-                throw new InvalidOperationException(
-                    "No GitHub App installation id is configured. Register the App (task b42b1883 item 3), "
-                    + "or set a default installation id.");
-            }
+            string installation = await ResolveInstallationIdAsync(installationId, ct).ConfigureAwait(false);
 
             if (TryGetFresh(installation, out string cached))
                 return cached;
@@ -166,6 +190,149 @@ namespace MultiTerminal.Services
             {
                 gate.Release();
             }
+        }
+
+        /// <summary>
+        /// Answers "which installation should this token be minted against?".
+        ///
+        /// <para><b>This method is the fix for the gap that made items 0-7 inert</b> (task b42b1883,
+        /// item 10). Registration was proven end to end, and every mint still failed, because nothing in
+        /// MultiTerminal could supply an installation id: the setter had no caller outside tests, there
+        /// was no settings UI and no write endpoint, and the manifest callback CANNOT know the id by
+        /// construction — conversion happens BEFORE the App is installed anywhere. The result was a 503
+        /// on every mint and a fall back to the Owner's own account on every <c>gh</c> command, which is
+        /// the single outcome this ticket exists to prevent.</para>
+        ///
+        /// <para>Order, first hit wins: an explicitly requested id, then the stored default, then asking
+        /// GitHub. Discovery is what repairs an ALREADY-REGISTERED App — it needs no Owner action, no
+        /// re-registration and no GitHub-side configuration change, which is why it is the primary fix
+        /// and the manifest's <c>setup_url</c> is only the thing that stops a FUTURE registration from
+        /// ever landing here.</para>
+        ///
+        /// <para><b>⚠️ A stored default is never re-discovered, and that is deliberate.</b> Re-running
+        /// discovery when a mint fails is the obvious "self-healing" behaviour and it would quietly
+        /// defeat this ticket's own acceptance: revoke the installation agents act through, and MT would
+        /// hop to whichever installation survived and carry on commenting. Access must stop when the
+        /// Owner stops it, so a stale default stays stale and surfaces as an error.</para>
+        ///
+        /// <para>Zero and many installations are distinct failures with distinct instructions, never a
+        /// guess. Silently picking one of several would bind the bot to an account nobody chose.</para>
+        /// </summary>
+        /// <exception cref="InvalidOperationException">No App configured, or no single installation to adopt.</exception>
+        internal async Task<string> ResolveInstallationIdAsync(string requested, CancellationToken ct = default)
+        {
+            if (!string.IsNullOrWhiteSpace(requested))
+                return requested.Trim();
+
+            string stored = _settings.GetGitHubAppDefaultInstallationId();
+            if (!string.IsNullOrWhiteSpace(stored))
+                return stored.Trim();
+
+            SemaphoreSlim discoveryGate = _mintGates.GetOrAdd(DiscoveryGateKey, _ => new SemaphoreSlim(1, 1));
+            await discoveryGate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                // Re-read inside the gate: a caller that queued behind a discovery must use ITS result
+                // rather than starting a second identical conversation with GitHub.
+                stored = _settings.GetGitHubAppDefaultInstallationId();
+                if (!string.IsNullOrWhiteSpace(stored))
+                    return stored.Trim();
+
+                IReadOnlyList<Installation> found = await ListInstallationsAsync(ct).ConfigureAwait(false);
+
+                if (found.Count == 0)
+                {
+                    throw new InvalidOperationException(
+                        "The GitHub App is registered but is not installed on any account, so there is no "
+                        + "installation to mint a token for. Install it at " + InstallUrl() + ".");
+                }
+
+                if (found.Count > 1)
+                {
+                    throw new InvalidOperationException(
+                        "This GitHub App is installed on more than one account and MultiTerminal will not "
+                        + "guess which one agents should act through. Installations: "
+                        + string.Join(", ", found.Select(i => $"{i.Id} ({i.Account})"))
+                        + ". Choose one with POST /api/github/app/installation.");
+                }
+
+                // Persisted rather than merely returned, so this conversation with GitHub happens once per
+                // machine instead of once per command an agent runs.
+                _settings.SetGitHubAppDefaultInstallationId(found[0].Id);
+                return found[0].Id;
+            }
+            finally
+            {
+                discoveryGate.Release();
+            }
+        }
+
+        /// <summary>
+        /// Records which installation agents act through, after checking that it is real.
+        ///
+        /// <para><b>The verification is the point, not politeness.</b> This is reachable from MT's
+        /// loopback REST API, which is unauthenticated by design (task c9285d2a), and from a browser
+        /// redirect that carries no secret of its own. Accepting an arbitrary number would let any local
+        /// process repoint the bot. Accepting only an id GitHub itself lists for THIS App means the worst
+        /// a caller can do is select among installations the Owner already created.</para>
+        /// </summary>
+        /// <returns>The account the chosen installation sits on, for display.</returns>
+        /// <exception cref="InvalidOperationException">No App configured, or no such installation.</exception>
+        public async Task<string> SetDefaultInstallationIdAsync(string installationId, CancellationToken ct = default)
+        {
+            if (string.IsNullOrWhiteSpace(installationId))
+                throw new InvalidOperationException("An installation id is required.");
+
+            string wanted = installationId.Trim();
+            IReadOnlyList<Installation> found = await ListInstallationsAsync(ct).ConfigureAwait(false);
+            Installation match = found.FirstOrDefault(i => string.Equals(i.Id, wanted, StringComparison.Ordinal));
+
+            if (match == null)
+            {
+                throw new InvalidOperationException(
+                    $"This GitHub App has no installation with id {wanted}. Known installations: "
+                    + (found.Count == 0 ? "none" : string.Join(", ", found.Select(i => i.Id))) + ".");
+            }
+
+            _settings.SetGitHubAppDefaultInstallationId(match.Id);
+
+            // Tokens already minted against the PREVIOUS default must not keep being handed out after a
+            // deliberate change of identity — that is the same "leftover credential that still works"
+            // the acceptance rules out, arriving through a different door.
+            InvalidateCache();
+
+            return match.Account;
+        }
+
+        /// <summary>
+        /// Every installation of this App, straight from GitHub, authenticated as the App itself.
+        /// <para>The JWT built here is a live credential for up to nine minutes and goes only to GitHub.</para>
+        /// <para>One page of up to 100 is read. An App installed more times than that is already the
+        /// "many" failure below, which refuses to choose rather than paging to find more candidates.</para>
+        /// </summary>
+        /// <exception cref="InvalidOperationException">No App configured, or GitHub refused.</exception>
+        internal async Task<IReadOnlyList<Installation>> ListInstallationsAsync(CancellationToken ct = default)
+        {
+            string appId = _settings.GetGitHubAppId();
+            string pem = _settings.GetGitHubAppPrivateKeyPem();
+
+            if (string.IsNullOrWhiteSpace(appId) || string.IsNullOrWhiteSpace(pem))
+            {
+                throw new InvalidOperationException(
+                    "No GitHub App is configured (missing app id or private key). Register the App first.");
+            }
+
+            string jwt = CreateAppJwt(pem, appId, _now());
+            return await _listInstallations(jwt, ct).ConfigureAwait(false) ?? Array.Empty<Installation>();
+        }
+
+        /// <summary>Where the Owner installs this App. Slug-specific when known, the App list otherwise.</summary>
+        private string InstallUrl()
+        {
+            string slug = _settings.GetGitHubAppSlug();
+            return string.IsNullOrWhiteSpace(slug)
+                ? "https://github.com/settings/apps"
+                : $"https://github.com/apps/{Uri.EscapeDataString(slug)}/installations/new";
         }
 
         /// <summary>
@@ -280,6 +447,62 @@ namespace MultiTerminal.Services
                 : DateTimeOffset.UtcNow.AddHours(1);
 
             return new InstallationToken(token, expires);
+        }
+
+        /// <summary>
+        /// The real listing. Replaced wholesale in tests — the only part of discovery needing network.
+        /// <para>Reads ids as strings via <c>ToString()</c> because GitHub sends them as JSON numbers
+        /// while every other id in this file is a string; parsing to a long and back would be one more
+        /// place for a 64-bit id to lose its tail.</para>
+        /// </summary>
+        private static async Task<IReadOnlyList<Installation>> ListWithGitHubAsync(string jwt, CancellationToken ct)
+        {
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get,
+                "https://api.github.com/app/installations?per_page=100");
+
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+            request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
+            request.Headers.UserAgent.Add(new ProductInfoHeaderValue("MultiTerminal", "1.0"));
+
+            using HttpResponseMessage response = await Http.SendAsync(request, ct).ConfigureAwait(false);
+            string body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                // Status and a capped body only. This request carried the App JWT; echoing the request or
+                // its headers into an exception is how a credential reaches a log.
+                throw new InvalidOperationException(
+                    "GitHub refused to list this App's installations: "
+                    + $"{(int)response.StatusCode} {response.ReasonPhrase}. {Summarize(body)}");
+            }
+
+            using JsonDocument doc = JsonDocument.Parse(body);
+            var found = new List<Installation>();
+
+            if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                return found;
+
+            foreach (JsonElement element in doc.RootElement.EnumerateArray())
+            {
+                string id = element.TryGetProperty("id", out JsonElement idElement) ? idElement.ToString() : null;
+
+                // An entry with no id cannot be minted against, so it is dropped rather than carried as a
+                // half-installation that would later fail somewhere less obvious.
+                if (string.IsNullOrWhiteSpace(id))
+                    continue;
+
+                string account = element.TryGetProperty("account", out JsonElement accountElement)
+                                 && accountElement.ValueKind == JsonValueKind.Object
+                                 && accountElement.TryGetProperty("login", out JsonElement login)
+                    ? login.GetString()
+                    : null;
+
+                found.Add(new Installation(id, string.IsNullOrWhiteSpace(account) ? "unknown account" : account));
+            }
+
+            return found;
         }
 
         /// <summary>

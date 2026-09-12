@@ -141,7 +141,18 @@ async function main() {
 
   // Every failure lands here identically, and every one of them means the same thing to git:
   // say nothing, exit 0, let it try its other helpers.
-  if (!token) return;
+  //
+  // Silence is the right answer TO GIT and the wrong answer to the human (Owner ruling 2026-09-12:
+  // warn and continue). Those other helpers hold the Owner's own credentials, so falling through
+  // does not fail the push — it succeeds, under their name. Saying so on stderr costs nothing: git
+  // ignores stderr from a credential helper, so this cannot affect the operation, and it is the only
+  // moment at which the attribution is still a surprise rather than a fact in the repository.
+  if (!token) {
+    warn('No MultiTerminal bot token, so git will fall back to its other credential helpers.');
+    warn('Commits pushed by this command will be attributed to whatever account those supply,'
+      + ' not to the bot.');
+    return;
+  }
 
   // x-access-token is GitHub's username convention for an installation token. The blank line
   // terminates the response; without it git keeps reading.

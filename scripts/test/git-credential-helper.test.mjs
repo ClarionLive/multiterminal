@@ -206,9 +206,11 @@ test('falls through silently when MT refuses the nonce (401)', async () => {
   }
 });
 
-test('falls through silently when no GitHub App is configured yet (503)', async () => {
-  // This is the EXPECTED state until the Owner completes item 3, so it must be boring rather than
-  // noisy: git keeps working, it simply gets no credential from us.
+test('falls through silently when MT cannot mint (503)', async () => {
+  // ⚠️ This WAS "the expected state until the Owner completes item 3" and is not any more. The App is
+  // registered, so a 503 now means something is genuinely wrong. What stays true is the part this
+  // test asserts: git keeps working and simply gets no credential from us. The noise now goes to
+  // stderr instead (see the attribution test below), where git cannot be confused by it.
   const broker = await startFakeBroker({ status: 503, body: { error: 'No GitHub App is configured' } });
   try {
     const { stdout, code } = await runHelper({
@@ -250,6 +252,50 @@ test('store and erase are silent no-ops', async () => {
     }
 
     assert.equal(broker.received.length, 0, 'nothing is stored, so nothing is minted or erased');
+  } finally {
+    await broker.close();
+  }
+});
+
+// ─── Silent to git, audible to the human (item 11) ────────────────────────────────────────
+//
+// Every test above asserts stdout is empty, and that is the contract WITH GIT: say nothing, exit 0,
+// let it try its other helpers. What those helpers hold is the Owner's own credentials — so falling
+// through does not fail the push, it succeeds under their name. git ignores a credential helper's
+// stderr, so saying so cannot affect the operation, and this is the last moment at which the
+// attribution is still a surprise rather than a fact in the repository.
+
+test('a failed mint warns on stderr about who the push will be attributed to', async () => {
+  const broker = await startFakeBroker({ status: 503, body: { error: 'no installation' } });
+  try {
+    const { stdout, stderr, code } = await runHelper({
+      stdin: githubRequest,
+      env: { MT_API_URL: broker.url, MULTITERMINAL_LAUNCH_NONCE: 'nonce-abc' },
+    });
+
+    // Unchanged where it matters to git.
+    assert.equal(stdout, '', 'stderr diagnostics must not turn into a partial answer on stdout');
+    assert.equal(code, 0, 'a non-zero exit makes git treat the helper as broken');
+
+    assert.match(stderr, /attributed/i);
+    assert.match(stderr, /not to the bot/i);
+  } finally {
+    await broker.close();
+  }
+});
+
+test('a non-GitHub host stays completely silent, warning included', async () => {
+  // The warning belongs to "we could not act as the bot for a request that was ours". A push to some
+  // other host was never ours to answer, and warning there would train the reader to ignore it.
+  const broker = await startFakeBroker();
+  try {
+    const { stdout, stderr } = await runHelper({
+      stdin: 'protocol=https\nhost=gitlab.com\n\n',
+      env: { MT_API_URL: broker.url, MULTITERMINAL_LAUNCH_NONCE: 'nonce-abc' },
+    });
+
+    assert.equal(stdout, '');
+    assert.equal(stderr, '', 'a host we never claimed must produce no diagnostics at all');
   } finally {
     await broker.close();
   }

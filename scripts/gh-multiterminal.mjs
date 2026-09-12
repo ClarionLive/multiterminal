@@ -161,7 +161,19 @@ async function main() {
     });
 
     // Rule (1): no token is not an error. gh runs exactly as it would have without this shim.
-    if (!token) warn('Running gh without a MultiTerminal token.');
+    //
+    // THE WARNING NAMES THE CONSEQUENCE, NOT JUST THE CAUSE (Owner ruling 2026-09-12: warn and
+    // continue, do not refuse). The previous text — "Running gh without a MultiTerminal token." —
+    // was accurate and useless: it described a missing credential and said nothing about what the
+    // command is about to DO, which is publish under whichever account gh is signed in to. That is
+    // the Owner's own account, and an agent's words appearing under it is the exact harm this whole
+    // ticket exists to end. A reader who has to already understand the design in order to decode the
+    // warning is not being warned.
+    if (!token) {
+      warn('No MultiTerminal bot token, so gh will use whatever account it is already signed in to.');
+      warn('Anything this command publishes — a comment, an issue, a pull request, a push — will be'
+        + ' attributed to THAT account, not to the bot.');
+    }
   }
 
   // Rule (5). Signing is deliberately the LAST thing before the spawn: the token path above must be

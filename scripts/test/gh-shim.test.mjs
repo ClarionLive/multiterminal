@@ -95,6 +95,70 @@ function runShim({ args = ['issue', 'comment'], env = {}, realGh = process.execP
   });
 }
 
+// ─── The fallback says what it will DO, not only what failed (item 11) ─────────────────────
+//
+// Owner ruling 2026-09-12: warn and continue, do not refuse. The CONTINUE half was already true and
+// is covered by the three "runs gh anyway" tests above — these do not re-prove it, they pin the WARN
+// half, which was the part that was failing its job. The old text said "Running gh without a
+// MultiTerminal token.": true, and silent about the thing a reader needs, which is that the next
+// comment will carry their own name.
+
+test('a failed mint warns about the ATTRIBUTION, not just the missing token', async () => {
+  const broker = await startFakeBroker({ status: 503, body: { error: 'no installation' } });
+  try {
+    const { stdout, stderr, code } = await runShim({
+      env: { MT_API_URL: broker.url, MULTITERMINAL_LAUNCH_NONCE: 'nonce-abc' },
+    });
+
+    // The consequence, in words someone who has never read this ticket can act on.
+    assert.match(stderr, /attributed/i, 'the warning must name what happens, not only what failed');
+    assert.match(stderr, /not to the bot/i, 'it must be explicit about which identity is NOT used');
+    assert.match(stderr, /signed in to/i, 'and about where the other identity comes from');
+
+    // Rule (1) is untouched: gh still ran, with no token, exactly as it would have without the shim.
+    assert.match(stdout, /GH_TOKEN=\(none\)/);
+    assert.equal(code, 0);
+  } finally {
+    await broker.close();
+  }
+});
+
+test('the attribution warning also fires for a terminal that holds no nonce', async () => {
+  // Reached through a completely different branch — mintInstallationToken refuses before any request
+  // — so a warning added only to the HTTP-failure path would pass the test above and leave an adopted
+  // terminal posting as the Owner with no notice at all.
+  const broker = await startFakeBroker();
+  try {
+    const { stdout, stderr } = await runShim({ env: { MT_API_URL: broker.url } });
+
+    assert.equal(broker.received.length, 0, 'no nonce must still mean no request');
+    assert.match(stderr, /attributed/i);
+    assert.match(stderr, /not to the bot/i);
+    assert.match(stdout, /GH_TOKEN=\(none\)/);
+  } finally {
+    await broker.close();
+  }
+});
+
+test('the warning never names the identity it could not get a token for', async () => {
+  // A diagnostic is not a place to start printing installation ids or nonces back at the user.
+  const broker = await startFakeBroker({ status: 503, body: { error: 'no installation' } });
+  try {
+    const { stderr } = await runShim({
+      env: {
+        MT_API_URL: broker.url,
+        MULTITERMINAL_LAUNCH_NONCE: 'nonce-abc',
+        MULTITERMINAL_GITHUB_INSTALLATION_ID: '161180702',
+      },
+    });
+
+    assert.ok(!stderr.includes('nonce-abc'), 'the nonce must never reach stderr');
+    assert.ok(!stderr.includes('161180702'), 'the installation id is not diagnostic, it is noise');
+  } finally {
+    await broker.close();
+  }
+});
+
 test('hands the minted token to gh, and only to gh', async () => {
   const broker = await startFakeBroker();
   try {

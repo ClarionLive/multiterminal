@@ -59,8 +59,18 @@ export async function mintInstallationToken({
   }
 
   if (!response.ok) {
-    // 401 = not an MT-launched terminal. 503 = no App configured yet, which is the CORRECT state
-    // until the Owner completes item 3, so this path must stay boring rather than alarming.
+    // 401 = not an MT-launched terminal, which is normal and permanent for an adopted one.
+    //
+    // 503 USED TO BE THE EXPECTED STATE and is no longer. This comment previously read "no App
+    // configured yet, which is the CORRECT state until the Owner completes item 3, so this path must
+    // stay boring rather than alarming" — written while the App did not exist. The App is registered
+    // now, so a 503 here means something is actually wrong (no installation MT can resolve, or GitHub
+    // refused), and the response body carries MT's own explanation of which.
+    //
+    // Still only the status is reported, and still nothing is retried: this module's contract is "a
+    // token or nothing", and a caller cannot act differently on the reasons. Naming the CONSEQUENCE
+    // is each caller's job, because only the caller knows what it was about to do — see the shim and
+    // the credential helper.
     warn(`MultiTerminal refused to mint a token (HTTP ${response.status}).`);
     return null;
   }
