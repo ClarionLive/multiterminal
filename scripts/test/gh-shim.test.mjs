@@ -248,6 +248,61 @@ test('resolveRealGh skips the shim directory and honours an override', () => {
   );
 });
 
+test('skips the launcher directory MT puts first on PATH', () => {
+  // THE REAL RECURSION CASE. This .mjs lives in scripts/, but what is on PATH under the name `gh` is
+  // a launcher in MultiTerminal's shims directory — a different folder. Skipping only our own would
+  // find that launcher, which runs this file again. MT passes it as MULTITERMINAL_GH_SHIM_DIR.
+  const scriptsDir = path.join('C:', 'app', 'scripts');
+  const launcherDir = path.join('C:', 'Users', 'x', 'AppData', 'Roaming', 'multiterminal', 'shims');
+  const realDir = path.join('C:', 'Program Files', 'GitHub CLI');
+
+  // Mirror the real layout: MT writes only gh.cmd into the launcher directory, and GitHub CLI
+  // installs gh.exe. A predicate that claimed both existed everywhere would test a world that
+  // cannot happen.
+  const exists = (p) => {
+    const lower = p.toLowerCase();
+    if (lower.startsWith(launcherDir.toLowerCase())) return lower.endsWith('gh.cmd');
+    if (lower.startsWith(realDir.toLowerCase())) return lower.endsWith('gh.exe');
+    return false;
+  };
+
+  assert.equal(
+    resolveRealGh({
+      override: null,
+      pathValue: [launcherDir, realDir].join(path.delimiter),
+      shimDir: scriptsDir,
+      extraSkipDirs: [launcherDir],
+      exists,
+    }),
+    path.join(realDir, 'gh.exe'),
+    'the real gh must win over the launcher that shadows it',
+  );
+
+  // Without the extra skip, the launcher is what gets found — the bug this guards.
+  assert.equal(
+    resolveRealGh({
+      override: null,
+      pathValue: [launcherDir, realDir].join(path.delimiter),
+      shimDir: scriptsDir,
+      exists,
+    }),
+    path.join(launcherDir, 'gh.cmd'),
+    'demonstrates what happens without the skip: the launcher resolves to itself',
+  );
+
+  // A null/undefined entry must not blow up the resolver.
+  assert.equal(
+    resolveRealGh({
+      override: null,
+      pathValue: realDir,
+      shimDir: scriptsDir,
+      extraSkipDirs: [undefined, null],
+      exists,
+    }),
+    path.join(realDir, 'gh.exe'),
+  );
+});
+
 test('buildChildEnv adds the token only when the environment has none', () => {
   assert.equal(buildChildEnv({ A: '1' }, 'tok').GH_TOKEN, 'tok');
   assert.equal(buildChildEnv({ GH_TOKEN: 'mine' }, 'tok').GH_TOKEN, 'mine');

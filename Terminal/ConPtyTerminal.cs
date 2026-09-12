@@ -463,6 +463,35 @@ namespace MultiTerminal.Terminal
                 DebugLogService?.Trace("ConPtyTerminal", "Clearing inherited MULTITERMINAL_TASK_WORKTREE");
             }
 
+            // Point git and gh at the bot identity (task b42b1883, item 6). Everything added here is a
+            // file path or a git config KEY — no credential — so nothing new needs redacting before
+            // this command line is logged. That is asserted by AgentGitIdentityWiringTests rather than
+            // promised; if it ever stops being true, the design has drifted back toward a credential in
+            // the environment and must be re-examined instead of gaining another redaction rule.
+            string scriptsDirectory = Services.AgentGitIdentityWiring.ResolveScriptsDirectory();
+            if (Services.AgentGitIdentityWiring.ScriptsArePresent(scriptsDirectory))
+            {
+                string shimDirectory = Services.AgentGitIdentityWiring.EnsureGhLauncher(
+                    scriptsDirectory,
+                    Services.AgentGitIdentityWiring.ResolveShimDirectory(),
+                    message => DebugLogService?.Trace("ConPtyTerminal", message));
+
+                envSetup += Services.AgentGitIdentityWiring.BuildEnvironmentSetup(scriptsDirectory, shimDirectory);
+                DebugLogService?.Trace(
+                    "ConPtyTerminal",
+                    shimDirectory != null
+                        ? "Wired git credential helper + gh shim for the bot identity"
+                        : "Wired git credential helper; gh launcher unavailable");
+            }
+            else
+            {
+                // Same anti-inheritance rule the MULTITERMINAL_* variables follow: rather than let a
+                // child inherit MT's own GIT_CONFIG_* and end up pointed at a helper that is not
+                // there, clear them.
+                envSetup += Services.AgentGitIdentityWiring.BuildEnvironmentClear();
+                DebugLogService?.Trace("ConPtyTerminal", "Bot-identity scripts not found; cleared inherited git wiring");
+            }
+
             // Enable flicker-free alternate-screen renderer for Claude Code
             envSetup += "$env:CLAUDE_CODE_NO_FLICKER = '1'; ";
 

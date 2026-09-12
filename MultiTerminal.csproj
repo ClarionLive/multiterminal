@@ -160,6 +160,18 @@
     <Content Include="scripts\statusline.js">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- Bot-identity scripts (task b42b1883, items 4-6). A DEPLOYED MultiTerminal has no working
+         tree, so these must sit next to the executable: AgentGitIdentityWiring resolves them from
+         AppContext.BaseDirectory, and a terminal is left unwired if they are missing. -->
+    <Content Include="scripts\git-credential-multiterminal.mjs">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="scripts\gh-multiterminal.mjs">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="scripts\lib\mint-github-token.mjs">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>

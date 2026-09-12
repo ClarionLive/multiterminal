@@ -71,16 +71,26 @@ export function resolveRealGh({
   override,
   pathValue,
   shimDir,
+  extraSkipDirs = [],
   extensions = ['.exe', '.cmd', ''],
   exists = (p) => { try { return fs.statSync(p).isFile(); } catch { return false; } },
 }) {
   if (override) return override;
 
-  const normalizedShimDir = shimDir ? path.resolve(shimDir).toLowerCase() : null;
+  // TWO directories must be skipped, and missing the second one is the recursion bug in practice:
+  // this .mjs lives in the repo's scripts/ folder, but what is actually ON PATH under the name `gh`
+  // is a launcher in MultiTerminal's shims directory. Skipping only our own folder would find that
+  // launcher, which runs this file again, forever. MT passes the shims directory in
+  // MULTITERMINAL_GH_SHIM_DIR precisely so we can exclude it.
+  const skip = new Set(
+    [shimDir, ...extraSkipDirs]
+      .filter(Boolean)
+      .map((d) => path.resolve(d).toLowerCase()),
+  );
 
   for (const dir of String(pathValue ?? '').split(path.delimiter)) {
     if (!dir) continue;
-    if (normalizedShimDir && path.resolve(dir).toLowerCase() === normalizedShimDir) continue;
+    if (skip.has(path.resolve(dir).toLowerCase())) continue;
 
     for (const ext of extensions) {
       const candidate = path.join(dir, `gh${ext}`);
@@ -115,6 +125,7 @@ async function main() {
     override: process.env.MULTITERMINAL_REAL_GH || null,
     pathValue: process.env.PATH,
     shimDir: path.dirname(shimPath),
+    extraSkipDirs: [process.env.MULTITERMINAL_GH_SHIM_DIR],
   });
 
   if (!realGh) {
