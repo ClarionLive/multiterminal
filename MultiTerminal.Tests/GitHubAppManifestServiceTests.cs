@@ -74,6 +74,37 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void Hook_attributes_carries_a_url_because_GitHub_rejects_the_manifest_without_one()
+        {
+            // REGRESSION, and the reason this test exists rather than being folded into the one above.
+            //
+            // The first live registration attempt (2026-09-12) failed on GitHub's own validation page
+            // with `"url" wasn't supplied.` — because hook_attributes was sent as `{ active: false }`
+            // with no url. Every test in this file passed at the time. They pinned what we MEANT to ask
+            // for and nothing checked that GitHub would accept the payload, so the defect survived all
+            // the way to an Owner click.
+            //
+            // The error message is actively misleading: the top-level url WAS supplied, so it reads as
+            // if the homepage url were missing. Measured against the live endpoint, the rule is that
+            // omitting hook_attributes entirely validates fine, but supplying it obliges you to supply
+            // its url. Hence this assertion sits next to the active=false one — the two are only
+            // correct together, and asserting active=false alone is what let the bug through.
+            JsonElement hook = Manifest().GetProperty("hook_attributes");
+
+            Assert.True(
+                hook.TryGetProperty("url", out JsonElement url),
+                "hook_attributes must carry a url; GitHub rejects the whole manifest without it.");
+
+            string value = url.GetString();
+            Assert.False(string.IsNullOrWhiteSpace(value));
+
+            // Loopback on purpose. The webhook is inactive, and even if something flipped it active,
+            // GitHub's servers cannot route to this host — so the field satisfies GitHub's schema
+            // without opening an inbound listener, which is the whole point of asking for no webhook.
+            Assert.StartsWith("http://localhost:", value, StringComparison.Ordinal);
+        }
+
+        [Fact]
         public void The_manifest_is_private_and_points_back_at_this_machine()
         {
             JsonElement m = Manifest();

@@ -124,8 +124,25 @@ namespace MultiTerminal.Services
 
                 // No webhook and no events: MT polls and acts, nothing calls back into it. An inbound
                 // webhook would be a public listener this design does not need and would have to defend.
+                //
+                // ⚠️ The url is MANDATORY and its absence is why the first live registration attempt
+                // failed (2026-09-12). GitHub's manifest parser rejects hook_attributes without a url
+                // and reports it as `"url" wasn't supplied.` — which reads like the TOP-LEVEL url is
+                // missing and sends you looking in the wrong place. GitHub's own docs call
+                // hook_attributes required; measured against the live endpoint it is not (omitting the
+                // object entirely validates fine). The real rule is narrower: supply the object and you
+                // must supply its url.
+                //
+                // So the object stays, because it states "no webhook" rather than leaving it to a
+                // default nobody asserted, and the url is deliberately loopback: unreachable twice over,
+                // once because active is false and again because GitHub's servers cannot route to
+                // 127.0.0.1. MT serves nothing at this path and is not meant to.
                 default_events = Array.Empty<string>(),
-                hook_attributes = new { active = false },
+                hook_attributes = new
+                {
+                    url = "http://localhost:5050/api/github/app/webhook",
+                    active = false,
+                },
             };
 
             return JsonSerializer.Serialize(manifest);
