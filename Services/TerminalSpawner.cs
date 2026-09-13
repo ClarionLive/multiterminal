@@ -537,20 +537,69 @@ Always use ""{agentName}"" as your name when registering, claiming tasks, or sen
                 ? string.Empty
                 : SanitizeForPowerShell(taskWorktreePath);
 
-            // Build PowerShell command that sets environment variables and launches Claude Code
-            // The startup hook will detect these variables and auto-register
-            string command = $@"
+            // ─── Bot identity for SPAWNED terminals (task b42b1883, pipeline Run 1) ───────────────
+            //
+            // ⚠️ THIS BLOCK EXISTS BECAUSE ITS ABSENCE WAS INVISIBLE. The GitHub App wiring was added
+            // only to ConPtyTerminal, so docked terminals published as clarionlive-agent[bot] while
+            // every terminal spawned through HERE — a separate `claude` process in its own window —
+            // silently published under the OWNER'S account: no launch nonce (so the mint endpoint
+            // answered 401), no PATH shim (so `gh` found the real GitHub CLI), and no credential
+            // helper (so `git push` was unwired too). Nothing failed; the terminals everyone tests
+            // with were the wired ones.
+            //
+            // The nonce is a fresh per-launch secret, exactly as TerminalDocument generates one for a
+            // docked terminal. It does not need pre-registering with the broker: the MCP
+            // register_terminal tool echoes MULTITERMINAL_LAUNCH_NONCE back when the spawned agent
+            // registers at session start, and the broker attaches it to the row — which is the same
+            // path the docked terminals rely on.
+            //
+            // On the redaction question this class is in the clear, and deliberately so: unlike
+            // ConPtyTerminal, nothing here ever writes `command` (or psi.Arguments) to a log, and this
+            // file uses no DebugLogService at all. If that changes, this nonce becomes a secret in a
+            // logged command line and needs the RedactLaunchNonceForLog treatment.
+            string launchNonce = Guid.NewGuid().ToString("N");
+            string safeLaunchNonce = SanitizeForPowerShell(launchNonce);
+
+            string scriptsDirectory = AgentGitIdentityWiring.ResolveScriptsDirectory();
+            string gitIdentitySetup;
+            if (AgentGitIdentityWiring.ScriptsArePresent(scriptsDirectory))
+            {
+                string shimDirectory = AgentGitIdentityWiring.EnsureGhLauncher(
+                    scriptsDirectory,
+                    AgentGitIdentityWiring.ResolveShimDirectory());
+
+                gitIdentitySetup = AgentGitIdentityWiring.BuildEnvironmentSetup(scriptsDirectory, shimDirectory);
+            }
+            else
+            {
+                // Anti-inheritance: this child inherits MT's OWN environment (UseShellExecute = true
+                // cannot set per-child variables), so without an explicit clear it could pick up
+                // GIT_CONFIG_* pointing at a helper script that is not present here.
+                gitIdentitySetup = AgentGitIdentityWiring.BuildEnvironmentClear();
+            }
+
+            // ONE template, built in one place. There are two callers — the normal path and the
+            // pruning-path rebuild below — and keeping two literal copies in sync by hand is precisely
+            // how the identity wiring came to be missing in the first place. A local function makes
+            // "add a variable to both" impossible to get half-right.
+            string BuildLaunchCommand(string worktreeValue, string workingDirectory) => $@"
 $env:MULTITERMINAL_NAME='{safeName}';
 $env:MULTITERMINAL_DOC_ID='{safeDocId}';
 $env:MULTITERMINAL_ROLE='{safeType}';
 $env:MULTITERMINAL_SPAWNER='{SanitizeForPowerShell(Environment.GetEnvironmentVariable("MULTITERMINAL_NAME") ?? "host")}';
-$env:MULTITERMINAL_TASK_WORKTREE='{safeWorktreePath}';
+$env:MULTITERMINAL_TASK_WORKTREE='{worktreeValue}';
+$env:MULTITERMINAL_LAUNCH_NONCE='{safeLaunchNonce}';
 $env:CHANNEL_PORT='{channelPort}';
 $env:CLAUDE_CODE_NO_FLICKER='1';
-cd '{safeDir}';
+{gitIdentitySetup}
+cd '{SanitizeForPowerShell(workingDirectory)}';
 Write-Host '🤖 Spawning as {safeName} ({safeType}) [channel port {channelPort}]...' -ForegroundColor Cyan;
 claude {claudeFlags}
 ".Trim();
+
+            // Build PowerShell command that sets environment variables and launches Claude Code
+            // The startup hook will detect these variables and auto-register
+            string command = BuildLaunchCommand(safeWorktreePath, workingDir);
 
             // Spawn PowerShell process (auto-detect pwsh.exe or powershell.exe)
             var psi = new ProcessStartInfo
@@ -595,19 +644,10 @@ claude {claudeFlags}
                 }
                 // Rebuild the command without the env var. Cheapest path: a
                 // second pass through the template with safeWorktreePath empty.
+                // Shares the ONE builder, so the bot-identity wiring and the launch nonce come along
+                // automatically instead of having to be remembered here a second time.
                 safeWorktreePath = string.Empty;
-                command = $@"
-$env:MULTITERMINAL_NAME='{safeName}';
-$env:MULTITERMINAL_DOC_ID='{safeDocId}';
-$env:MULTITERMINAL_ROLE='{safeType}';
-$env:MULTITERMINAL_SPAWNER='{SanitizeForPowerShell(Environment.GetEnvironmentVariable("MULTITERMINAL_NAME") ?? "host")}';
-$env:MULTITERMINAL_TASK_WORKTREE='{safeWorktreePath}';
-$env:CHANNEL_PORT='{channelPort}';
-$env:CLAUDE_CODE_NO_FLICKER='1';
-cd '{SanitizeForPowerShell(workingDir)}';
-Write-Host '🤖 Spawning as {safeName} ({safeType}) [channel port {channelPort}]...' -ForegroundColor Cyan;
-claude {claudeFlags}
-".Trim();
+                command = BuildLaunchCommand(safeWorktreePath, workingDir);
                 psi.Arguments = $"-NoExit -Command \"{command}\"";
             }
 
