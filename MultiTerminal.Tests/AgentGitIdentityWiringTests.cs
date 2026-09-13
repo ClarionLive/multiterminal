@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using MultiTerminal.Services;
 using MultiTerminal.Terminal;
 using Xunit;
@@ -101,6 +102,123 @@ namespace MultiTerminal.Tests
 
             Assert.Contains("git-credential-multiterminal.mjs", value);
             Assert.DoesNotContain("\\", value);
+        }
+
+        /// <summary>
+        /// Two terminals launching at once must both end up with a usable shim directory.
+        /// <para>Before the fix this used <c>File.WriteAllText</c>, which opens with
+        /// <c>FileShare.Read</c>: a second concurrent writer throws <c>IOException</c>, which
+        /// <c>EnsureGhLauncher</c>'s catch converts into "no shim directory" — so PATH is never
+        /// prepended and that terminal silently falls back to the real <c>gh</c>, publishing under the
+        /// Owner's account. The Run-1 defect returning as a race.</para>
+        /// <para>⚠️ A race test cannot prove absence, and this one does not claim to: it drives enough
+        /// concurrent callers on genuinely differing content that the unfixed code fails most runs,
+        /// which makes it a regression tripwire rather than a proof. Keeping it is worth more than the
+        /// flakiness it risks, and if it ever goes red intermittently the answer is to look at the
+        /// write path, not to loosen the assertion.</para>
+        /// </summary>
+        [Fact]
+        public void Concurrent_callers_all_get_a_shim_directory_rather_than_one_losing_the_race()
+        {
+            // Force the content to differ from whatever is on disk, so every caller takes the write
+            // path rather than the read-then-compare early return.
+            string freshScripts = Path.Combine(Path.GetTempPath(), "mt-race-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(Path.Combine(freshScripts, "lib"));
+            try
+            {
+                foreach (string f in Directory.GetFiles(_scriptsDir))
+                    File.Copy(f, Path.Combine(freshScripts, Path.GetFileName(f)));
+                foreach (string f in Directory.GetFiles(Path.Combine(_scriptsDir, "lib")))
+                    File.Copy(f, Path.Combine(freshScripts, "lib", Path.GetFileName(f)));
+
+                var results = new string[16];
+                Parallel.For(0, results.Length, i =>
+                {
+                    results[i] = AgentGitIdentityWiring.EnsureGhLauncher(freshScripts, _shimDir);
+                });
+
+                Assert.All(results, r => Assert.False(string.IsNullOrEmpty(r),
+                    "every concurrent caller must get a shim directory; a null means one lost the race "
+                    + "and that terminal would silently use the real gh"));
+
+                // Both launchers must exist and be complete — an atomic move never leaves a half file.
+                Assert.True(File.Exists(Path.Combine(_shimDir, "gh.cmd")));
+                string posix = File.ReadAllText(Path.Combine(_shimDir, "gh"));
+                Assert.StartsWith("#!/bin/sh\n", posix, StringComparison.Ordinal);
+                Assert.Contains("gh-multiterminal.mjs", posix, StringComparison.Ordinal);
+
+                // No temp files survive a successful run.
+                Assert.Empty(Directory.GetFiles(_shimDir, "*.tmp"));
+            }
+            finally
+            {
+                try { Directory.Delete(freshScripts, recursive: true); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// The fragment must contain NO double quote, because every caller embeds it inside a
+        /// PowerShell <c>-Command "…"</c> argument and <c>CommandLineToArgvW</c> eats inner double
+        /// quotes on the way to the child.
+        /// <para>MEASURED in a running MT terminal before the fix: the source built
+        /// <c>!node "H:/…/git-credential-multiterminal.mjs"</c> and
+        /// <c>$env:GIT_CONFIG_VALUE_1</c> arrived with the quotes GONE. git runs a '!' helper through
+        /// sh, so on any path containing a space sh word-splits it, the helper never runs, and git
+        /// falls back to the OS credential manager — the Owner's identity, silently. The single
+        /// outcome this whole feature exists to prevent.</para>
+        /// <para>⚠️ This asserts the ABSENCE of a character rather than the presence of an escape, and
+        /// that is deliberate: escaping at each of the three call sites would be a convention a fourth
+        /// site could forget. A fragment that cannot contain a double quote cannot be broken by a new
+        /// caller. If this test starts failing because someone reintroduced <c>"</c>, the fix is to
+        /// remove it here, not to escape it there.</para>
+        /// </summary>
+        [Fact]
+        public void Helper_value_carries_no_double_quote_because_the_launch_command_would_eat_it()
+        {
+            string setup = AgentGitIdentityWiring.BuildEnvironmentSetup(_scriptsDir, _shimDir);
+
+            Assert.DoesNotContain("\"", setup);
+        }
+
+        /// <summary>
+        /// A scripts directory containing a space must still arrive as ONE argument to sh.
+        /// <para>This is the regression that mattered: the defect was invisible on a machine whose
+        /// path had no space, which is exactly why item 12's live pass did not catch it. %APPDATA% on
+        /// this machine is <c>C:\Users\John Hickey\…</c>, so the failing case is one relocation away.</para>
+        /// </summary>
+        [Fact]
+        public void A_scripts_directory_containing_a_space_survives_as_one_shell_argument()
+        {
+            string spaced = Path.Combine(Path.GetTempPath(), "mt wiring " + Guid.NewGuid().ToString("N").Substring(0, 6));
+            Directory.CreateDirectory(Path.Combine(spaced, "lib"));
+            try
+            {
+                foreach (string f in Directory.GetFiles(_scriptsDir))
+                    File.Copy(f, Path.Combine(spaced, Path.GetFileName(f)));
+                foreach (string f in Directory.GetFiles(Path.Combine(_scriptsDir, "lib")))
+                    File.Copy(f, Path.Combine(spaced, "lib", Path.GetFileName(f)));
+
+                string setup = AgentGitIdentityWiring.BuildEnvironmentSetup(spaced, _shimDir);
+                Assert.NotEqual(string.Empty, setup);
+
+                int start = setup.IndexOf("$env:GIT_CONFIG_VALUE_1 = '", StringComparison.Ordinal);
+                Assert.True(start >= 0, "the helper pair must be present for a spaced scripts directory");
+                int end = setup.IndexOf("';", start, StringComparison.Ordinal);
+                string assignment = setup.Substring(start, end - start);
+
+                // The PowerShell literal doubles the quotes; what git receives is the single-quoted form.
+                Assert.Contains("''", assignment);
+
+                // And what sh ultimately sees groups the whole path, spaces included.
+                string value = assignment.Substring("$env:GIT_CONFIG_VALUE_1 = '".Length).Replace("''", "'");
+                Assert.StartsWith("!node '", value, StringComparison.Ordinal);
+                Assert.EndsWith("git-credential-multiterminal.mjs'", value, StringComparison.Ordinal);
+                Assert.Contains(" ", value.Substring("!node '".Length));   // the space really is inside
+            }
+            finally
+            {
+                try { Directory.Delete(spaced, recursive: true); } catch { }
+            }
         }
 
         [Fact]

@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Text;
+using System.Threading;
 
 namespace MultiTerminal.Services
 {
@@ -136,6 +137,15 @@ namespace MultiTerminal.Services
                 // A terminal that cannot have the bot identity is worth launching anyway: gh keeps
                 // working exactly as it does today. Failing the launch over this would be worse than
                 // the problem being solved.
+                //
+                // PARTIAL WRITES ARE SAFE, AND WORTH STATING because there are two writes behind one
+                // all-or-nothing return: if gh.cmd succeeds and the POSIX launcher then fails, we
+                // return null, so the caller never prepends the shim directory to PATH. The freshly
+                // written gh.cmd is therefore unreachable and inert — the outcome is identical to
+                // having written neither, which is why one return value for two writes is honest
+                // rather than lossy. Do not "improve" this into a partial success: a shim directory
+                // on PATH with only one launcher in it is the Git-Bash-invisible bug (item 14) by
+                // another route.
                 log?.Invoke($"Could not write the gh launcher: {ex.Message}");
                 return null;
             }
@@ -144,17 +154,87 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Read-then-compare rather than always writing: an unconditional write on every launch would
         /// rewrite a file that other processes may be executing at that moment.
+        /// <para>⚠️ THE WRITE IS ATOMIC BECAUSE TWO TERMINALS CAN LAUNCH AT ONCE. <c>File.WriteAllText</c>
+        /// opens with <c>FileShare.Read</c>, so a second concurrent writer throws <c>IOException</c> —
+        /// which <c>EnsureGhLauncher</c>'s catch turns into "no shim directory", so PATH is never
+        /// prepended and that terminal silently falls back to the real <c>gh</c> and publishes under the
+        /// Owner's account. That is the Run-1 defect reappearing as a race, reachable on the first launch
+        /// after a deploy when the content genuinely differs and two spawns collide. Found by pipeline
+        /// Run 2's debugger gate (ticket 27002183).</para>
+        /// <para>Temp-file-then-move makes the replacement atomic, so concurrent callers converge on the
+        /// same bytes instead of one of them losing its shim. The temp file is created in the SAME
+        /// directory because <c>File.Move</c> across volumes is a copy, not an atomic rename.</para>
         /// </summary>
         private static void WriteLauncherIfChanged(string launcherPath, string desired, Action<string> log)
         {
-            if (File.Exists(launcherPath)
-                && string.Equals(File.ReadAllText(launcherPath), desired, StringComparison.Ordinal))
+            // ⚠️ ATOMIC REPLACEMENT ALONE IS NOT ENOUGH, and a measured test says so: with temp-file +
+            // File.Move(overwrite) and nothing else, 2 of 16 concurrent callers still ended up null.
+            // Windows lets both File.ReadAllText and File.Move fail while a PEER is mid-replacement, so
+            // the loser's exception reached EnsureGhLauncher's catch and became "no shim directory".
+            //
+            // ⭐ WHAT MAKES RETRYING CORRECT RATHER THAN PAPERING OVER A RACE: every concurrent caller
+            // writes BYTE-IDENTICAL content (the desired launcher for the same scripts directory), so a
+            // peer finishing first is as good as finishing ourselves. Re-reading the content after a
+            // collision therefore ANSWERS the question rather than retrying blindly — which is also why
+            // the check sits at the top of the loop instead of only before it.
+            for (int attempt = 0; ; attempt++)
             {
-                return;
-            }
+                if (ContentAlreadyMatches(launcherPath, desired)) return;
 
-            File.WriteAllText(launcherPath, desired);
-            log?.Invoke($"Wrote the gh launcher to {launcherPath}");
+                string directory = Path.GetDirectoryName(launcherPath) ?? ".";
+                string temp = Path.Combine(
+                    directory,
+                    Path.GetFileName(launcherPath) + "." + Guid.NewGuid().ToString("N").Substring(0, 8) + ".tmp");
+
+                try
+                {
+                    File.WriteAllText(temp, desired);
+                    // Move rather than write in place: a reader executing the launcher at this moment
+                    // must never observe a half-written file.
+                    File.Move(temp, launcherPath, overwrite: true);
+                    log?.Invoke($"Wrote the gh launcher to {launcherPath}");
+                    return;
+                }
+                catch (Exception ex) when ((ex is IOException || ex is UnauthorizedAccessException) && attempt < 3)
+                {
+                    // A peer holds the target. Give it a moment, then let the content check above
+                    // settle it. After the last attempt the exception propagates to EnsureGhLauncher,
+                    // which degrades honestly rather than pretending the shim is installed.
+                    Thread.Sleep(15 * (attempt + 1));
+                }
+                finally
+                {
+                    // A stray .tmp is inert — nothing resolves it — but it would accumulate on every
+                    // collision, and unexplained files in the shim directory make a later reader doubt
+                    // the directory's contents.
+                    try { if (File.Exists(temp)) File.Delete(temp); }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Whether the launcher on disk already holds exactly the desired bytes.
+        /// <para>A read that throws means a peer is replacing the file right now, which is neither a
+        /// match nor a reason to fail: answer "not yet" and let the caller retry, where the peer's
+        /// completed write will satisfy the check.</para>
+        /// </summary>
+        private static bool ContentAlreadyMatches(string launcherPath, string desired)
+        {
+            try
+            {
+                return File.Exists(launcherPath)
+                    && string.Equals(File.ReadAllText(launcherPath), desired, StringComparison.Ordinal);
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
         }
 
         /// <summary>
@@ -222,7 +302,31 @@ namespace MultiTerminal.Services
             string helperPath = Path.Combine(scriptsDirectory, CredentialHelperScript).Replace('\\', '/');
 
             // The leading '!' tells git the value is a command rather than a built-in helper name.
-            string helperValue = $"!node \"{helperPath}\"";
+            //
+            // ⚠️ SINGLE QUOTES, NOT DOUBLE — AND THIS IS A CORRECTNESS FIX, NOT A STYLE CHOICE.
+            // This was `!node "{helperPath}"` and the double quotes did not survive the launch. Every
+            // caller embeds this fragment inside a PowerShell `-Command "…"` argument
+            // (ConPtyTerminal.cs — the live path — plus both TerminalSpawner sites), and
+            // CommandLineToArgvW consumes the inner double quotes on the way to the child. MEASURED in
+            // a running MT terminal: the source built `!node "H:/…/git-credential-multiterminal.mjs"`
+            // and $env:GIT_CONFIG_VALUE_1 arrived as `!node H:/…/git-credential-multiterminal.mjs`,
+            // quotes gone. git runs a '!' helper through sh, so on any path containing a space or
+            // parentheses — `C:\Program Files\…`, or %APPDATA% on a machine whose user name has a
+            // space — sh word-splits it, the helper never runs, and git falls back to the OS
+            // credential manager: THE OWNER'S IDENTITY, silently, which is the single outcome this
+            // whole feature exists to prevent. Invisible on a machine whose scripts path happens to
+            // have no space, which is why item 12's live pass did not catch it. Found by pipeline
+            // Run 2's debugger gate (ticket 27002183).
+            //
+            // sh accepts single quotes for exactly the same grouping job, and Escape() below doubles
+            // them for the PowerShell literal, so `'` round-trips to the child intact while `"` cannot.
+            // ⭐ WHY HERE AND NOT AT THE THREE CALL SITES: escaping per site is a convention a fourth
+            // site can forget — the same shape as the ApplyTheme chain this repo documents as a trap.
+            // Producing a fragment that contains NO double quote at all removes the hazard instead of
+            // handling it three times, so a new caller cannot reintroduce it.
+            // ⚠️ Do NOT "simplify" by dropping the quotes altogether: they are what makes a spaced path
+            // work at all. Removing them fixes this machine and guarantees the bug on every other.
+            string helperValue = $"!node '{helperPath}'";
 
             // Pair 0 CLEARS the inherited helper list for this URL; pair 1 installs ours. Order is the
             // whole point — see the class remarks.
