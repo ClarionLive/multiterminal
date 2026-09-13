@@ -154,9 +154,6 @@ namespace MultiTerminal.Services
         /// <exception cref="InvalidOperationException">No App is configured, or no installation id.</exception>
         public async Task<string> GetInstallationTokenAsync(string installationId, CancellationToken ct = default)
         {
-            string appId = _settings.GetGitHubAppId();
-            string pem = _settings.GetGitHubAppPrivateKeyPem();
-
             // ⚠️ CHECKED FIRST, AHEAD OF RESOLUTION, AND THE ORDER IS THE POINT. "No App is configured"
             // is the more fundamental failure: without one, no installation id could be usable anyway,
             // and resolution's own errors would send the caller somewhere useless — telling them to set
@@ -165,7 +162,20 @@ namespace MultiTerminal.Services
             // has no App at all. Pinned by
             // GitHubAppTokenServiceTests.Minting_without_a_configured_app_fails_loudly_rather_than_returning_nothing,
             // which caught this the moment resolution grew a refusal of its own.
-            if (string.IsNullOrWhiteSpace(appId) || string.IsNullOrWhiteSpace(pem))
+            //
+            // ⚠️ AND IT MUST NOT DECRYPT ANYTHING. This guard used to read GetGitHubAppPrivateKeyPem()
+            // here — a DPAPI Unprotect into a managed string — BEFORE the cache check, so the private
+            // key was materialised on every call including the cache hits that never sign a JWT: every
+            // gh invocation and every git credential fill. IsGitHubAppConfigured() exists precisely for
+            // this and says so in its own doc ("so a status read never handles the key material. Does
+            // not decrypt anything"); the purpose-built accessor was bypassed by the hoist that made
+            // this ordering correct. Found by pipeline Run 2's code-reviewer and debugger gates
+            // (ticket 27002183).
+            // ⭐ WHY NO BEHAVIOURAL TEST CAUGHT IT: item 5's live probes (default -> 200, foreign id ->
+            // 503, numeric decoy -> 400) all return the CORRECT STATUS while decrypting a key they
+            // never use. A functional test cannot see a cost or exposure regression — which is the
+            // argument for the quality gate being separate from the verifier, stated as a measurement.
+            if (!_settings.IsGitHubAppConfigured())
             {
                 throw new InvalidOperationException(
                     "No GitHub App is configured (missing app id or private key). Register the App first.");
@@ -184,6 +194,28 @@ namespace MultiTerminal.Services
                 // just because the cache was empty when it queued — that is the whole point of the gate.
                 if (TryGetFresh(installation, out cached))
                     return cached;
+
+                // ⚠️ READ HERE, NOT ABOVE — TWO REASONS, AND THE SECOND IS A CORRECTNESS ONE.
+                // (1) Exposure: this is the only branch that actually signs a JWT, so it is the only
+                //     branch that needs the plaintext key. Every earlier return path leaves the DPAPI
+                //     blob untouched.
+                // (2) Staleness: read above, these values were captured BEFORE the `await` on
+                //     ResolveInstallationIdAsync and before this gate, so an Owner re-registering the
+                //     App mid-flight would be signed for with the pre-wait key. Reading inside the gate,
+                //     after the second cache check, means the key used is the key configured now.
+                string appId = _settings.GetGitHubAppId();
+                string pem = _settings.GetGitHubAppPrivateKeyPem();
+
+                // IsGitHubAppConfigured() above proves the values are PRESENT; it cannot prove the blob
+                // decrypts. GetProtected returns null on a failed Unprotect (it logs and swallows), so
+                // without this the failure would surface from inside CreateAppJwt as a key-parsing error
+                // and read as a corrupt key rather than an unreadable one.
+                if (string.IsNullOrWhiteSpace(appId) || string.IsNullOrWhiteSpace(pem))
+                {
+                    throw new InvalidOperationException(
+                        "The GitHub App private key is stored but could not be read (DPAPI unprotect "
+                        + "failed — the key was likely written by a different Windows user). Re-register the App.");
+                }
 
                 string jwt = CreateAppJwt(pem, appId, _now());
                 InstallationToken minted = await _exchange(jwt, installation, ct).ConfigureAwait(false);

@@ -283,6 +283,75 @@ namespace MultiTerminal.Tests
             Assert.Contains("No GitHub App is configured", ex.Message, StringComparison.Ordinal);
         }
 
+        /// <summary>
+        /// A cache hit must not depend on the private key being readable — because a cache hit must not
+        /// read it at all.
+        /// <para>The guard used to call <c>GetGitHubAppPrivateKeyPem()</c> (a DPAPI Unprotect into a
+        /// managed string) BEFORE the cache check, so every <c>gh</c> invocation and every git credential
+        /// fill materialised the key it never used. <c>IsGitHubAppConfigured()</c> exists for exactly this
+        /// and says so in its own doc; the hoist that made the ordering correct bypassed it.</para>
+        /// <para>⭐ HOW THIS TESTS AN ABSENCE WITHOUT A SPY. <c>SettingsService</c> is concrete, so the
+        /// accessor cannot be mocked. Instead the stored blob is made PRESENT BUT UNDECRYPTABLE:
+        /// <c>IsGitHubAppConfigured()</c> only checks the raw value is non-blank, while
+        /// <c>GetProtected()</c> logs and returns null on a failed Unprotect. So the two versions of the
+        /// code diverge observably — the old one throws "No GitHub App is configured" before ever
+        /// reaching the cache, the new one serves the cached token. No timing, no instrumentation.</para>
+        /// <para>⚠️ This is also why no earlier test caught the regression: every functional probe
+        /// (default -> 200, foreign id -> 503, numeric decoy -> 400) returns the CORRECT status while
+        /// decrypting more than it needs. A behavioural test cannot see an exposure regression unless the
+        /// exposure is made load-bearing, which is what corrupting the blob does here.</para>
+        /// </summary>
+        [Fact]
+        public async Task A_cached_token_is_served_without_reading_the_private_key()
+        {
+            var settings = ConfiguredSettings();
+            int mints = 0;
+            var svc = new GitHubAppTokenService(
+                settings,
+                () => DateTimeOffset.UtcNow,
+                (jwt, installation, ct) =>
+                {
+                    mints++;
+                    return Task.FromResult(
+                        new GitHubAppTokenService.InstallationToken("tok-" + mints, DateTimeOffset.UtcNow.AddHours(1)));
+                });
+
+            // First call mints for real, which DOES need the key, and populates the cache.
+            Assert.Equal("tok-1", await svc.GetInstallationTokenAsync("99887766"));
+            Assert.Equal(1, mints);
+
+            // Now make the key unreadable while leaving it PRESENT. Raw Set bypasses SetProtected, so
+            // the stored value is not a valid DPAPI blob and GetProtected will return null.
+            settings.Set("GitHub.App.PrivateKeyPem", "not-a-dpapi-blob");
+
+            // The cached token must still come back. Before the fix this threw, because the guard read
+            // (and failed to decrypt) the key before looking at the cache.
+            Assert.Equal("tok-1", await svc.GetInstallationTokenAsync("99887766"));
+            Assert.Equal(1, mints);
+        }
+
+        /// <summary>
+        /// A key that is stored but cannot be decrypted must say so, rather than surfacing as a
+        /// key-parsing error from inside JWT creation — those have very different remedies.
+        /// </summary>
+        [Fact]
+        public async Task An_unreadable_private_key_fails_with_its_own_message_when_a_mint_is_needed()
+        {
+            var settings = ConfiguredSettings();
+            settings.Set("GitHub.App.PrivateKeyPem", "not-a-dpapi-blob");
+
+            var svc = new GitHubAppTokenService(
+                settings,
+                () => DateTimeOffset.UtcNow,
+                (jwt, installation, ct) => Task.FromResult(
+                    new GitHubAppTokenService.InstallationToken("x", DateTimeOffset.UtcNow.AddHours(1))));
+
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => svc.GetInstallationTokenAsync("99887766"));
+
+            Assert.Contains("could not be read", ex.Message, StringComparison.Ordinal);
+        }
+
         [Fact]
         public async Task An_absent_installation_id_falls_back_to_the_configured_default()
         {
