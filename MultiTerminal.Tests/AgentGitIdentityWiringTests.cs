@@ -221,6 +221,59 @@ namespace MultiTerminal.Tests
             }
         }
 
+        /// <summary>
+        /// An APOSTROPHE in the scripts path must not break out of the shell quoting.
+        /// <para>There are two shells here and they need different escaping. <c>Escape()</c> doubles
+        /// <c>'</c> for the PowerShell string literal, but git hands the finished helper string to
+        /// <b>sh</b>, where a bare apostrophe terminates the quote — so <c>C:\Users\John O'Brien\…</c>
+        /// would word-split, the helper would not run, and git would fall back to the OS credential
+        /// manager: the Owner's identity, silently.</para>
+        /// <para>⚠️ The spaced-path fact above does NOT cover this, which is precisely why both the
+        /// security-auditor and code-reviewer gates raised it separately. A space is inert inside quotes;
+        /// an apostrophe is the quote character itself.</para>
+        /// </summary>
+        [Fact]
+        public void An_apostrophe_in_the_scripts_path_cannot_escape_the_shell_quoting()
+        {
+            string quoted = Path.Combine(Path.GetTempPath(), "mt o'brien " + Guid.NewGuid().ToString("N").Substring(0, 6));
+            Directory.CreateDirectory(Path.Combine(quoted, "lib"));
+            try
+            {
+                foreach (string f in Directory.GetFiles(_scriptsDir))
+                    File.Copy(f, Path.Combine(quoted, Path.GetFileName(f)));
+                foreach (string f in Directory.GetFiles(Path.Combine(_scriptsDir, "lib")))
+                    File.Copy(f, Path.Combine(quoted, "lib", Path.GetFileName(f)));
+
+                string setup = AgentGitIdentityWiring.BuildEnvironmentSetup(quoted, _shimDir);
+                Assert.NotEqual(string.Empty, setup);
+
+                int start = setup.IndexOf("$env:GIT_CONFIG_VALUE_1 = '", StringComparison.Ordinal);
+                int end = setup.IndexOf("';", start, StringComparison.Ordinal);
+                string assignment = setup.Substring(start, end - start);
+
+                // Undo the PowerShell literal's doubling to get the value git will actually receive.
+                string forGit = assignment.Substring("$env:GIT_CONFIG_VALUE_1 = '".Length).Replace("''", "'");
+
+                // What sh must see: one quoted word, with the apostrophe emitted via the '\'' idiom.
+                Assert.StartsWith("!node '", forGit, StringComparison.Ordinal);
+                Assert.EndsWith("'", forGit, StringComparison.Ordinal);
+                Assert.Contains("'\\''", forGit);
+
+                // The load-bearing property: sh word-splitting must yield exactly ONE argument after
+                // `node`. Counting unescaped quotes is how that is checked without invoking sh: a
+                // correctly quoted value has an even number of them, and the escaped ones are excluded.
+                string withoutEscaped = forGit.Replace("'\\''", "");
+                int quotes = 0;
+                foreach (char c in withoutEscaped) if (c == '\'') quotes++;
+                Assert.True(quotes % 2 == 0,
+                    $"unbalanced sh quoting would word-split the path: {quotes} unescaped quotes in {forGit}");
+            }
+            finally
+            {
+                try { Directory.Delete(quoted, recursive: true); } catch { }
+            }
+        }
+
         [Fact]
         public void Prepends_the_shim_directory_without_discarding_PATH()
         {

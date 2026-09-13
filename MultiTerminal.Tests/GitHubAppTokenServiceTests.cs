@@ -352,6 +352,72 @@ namespace MultiTerminal.Tests
             Assert.Contains("could not be read", ex.Message, StringComparison.Ordinal);
         }
 
+        /// <summary>
+        /// Re-registering the App must not keep serving a token minted under the previous one.
+        /// <para>Keyed by installation alone, a singleton service handed out the OLD App's token for up to
+        /// the refresh margin (~55 min) after a re-registration — still valid, comments still posted, just
+        /// under the old identity and permissions. It passes every functional probe, which is why nothing
+        /// caught it; the cross-model adversary gate found it by checking whether the cache path honoured
+        /// what the comment above it claimed.</para>
+        /// </summary>
+        [Fact]
+        public async Task Re_registering_the_app_does_not_keep_serving_the_previous_apps_token()
+        {
+            var settings = ConfiguredSettings();
+            int mints = 0;
+            var svc = new GitHubAppTokenService(
+                settings,
+                () => DateTimeOffset.UtcNow,
+                (jwt, installation, ct) =>
+                {
+                    mints++;
+                    return Task.FromResult(
+                        new GitHubAppTokenService.InstallationToken("tok-" + mints, DateTimeOffset.UtcNow.AddHours(1)));
+                });
+
+            Assert.Equal("tok-1", await svc.GetInstallationTokenAsync("99887766"));
+
+            // Same installation, DIFFERENT App. The installation id alone is unchanged, which is exactly
+            // the case a single-keyed cache could not distinguish.
+            settings.SetGitHubAppId("654321");
+
+            Assert.Equal("tok-2", await svc.GetInstallationTokenAsync("99887766"));
+            Assert.Equal(2, mints);
+        }
+
+        /// <summary>
+        /// Targeted invalidation must still find the entry now that the key is composite.
+        /// <para>⚠️ This is the paired half of the cache-key change, not a bonus test. The cache is keyed
+        /// <c>"appId|installationId"</c>, so a <c>TryRemove</c> on the bare installation id matches
+        /// nothing — targeted invalidation would silently no-op while appearing to succeed, in the one
+        /// method whose entire purpose is ruling out a leftover credential that still works. Trading a
+        /// stale-token bug for a dead-invalidation bug would have been a clear net loss.</para>
+        /// </summary>
+        [Fact]
+        public async Task Invalidating_one_installation_still_drops_its_token_under_the_composite_key()
+        {
+            var settings = ConfiguredSettings();
+            int mints = 0;
+            var svc = new GitHubAppTokenService(
+                settings,
+                () => DateTimeOffset.UtcNow,
+                (jwt, installation, ct) =>
+                {
+                    mints++;
+                    return Task.FromResult(
+                        new GitHubAppTokenService.InstallationToken("tok-" + mints, DateTimeOffset.UtcNow.AddHours(1)));
+                });
+
+            Assert.Equal("tok-1", await svc.GetInstallationTokenAsync("99887766"));
+            Assert.Equal("tok-1", await svc.GetInstallationTokenAsync("99887766"));   // cached
+            Assert.Equal(1, mints);
+
+            svc.InvalidateCache("99887766");
+
+            Assert.Equal("tok-2", await svc.GetInstallationTokenAsync("99887766"));
+            Assert.Equal(2, mints);
+        }
+
         [Fact]
         public async Task An_absent_installation_id_falls_back_to_the_configured_default()
         {

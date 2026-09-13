@@ -32,16 +32,25 @@
 //      were THE AUDIT SCRIPT'S OWN SOURCE, captured into the session transcript that MT stores in
 //      SQLite, and two were the test fixture (whose body reads NOTAREALKEYJUSTAMARKER). A counting
 //      check reports FAIL on the very session that runs it, which trains the reader to ignore it.
-//      classifyMarkerHit() asks the only question that matters: is the marker followed by enough of a
-//      base64 run to be a USABLE key (key material), or by prose (someone talking about keys)?
+//      classifyMarkerHit() asks the only question that matters, and asks it by DECODING rather than by
+//      inspecting shape: does the text after the marker decode to an actual private key (key material),
+//      or is it prose that merely mentions one? See looksLikePrivateKeyDer().
 //      ⚠️ IT USED TO SAY "prose/escapes", AND THE WORD "escapes" WAS A DEFECT, NOT A DESCRIPTION.
 //      Treating an escaped newline as evidence of prose made the sweep blind to a key written into
 //      JSON — `-----BEGIN … -----\nMII…` with a literal backslash-n — which is the encoding of BOTH
 //      artifacts item 9's acceptance names by hand: project.json (checked in, so a leak there becomes
 //      public) and agent transcripts (JSONL, which MT then imports into multiterminal.db). Pipeline
 //      Run 2 found it, independently, on two different model providers (ticket 27002183).
-//      The discriminator is now SEMANTIC — "is there enough of it to be a key?" — and never about
-//      encoding shape, because an encoding says nothing about usability. See classifyMarkerHit.
+//      ⚠️ THE FIRST TWO ATTEMPTS AT A REPLACEMENT WERE ALSO SHAPE-BASED, AND BOTH FAILED. "A run of
+//      200+ chars, or a closing END marker in the window" read as semantic but was still surface
+//      inspection, and it was defeated twice over: an unnormalised escape stopped the run from ever
+//      starting (so BOTH branches fell together), and the run length was measured with a character class
+//      that EXCLUDED newlines — which, since real PEMs wrap at 64 chars, made that branch unreachable for
+//      every real key at every size. RSA-4096 was benign. Four consecutive fix rounds each produced a new
+//      defect in this detector before the rule stopped guessing and started decoding.
+//      ⇒ THE LESSON IS NOT "PICK A BETTER HEURISTIC". It is that the question "is this a key?" has an
+//      exact answer available — base64-decode it and read the ASN.1 — and every attempt to approximate
+//      that answer from the surface was wrong in a way no fixture caught. See looksLikePrivateKeyDer.
 //      ⭐ THE REUSABLE LESSON, AND IT IS NOT ABOUT REGEXES: the old comment asserted the escaped form
 //      "correctly" failed to match, and the self-test had a fixture blessing that behaviour. A
 //      confident comment plus a test agreeing with it is how a gap survives review — three reviewers
@@ -134,18 +143,16 @@ const GITHUB_TOKEN_ENV_RE = /^(GH_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_TOKEN|GITHUB_
 // 27002183). The word "correctly" is what made it survive three reviews: it told every later reader
 // the case had been considered and settled.
 //
-// So: normalise escape sequences FIRST, then ask whether enough key follows to be USABLE.
+// So: normalise every escape spelling to a real line break, so that what reaches the classifier is the
+// same bytes regardless of how the artifact happened to serialise them. This function's only job is to
+// make encoding STOP MATTERING; the decision about whether the result is a key belongs to
+// looksLikePrivateKeyDer(), which decodes it rather than inspecting its shape.
 //
-// ⚠️ WHY THERE IS A SECOND TEST AT ALL, AND WHY IT IS SEMANTIC. Maximal strictness is not available:
-// B64_FRAGMENT below lives in an agent transcript that cannot be cleaned, and trap (3)'s whole point
-// is that an audit which fails on the session running it gets ignored — which is how the missing-caller
-// defect survived. But the exemption must ask "is there enough of this to be a key?", a question about
-// USABILITY, and never "does it have escaped newlines?", which says nothing about usability and is
-// precisely what created the bug above. Owner decision 2026-09-13: END marker present, OR run >= 200.
-//
-// ⚠️ ACCEPTED GAP, recorded so it is never found as a surprise: a run of 40-199 chars with NO closing
-// END marker is NOT flagged. Such a fragment cannot be used as a key. That is a deliberate choice
-// about what this audit may miss, not an oversight — the levers are the threshold and the END clause.
+// ⚠️ WHY NORMALISATION MUST BE COMPLETE RATHER THAN INCREMENTAL. An unhandled escape does not merely
+// weaken the classifier, it BLINDS it: the base64 run never starts, so every later test is skipped
+// whatever it tests. That is how a key with a closing END marker sitting right beside it was still
+// reported benign. Adding escapes one at a time as they are discovered would keep reopening the hole,
+// which is why the list above is exhaustive over spellings rather than over observed incidents.
 // How many DECODED bytes of a key must be visible before a truncated one counts. 200 sits comfortably
 // above the 46B that the 67-char DER prefix in this file's own fixtures decodes to, and comfortably
 // below any real key. See looksLikePrivateKeyDer for why a valid header alone is not enough.
@@ -643,6 +650,47 @@ function filesContaining(needle, roots) {
 const PEM_MARKER_TAIL = 'PRIVATE KEY-----';
 const PEM_MARKER_RE = String.raw`-----BEGIN [A-Z ]{0,24}PRIVATE KEY-----[\s\S]{0,2400}`;
 
+// How many PEM markers exist under `roots`, counted WITHOUT a trailing window.
+//
+// ⚠️ WHY A SECOND PASS EXISTS AT ALL, AND WHY IT IS A COVERAGE CHECK RATHER THAN A TIDY-UP.
+// PEM_MARKER_RE carries a greedy 2400-byte tail and rg matches are NON-OVERLAPPING, so a match can
+// absorb the leading bytes of the NEXT marker and rg then resumes scanning past it — that marker never
+// matches again, and markerTailsIn cannot recover it either because its own tail lies outside the
+// window. Measured by the debugger gate: a benign marker followed by 2360 bytes of filler and then a
+// full RSA-2048 key produced exactly ONE hit, classified benign; the real key produced NO HIT AT ALL.
+// Widening the window from 64 to 2400 bytes made that far likelier, since one match now spans 2400
+// bytes of transcript.
+// ⇒ This is trap (5) in miniature — auditing less than claimed while still printing PASS — so the
+//   answer is the same as trap (5)'s: make the shortfall a hard FAILURE rather than a silent skip.
+//   A marker the sweep never examined is indistinguishable from a marker it cleared, and only one of
+//   those is safe to report as NONE.
+// Making the quantifier lazy does NOT fix it: a lazy `{0,2400}` matches zero characters.
+//
+// ⚠️ MEASURED LIMIT OF THIS CHECK, recorded because an unstated limit is how the defects above survived.
+// It compares TOTALS, not identities, so it detects a NET shortfall. Measured on this machine:
+//     standalone markers 262 | examined at window 2400: 270 | at 800: 259 | at 200: 262 | at 64: 252
+// The check is satisfied at the shipped 2400 and FIRES at 800 and 64, so it is falsifiable rather than
+// decorative. But note the surplus at 2400: markerTailsIn can emit a tail for a marker that appears as
+// CONTENT inside another match's window, so counts can exceed the standalone total. That makes the check
+// one-directional and safe — it never false-alarms — but it also means N duplicate emissions could in
+// principle mask N genuine straddles and net to zero. Comparing byte OFFSETS rather than counts would
+// close that; it is not done here because the shortfall case is the one that loses a key, and a surplus
+// only inflates a number that is already labelled "examined".
+function countMarkers(roots) {
+  const existing = roots.filter(r => fs.existsSync(r));
+  if (!existing.length) return 0;
+  try {
+    const out = execFileSync(rgPath(),
+      ['-a', '-uu', '-o', '--count-matches', '--no-filename',
+       '-e', String.raw`-----BEGIN [A-Z ]{0,24}PRIVATE KEY-----`, '--', ...existing],
+      { encoding: 'utf8', maxBuffer: 1 << 28 });
+    return out.split(/\r?\n/).reduce((n, line) => n + (parseInt(line, 10) || 0), 0);
+  } catch (e) {
+    if (e.status === 1) return 0;            // rg: no matches
+    throw new Error(`ripgrep failed counting markers (status ${e.status}): ${e.stderr || e.message}`);
+  }
+}
+
 function markerHits(roots) {
   const existing = roots.filter(r => fs.existsSync(r));
   if (!existing.length) return [];
@@ -808,9 +856,24 @@ for (const needle of needles) {
 // measurement the header advertised. Found by pipeline Run 1 (code-reviewer, MAJOR).
 const markers = markerHits(sweepPaths);
 const markerVerdict = verdictForMarkerHits(markers);
+
+// COVERAGE CHECK, and it is not decoration: every marker that exists must have been EXAMINED. See
+// countMarkers() for the mechanism by which one can go missing. An unexamined marker is
+// indistinguishable in the output from a cleared one, and only one of those justifies printing NONE.
+const markerTotal = countMarkers(sweepPaths);
+if (markerTotal > markers.length) {
+  problems.push(`plaintext PEM: COVERAGE SHORTFALL — ${markerTotal} PEM marker(s) exist under the sweep`
+    + `\n      roots but only ${markers.length} were classified. The missing ${markerTotal - markers.length}`
+    + ' straddled a capture-window boundary, so'
+    + '\n      rg never re-matched them and their contents were never examined. This is reported as a'
+    + '\n      FAILURE rather than a note because an unexamined marker reads exactly like a cleared one,'
+    + '\n      and "plaintext PEM: NONE" would then be a claim about coverage this run did not have.'
+    + '\n      Fix by widening PEM_MARKER_RE or by matching markers and tails in separate passes.');
+}
+
 if (markerVerdict.ok) {
-  console.log(`  ok   plaintext PEM: NONE — ${markers.length} marker hit(s), all classified benign`
-    + ' (this audit script, fixtures and transcripts quoting the marker)');
+  console.log(`  ok   plaintext PEM: NONE — ${markerVerdict.benignCount} marker hit(s) examined, all`
+    + ' classified benign (this audit script, fixtures and transcripts quoting the marker)');
 } else {
   problems.push('plaintext PEM: LEAKED — a PEM marker is followed by real key material in:\n      '
     + markerVerdict.keyMaterialPaths.join('\n      ')

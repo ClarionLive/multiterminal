@@ -183,16 +183,30 @@ namespace MultiTerminal.Services
 
             string installation = await ResolveInstallationIdAsync(installationId, ct).ConfigureAwait(false);
 
-            if (TryGetFresh(installation, out string cached))
+            // ⚠️ THE CACHE IS KEYED BY THE CONFIGURATION THAT MINTED THE TOKEN, NOT BY THE INSTALLATION
+            // ALONE — otherwise a token outlives the App it was minted under. Keyed only by installation,
+            // re-registering the App left a singleton service handing out a token signed by the PREVIOUS
+            // App for up to the refresh margin (~55 min): still valid, comments still posted, just under
+            // the old identity and permissions. It passes every functional probe, which is why nothing
+            // caught it — the cross-model adversary gate did, by reading what the comment above claimed
+            // and checking whether the cache path honoured it.
+            // The app id is a NON-SECRET and GetGitHubAppId() does not decrypt (it is Get(), not
+            // GetProtected()), so reading it here costs nothing the fix above was buying back.
+            // ⚠️ This is a narrowing, not a substitute for invalidation: InvalidateCache() still has no
+            // production caller (census on b42b1883 item [1]), so a REVOKED installation is unaffected by
+            // this and still serves its cached token until expiry. Different problem, same root, filed there.
+            string cacheKey = _settings.GetGitHubAppId() + "|" + installation;
+
+            if (TryGetFresh(cacheKey, out string cached))
                 return cached;
 
-            SemaphoreSlim gate = _mintGates.GetOrAdd(installation, _ => new SemaphoreSlim(1, 1));
+            SemaphoreSlim gate = _mintGates.GetOrAdd(cacheKey, _ => new SemaphoreSlim(1, 1));
             await gate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
                 // Re-check inside the gate. The caller that lost the race must NOT mint a second token
                 // just because the cache was empty when it queued — that is the whole point of the gate.
-                if (TryGetFresh(installation, out cached))
+                if (TryGetFresh(cacheKey, out cached))
                     return cached;
 
                 // ⚠️ READ HERE, NOT ABOVE — TWO REASONS, AND THE SECOND IS A CORRECTNESS ONE.
@@ -201,8 +215,13 @@ namespace MultiTerminal.Services
                 //     blob untouched.
                 // (2) Staleness: read above, these values were captured BEFORE the `await` on
                 //     ResolveInstallationIdAsync and before this gate, so an Owner re-registering the
-                //     App mid-flight would be signed for with the pre-wait key. Reading inside the gate,
-                //     after the second cache check, means the key used is the key configured now.
+                //     App mid-flight would be signed for with the pre-wait key.
+                // ⚠️ AND NOTE WHAT (2) DOES *NOT* SAY. An earlier version of this comment claimed
+                //     "the key used is the key configured now", which is true of THIS branch and FALSE of
+                //     the method: a fresh cached token returns before the key is ever read. The
+                //     cross-model adversary gate caught the overclaim. The cache key below is what makes
+                //     the broader statement true; without it, moving this read bought nothing for
+                //     re-registration.
                 string appId = _settings.GetGitHubAppId();
                 string pem = _settings.GetGitHubAppPrivateKeyPem();
 
@@ -223,7 +242,7 @@ namespace MultiTerminal.Services
                 if (minted == null || string.IsNullOrWhiteSpace(minted.Token))
                     throw new InvalidOperationException("GitHub returned no installation token.");
 
-                _cache[installation] = new CachedToken(minted.Token, minted.ExpiresAt);
+                _cache[cacheKey] = new CachedToken(minted.Token, minted.ExpiresAt);
                 return minted.Token;
             }
             finally
@@ -441,15 +460,31 @@ namespace MultiTerminal.Services
         public void InvalidateCache(string installationId = null)
         {
             if (string.IsNullOrWhiteSpace(installationId))
+            {
                 _cache.Clear();
-            else
-                _cache.TryRemove(installationId, out _);
+                return;
+            }
+
+            // ⚠️ THE CACHE IS KEYED BY "<appId>|<installationId>", SO A BARE TryRemove WOULD MATCH
+            // NOTHING. That is the dangerous kind of wrong: targeted invalidation would silently no-op
+            // while appearing to succeed, and this method's entire purpose is ruling out "a leftover
+            // credential that still works". Adding the app id to the cache key (see
+            // GetInstallationTokenAsync) therefore has to be paired with this, or it trades one
+            // stale-credential bug for a worse one.
+            // Every GENERATION of the installation goes, not just the current one: after a revocation a
+            // token minted under an earlier App configuration is exactly as dangerous as a current one.
+            string suffix = "|" + installationId;
+            foreach (string key in _cache.Keys)
+            {
+                if (key.EndsWith(suffix, StringComparison.Ordinal))
+                    _cache.TryRemove(key, out _);
+            }
         }
 
-        private bool TryGetFresh(string installation, out string token)
+        private bool TryGetFresh(string cacheKey, out string token)
         {
             token = null;
-            if (!_cache.TryGetValue(installation, out CachedToken hit))
+            if (!_cache.TryGetValue(cacheKey, out CachedToken hit))
                 return false;
 
             if (_now() >= hit.ExpiresAt - RefreshMargin)

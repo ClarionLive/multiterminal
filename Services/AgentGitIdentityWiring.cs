@@ -326,7 +326,21 @@ namespace MultiTerminal.Services
             // handling it three times, so a new caller cannot reintroduce it.
             // ⚠️ Do NOT "simplify" by dropping the quotes altogether: they are what makes a spaced path
             // work at all. Removing them fixes this machine and guarantees the bug on every other.
-            string helperValue = $"!node '{helperPath}'";
+            //
+            // ⚠️ AND THE PATH IS ESCAPED FOR **SH**, NOT JUST FOR POWERSHELL. There are two shells in this
+            // path and they need different escaping: Escape() below doubles `'` for the PowerShell string
+            // literal, but git hands the finished helper string to SH, where a bare apostrophe TERMINATES
+            // the quote — so `C:\Users\John O'Brien\…` would word-split, the helper would not run, and git
+            // would fall back to the OS credential manager, i.e. the Owner's identity, silently. Exactly
+            // the failure this whole value exists to prevent, one directory name away.
+            // Flagged independently by the security-auditor and code-reviewer gates on pipeline run 1.
+            // ⚠️ It had been RECORDED as a known limitation and left unfixed, on the argument that the
+            // previous `"`-quoted version had the same exposure. That argument justifies not making it
+            // worse; it does not justify shipping a new quoting layer with the same hole. Recording a hole
+            // is not closing it.
+            // `'\''` is the POSIX idiom: close the quote, emit an escaped literal quote, reopen.
+            string shQuotedPath = "'" + helperPath.Replace("'", "'\\''") + "'";
+            string helperValue = $"!node {shQuotedPath}";
 
             // Pair 0 CLEARS the inherited helper list for this URL; pair 1 installs ours. Order is the
             // whole point — see the class remarks.
