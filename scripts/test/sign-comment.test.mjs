@@ -379,10 +379,65 @@ for (const [label, argv] of [
   });
 }
 
-// Scanning for a matching ADJACENT PAIR anywhere in argv is a wider net than reading the first two
-// words, so the widening has to be shown not to catch things it should not. A --body value is ONE
-// token however many words it holds, which is why no body text can forge a subcommand; the risk is
-// only from separately-passed adjacent tokens, and that is what these pin.
+// ---------------------------------------------------------------------------
+// WHERE THE REPO FLAG SITS, PART TWO — INSIDE the command path
+// ---------------------------------------------------------------------------
+//
+// The adjacency fix above closed "flag BEFORE the subcommand" and left its mirror image open. gh
+// equally accepts an inherited flag BETWEEN the parent and the subcommand, so `gh issue --repo o/r
+// comment` has no adjacent `issue`,`comment` pair and shipped UNSIGNED — identity intact, attribution
+// gone, exit 0. Found by pipeline Run 2's security gate, confirmed against the DEPLOYED module, and
+// gh itself resolves the form: `gh issue --repo X comment --help` prints the issue-comment help.
+//
+// ⭐ THESE ARE END-TO-END CHILD-ARGV FACTS, NOT transformArgs FACTS, AND THAT IS THE POINT.
+// The section above had to settle for transformArgs because node eats a LEADING --repo as its own
+// option (exit 9) before the stand-in's --import can run. A flag that comes AFTER the first word does
+// not have that problem: node takes `issue` as the script and the rest as script arguments, so the
+// stand-in loads and records the real child argv. So the shapes fixed here can be proven at the
+// observation point the earlier ones could not reach — which is exactly the gap b42b1883 item 18 was
+// raised about. Do not "simplify" these down to transformArgs to match their neighbours.
+for (const [label, argv] of [
+  ['--repo between issue and comment', ['issue', '--repo', 'o/r', 'comment', '31', '--body', 'hi']],
+  ['-R between issue and comment', ['issue', '-R', 'o/r', 'comment', '31', '--body', 'hi']],
+  ['--repo=o/r between issue and comment', ['issue', '--repo=o/r', 'comment', '31', '--body', 'hi']],
+  ['-Ro/r attached, between issue and comment', ['issue', '-Ro/r', 'comment', '31', '--body', 'hi']],
+  ['--repo between pr and comment', ['pr', '--repo', 'o/r', 'comment', '7', '--body', 'hi']],
+  ['-R between pr and review', ['pr', '-R', 'o/r', 'review', '7', '--body', 'hi']],
+  ['--repo between issue and create', ['issue', '--repo', 'o/r', 'create', '--title', 't', '--body', 'hi']],
+]) {
+  test(`signs end-to-end when the repo flag sits ${label}`, async () => {
+    const r = await runShim(ghArgs(argv));
+    assert.equal(r.code, 0, `${label}: the stand-in ran, so the shim spawned the child`);
+    const i = r.args.indexOf('--body');
+    assert.ok(i >= 0, `${label}: --body survived into the child argv`);
+    assert.equal(r.args[i + 1], 'hi\n\n— Alice\n',
+      `${label}: the BODY the child receives must carry the signature`);
+  });
+}
+
+// The scan must stop rather than guess when it meets a flag it does not know, because it cannot tell
+// that flag's value from a command word. Losing a signature is visible and recoverable; promoting a
+// flag value into a subcommand would mangle a real command.
+test('an UNKNOWN flag inside the command path stops the scan rather than guessing', () => {
+  // `--label` is not inherited, so `comment` here cannot be assumed to be a command word.
+  assert.equal(transformArgs(['issue', '--label', 'x', 'comment', '31', '--body', 'hi'], 'Alice').signed,
+    false);
+});
+
+test('an inherited flag may not promote its own VALUE into a command word', () => {
+  // --repo's value is `comment`; the path is then `issue list`, which is not an authoring command.
+  assert.equal(transformArgs(['issue', '--repo', 'comment', 'list'], 'Alice').signed, false);
+});
+
+test('--help between the path words still resolves the authoring command', () => {
+  const r = transformArgs(['issue', '--help', 'comment', '31', '--body', 'hi'], 'Alice');
+  assert.equal(r.signed, true);
+});
+
+// Scanning for a matching pair of command-path words anywhere in argv is a wider net than reading the
+// first two words, so the widening has to be shown not to catch things it should not. A --body value is
+// ONE token however many words it holds, which is why no body text can forge a subcommand; the risk is
+// only from separately-passed path words, and that is what these pin.
 for (const [label, argv] of [
   ['gh api stays out, deliberately', ['api', 'repos/o/r/issues/31/comments']],
   ['flag values that spell a subcommand', ['issue', 'list', '--label', 'issue', '--label', 'comment']],
