@@ -154,6 +154,23 @@ namespace MultiTerminal.Services
         /// <exception cref="InvalidOperationException">No App is configured, or no installation id.</exception>
         public async Task<string> GetInstallationTokenAsync(string installationId, CancellationToken ct = default)
         {
+            string appId = _settings.GetGitHubAppId();
+            string pem = _settings.GetGitHubAppPrivateKeyPem();
+
+            // ⚠️ CHECKED FIRST, AHEAD OF RESOLUTION, AND THE ORDER IS THE POINT. "No App is configured"
+            // is the more fundamental failure: without one, no installation id could be usable anyway,
+            // and resolution's own errors would send the caller somewhere useless — telling them to set
+            // a default installation, or to ask GitHub, when what they actually need is to register the
+            // App. Resolving first also meant a caller could create a mint-gate entry on a machine that
+            // has no App at all. Pinned by
+            // GitHubAppTokenServiceTests.Minting_without_a_configured_app_fails_loudly_rather_than_returning_nothing,
+            // which caught this the moment resolution grew a refusal of its own.
+            if (string.IsNullOrWhiteSpace(appId) || string.IsNullOrWhiteSpace(pem))
+            {
+                throw new InvalidOperationException(
+                    "No GitHub App is configured (missing app id or private key). Register the App first.");
+            }
+
             string installation = await ResolveInstallationIdAsync(installationId, ct).ConfigureAwait(false);
 
             if (TryGetFresh(installation, out string cached))
@@ -167,15 +184,6 @@ namespace MultiTerminal.Services
                 // just because the cache was empty when it queued — that is the whole point of the gate.
                 if (TryGetFresh(installation, out cached))
                     return cached;
-
-                string appId = _settings.GetGitHubAppId();
-                string pem = _settings.GetGitHubAppPrivateKeyPem();
-
-                if (string.IsNullOrWhiteSpace(appId) || string.IsNullOrWhiteSpace(pem))
-                {
-                    throw new InvalidOperationException(
-                        "No GitHub App is configured (missing app id or private key). Register the App first.");
-                }
 
                 string jwt = CreateAppJwt(pem, appId, _now());
                 InstallationToken minted = await _exchange(jwt, installation, ct).ConfigureAwait(false);
@@ -203,11 +211,34 @@ namespace MultiTerminal.Services
         /// on every mint and a fall back to the Owner's own account on every <c>gh</c> command, which is
         /// the single outcome this ticket exists to prevent.</para>
         ///
-        /// <para>Order, first hit wins: an explicitly requested id, then the stored default, then asking
-        /// GitHub. Discovery is what repairs an ALREADY-REGISTERED App — it needs no Owner action, no
-        /// re-registration and no GitHub-side configuration change, which is why it is the primary fix
-        /// and the manifest's <c>setup_url</c> is only the thing that stops a FUTURE registration from
-        /// ever landing here.</para>
+        /// <para>Order: a requested id is CHECKED AGAINST the stored default (see below), then the stored
+        /// default is used, then GitHub is asked. Discovery is what repairs an ALREADY-REGISTERED App —
+        /// it needs no Owner action, no re-registration and no GitHub-side configuration change, which is
+        /// why it is the primary fix and the manifest's <c>setup_url</c> is only the thing that stops a
+        /// FUTURE registration from ever landing here.</para>
+        ///
+        /// <para><b>⚠️ A requested id may only RESTATE the configured default; it can never select a
+        /// different one.</b> This used to be "first hit wins", and an explicitly requested id was
+        /// returned trimmed and unverified, ahead of everything else. That was an escalation
+        /// (OWASP A01), found by pipeline Run 1 on task b42b1883: the id arrives in the body of
+        /// <c>POST /api/github/token</c>, so any terminal holding a launch nonce could list installations
+        /// through <c>GET /app/installations</c> and mint a <c>contents:write</c> token for an account
+        /// the Owner had never selected for it. <see cref="SetDefaultInstallationIdAsync"/> verifies an id
+        /// against GitHub before storing it; the mint path verified nothing, so the endpoint that took
+        /// untrusted input was the one that checked least.</para>
+        ///
+        /// <para><b>It also punched a hole in revocation, which is the subtler half.</b> The
+        /// never-re-discover rule below stops MT hopping to a surviving installation after a revoke — but
+        /// only for callers that let MT choose. A caller naming a survivor explicitly bypassed the rule
+        /// entirely, so "revoking stops access" held only while exactly one installation existed. The
+        /// two defences have to agree, or the weaker one is the real policy.</para>
+        ///
+        /// <para>The previous behaviour was deliberate and tested
+        /// (<c>An_explicit_id_beats_both_the_stored_default_and_discovery</c>), and that test was
+        /// rewritten rather than deleted — it now asserts the refusal. Its original guarded the adjacent
+        /// risk, that an explicit id must not be PERSISTED as the new default and silently repoint every
+        /// other terminal; that reasoning was right and still holds. It simply stopped one step short of
+        /// asking whether a caller should be able to USE such an id even once.</para>
         ///
         /// <para><b>⚠️ A stored default is never re-discovered, and that is deliberate.</b> Re-running
         /// discovery when a mint fails is the obvious "self-healing" behaviour and it would quietly
@@ -221,10 +252,44 @@ namespace MultiTerminal.Services
         /// <exception cref="InvalidOperationException">No App configured, or no single installation to adopt.</exception>
         internal async Task<string> ResolveInstallationIdAsync(string requested, CancellationToken ct = default)
         {
-            if (!string.IsNullOrWhiteSpace(requested))
-                return requested.Trim();
-
             string stored = _settings.GetGitHubAppDefaultInstallationId();
+
+            // ⚠️ A REQUESTED ID IS ONLY EVER A RESTATEMENT OF THE CONFIGURED DEFAULT — never a choice.
+            // See the remarks above for why letting the caller pick is an escalation and a hole in
+            // revocation. Compared BEFORE the "use the stored default" path so that naming the default
+            // explicitly (which the helper and the shim both do when
+            // MULTITERMINAL_GITHUB_INSTALLATION_ID is set) keeps working unchanged.
+            if (!string.IsNullOrWhiteSpace(requested))
+            {
+                string wanted = requested.Trim();
+
+                if (string.IsNullOrWhiteSpace(stored))
+                {
+                    throw new InvalidOperationException(
+                        "This request named installation " + wanted + ", but MultiTerminal has no default "
+                        + "installation configured to check it against, and it will not mint for an "
+                        + "installation chosen by the caller. Set the default with "
+                        + "POST /api/github/app/installation, which verifies the id against GitHub first.");
+                }
+
+                if (!string.Equals(wanted, stored.Trim(), StringComparison.Ordinal))
+                {
+                    // Names both ids: the caller is normally a script passing a stale environment
+                    // variable, and "yours is not ours" is only actionable if it says what ours is.
+                    // Neither value is a secret — an installation id says WHICH installation, not how
+                    // to authenticate as it.
+                    throw new InvalidOperationException(
+                        "This request named installation " + wanted + ", but MultiTerminal is configured "
+                        + "to act through " + stored.Trim() + ". A caller does not get to choose the "
+                        + "installation: that would let any terminal mint a contents:write token for an "
+                        + "account the Owner never selected, and would let a revoked installation be "
+                        + "worked around by naming a surviving one. Change the default deliberately with "
+                        + "POST /api/github/app/installation, or omit the id to use the configured one.");
+                }
+
+                return wanted;
+            }
+
             if (!string.IsNullOrWhiteSpace(stored))
                 return stored.Trim();
 

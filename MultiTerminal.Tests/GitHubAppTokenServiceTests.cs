@@ -233,11 +233,21 @@ namespace MultiTerminal.Tests
         {
             // The gate is per-installation on purpose: a global lock would make one slow installation
             // stall every other agent's git operation.
+            //
+            // ⚠️ HOW THIS REACHES TWO INSTALLATIONS CHANGED (pipeline Run 1). It used to pass "111" and
+            // "222" straight to GetInstallationTokenAsync, which worked only because a caller could
+            // name any installation it wanted — the escalation that has since been closed. Two distinct
+            // gate keys are still reachable, and this is the way production actually gets there: the
+            // configured default CHANGES. Driving it through the supported route keeps the test honest
+            // about what it is exercising.
             var now = DateTimeOffset.FromUnixTimeSeconds(1_700_000_000);
             var seen = new List<string>();
 
+            SettingsService settings = ConfiguredSettings();
+            settings.SetGitHubAppDefaultInstallationId("111");
+
             var svc = new GitHubAppTokenService(
-                ConfiguredSettings(),
+                settings,
                 () => now,
                 (jwt, installation, ct) =>
                 {
@@ -245,10 +255,14 @@ namespace MultiTerminal.Tests
                     return Task.FromResult(new GitHubAppTokenService.InstallationToken($"ghs_{installation}", now.AddHours(1)));
                 });
 
-            Assert.Equal("ghs_111", await svc.GetInstallationTokenAsync("111"));
-            Assert.Equal("ghs_222", await svc.GetInstallationTokenAsync("222"));
+            Assert.Equal("ghs_111", await svc.GetInstallationTokenAsync(null));
 
-            Assert.Equal(2, seen.Count);
+            settings.SetGitHubAppDefaultInstallationId("222");
+            Assert.Equal("ghs_222", await svc.GetInstallationTokenAsync(null));
+
+            // Two separate mints for two separate installations: the second was not blocked behind the
+            // first, and neither was served from the other's cache entry.
+            Assert.Equal(new[] { "111", "222" }, seen);
         }
 
         // ─── Configuration failures ──────────────────────────────────────────────────────────

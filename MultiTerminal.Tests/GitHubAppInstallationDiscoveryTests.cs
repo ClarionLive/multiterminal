@@ -211,8 +211,11 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
-        public async Task An_explicit_id_beats_both_the_stored_default_and_discovery()
+        public async Task An_explicit_id_that_restates_the_configured_default_is_honoured()
         {
+            // The helper and the shim both send an explicit id when MULTITERMINAL_GITHUB_INSTALLATION_ID
+            // is set, so naming the default must keep working. This is the whole legitimate use of the
+            // field, and it is the reason the refusal below is a comparison rather than a flat ban.
             SettingsService settings = RegisteredButNoInstallation();
             settings.SetGitHubAppDefaultInstallationId("161180702");
             string mintedFor = null;
@@ -233,13 +236,114 @@ namespace MultiTerminal.Tests
                         Array.Empty<GitHubAppTokenService.Installation>());
                 });
 
-            Assert.Equal("ghs_explicit", await svc.GetInstallationTokenAsync("555555555"));
-            Assert.Equal("555555555", mintedFor);
+            Assert.Equal("ghs_explicit", await svc.GetInstallationTokenAsync("161180702"));
+            Assert.Equal("161180702", mintedFor);
+            Assert.Equal(0, listings);
+            Assert.Equal("161180702", settings.GetGitHubAppDefaultInstallationId());
+        }
+
+        [Fact]
+        public async Task An_explicit_id_may_never_select_an_installation_the_owner_did_not_configure()
+        {
+            // ⚠️ THIS TEST REPLACES An_explicit_id_beats_both_the_stored_default_and_discovery, which
+            // asserted the OPPOSITE and was wrong — found by the security and adversary gates in
+            // pipeline Run 1 on task b42b1883. The id arrives in the body of POST /api/github/token, so
+            // "first hit wins" let any nonce-holding terminal mint a contents:write token for an account
+            // the Owner never selected for it (OWASP A01).
+            //
+            // The original test's own reasoning was half right and is preserved in the sibling test
+            // above: an explicit id must never be PERSISTED as the new default, because that would
+            // silently repoint every other terminal. It simply never asked whether such an id should be
+            // USABLE even once.
+            SettingsService settings = RegisteredButNoInstallation();
+            settings.SetGitHubAppDefaultInstallationId("161180702");
+            int mints = 0;
+            int listings = 0;
+
+            var svc = new GitHubAppTokenService(
+                settings,
+                () => DateTimeOffset.UtcNow,
+                (jwt, installation, ct) => { mints++; return Mint("ghs_should_never_be_minted"); },
+                (jwt, ct) =>
+                {
+                    listings++;
+                    return Task.FromResult<IReadOnlyList<GitHubAppTokenService.Installation>>(
+                        new[] { Install("555555555", "SomeOtherAccount") });
+                });
+
+            InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => svc.GetInstallationTokenAsync("555555555"));
+
+            // GitHub is never even asked. Refusing AFTER a successful mint would already have created a
+            // live credential at GitHub for the wrong account, which is the thing being prevented.
+            Assert.Equal(0, mints);
             Assert.Equal(0, listings);
 
-            // An explicit id is for ONE call. Writing it through as the new default would let any caller
-            // silently repoint every other terminal.
+            // Both ids are named, because the caller is usually a script carrying a stale environment
+            // variable and cannot act on "no" alone.
+            Assert.Contains("555555555", ex.Message, StringComparison.Ordinal);
+            Assert.Contains("161180702", ex.Message, StringComparison.Ordinal);
+
+            // The refusal changes nothing: a rejected request must not disturb the configured identity.
             Assert.Equal("161180702", settings.GetGitHubAppDefaultInstallationId());
+        }
+
+        [Fact]
+        public async Task A_revoked_default_cannot_be_worked_around_by_naming_a_surviving_installation()
+        {
+            // The revocation half of the same hole, and the reason this is not merely a tidiness fix.
+            // Task b42b1883 item 12 proved live that MT does not re-discover a substitute installation
+            // after a revoke — but that rule only ever governed callers who let MT choose. A caller
+            // naming a survivor explicitly bypassed it completely, so "revoking stops access
+            // immediately" held only because exactly one installation happened to exist.
+            SettingsService settings = RegisteredButNoInstallation();
+            settings.SetGitHubAppDefaultInstallationId("161180702");   // the revoked one
+            int mints = 0;
+
+            var svc = new GitHubAppTokenService(
+                settings,
+                () => DateTimeOffset.UtcNow,
+                (jwt, installation, ct) => { mints++; return Mint("ghs_survivor"); },
+                (jwt, ct) => Task.FromResult<IReadOnlyList<GitHubAppTokenService.Installation>>(
+                    new[] { Install("222222222", "AnotherAccount") }));   // the survivor
+
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => svc.GetInstallationTokenAsync("222222222"));
+
+            Assert.Equal(0, mints);
+            Assert.Equal("161180702", settings.GetGitHubAppDefaultInstallationId());
+        }
+
+        [Fact]
+        public async Task An_explicit_id_is_refused_when_no_default_is_configured_to_check_it_against()
+        {
+            // With nothing to compare against there is no way to tell a legitimate restatement from a
+            // caller's own choice, so the answer is no. The Owner-managed route
+            // (POST /api/github/app/installation) verifies an id against GitHub before storing it, and
+            // that is how a default is meant to arrive.
+            SettingsService settings = RegisteredButNoInstallation();
+            int mints = 0;
+            int listings = 0;
+
+            var svc = new GitHubAppTokenService(
+                settings,
+                () => DateTimeOffset.UtcNow,
+                (jwt, installation, ct) => { mints++; return Mint("ghs_should_never_be_minted"); },
+                (jwt, ct) =>
+                {
+                    listings++;
+                    return Task.FromResult<IReadOnlyList<GitHubAppTokenService.Installation>>(
+                        new[] { Install("555555555", "SomeOtherAccount") });
+                });
+
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => svc.GetInstallationTokenAsync("555555555"));
+
+            Assert.Equal(0, mints);
+            Assert.Equal(0, listings);
+
+            // Crucially, a refused request must not become the default by a side effect.
+            Assert.True(string.IsNullOrWhiteSpace(settings.GetGitHubAppDefaultInstallationId()));
         }
 
         // ─── Choosing deliberately ───────────────────────────────────────────────────────────
@@ -295,7 +399,20 @@ namespace MultiTerminal.Tests
             Assert.Equal("SomeOrg", await svc.SetDefaultInstallationIdAsync("987654321"));
             Assert.Equal("987654321", settings.GetGitHubAppDefaultInstallationId());
 
-            // The cache was dropped, so the old installation's token is gone rather than still live.
+            // ⚠️ THE GUARANTEE GOT STRONGER, so this assertion changed shape (pipeline Run 1). It used
+            // to re-mint the OLD installation and check the token was fresh — proving the cache had
+            // been dropped, but also quietly relying on a caller being able to name any installation it
+            // liked. That ability was an escalation and is gone. The previous identity is now not
+            // merely re-minted, it is UNREACHABLE: naming the superseded installation is refused
+            // outright, which is what "must not leave the previous one usable" should have meant all
+            // along.
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => svc.GetInstallationTokenAsync("161180702"));
+            Assert.Equal(1, mints);   // and GitHub was never asked
+
+            // The cache-drop itself is still proven, via calls the design permits: switch back, and the
+            // token for 161180702 must be minted afresh rather than served from before the change.
+            Assert.Equal("ClarionLive", await svc.SetDefaultInstallationIdAsync("161180702"));
             Assert.Equal("ghs_2", await svc.GetInstallationTokenAsync("161180702"));
             Assert.Equal(2, mints);
         }
