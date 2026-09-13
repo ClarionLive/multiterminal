@@ -34,6 +34,14 @@
 //      check reports FAIL on the very session that runs it, which trains the reader to ignore it.
 //      classifyMarkerHit() asks the only question that matters: is the marker followed by a long
 //      unbroken base64 run (key material) or by prose/escapes (someone talking about keys)?
+//      ⚠️ AND IT MUST ACTUALLY RUN. For several sessions this trap was described here and exercised
+//      only by --self-test: classifyMarkerHit() had no caller in the audit path, so the sweep looked
+//      solely for the DPAPI CIPHERTEXT and a readable key in a project.json or a transcript — the
+//      literal wording of item 9's acceptance — would not have been searched for at all. The audit
+//      passed its own unit tests while never performing the measurement this paragraph promised, and
+//      the header made it read as though it did. Pipeline Run 1 caught it; markerHits() +
+//      verdictForMarkerHits() are the wiring. A trap that is documented but not executed is worse
+//      than one that was never claimed, because it is trusted.
 //
 //  (4) THE SWEEP MUST SEE HIDDEN AND IGNORED FILES.
 //      ripgrep skips .gitignored and dotted paths by default, so the first tree sweep silently never
@@ -108,6 +116,27 @@ export function classifyMarkerHit(textAfterMarker) {
   return m ? 'key-material' : 'benign';
 }
 
+// Trap (3), the verdict half. Given classified marker hits, decide the audit's answer.
+//
+// ⚠️ THE RULE IS "NO KEY MATERIAL ANYWHERE", INCLUDING THE AUTHORIZED STORE — which is the opposite
+// of verdictForLocations() below, and the difference is the whole point. The ciphertext needle is
+// SUPPOSED to live in settings.txt, so its rule is "exactly one copy, there". A PLAINTEXT PEM is
+// supposed to exist nowhere at all: the authorized store holds a DPAPI blob, so a readable key
+// sitting in it would mean the protection had failed, not that the key was where it belonged.
+// Excepting the authorized path here would hide precisely that.
+//
+// Benign hits are expected and must NOT fail: this very file names the marker, and session
+// transcripts quote it. See trap (3) — counting instead of classifying makes the audit fail on the
+// session that runs it, which teaches the reader to ignore it.
+export function verdictForMarkerHits(hits) {
+  const keyMaterial = hits.filter(h => classifyMarkerHit(h.after) === 'key-material');
+  return {
+    ok: keyMaterial.length === 0,
+    keyMaterialPaths: [...new Set(keyMaterial.map(h => h.path))],
+    benignCount: hits.length - keyMaterial.length,
+  };
+}
+
 // Trap (2). The verdict rule. `hitPaths` are the files containing the ciphertext needle.
 export function verdictForLocations(hitPaths, authorizedPath) {
   const norm = p => path.resolve(p).toLowerCase();
@@ -154,6 +183,36 @@ function selfTest() {
     classifyMarkerHit(' is what a PEM file starts with, as everyone knows'), 'benign');
   report('marker', 'a short base64-ish run is not a key body',
     classifyMarkerHit('\nMIIEpAIB'), 'benign');
+
+  // --- verdictForMarkerHits. The half that was missing entirely until pipeline Run 1: classification
+  //     is useless unless something turns classified hits into a PASS/FAIL. These assert the rule is
+  //     "no key material ANYWHERE" — deliberately unlike verdictForLocations, which requires a hit in
+  //     the authorized store.
+  const AUTH_STORE = 'C:\\Users\\x\\AppData\\Roaming\\multiterminal\\settings.txt';
+  report('markerVerdict', 'benign hits alone are a PASS — the audit must not fail on its own source',
+    verdictForMarkerHits([
+      { path: 'scripts/verify-key-at-rest.mjs', after: " is what a PEM file starts with" },
+      { path: 'transcript.jsonl', after: "'\\n$needles += '-----BEGIN PRIVATE KEY-----'" },
+    ]),
+    { ok: true, keyMaterialPaths: [], benignCount: 2 });
+  report('markerVerdict', 'one real key body anywhere is a FAIL',
+    verdictForMarkerHits([
+      { path: 'scripts/verify-key-at-rest.mjs', after: ' prose' },
+      { path: 'C:\\repo\\.claude\\project.json', after: '\n' + B64 },
+    ]),
+    { ok: false, keyMaterialPaths: ['C:\\repo\\.claude\\project.json'], benignCount: 1 });
+  report('markerVerdict', 'THE difference from verdictForLocations: key material in the AUTHORIZED '
+    + 'store still fails, because that store holds ciphertext',
+    verdictForMarkerHits([{ path: AUTH_STORE, after: '\r\n' + B64 }]),
+    { ok: false, keyMaterialPaths: [AUTH_STORE], benignCount: 0 });
+  report('markerVerdict', 'no hits at all is a PASS (a machine that never registered an App)',
+    verdictForMarkerHits([]), { ok: true, keyMaterialPaths: [], benignCount: 0 });
+  report('markerVerdict', 'the same file twice is reported once',
+    verdictForMarkerHits([
+      { path: 'dup.json', after: '\n' + B64 },
+      { path: 'dup.json', after: '\n' + B64 },
+    ]),
+    { ok: false, keyMaterialPaths: ['dup.json'], benignCount: 0 });
 
   // --- verdictForLocations. Trap (2) in executable form.
   const AUTH = 'C:\\Users\\x\\AppData\\Roaming\\multiterminal\\settings.txt';
@@ -224,6 +283,50 @@ function filesContaining(needle, roots) {
     if (e.status === 1) return [];          // rg: no matches
     throw new Error(`ripgrep failed (status ${e.status}): ${e.stderr || e.message}`);
   }
+}
+
+// Trap (3), the measurement half. Returns every PEM-marker occurrence under `roots` together with
+// the bytes that FOLLOW it, so classifyMarkerHit() can tell a real key body from prose about keys.
+//
+// Why this is not filesContaining(): that returns filenames, and a filename cannot be classified.
+// The marker's meaning is entirely in what comes next. Bounded to 64 trailing bytes and matched with
+// -U (multiline) because a real PEM body begins on the NEXT line, so a line-scoped match would
+// always see an empty tail and classify every genuine key as benign — failing open, silently.
+//
+// --json rather than -o alone: with -U the matched text contains newlines, so line-splitting rg's
+// plain output cannot tell one match from the next.
+const PEM_MARKER_TAIL = 'PRIVATE KEY-----';
+const PEM_MARKER_RE = String.raw`-----BEGIN [A-Z ]{0,24}PRIVATE KEY-----[\s\S]{0,64}`;
+
+function markerHits(roots) {
+  const existing = roots.filter(r => fs.existsSync(r));
+  if (!existing.length) return [];
+  let out;
+  try {
+    out = execFileSync(rgPath(),
+      ['-a', '-uu', '-U', '-o', '--json', '-e', PEM_MARKER_RE, '--', ...existing],
+      { encoding: 'utf8', maxBuffer: 1 << 28 });
+  } catch (e) {
+    if (e.status === 1) return [];          // rg: no matches
+    throw new Error(`ripgrep failed (status ${e.status}): ${e.stderr || e.message}`);
+  }
+
+  const hits = [];
+  for (const line of out.split(/\r?\n/)) {
+    if (!line) continue;
+    let ev;
+    try { ev = JSON.parse(line); } catch { continue; }
+    if (ev.type !== 'match') continue;
+    const p = ev.data?.path?.text ?? '(unknown path)';
+    for (const sm of ev.data?.submatches ?? []) {
+      const text = sm?.match?.text;
+      if (typeof text !== 'string') continue;
+      const i = text.indexOf(PEM_MARKER_TAIL);
+      if (i < 0) continue;
+      hits.push({ path: p, after: text.slice(i + PEM_MARKER_TAIL.length) });
+    }
+  }
+  return hits;
 }
 
 function probeDpapi() {
@@ -340,6 +443,27 @@ for (const needle of needles) {
     problems.push(`${needle.label}: LEAKED — copies outside the authorized store:\n      `
       + v.foreign.join('\n      '));
   }
+}
+
+// ---- the PLAINTEXT half. ------------------------------------------------------------------------
+//
+// ⚠️ THE CIPHERTEXT SWEEP ABOVE CANNOT SEE THIS, AND FOR A LONG TIME NOTHING DID. Its needles are
+// prefixes of the DPAPI blob, so it finds the ENCRYPTED key copied somewhere it should not be — and
+// is blind to the far worse case of a READABLE key written to a project.json, a repo working tree or
+// an agent transcript, which is the literal wording of item 9's acceptance. classifyMarkerHit() and
+// trap (3) were written for exactly this check, and then it was never wired up: the function's only
+// callers were in selfTest(), so the audit passed its own unit tests while never performing the
+// measurement the header advertised. Found by pipeline Run 1 (code-reviewer, MAJOR).
+const markers = markerHits(sweepPaths);
+const markerVerdict = verdictForMarkerHits(markers);
+if (markerVerdict.ok) {
+  console.log(`  ok   plaintext PEM: NONE — ${markers.length} marker hit(s), all classified benign`
+    + ' (this audit script, fixtures and transcripts quoting the marker)');
+} else {
+  problems.push('plaintext PEM: LEAKED — a PEM marker is followed by real key material in:\n      '
+    + markerVerdict.keyMaterialPaths.join('\n      ')
+    + '\n      Note this fails even if the file IS the authorized store: that holds a DPAPI blob, so a'
+    + '\n      readable key there means the protection failed, not that the key was where it belonged.');
 }
 
 // ---- the environment half: a terminal must carry no GitHub token at all. -------------------------
