@@ -93,6 +93,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
+import { generateKeyPairSync } from 'crypto';
 
 const argv = process.argv.slice(2);
 const doSelfTest = argv.includes('--self-test');
@@ -145,12 +146,46 @@ const GITHUB_TOKEN_ENV_RE = /^(GH_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_TOKEN|GITHUB_
 // ⚠️ ACCEPTED GAP, recorded so it is never found as a surprise: a run of 40-199 chars with NO closing
 // END marker is NOT flagged. Such a fragment cannot be used as a key. That is a deliberate choice
 // about what this audit may miss, not an oversight — the levers are the threshold and the END clause.
-export const KEY_MATERIAL_MIN_RUN = 200;
+// How many DECODED bytes of a key must be visible before a truncated one counts. 200 sits comfortably
+// above the 46B that the 67-char DER prefix in this file's own fixtures decodes to, and comfortably
+// below any real key. See looksLikePrivateKeyDer for why a valid header alone is not enough.
+export const KEY_MATERIAL_MIN_DECODED_BYTES = 200;
 
-// JSON, JSONL and most source literals carry a line break as two characters. Collapse them to the
-// real thing so one rule covers every encoding a key can be written in.
+// JSON, JSONL and most source literals carry a line break as something other than a raw byte.
+// Collapse every spelling to the real thing so one rule covers every encoding a key can be written in.
+//
+// ⚠️ THE SHORT VERSION OF THIS FUNCTION WAS ITSELF A FINDING. It handled only `\n`, `\r` and `\r\n`,
+// which left FIVE working encodings classified benign — found by the codex security gate on the very
+// commit that introduced this function, and then measured. Written descriptively below rather than
+// literally, because a literal escape sequence in this comment is itself processed by tooling on the
+// way into the file — which happened while writing it, splitting these very lines:
+//     backslash-u-000a            valid JSON; JSON.parse turns it into a real newline
+//     backslash-u-000d + -000a    the CRLF spelling of the same
+//     backslash-u-000A            the same again with uppercase hex, which JSON also accepts
+//     backslash-backslash-n       DOUBLE-escaped — how a key looks inside NESTED JSON, i.e. a JSON
+//                                 payload quoted inside an agent transcript, which is a swept root
+//     percent-30-A                a key pasted into a URL or an HTTP log line
+//     any of the above WITH a closing -----END marker
+//
+// ⭐ THAT LAST CASE IS WHY THIS MUST BE COMPLETE RATHER THAN INCREMENTAL. The discriminator has two
+// branches (a complete key, or enough decoded bytes of one) and an unnormalised escape defeats BOTH
+// AT ONCE: the base64 run never starts, the regex fails before `hasEnd` is ever consulted, and the
+// END marker sitting right there rescues nothing. Normalisation is not one input to the rule; it is
+// the precondition for either branch meaning anything. Adding escapes one at a time as they are
+// discovered would keep re-opening the same hole.
+//
+// Backslash RUNS are matched (`\\+`) rather than a single backslash, because each level of JSON
+// nesting doubles them. Percent-encoding is handled too: a key pasted inside a URL or an HTTP log
+// line is a plausible transcript shape, and over-matching here can only make the audit MORE likely
+// to flag — the safe direction for a detector whose failure mode is silence.
 export function normaliseEscapedNewlines(s) {
-  return s.replace(/\\r\\n|\\n|\\r/g, '\n');
+  return s
+    .replace(/\\+u000[aA]/g, '\n')
+    .replace(/\\+u000[dD]/g, '\r')
+    .replace(/\\+n/g, '\n')
+    .replace(/\\+r/g, '\r')
+    .replace(/%0[aA]/g, '\n')
+    .replace(/%0[dD]/g, '\r');
 }
 
 // Split one rg match into the tail of EVERY PEM marker inside it.
@@ -181,18 +216,86 @@ export function markerTailsIn(text) {
   return tails;
 }
 
+// RFC 1421 armor headers sit BETWEEN the BEGIN line and the base64 body, ended by a blank line:
+//     -----BEGIN RSA PRIVATE KEY-----
+//     Proc-Type: 4,ENCRYPTED
+//     DEK-Info: AES-128-CBC,1B2C3D...
+//
+//     MIIEpAIBAAKC...
+// ⚠️ Without this, such a key classifies BENIGN even with a full body and an END marker in the same
+// window, because the matcher saw `Proc-Type` where it wanted base64. An encrypted PEM is still a
+// private key sitting in an agent-reachable artifact — the passphrase is a separate secret, not a
+// reason for the audit to stay silent. Found by the cross-model adversary gate, which reproduced it.
+// The `Key: value` shape is matched generally rather than by a list of known header names: over-
+// matching can only make the audit MORE likely to flag, and a detector whose failure mode is silence
+// should err that way.
+function stripPemArmorHeaders(text) {
+  const m = /^[\r\n \t]*(?:[A-Za-z][A-Za-z0-9-]*:[^\r\n]*(?:\r?\n)+)+/.exec(text);
+  return m ? text.slice(m[0].length) : text;
+}
+
+// Smallest and largest plausible DER-encoded private key, in DECODED bytes. An EC P-256 key is ~120B;
+// an RSA-4096 PKCS#8 is ~2370B. The upper bound exists only to reject absurd declared lengths from
+// random bytes that happen to begin 0x30 0x82.
+const KEY_DER_MIN_BYTES = 64;
+const KEY_DER_MAX_BYTES = 20000;
+
+/**
+ * Does this base64 run DECODE to something that IS a private key, rather than merely looking like one?
+ *
+ * ⭐ THIS REPLACED TWO HEURISTICS — a 200-char run threshold, or a closing END marker inside the
+ * capture window — WHICH BETWEEN THEM PRODUCED A NEW DEFECT IN EACH OF FOUR CONSECUTIVE FIX ROUNDS.
+ * The last one was decisive: the run threshold measured a character class that EXCLUDED newlines, and a
+ * real PEM wraps its body at 64 chars, so the threshold could never fire on ANY real key at ANY size
+ * and detection silently rested on the END marker alone. Measured: RSA-2048 caught, RSA-3072 on the
+ * cliff, RSA-4096 BENIGN. Found by the debugger gate.
+ *
+ * The heuristics were guessing at "is this a key?" from surface shape. This decodes it and asks. That is
+ * why it is not simply a fifth heuristic:
+ *   - ENCODING-INDEPENDENT: escapes are normalised and whitespace stripped first, so wrapped, unwrapped,
+ *     JSON-escaped and percent-encoded bodies all reduce to the same bytes.
+ *   - WINDOW-INDEPENDENT FOR DETECTION: a key truncated by the capture window still presents a valid
+ *     SEQUENCE header with a key-sized declared length, which is enough. MEASURED: a real RSA-4096 body
+ *     truncated at 2400 bytes is caught (declares 2370B, 1768B visible).
+ *   - TWO-SIDED BY CONSTRUCTION: a fragment fails because its declared length is unmet and too little
+ *     follows; a complete key passes because it is met. The old rules could only say "long" or "short".
+ *
+ * ⚠️ `complete || substantial`, NOT `complete` alone — requiring completeness would reintroduce window
+ * dependence by the back door, and a key truncated by the window is still a key in the file.
+ * ⚠️ And `substantial` is what keeps the 67-char DER PREFIX benign. That prefix decodes to a PERFECTLY
+ * VALID SEQUENCE header declaring 1188 bytes, because it is the genuine opening of an RSA key. Header
+ * validity alone is therefore NOT sufficient to call something key material — which is the subtlety
+ * that makes this function longer than it first appears to need to be.
+ */
+export function looksLikePrivateKeyDer(b64) {
+  let buf;
+  try { buf = Buffer.from(b64, 'base64'); } catch { return false; }
+  if (buf.length < 8) return false;
+  if (buf[0] !== 0x30) return false;                  // ASN.1 SEQUENCE — every PKCS#1/#8/SEC1 key
+  let declared;
+  let header;
+  if (buf[1] === 0x82) { declared = (buf[2] << 8) | buf[3]; header = 4; }
+  else if (buf[1] === 0x81) { declared = buf[2]; header = 3; }
+  else if (buf[1] < 0x80) { declared = buf[1]; header = 2; }
+  else return false;                                  // 3+ byte length forms: not a key of any size
+  if (declared < KEY_DER_MIN_BYTES || declared > KEY_DER_MAX_BYTES) return false;
+
+  const payload = buf.length - header;
+  return payload >= declared || payload >= KEY_MATERIAL_MIN_DECODED_BYTES;
+}
+
 export function classifyMarkerHit(textAfterMarker) {
   const text = normaliseEscapedNewlines(textAfterMarker);
-  const m = /^[\r\n \t]*([A-Za-z0-9+/=]{40,})/.exec(text);
+  // ⚠️ THE CAPTURE MUST CROSS LINE BREAKS. A real PEM wraps its body at 64 characters, so a
+  // newline-EXCLUDING class only ever sees the first line — which is how the previous 200-char run
+  // threshold came to be unreachable for every real key at every size. Whitespace is stripped before
+  // decoding, so wrapped and unwrapped bodies reduce to the same bytes.
+  const m = /^[\r\n \t]*((?:[A-Za-z0-9+/=]+[\r\n \t]*)+)/.exec(stripPemArmorHeaders(text));
   if (!m) return 'benign';
-  // A complete key closes with an END marker; a truncated one is still key material once there is
-  // enough of it. Either trigger suffices.
-  // ⚠️ BOTH TRIGGERS REQUIRE THE WIDE CAPTURE WINDOW. Inside the 64-byte tail this function used to
-  // be given, a real key and a 67-char fragment are LITERALLY indistinguishable — both present as
-  // "40+ contiguous base64 chars". Widening PEM_MARKER_RE is a precondition of this rule, not a
-  // refinement of it; narrow the window again and the discriminator silently stops discriminating.
-  const hasEnd = text.includes('-----END');
-  return (hasEnd || m[1].length >= KEY_MATERIAL_MIN_RUN) ? 'key-material' : 'benign';
+
+  const b64 = m[1].replace(/\s+/g, '');
+  if (b64.length < 40) return 'benign';
+  return looksLikePrivateKeyDer(b64) ? 'key-material' : 'benign';
 }
 
 // Trap (3), the verdict half. Given classified marker hits, decide the audit's answer.
@@ -256,14 +359,49 @@ function selfTest() {
   //    fixture, captured into a session transcript MT imports into SQLite. Keeping it benign is what
   //    stops the audit failing on the session that runs it (trap 3).
   const B64_FRAGMENT = 'MIIEpAIBAAKCAQEAx4fT0Zq9nQ6NpVvVQnrGdVvAAAABBBBCCCCDDDDEEEEFFFFGGGG';
-  // A realistic body: long enough to be usable, so long enough to flag. 260 chars.
-  const B64_FULL = B64_FRAGMENT + B64_FRAGMENT + B64_FRAGMENT + B64_FRAGMENT;
   const BS = String.fromCharCode(92);   // one literal backslash — never written as an escape here
 
+  // ⭐⭐ THE FIXTURE IS A REAL KEY, GENERATED HERE, AND THAT IS THE WHOLE POINT OF THIS SECTION.
+  // The previous fixture was B64_FRAGMENT repeated four times: 268 CONTIGUOUS base64 chars. No PEM
+  // writer emits that — real bodies wrap at 64 — so it certified a code path that could never fire in
+  // the field, and the run-length trigger it blessed turned out to be unreachable for EVERY real key at
+  // EVERY size. The debugger gate found that by generating actual keys; this fixture exists so the same
+  // mistake cannot be made again. THE THIRD TIME on this ticket that a fixture certified an assumption
+  // instead of testing it — see trap (3).
+  // Generated in-process and never written anywhere, so no key-shaped literal enters this source file
+  // (which is itself a swept root, and whose old fixture is the reason multiterminal.db has a hit).
+  // RSA-2048 only: keygen is ~100 ms, while RSA-4096 is seconds. The 4096 case — a body TRUNCATED by
+  // the 2400-byte capture window — is covered below by truncating this key instead, which exercises the
+  // identical `substantial` branch. RSA-4096 was measured by hand at 2370B declared / 1768B visible.
+  const realPem = (type) => {
+    const { privateKey } = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+      privateKeyEncoding: { type, format: 'pem' },
+    });
+    const at = privateKey.indexOf(PEM_MARKER_TAIL);
+    return privateKey.slice(at + PEM_MARKER_TAIL.length);   // the tail: wrapped body + END marker
+  };
+  const realEcPem = () => {
+    const { privateKey } = generateKeyPairSync('ec', {
+      namedCurve: 'prime256v1',
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+      privateKeyEncoding: { type: 'sec1', format: 'pem' },
+    });
+    const at = privateKey.indexOf(PEM_MARKER_TAIL);
+    return privateKey.slice(at + PEM_MARKER_TAIL.length);
+  };
+  const REAL_PKCS1 = realPem('pkcs1');
+  const REAL_PKCS8 = realPem('pkcs8');
+  // As the sweep would see it when the key is larger than the window: body cut, END never reached.
+  const REAL_TRUNCATED = REAL_PKCS1.slice(0, 900);
+  // Re-encode a real key the way a JSON artifact carries it.
+  const esc = (s, seq) => s.replace(/\r?\n/g, seq);
+
   report('marker', 'a real PEM body (newline then a long base64 run) is key material',
-    classifyMarkerHit('\n' + B64_FULL), 'key-material');
+    classifyMarkerHit('\n' + REAL_PKCS1), 'key-material');
   report('marker', 'CRLF form is key material too',
-    classifyMarkerHit('\r\n' + B64_FULL), 'key-material');
+    classifyMarkerHit('\r\n' + REAL_PKCS1), 'key-material');
 
   // ⭐ THE REGRESSION. Its absence is why this self-test passed 23/23 while the sweep was blind to the
   //    one encoding that matters. A key written into JSON carries a LITERAL backslash-n, and JSON is
@@ -271,12 +409,33 @@ function selfTest() {
   //    backslash-sensitive fixture written as a source escape is one editor away from silently
   //    becoming a real newline and testing nothing.
   report('marker', 'THE REGRESSION: a JSON-escaped real body is key material, not prose',
-    classifyMarkerHit(BS + 'n' + B64_FULL), 'key-material');
+    classifyMarkerHit(esc(REAL_PKCS1, BS + 'n')), 'key-material');
   report('marker', 'JSON-escaped CRLF form too',
-    classifyMarkerHit(BS + 'r' + BS + 'n' + B64_FULL), 'key-material');
-  report('marker', 'a SHORT body still counts when a closing END marker proves it complete '
-    + '(an EC key body is far shorter than RSA)',
-    classifyMarkerHit(BS + 'n' + B64_FRAGMENT + BS + 'n-----END EC PRIVATE KEY-----'), 'key-material');
+    classifyMarkerHit(BS + 'r' + esc(REAL_PKCS1, BS + 'n')), 'key-material');
+  // A real EC key body is ~10x shorter than RSA, so this is the fixture that stops the rule being
+  // accidentally RSA-shaped. It passes because it DECODES COMPLETELY, not because it is long — which is
+  // the difference between the current rule and the length threshold it replaced.
+  // ⚠️ THIS FIXTURE USED TO READ "a SHORT body still counts when a closing END marker proves it
+  // complete", asserting B64_FRAGMENT plus an END marker. That is now correctly BENIGN: an END marker
+  // after a 46-byte fragment proves nothing, and treating it as proof was one of the two disjoint
+  // triggers that let RSA-4096 through. The intent was right and the mechanism was wrong.
+  report('marker', 'a real EC key is key material despite a body an order of magnitude shorter than RSA',
+    classifyMarkerHit(realEcPem()), 'key-material');
+  report('marker', 'a 46-byte fragment followed by an END marker is NOT proof of a key',
+    classifyMarkerHit(BS + 'n' + B64_FRAGMENT + BS + 'n-----END EC PRIVATE KEY-----'), 'benign');
+  report('marker', 'PKCS#8 is key material too — the rule must not be PKCS#1-shaped',
+    classifyMarkerHit(REAL_PKCS8), 'key-material');
+
+  // ⭐ THE CASE THE PREVIOUS RULE COULD NOT SEE AT ALL. A key larger than the capture window arrives
+  //    with its body cut and its END marker never reached — which is exactly RSA-4096 (measured by hand:
+  //    declares 2370B, only 1768B visible). The old rule had two triggers and this shape defeated both:
+  //    no END in the window, and a newline-wrapped body so the run threshold saw only 64 chars.
+  //    It passes now because a valid SEQUENCE header plus enough payload is sufficient — which is what
+  //    makes detection window-INDEPENDENT rather than merely window-widened.
+  report('marker', 'a key TRUNCATED by the capture window is still key material',
+    classifyMarkerHit(REAL_TRUNCATED), 'key-material');
+  report('marker', 'and the truncated form survives JSON escaping too',
+    classifyMarkerHit(esc(REAL_TRUNCATED, BS + 'n')), 'key-material');
 
   report('marker', 'the 67-char fragment alone is NOT usable key material — this is the row that sits '
     + 'in multiterminal.db, and flagging it would make the audit permanently red',
@@ -294,13 +453,48 @@ function selfTest() {
   report('marker', 'normaliseEscapedNewlines collapses the two-char form and leaves real ones alone',
     [normaliseEscapedNewlines(BS + 'n' + 'x'), normaliseEscapedNewlines('\nx')], ['\nx', '\nx']);
 
+  // ⭐ EVERY SERIALIZATION LAYER A LEAKED KEY CAN ARRIVE IN. Found by all THREE review gates
+  //    independently (codex security auditor, claude code reviewer, codex cross-model adversary) on the
+  //    commit that added single-escape handling — the first fix covered one layer and left five working
+  //    encodings benign. Their absence here is why the previous self-test passed while the detector was
+  //    still blind, which is the same failure this whole file is about.
+  //    ⚠️ The last one is the sharpest: an escaped body WITH a closing END marker was still benign,
+  //    because the base64 run never starts, so the regex fails before `hasEnd` is ever consulted.
+  //    Normalisation is a PRECONDITION for both branches of the rule, not one input among them.
+  for (const [label, prefix] of [
+    ['JSON unicode escape', BS + 'u000a'],
+    ['JSON unicode CRLF', BS + 'u000d' + BS + 'u000a'],
+    ['JSON unicode, uppercase hex (also valid JSON)', BS + 'u000A'],
+    ['double-escaped, i.e. JSON nested inside JSON', BS + BS + 'n'],
+    ['percent-encoded, i.e. a key pasted into a URL or an HTTP log', '%0A'],
+  ]) {
+    report('marker', `a real body behind a ${label} is key material`,
+      classifyMarkerHit(esc(REAL_PKCS1, prefix)), 'key-material');
+  }
+  report('marker', 'THE ONE THE END-MARKER BRANCH COULD NOT RESCUE: escaped body plus a closing END',
+    classifyMarkerHit(BS + 'u000a' + REAL_PKCS1 + BS + 'u000a-----END RSA PRIVATE KEY-----'),
+    'key-material');
+
+  // ⭐ RFC 1421 ARMOR HEADERS. An encrypted PEM puts Proc-Type/DEK-Info between the marker and the
+  //    body, so the matcher saw a header where it wanted base64 and called a complete key benign.
+  //    Found by the cross-model adversary gate. The passphrase is a separate secret; a key file in a
+  //    swept root is still a finding.
+  report('marker', 'an encrypted PEM with Proc-Type/DEK-Info armor headers is still key material',
+    classifyMarkerHit('\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,1B2C3D4E\n\n' + REAL_PKCS1),
+    'key-material');
+  report('marker', 'armor headers in the JSON-escaped form too',
+    classifyMarkerHit(BS + 'nProc-Type: 4,ENCRYPTED' + BS + 'n' + esc(REAL_PKCS1, BS + 'n')),
+    'key-material');
+  report('marker', 'a header-shaped line with NO body behind it is still benign',
+    classifyMarkerHit('\nProc-Type: 4,ENCRYPTED\n\nnot a key at all'), 'benign');
+
   // --- markerTailsIn. Guards the shadowing regression that WIDENING the capture window introduced:
   //     a benign marker must never hide a real key that follows it inside the same rg match.
   const BEGIN = '-----BEGIN RSA PRIVATE KEY-----';
   report('tails', 'one marker yields one tail',
     markerTailsIn(BEGIN + '\nabc'), ['\nabc']);
   report('tails', 'THE SHADOWING REGRESSION: a benign marker does not hide a real key behind it',
-    markerTailsIn(BEGIN + ' prose about keys, at length. ' + BEGIN + '\n' + B64_FULL)
+    markerTailsIn(BEGIN + ' prose about keys, at length. ' + BEGIN + '\n' + REAL_PKCS1)
       .map(classifyMarkerHit),
     ['benign', 'key-material']);
   report('tails', 'each tail stops at the next BEGIN, so one key body is never read as another\'s',
@@ -309,7 +503,7 @@ function selfTest() {
   report('tails', 'an END marker does not open a tail of its own (it also contains "PRIVATE KEY-----")',
     markerTailsIn(BEGIN + '\nbody\n-----END RSA PRIVATE KEY-----\ntrailing').length, 1);
   report('tails', 'a CERTIFICATE block cannot claim a later private key\'s body',
-    markerTailsIn('-----BEGIN CERTIFICATE-----\nzzz\n' + BEGIN + '\n' + B64_FULL)
+    markerTailsIn('-----BEGIN CERTIFICATE-----\nzzz\n' + BEGIN + '\n' + REAL_PKCS1)
       .map(classifyMarkerHit),
     ['key-material']);
   report('tails', 'text with no marker at all yields nothing',
@@ -329,12 +523,12 @@ function selfTest() {
   report('markerVerdict', 'one real key body anywhere is a FAIL',
     verdictForMarkerHits([
       { path: 'scripts/verify-key-at-rest.mjs', after: ' prose' },
-      { path: 'C:\\repo\\.claude\\project.json', after: '\n' + B64_FULL },
+      { path: 'C:\\repo\\.claude\\project.json', after: '\n' + REAL_PKCS1 },
     ]),
     { ok: false, keyMaterialPaths: ['C:\\repo\\.claude\\project.json'], benignCount: 1 });
   report('markerVerdict', 'THE difference from verdictForLocations: key material in the AUTHORIZED '
     + 'store still fails, because that store holds ciphertext',
-    verdictForMarkerHits([{ path: AUTH_STORE, after: '\r\n' + B64_FULL }]),
+    verdictForMarkerHits([{ path: AUTH_STORE, after: '\r\n' + REAL_PKCS1 }]),
     { ok: false, keyMaterialPaths: [AUTH_STORE], benignCount: 0 });
   report('markerVerdict', 'no hits at all is a PASS (a machine that never registered an App)',
     verdictForMarkerHits([]), { ok: true, keyMaterialPaths: [], benignCount: 0 });
@@ -344,7 +538,7 @@ function selfTest() {
   //    correct classifier with no caller, so proving the CLASSIFIER works has already once been
   //    insufficient to prove the AUDIT works.
   report('markerVerdict', 'THE REGRESSION: a JSON-encoded key in a project.json is a FAIL',
-    verdictForMarkerHits([{ path: 'C:\\repo\\.claude\\project.json', after: BS + 'n' + B64_FULL }]),
+    verdictForMarkerHits([{ path: 'C:\\repo\\.claude\\project.json', after: esc(REAL_PKCS1, BS + 'n') }]),
     { ok: false, keyMaterialPaths: ['C:\\repo\\.claude\\project.json'], benignCount: 0 });
   report('markerVerdict', 'the transcript fragment that lives in multiterminal.db stays a PASS, so the '
     + 'audit does not fail on the session that runs it',
@@ -352,8 +546,8 @@ function selfTest() {
     { ok: true, keyMaterialPaths: [], benignCount: 1 });
   report('markerVerdict', 'the same file twice is reported once',
     verdictForMarkerHits([
-      { path: 'dup.json', after: '\n' + B64_FULL },
-      { path: 'dup.json', after: '\n' + B64_FULL },
+      { path: 'dup.json', after: '\n' + REAL_PKCS1 },
+      { path: 'dup.json', after: '\n' + REAL_PKCS1 },
     ]),
     { ok: false, keyMaterialPaths: ['dup.json'], benignCount: 0 });
 
@@ -442,7 +636,7 @@ function filesContaining(needle, roots) {
 // ⚠️ THE WINDOW SIZE IS LOAD-BEARING — DO NOT SHRINK IT BACK. It was 64 bytes, which is smaller than
 // any real key body, so classifyMarkerHit() could only ever observe "40+ base64 chars follow" and had
 // no way to distinguish a genuine key from a 67-char fragment of one. Both of its current triggers
-// (a closing END marker, or a run >= KEY_MATERIAL_MIN_RUN) are unobservable inside 64 bytes. 2400 is
+// (a decodable key header plus enough payload) are unobservable inside 64 bytes. 2400 is
 // sized to contain a full RSA-2048 PKCS#1 body (~1600 base64 chars plus line breaks) AND its END
 // marker, so a complete key is always classifiable from one match. Cost is bounded: a few hundred KB
 // of rg output across the whole sweep, against maxBuffer 1<<28.
