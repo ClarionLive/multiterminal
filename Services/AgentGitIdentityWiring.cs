@@ -45,8 +45,29 @@ namespace MultiTerminal.Services
         internal const string CredentialHelperScript = "git-credential-multiterminal.mjs";
         internal const string GhShimScript = "gh-multiterminal.mjs";
 
-        /// <summary>The launcher PATH picks up under the name <c>gh</c>.</summary>
+        /// <summary>The launcher cmd.exe and PowerShell pick up under the name <c>gh</c>, via PATHEXT.</summary>
         internal const string GhLauncherFileName = "gh.cmd";
+
+        /// <summary>
+        /// The launcher POSIX shells pick up under the name <c>gh</c>.
+        ///
+        /// <para><b>⚠️ This file is not a nicety — without it the whole gh half of this ticket is
+        /// silently inert in the shell agents actually use</b> (task b42b1883, pipeline Run 1). Resolving
+        /// an extension-less name through PATHEXT is a cmd.exe / PowerShell behaviour. MSYS (Git Bash,
+        /// which is what the agent Bash tool runs) uses <c>execvp</c>, which appends <c>.exe</c> and never
+        /// <c>.cmd</c>, so <see cref="GhLauncherFileName"/> alone is invisible there: the shims directory
+        /// sat first on PATH and a bare <c>gh</c> still resolved to the real GitHub CLI. Comments then
+        /// published under the OWNER'S account with no token, no signature and — worst of all — no
+        /// warning, because the warn-and-continue notice lives inside a shim that never executed. Note
+        /// <c>git push</c> was unaffected the whole time, because <c>GIT_CONFIG_*</c> is shell-agnostic;
+        /// that asymmetry is exactly what made the failure so quiet.</para>
+        ///
+        /// <para>The two launchers coexist safely. cmd.exe and PowerShell only execute names carrying a
+        /// PATHEXT extension, so they keep choosing <c>gh.cmd</c> and never this file; POSIX shells see
+        /// this one. And <c>resolveRealGh</c> in the shim skips the ENTIRE shims directory rather than a
+        /// single filename, so adding a second launcher here cannot make the shim find itself.</para>
+        /// </summary>
+        internal const string GhPosixLauncherFileName = "gh";
 
         /// <summary>
         /// Where the scripts live at runtime: next to the executable, copied by the csproj (the same
@@ -78,11 +99,16 @@ namespace MultiTerminal.Services
             && File.Exists(Path.Combine(scriptsDirectory, GhShimScript));
 
         /// <summary>
-        /// Creates (or refreshes) the <c>gh</c> launcher. Idempotent: it rewrites only when the content
-        /// differs, so a terminal launch does not touch the disk in the common case, and a moved
-        /// install is corrected automatically rather than silently pointing at a path that is gone.
+        /// Creates (or refreshes) BOTH <c>gh</c> launchers — the cmd one for Windows shells and the
+        /// POSIX one for MSYS/Git Bash. Idempotent: each rewrites only when the content differs, so a
+        /// terminal launch does not touch the disk in the common case, and a moved install is corrected
+        /// automatically rather than silently pointing at a path that is gone.
+        ///
+        /// <para><b>Both are required, and writing only one is the bug this method was fixed for</b>
+        /// (task b42b1883, pipeline Run 1) — see <see cref="GhPosixLauncherFileName"/> for why a
+        /// Windows-only launcher leaves agents publishing under the Owner's name with no warning.</para>
         /// </summary>
-        /// <returns>The shim directory, or null when the launcher could not be written.</returns>
+        /// <returns>The shim directory, or null when the launchers could not be written.</returns>
         public static string EnsureGhLauncher(string scriptsDirectory, string shimDirectory, Action<string> log = null)
         {
             if (!ScriptsArePresent(scriptsDirectory)) return null;
@@ -91,16 +117,17 @@ namespace MultiTerminal.Services
             {
                 Directory.CreateDirectory(shimDirectory);
 
-                string launcherPath = Path.Combine(shimDirectory, GhLauncherFileName);
-                string desired = BuildGhLauncherContents(Path.Combine(scriptsDirectory, GhShimScript));
+                string ghShimScriptPath = Path.Combine(scriptsDirectory, GhShimScript);
 
-                // Read-then-compare rather than always writing: an unconditional write on every launch
-                // would rewrite a file that other processes may be executing at that moment.
-                if (!File.Exists(launcherPath) || !string.Equals(File.ReadAllText(launcherPath), desired, StringComparison.Ordinal))
-                {
-                    File.WriteAllText(launcherPath, desired);
-                    log?.Invoke($"Wrote the gh launcher to {launcherPath}");
-                }
+                WriteLauncherIfChanged(
+                    Path.Combine(shimDirectory, GhLauncherFileName),
+                    BuildGhLauncherContents(ghShimScriptPath),
+                    log);
+
+                WriteLauncherIfChanged(
+                    Path.Combine(shimDirectory, GhPosixLauncherFileName),
+                    BuildGhPosixLauncherContents(ghShimScriptPath),
+                    log);
 
                 return shimDirectory;
             }
@@ -115,6 +142,22 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Read-then-compare rather than always writing: an unconditional write on every launch would
+        /// rewrite a file that other processes may be executing at that moment.
+        /// </summary>
+        private static void WriteLauncherIfChanged(string launcherPath, string desired, Action<string> log)
+        {
+            if (File.Exists(launcherPath)
+                && string.Equals(File.ReadAllText(launcherPath), desired, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            File.WriteAllText(launcherPath, desired);
+            log?.Invoke($"Wrote the gh launcher to {launcherPath}");
+        }
+
+        /// <summary>
         /// The batch file PATH resolves as <c>gh</c>. <c>%*</c> forwards every argument, and the exit
         /// code is propagated — `gh` is scripted against, so swallowing it would turn a failed comment
         /// into an apparent success.
@@ -125,6 +168,39 @@ namespace MultiTerminal.Services
             + "REM this one gh invocation. Generated file: edits are overwritten on the next launch.\r\n"
             + $"node \"{ghShimScriptPath}\" %*\r\n"
             + "exit /b %ERRORLEVEL%\r\n";
+
+        /// <summary>
+        /// The shell script MSYS/Git Bash resolves as <c>gh</c>.
+        ///
+        /// <para><b>Three details here are load-bearing rather than stylistic.</b></para>
+        ///
+        /// <para>(1) <b>LF line endings, and the shebang on the very first byte.</b> A CRLF after
+        /// <c>#!/bin/sh</c> makes the kernel read the interpreter as <c>/bin/sh\r</c>, which does not
+        /// exist; the error ("bad interpreter") names a path that looks correct, so it reads as a broken
+        /// install rather than a line-ending bug. A UTF-8 BOM breaks it the same way, which is why this
+        /// is written with <see cref="File.WriteAllText(string,string)"/> — .NET's default UTF-8 encoding
+        /// emits no BOM, and it performs no newline translation, so the "\n" here survives to disk.</para>
+        ///
+        /// <para>(2) <b>Forward slashes in the script path.</b> The path is interpolated inside a
+        /// double-quoted shell word, where a Windows backslash is an escape character. Node accepts
+        /// forward slashes on Windows, so converting sidesteps the question — the same reasoning as the
+        /// credential helper value in <see cref="BuildEnvironmentSetup"/>.</para>
+        ///
+        /// <para>(3) <b><c>exec</c> and <c>"$@"</c>.</b> <c>exec</c> replaces the shell process so the
+        /// child's exit code is the script's own, with no wrapper left to swallow a signal. <c>"$@"</c>
+        /// (quoted) forwards arguments one-for-one; the unquoted form would re-split a comment body on
+        /// whitespace, which is the normal case for this tool rather than an edge case.</para>
+        ///
+        /// <para>No execute bit is set, and none is needed: MSYS derives executability from the file's
+        /// first bytes, and a <c>#!</c> shebang is enough. .NET on Windows could not set a POSIX mode
+        /// bit anyway.</para>
+        /// </summary>
+        internal static string BuildGhPosixLauncherContents(string ghShimScriptPath) =>
+            "#!/bin/sh\n"
+            + "# MultiTerminal gh shim (task b42b1883, item 5/6; POSIX half added in pipeline Run 1).\n"
+            + "# Mints a short-lived bot token into this one gh invocation. Generated file: edits are\n"
+            + "# overwritten on the next launch.\n"
+            + $"exec node \"{ghShimScriptPath.Replace('\\', '/')}\" \"$@\"\n";
 
         /// <summary>
         /// The PowerShell fragment appended to a terminal's launch command.

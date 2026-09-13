@@ -202,5 +202,66 @@ namespace MultiTerminal.Tests
             AgentGitIdentityWiring.EnsureGhLauncher(_scriptsDir, _shimDir);
             Assert.Contains(_scriptsDir.Replace("\\", "\\"), File.ReadAllText(launcher));
         }
+
+        /// <summary>
+        /// ⚠️ THE REGRESSION THIS FILE EXISTS TO PREVENT FROM RECURRING (pipeline Run 1, task
+        /// b42b1883). Only <c>gh.cmd</c> was ever written, and PATHEXT resolution of an
+        /// extension-less name is a cmd.exe / PowerShell behaviour — MSYS <c>execvp</c> appends
+        /// <c>.exe</c> and never <c>.cmd</c>. So in Git Bash, which is what the agent Bash tool runs,
+        /// the shims directory sat first on PATH and a bare <c>gh</c> still resolved to the real
+        /// GitHub CLI. Comments published under the Owner's account with no token, no signature and
+        /// no warning, because the warn-and-continue notice lives inside a shim that never executed.
+        /// <para>Nothing failed and no test went red, which is exactly why this one is worth having.</para>
+        /// </summary>
+        [Fact]
+        public void Both_gh_launchers_are_written_because_one_shell_family_cannot_see_the_other()
+        {
+            AgentGitIdentityWiring.EnsureGhLauncher(_scriptsDir, _shimDir);
+
+            string cmdLauncher = Path.Combine(_shimDir, "gh.cmd");
+            string posixLauncher = Path.Combine(_shimDir, "gh");
+
+            Assert.True(File.Exists(cmdLauncher), "gh.cmd is what cmd.exe and PowerShell resolve via PATHEXT.");
+            Assert.True(File.Exists(posixLauncher), "the extension-less gh is the ONLY one MSYS/Git Bash can find.");
+
+            // Read as bytes: the two properties that break the shebang are invisible in a string.
+            byte[] raw = File.ReadAllBytes(posixLauncher);
+
+            // No UTF-8 BOM. A BOM before #! makes the kernel refuse the interpreter.
+            Assert.False(raw.Length >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF,
+                "a BOM ahead of the shebang breaks exec in the same way a CRLF does.");
+
+            string posix = System.Text.Encoding.UTF8.GetString(raw);
+
+            Assert.StartsWith("#!/bin/sh\n", posix, StringComparison.Ordinal);
+
+            // LF ONLY. A CRLF after the shebang makes the interpreter "/bin/sh\r", and the resulting
+            // error names a path that looks correct — it reads as a broken install, not a line-ending
+            // bug, which is what makes it expensive to diagnose.
+            Assert.DoesNotContain("\r", posix, StringComparison.Ordinal);
+
+            Assert.Contains("gh-multiterminal.mjs", posix, StringComparison.Ordinal);
+
+            // exec: the child's exit code becomes the script's, with no wrapper left to swallow it.
+            // "$@" QUOTED: the unquoted form re-splits a comment body on whitespace, which for this
+            // tool is the normal case rather than an edge case.
+            Assert.Contains("exec node ", posix, StringComparison.Ordinal);
+            Assert.Contains("\"$@\"", posix, StringComparison.Ordinal);
+
+            // Forward slashes: the path sits inside a double-quoted shell word, where a Windows
+            // backslash is an escape character.
+            Assert.DoesNotContain("\\", posix, StringComparison.Ordinal);
+
+            // Idempotent, like its cmd sibling: a launch must not rewrite a file another process may
+            // be executing at that moment.
+            DateTime firstWrite = File.GetLastWriteTimeUtc(posixLauncher);
+            AgentGitIdentityWiring.EnsureGhLauncher(_scriptsDir, _shimDir);
+            Assert.Equal(firstWrite, File.GetLastWriteTimeUtc(posixLauncher));
+
+            // And a stale one is corrected rather than left pointing at a path that is gone.
+            File.WriteAllText(posixLauncher, "#!/bin/sh\nexec node \"C:/gone/gh-multiterminal.mjs\" \"$@\"\n");
+            AgentGitIdentityWiring.EnsureGhLauncher(_scriptsDir, _shimDir);
+            Assert.Contains(_scriptsDir.Replace('\\', '/'), File.ReadAllText(posixLauncher), StringComparison.Ordinal);
+        }
     }
 }
