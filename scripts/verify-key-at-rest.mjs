@@ -32,8 +32,20 @@
 //      were THE AUDIT SCRIPT'S OWN SOURCE, captured into the session transcript that MT stores in
 //      SQLite, and two were the test fixture (whose body reads NOTAREALKEYJUSTAMARKER). A counting
 //      check reports FAIL on the very session that runs it, which trains the reader to ignore it.
-//      classifyMarkerHit() asks the only question that matters: is the marker followed by a long
-//      unbroken base64 run (key material) or by prose/escapes (someone talking about keys)?
+//      classifyMarkerHit() asks the only question that matters: is the marker followed by enough of a
+//      base64 run to be a USABLE key (key material), or by prose (someone talking about keys)?
+//      ⚠️ IT USED TO SAY "prose/escapes", AND THE WORD "escapes" WAS A DEFECT, NOT A DESCRIPTION.
+//      Treating an escaped newline as evidence of prose made the sweep blind to a key written into
+//      JSON — `-----BEGIN … -----\nMII…` with a literal backslash-n — which is the encoding of BOTH
+//      artifacts item 9's acceptance names by hand: project.json (checked in, so a leak there becomes
+//      public) and agent transcripts (JSONL, which MT then imports into multiterminal.db). Pipeline
+//      Run 2 found it, independently, on two different model providers (ticket 27002183).
+//      The discriminator is now SEMANTIC — "is there enough of it to be a key?" — and never about
+//      encoding shape, because an encoding says nothing about usability. See classifyMarkerHit.
+//      ⭐ THE REUSABLE LESSON, AND IT IS NOT ABOUT REGEXES: the old comment asserted the escaped form
+//      "correctly" failed to match, and the self-test had a fixture blessing that behaviour. A
+//      confident comment plus a test agreeing with it is how a gap survives review — three reviewers
+//      read that line and stopped. A test that encodes an assumption cannot also validate it.
 //      ⚠️ AND IT MUST ACTUALLY RUN. For several sessions this trap was described here and exercised
 //      only by --self-test: classifyMarkerHit() had no caller in the audit path, so the sweep looked
 //      solely for the DPAPI CIPHERTEXT and a readable key in a project.json or a transcript — the
@@ -107,13 +119,80 @@ const GITHUB_TOKEN_ENV_RE = /^(GH_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_TOKEN|GITHUB_
 // ── PURE LOGIC (self-testable without a machine to audit) ─────────────────────────────────────────
 
 // Trap (3). Given the text immediately AFTER a PEM marker, decide whether it is real key material.
-// A PEM body is a long unbroken base64 run on the next line(s). Prose, escaped-newline source
-// literals ("\\n" as two characters) and script fragments are not.
+// A PEM body is a long unbroken base64 run on the next line(s). Prose and script fragments are not.
+//
+// ⚠️ THE ESCAPED FORM IS KEY MATERIAL, NOT PROSE — AND THIS FUNCTION USED TO SAY OTHERWISE.
+// It required a REAL CR/LF before the base64 run, and its own comment called the escaped form
+// "correctly" failing to match. That was wrong in the worst available direction. A key serialized
+// into JSON reads `-----BEGIN … -----\nMII…` with a LITERAL backslash-n, and JSON is the encoding of
+// the two sweep roots most likely to ever carry a leak: `.claude/project.json` (checked in, so a leak
+// there becomes PUBLIC) and agent transcripts (JSONL — which MT's session pipeline then copies into
+// multiterminal.db). Item 9's acceptance names "a project.json or a transcript" verbatim, so the one
+// question this sweep exists to answer was the one encoding it could not see.
+// Found by pipeline Run 2, independently by two gates on two different model providers (ticket
+// 27002183). The word "correctly" is what made it survive three reviews: it told every later reader
+// the case had been considered and settled.
+//
+// So: normalise escape sequences FIRST, then ask whether enough key follows to be USABLE.
+//
+// ⚠️ WHY THERE IS A SECOND TEST AT ALL, AND WHY IT IS SEMANTIC. Maximal strictness is not available:
+// B64_FRAGMENT below lives in an agent transcript that cannot be cleaned, and trap (3)'s whole point
+// is that an audit which fails on the session running it gets ignored — which is how the missing-caller
+// defect survived. But the exemption must ask "is there enough of this to be a key?", a question about
+// USABILITY, and never "does it have escaped newlines?", which says nothing about usability and is
+// precisely what created the bug above. Owner decision 2026-09-13: END marker present, OR run >= 200.
+//
+// ⚠️ ACCEPTED GAP, recorded so it is never found as a surprise: a run of 40-199 chars with NO closing
+// END marker is NOT flagged. Such a fragment cannot be used as a key. That is a deliberate choice
+// about what this audit may miss, not an oversight — the levers are the threshold and the END clause.
+export const KEY_MATERIAL_MIN_RUN = 200;
+
+// JSON, JSONL and most source literals carry a line break as two characters. Collapse them to the
+// real thing so one rule covers every encoding a key can be written in.
+export function normaliseEscapedNewlines(s) {
+  return s.replace(/\\r\\n|\\n|\\r/g, '\n');
+}
+
+// Split one rg match into the tail of EVERY PEM marker inside it.
+//
+// ⚠️ WHY THIS IS NOT `indexOf` ONCE. It used to be, and that was safe only while the capture window
+// was 64 bytes. At 2400 bytes rg's greedy match absorbs any further BEGIN markers that fall inside it,
+// so they never arrive as matches of their own — and classifying only the first lets a BENIGN marker
+// SHADOW a real key a few hundred bytes behind it. That is the same silent false negative this whole
+// trap exists to prevent, reintroduced from the opposite direction by the fix for it. It was caught
+// only because the hit count FELL from 165 to 112 across the widening, and transcripts only ever grow:
+// a count moving the wrong way was the single observable symptom.
+//
+// Pure and exported so the shadowing case is testable without a filesystem — the same reason
+// classifyMarkerHit and verdictForMarkerHits are.
+export function markerTailsIn(text) {
+  const tails = [];
+  for (let b = text.indexOf('-----BEGIN'); b >= 0; b = text.indexOf('-----BEGIN', b + 1)) {
+    const t = text.indexOf(PEM_MARKER_TAIL, b);
+    // The tail must belong to THIS marker. `-----BEGIN [A-Z ]{0,24}PRIVATE KEY-----` is at most ~40
+    // chars, so a farther hit belongs to a later marker — or this BEGIN opens a CERTIFICATE block,
+    // which must not be allowed to claim some unrelated private key's body further down the file.
+    if (t < 0 || t - b > 40) continue;
+    const from = t + PEM_MARKER_TAIL.length;
+    // Bound each tail at the next BEGIN so one key's body can never be read as another's.
+    const next = text.indexOf('-----BEGIN', from);
+    tails.push(next < 0 ? text.slice(from) : text.slice(from, next));
+  }
+  return tails;
+}
+
 export function classifyMarkerHit(textAfterMarker) {
-  // Real PEM: optional CR/LF then >=40 contiguous base64 chars. An escaped literal in source reads
-  // `\n` as backslash-n, which is NOT whitespace, so it correctly fails to match here.
-  const m = /^[\r\n \t]*([A-Za-z0-9+/=]{40,})/.exec(textAfterMarker);
-  return m ? 'key-material' : 'benign';
+  const text = normaliseEscapedNewlines(textAfterMarker);
+  const m = /^[\r\n \t]*([A-Za-z0-9+/=]{40,})/.exec(text);
+  if (!m) return 'benign';
+  // A complete key closes with an END marker; a truncated one is still key material once there is
+  // enough of it. Either trigger suffices.
+  // ⚠️ BOTH TRIGGERS REQUIRE THE WIDE CAPTURE WINDOW. Inside the 64-byte tail this function used to
+  // be given, a real key and a 67-char fragment are LITERALLY indistinguishable — both present as
+  // "40+ contiguous base64 chars". Widening PEM_MARKER_RE is a precondition of this rule, not a
+  // refinement of it; narrow the window again and the discriminator silently stops discriminating.
+  const hasEnd = text.includes('-----END');
+  return (hasEnd || m[1].length >= KEY_MATERIAL_MIN_RUN) ? 'key-material' : 'benign';
 }
 
 // Trap (3), the verdict half. Given classified marker hits, decide the audit's answer.
@@ -166,13 +245,42 @@ function selfTest() {
     if (!ok) console.log(`        got ${JSON.stringify(got)} want ${JSON.stringify(exp)}`);
   };
 
-  // --- classifyMarkerHit. The three benign shapes below are VERBATIM from the real measurement run
-  //     against multiterminal.db; all three were reported as hits by the counting draft.
-  const B64 = 'MIIEpAIBAAKCAQEAx4fT0Zq9nQ6NpVvVQnrGdVvAAAABBBBCCCCDDDDEEEEFFFFGGGG';
+  // --- classifyMarkerHit. The benign shapes below are VERBATIM from the real measurement run
+  //     against multiterminal.db; all were reported as hits by the counting draft.
+  //
+  // ⚠️ B64_FRAGMENT WAS CALLED "a real PEM body" UNTIL 2026-09-13 AND IS NOT ONE. It is 67 base64
+  //    chars — a DER prefix, not a key. Nothing can be unlocked with it. It stayed unchallenged
+  //    because the old 64-byte capture window could not observe anything longer, so a fixture that
+  //    short LOOKED indistinguishable from the real thing. That is now the point it tests.
+  //    It is also the literal string pipeline Run 2 found in multiterminal.db: this file's own
+  //    fixture, captured into a session transcript MT imports into SQLite. Keeping it benign is what
+  //    stops the audit failing on the session that runs it (trap 3).
+  const B64_FRAGMENT = 'MIIEpAIBAAKCAQEAx4fT0Zq9nQ6NpVvVQnrGdVvAAAABBBBCCCCDDDDEEEEFFFFGGGG';
+  // A realistic body: long enough to be usable, so long enough to flag. 260 chars.
+  const B64_FULL = B64_FRAGMENT + B64_FRAGMENT + B64_FRAGMENT + B64_FRAGMENT;
+  const BS = String.fromCharCode(92);   // one literal backslash — never written as an escape here
+
   report('marker', 'a real PEM body (newline then a long base64 run) is key material',
-    classifyMarkerHit('\n' + B64), 'key-material');
+    classifyMarkerHit('\n' + B64_FULL), 'key-material');
   report('marker', 'CRLF form is key material too',
-    classifyMarkerHit('\r\n' + B64), 'key-material');
+    classifyMarkerHit('\r\n' + B64_FULL), 'key-material');
+
+  // ⭐ THE REGRESSION. Its absence is why this self-test passed 23/23 while the sweep was blind to the
+  //    one encoding that matters. A key written into JSON carries a LITERAL backslash-n, and JSON is
+  //    what project.json and every agent transcript are. Built with fromCharCode(92) deliberately: a
+  //    backslash-sensitive fixture written as a source escape is one editor away from silently
+  //    becoming a real newline and testing nothing.
+  report('marker', 'THE REGRESSION: a JSON-escaped real body is key material, not prose',
+    classifyMarkerHit(BS + 'n' + B64_FULL), 'key-material');
+  report('marker', 'JSON-escaped CRLF form too',
+    classifyMarkerHit(BS + 'r' + BS + 'n' + B64_FULL), 'key-material');
+  report('marker', 'a SHORT body still counts when a closing END marker proves it complete '
+    + '(an EC key body is far shorter than RSA)',
+    classifyMarkerHit(BS + 'n' + B64_FRAGMENT + BS + 'n-----END EC PRIVATE KEY-----'), 'key-material');
+
+  report('marker', 'the 67-char fragment alone is NOT usable key material — this is the row that sits '
+    + 'in multiterminal.db, and flagging it would make the audit permanently red',
+    classifyMarkerHit(BS + 'n' + B64_FRAGMENT), 'benign');
   report('marker', 'REAL benign hit #1: this audit script quoted in a session transcript',
     classifyMarkerHit("'\\n$needles += '-----BEGIN PRIVATE KEY-----'"), 'benign');
   report('marker', 'REAL benign hit #2: the C# test fixture with escaped newlines',
@@ -183,6 +291,29 @@ function selfTest() {
     classifyMarkerHit(' is what a PEM file starts with, as everyone knows'), 'benign');
   report('marker', 'a short base64-ish run is not a key body',
     classifyMarkerHit('\nMIIEpAIB'), 'benign');
+  report('marker', 'normaliseEscapedNewlines collapses the two-char form and leaves real ones alone',
+    [normaliseEscapedNewlines(BS + 'n' + 'x'), normaliseEscapedNewlines('\nx')], ['\nx', '\nx']);
+
+  // --- markerTailsIn. Guards the shadowing regression that WIDENING the capture window introduced:
+  //     a benign marker must never hide a real key that follows it inside the same rg match.
+  const BEGIN = '-----BEGIN RSA PRIVATE KEY-----';
+  report('tails', 'one marker yields one tail',
+    markerTailsIn(BEGIN + '\nabc'), ['\nabc']);
+  report('tails', 'THE SHADOWING REGRESSION: a benign marker does not hide a real key behind it',
+    markerTailsIn(BEGIN + ' prose about keys, at length. ' + BEGIN + '\n' + B64_FULL)
+      .map(classifyMarkerHit),
+    ['benign', 'key-material']);
+  report('tails', 'each tail stops at the next BEGIN, so one key body is never read as another\'s',
+    markerTailsIn(BEGIN + '\n' + B64_FRAGMENT + BEGIN + '\nxyz'),
+    ['\n' + B64_FRAGMENT, '\nxyz']);
+  report('tails', 'an END marker does not open a tail of its own (it also contains "PRIVATE KEY-----")',
+    markerTailsIn(BEGIN + '\nbody\n-----END RSA PRIVATE KEY-----\ntrailing').length, 1);
+  report('tails', 'a CERTIFICATE block cannot claim a later private key\'s body',
+    markerTailsIn('-----BEGIN CERTIFICATE-----\nzzz\n' + BEGIN + '\n' + B64_FULL)
+      .map(classifyMarkerHit),
+    ['key-material']);
+  report('tails', 'text with no marker at all yields nothing',
+    markerTailsIn('nothing to see here'), []);
 
   // --- verdictForMarkerHits. The half that was missing entirely until pipeline Run 1: classification
   //     is useless unless something turns classified hits into a PASS/FAIL. These assert the rule is
@@ -198,19 +329,31 @@ function selfTest() {
   report('markerVerdict', 'one real key body anywhere is a FAIL',
     verdictForMarkerHits([
       { path: 'scripts/verify-key-at-rest.mjs', after: ' prose' },
-      { path: 'C:\\repo\\.claude\\project.json', after: '\n' + B64 },
+      { path: 'C:\\repo\\.claude\\project.json', after: '\n' + B64_FULL },
     ]),
     { ok: false, keyMaterialPaths: ['C:\\repo\\.claude\\project.json'], benignCount: 1 });
   report('markerVerdict', 'THE difference from verdictForLocations: key material in the AUTHORIZED '
     + 'store still fails, because that store holds ciphertext',
-    verdictForMarkerHits([{ path: AUTH_STORE, after: '\r\n' + B64 }]),
+    verdictForMarkerHits([{ path: AUTH_STORE, after: '\r\n' + B64_FULL }]),
     { ok: false, keyMaterialPaths: [AUTH_STORE], benignCount: 0 });
   report('markerVerdict', 'no hits at all is a PASS (a machine that never registered an App)',
     verdictForMarkerHits([]), { ok: true, keyMaterialPaths: [], benignCount: 0 });
+  // ⭐ THE REGRESSION AT THE VERDICT LEVEL, not just the classifier level. This is the shape the sweep
+  //    reported as "plaintext PEM: NONE" for four sessions: a key in a project.json, JSON-encoded.
+  //    Asserting it here as well as on classifyMarkerHit is deliberate — the earlier defect was a
+  //    correct classifier with no caller, so proving the CLASSIFIER works has already once been
+  //    insufficient to prove the AUDIT works.
+  report('markerVerdict', 'THE REGRESSION: a JSON-encoded key in a project.json is a FAIL',
+    verdictForMarkerHits([{ path: 'C:\\repo\\.claude\\project.json', after: BS + 'n' + B64_FULL }]),
+    { ok: false, keyMaterialPaths: ['C:\\repo\\.claude\\project.json'], benignCount: 0 });
+  report('markerVerdict', 'the transcript fragment that lives in multiterminal.db stays a PASS, so the '
+    + 'audit does not fail on the session that runs it',
+    verdictForMarkerHits([{ path: 'multiterminal.db', after: BS + 'n' + B64_FRAGMENT }]),
+    { ok: true, keyMaterialPaths: [], benignCount: 1 });
   report('markerVerdict', 'the same file twice is reported once',
     verdictForMarkerHits([
-      { path: 'dup.json', after: '\n' + B64 },
-      { path: 'dup.json', after: '\n' + B64 },
+      { path: 'dup.json', after: '\n' + B64_FULL },
+      { path: 'dup.json', after: '\n' + B64_FULL },
     ]),
     { ok: false, keyMaterialPaths: ['dup.json'], benignCount: 0 });
 
@@ -289,14 +432,22 @@ function filesContaining(needle, roots) {
 // the bytes that FOLLOW it, so classifyMarkerHit() can tell a real key body from prose about keys.
 //
 // Why this is not filesContaining(): that returns filenames, and a filename cannot be classified.
-// The marker's meaning is entirely in what comes next. Bounded to 64 trailing bytes and matched with
-// -U (multiline) because a real PEM body begins on the NEXT line, so a line-scoped match would
-// always see an empty tail and classify every genuine key as benign — failing open, silently.
+// The marker's meaning is entirely in what comes next. Matched with -U (multiline) because a real PEM
+// body begins on the NEXT line, so a line-scoped match would always see an empty tail and classify
+// every genuine key as benign — failing open, silently.
 //
 // --json rather than -o alone: with -U the matched text contains newlines, so line-splitting rg's
 // plain output cannot tell one match from the next.
+//
+// ⚠️ THE WINDOW SIZE IS LOAD-BEARING — DO NOT SHRINK IT BACK. It was 64 bytes, which is smaller than
+// any real key body, so classifyMarkerHit() could only ever observe "40+ base64 chars follow" and had
+// no way to distinguish a genuine key from a 67-char fragment of one. Both of its current triggers
+// (a closing END marker, or a run >= KEY_MATERIAL_MIN_RUN) are unobservable inside 64 bytes. 2400 is
+// sized to contain a full RSA-2048 PKCS#1 body (~1600 base64 chars plus line breaks) AND its END
+// marker, so a complete key is always classifiable from one match. Cost is bounded: a few hundred KB
+// of rg output across the whole sweep, against maxBuffer 1<<28.
 const PEM_MARKER_TAIL = 'PRIVATE KEY-----';
-const PEM_MARKER_RE = String.raw`-----BEGIN [A-Z ]{0,24}PRIVATE KEY-----[\s\S]{0,64}`;
+const PEM_MARKER_RE = String.raw`-----BEGIN [A-Z ]{0,24}PRIVATE KEY-----[\s\S]{0,2400}`;
 
 function markerHits(roots) {
   const existing = roots.filter(r => fs.existsSync(r));
@@ -319,11 +470,18 @@ function markerHits(roots) {
     if (ev.type !== 'match') continue;
     const p = ev.data?.path?.text ?? '(unknown path)';
     for (const sm of ev.data?.submatches ?? []) {
-      const text = sm?.match?.text;
-      if (typeof text !== 'string') continue;
-      const i = text.indexOf(PEM_MARKER_TAIL);
-      if (i < 0) continue;
-      hits.push({ path: p, after: text.slice(i + PEM_MARKER_TAIL.length) });
+      // ⚠️ rg emits `bytes` (base64) instead of `text` when the match is not valid UTF-8 — which is
+      // exactly what a key inside a SQLite page or a binary blob looks like. The old code dropped
+      // those submatches silently, so a hit could vanish UNEXAMINED from a census whose only job is
+      // examining them. Decode and classify instead; latin1 is right because every character the
+      // classifier cares about (base64, CR, LF, the END marker) is single-byte ASCII.
+      let text = sm?.match?.text;
+      if (typeof text !== 'string') {
+        const b64 = sm?.match?.bytes;
+        if (typeof b64 !== 'string') continue;
+        text = Buffer.from(b64, 'base64').toString('latin1');
+      }
+      for (const after of markerTailsIn(text)) hits.push({ path: p, after });
     }
   }
   return hits;
