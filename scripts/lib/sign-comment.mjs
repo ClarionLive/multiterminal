@@ -75,21 +75,33 @@ export function signBody(body, agentName) {
 /**
  * Which subcommand this argv invokes, or null.
  *
- * gh always takes its subcommand path before any flags, so the first two tokens that are not flags
- * ARE the subcommand. Values of flags can look like plain words, but they can never appear before
- * the subcommand, so reading from the left is safe.
+ * Scans for the first ADJACENT PAIR of non-flag tokens that names an authoring subcommand.
+ *
+ * The obvious implementation — skip flags, take the first two remaining tokens — is wrong, and was
+ * wrong here for seven sessions while reading as though it were obviously right. It rested on the
+ * claim that a flag VALUE can never appear before the subcommand. gh is cobra-based and accepts its
+ * repo flag ahead of the subcommand path, so `gh --repo owner/name issue comment 31 --body x` yields
+ * the words ['owner/name', 'issue'], matches nothing, and the body ships UNSIGNED with no error.
+ * Measured live on a real issue, not theorised: identity survived (the bot still authored it) while
+ * attribution silently did not, which is the half this file exists to provide.
+ *
+ * Scanning left to right keeps a canonical invocation matching at index 0, so the common case is
+ * unchanged. A false positive needs two SEPARATELY PASSED adjacent tokens spelling a pair in the
+ * table; a single --body value is one token however many words it contains, so it cannot produce
+ * one. That is why this needs no knowledge of gh's flag table — and deliberately takes none, for
+ * the same reason the attached short form `-bvalue` is left unparsed below: guessing at another
+ * tool's grammar mangles commands, while declining to guess merely fails to sign one.
  */
 export function findAuthoringSubcommand(argv) {
-  const words = [];
-  for (const tok of argv) {
-    if (String(tok).startsWith('-')) continue;
-    words.push(tok);
-    if (words.length === 2) break;
-  }
-  if (words.length < 2) return null;
+  for (let i = 0; i + 1 < argv.length; i++) {
+    const first = String(argv[i]);
+    const second = String(argv[i + 1]);
+    if (first.startsWith('-') || second.startsWith('-')) continue;
 
-  const hit = AUTHORING_SUBCOMMANDS.find((s) => s[0] === words[0] && s[1] === words[1]);
-  return hit ? [...hit] : null;
+    const hit = AUTHORING_SUBCOMMANDS.find((s) => s[0] === first && s[1] === second);
+    if (hit) return [...hit];
+  }
+  return null;
 }
 
 /**

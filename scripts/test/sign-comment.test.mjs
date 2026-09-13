@@ -316,3 +316,80 @@ test('signing never costs a working gh: the exit code still comes from the child
   assert.equal(r.code, 0, 'the stand-in ran, so the shim did not bail out before spawning');
   assert.deepEqual(r.args, ['issue', 'comment', '29', '--body']);
 });
+
+// ---------------------------------------------------------------------------
+// WHERE THE REPO FLAG SITS — the shape that shipped unsigned for seven sessions
+// ---------------------------------------------------------------------------
+//
+// MEASURED LIVE 2026-09-13 on ClarionLive/multiterminal#31, before the fix, by posting three real
+// comments and reading them back through the API:
+//
+//   gh issue comment 31 --repo o/r --body ...   ->  posted WITH "— Alice"
+//   gh --repo o/r issue comment 31 --body ...   ->  posted WITHOUT it
+//   gh -R     o/r issue comment 31 --body ...   ->  posted WITHOUT it
+//
+// All three authored correctly as clarionlive-agent[bot]. IDENTITY was never the casualty;
+// ATTRIBUTION was — silently, with a zero exit code. One shared bot identity with the per-agent
+// signature missing is the exact state item 7 exists to prevent, so "it still posted fine" is the
+// most dangerous possible reading of that result.
+//
+// Root cause was findAuthoringSubcommand taking the first two NON-FLAG tokens as the subcommand,
+// on the documented premise that a flag value can never precede the subcommand. gh is cobra-based
+// and accepts --repo/-R ahead of the subcommand path, so the tokens collected were
+// ['owner/name', 'issue'] — a pair that matches nothing, hence "not-an-authoring-subcommand".
+//
+// ⚠️ WHY THESE ARE transformArgs FACTS AND NOT CHILD-ARGV ONES, STATED SO NOBODY "UPGRADES" THEM.
+// The integration harness above points MULTITERMINAL_REAL_GH at node itself. node parses its own
+// options first and rejects a leading --repo or -R outright:
+//
+//     C:\Program Files\nodejs\node.exe: bad option: --repo     (exit 9, verified 2026-09-13)
+//
+// so the stand-in hook never runs and these shapes CANNOT be expressed against that harness. That is
+// a limitation of the observation point, not a reason to believe the shapes are covered elsewhere.
+// The end-to-end proof for them is the live GitHub run recorded on checklist item 19 — these facts
+// are the regression guard that keeps it from silently rotting, nothing more. If you later give the
+// suite a stand-in that is not node, move these up rather than leaving two half-proofs.
+
+for (const [label, argv] of [
+  ['--repo before the subcommand', ['--repo', 'o/r', 'issue', 'comment', '31', '--body', 'hi']],
+  ['-R before the subcommand', ['-R', 'o/r', 'issue', 'comment', '31', '--body', 'hi']],
+  ['--repo=o/r attached, before the subcommand', ['--repo=o/r', 'issue', 'comment', '31', '--body', 'hi']],
+  ['the canonical ordering still works', ['issue', 'comment', '31', '--repo', 'o/r', '--body', 'hi']],
+]) {
+  test(`signs an issue comment when ${label}`, () => {
+    const r = transformArgs(argv, 'Alice');
+    assert.equal(r.signed, true, `${label}: must be recognised as an authoring command`);
+    assert.equal(r.args[r.args.indexOf('--body') + 1], 'hi\n\n— Alice\n');
+  });
+}
+
+// The defect lives in the SHARED matcher, so every entry in AUTHORING_SUBCOMMANDS inherited it.
+// Only issue comment and issue create were measured live; these cover the rest by construction so
+// the untested ones are not left resting on the assumption that they behave the same.
+for (const [label, argv] of [
+  ['pr comment', ['-R', 'o/r', 'pr', 'comment', '7', '--body', 'hi']],
+  ['pr create', ['--repo', 'o/r', 'pr', 'create', '--title', 't', '--body', 'hi']],
+  ['pr review', ['-R', 'o/r', 'pr', 'review', '7', '--body', 'hi']],
+  ['issue create', ['--repo', 'o/r', 'issue', 'create', '--title', 't', '--body', 'hi']],
+]) {
+  test(`${label} is signed too when the repo flag comes first`, () => {
+    const r = transformArgs(argv, 'Alice');
+    assert.equal(r.signed, true, `${label}: the matcher is shared, so this shape must work too`);
+    assert.equal(r.args[r.args.indexOf('--body') + 1], 'hi\n\n— Alice\n');
+  });
+}
+
+// Scanning for a matching ADJACENT PAIR anywhere in argv is a wider net than reading the first two
+// words, so the widening has to be shown not to catch things it should not. A --body value is ONE
+// token however many words it holds, which is why no body text can forge a subcommand; the risk is
+// only from separately-passed adjacent tokens, and that is what these pin.
+for (const [label, argv] of [
+  ['gh api stays out, deliberately', ['api', 'repos/o/r/issues/31/comments']],
+  ['flag values that spell a subcommand', ['issue', 'list', '--label', 'issue', '--label', 'comment']],
+  ['a body that merely contains the words', ['issue', 'list', '--search', 'issue comment']],
+  ['a read-only subcommand', ['issue', 'view', '31', '--repo', 'o/r']],
+]) {
+  test(`does NOT sign: ${label}`, () => {
+    assert.equal(transformArgs(argv, 'Alice').signed, false);
+  });
+}
