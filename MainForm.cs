@@ -2088,15 +2088,28 @@ namespace MultiTerminal
         /// Delivers a spawned helper's initial prompt as ONE intact prompt (task 77d1182f).
         ///
         /// <para>WHEN — not at spawn time. <see cref="OnClaudeCodeDetected"/> types
-        /// <c>initializing...</c> as the session's first prompt; that fires the SessionStart hook
-        /// and <c>/session-start</c>, which ends on a BLOCKING <c>AskUserQuestion</c> menu. Text
-        /// typed before that menu is up is lost or interleaved; text typed into it routes as a
-        /// direct instruction. So the trigger is the helper's FIRST <c>ask_user_question</c>
-        /// notification — the ask-user-relay hook POSTs it to /api/notifications and the broker
-        /// raises <see cref="MCPServer.Services.MessageBroker.NotificationReceived"/> with
+        /// <c>initializing...</c> as the session's first prompt; that fires the SessionStart hook.
+        /// For a terminal the human opens, the hook then orders <c>/session-start</c>, which ends on
+        /// a BLOCKING <c>AskUserQuestion</c> menu. Text typed before that menu is up is lost or
+        /// interleaved; text typed into it routes as a direct instruction. So the trigger is the
+        /// helper's FIRST <c>ask_user_question</c> notification — the ask-user-relay hook POSTs it
+        /// to /api/notifications and the broker raises
+        /// <see cref="MCPServer.Services.MessageBroker.NotificationReceived"/> with
         /// <c>raw_type</c>/<c>agent_name</c>. A fixed delay would be a guess at a 10–30s variable,
         /// and session 9 of b42b1883 watched exactly that guess fail: the helper sat on its menu
         /// and ignored three prompts.</para>
+        ///
+        /// <para>⚠️ MEASURED 2026-09-14 — for a SPAWNED helper that question never arrives, so this
+        /// trigger never fires and delivery ALWAYS falls through to the 120s timer below. The
+        /// plugin's SessionStart hook short-circuits on <c>MULTITERMINAL_SPAWNER</c> ("Skip
+        /// kanban/plan context for spawned agents") and hands the helper a spawned-agent briefing
+        /// instead of the auto-run instruction — so there is no <c>/session-start</c>, no menu, and
+        /// no <c>ask_user_question</c>. Observed end to end: spawn 09:05:18 → delivery 09:07:18,
+        /// trigger "fallback timer — helper live, no question". The prompt still arrives intact and
+        /// the liveness guard still holds, so this is a LATENCY defect, not a correctness one; the
+        /// fix (a trigger that fires when the broker first sees the helper's channel port) is a
+        /// follow-up ticket rather than a change here. Nothing about this was visible before this
+        /// ticket: the flag-less spawn path loaded no plugin, so the branch never ran.</para>
         ///
         /// <para>HOW — <c>TypeInput</c>, never <c>InjectInputAsync</c>. The latter splits anything
         /// over 500 bytes into <c>[n/N]</c> chunks (TerminalControl.MaxChunkSize) and was observed
@@ -2105,13 +2118,15 @@ namespace MultiTerminal
         /// are collapsed to spaces — the prompt arrives as one line, which is the "one prompt"
         /// the contract promises.</para>
         ///
-        /// <para>FALLBACK — if no question arrives within the window, the prompt is typed ONLY if
-        /// the helper is demonstrably alive: its broker row carries a channel port, meaning the real
-        /// <c>register_terminal</c> from /session-start landed and it merely skipped its menu.
+        /// <para>FALLBACK — the NORMAL path for a spawned helper (see above), not the exception.
+        /// The prompt is typed ONLY if the helper is demonstrably alive: its broker row carries a
+        /// channel port, meaning the plugin loaded and its real registration landed.
         /// Otherwise the helper never booted — no claude, no plugin, no channel — and typing into
         /// that pane would be the "job typed blindly into whatever exists" the pipeline's adversary
-        /// gate flagged (Run 1). In that case nothing is typed; the SPAWNER gets a notification
-        /// saying the job was NOT delivered, so the failure is loud to the one who cares.
+        /// gate flagged (Run 1). In that case nothing is typed; the SPAWNER gets a <c>spawn_failed</c>
+        /// INBOX message (get_inbox / the Inbox panel — not a notification_events row, which the
+        /// attention rail drops and no agent-facing reader consults), so the failure is loud to the
+        /// one who cares.
         /// Exactly-once across every path via Interlocked.</para>
         /// </summary>
         private void QueueInitialPromptDelivery(string agentName, string docId, string initialPrompt, string spawnerName, string workingDir)

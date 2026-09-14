@@ -124,3 +124,31 @@ test("spawn_helper's description states the initialPrompt delivery contract", ()
   assert.ok(/line breaks become spaces|line breaks are collapsed/i.test(d), "must warn that line breaks are collapsed");
   assert.ok(d.includes("MULTITERMINAL_SPAWNER"), "must say what spawnerName becomes in the child");
 });
+
+test("no spawn_helper surface claims the helper runs /session-start", () => {
+  // Live test 2026-09-14. Every agent-facing surface used to promise the helper "runs
+  // /session-start and registers itself". It does not, and cannot: the plugin's SessionStart
+  // hook short-circuits on MULTITERMINAL_SPAWNER ("Skip kanban/plan context for spawned
+  // agents") and hands the helper a spawned-agent briefing INSTEAD of the auto-run instruction.
+  // A caller who believed it waited for a startup menu that never appears.
+  //
+  // The claim survived four pipeline rounds because it was UNFALSIFIABLE until this ticket
+  // landed: the old spawn path passed no --plugin-dir, so no hook ran at all and that branch
+  // had never once executed for a spawned pane. Pin it now that it can be observed.
+  for (const [name, text] of [["description", defBlock()], ["result text", handlerBlock()]]) {
+    assert.ok(
+      !/runs \/session-start|\/session-start menu|to run \/session-start/.test(text),
+      `${name} must not claim a spawned helper runs /session-start or shows its menu`,
+    );
+  }
+});
+
+test("spawn_helper warns that the job is not delivered immediately", () => {
+  // Same live test: delivery falls through to the 120s fallback timer for every spawned helper,
+  // because the question-based trigger was built around the /session-start menu above. Correct
+  // but slow — so the surfaces must set the expectation, rather than let a caller read silence
+  // in the first two minutes as a failed spawn and stack a second helper on top of the first.
+  for (const [name, text] of [["description", defBlock()], ["result text", handlerBlock()]]) {
+    assert.ok(/120s|120 s|two minutes/.test(text), `${name} must state the delivery delay`);
+  }
+});

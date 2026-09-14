@@ -120,16 +120,25 @@ namespace MultiTerminal.API.Controllers
 
             // What "success" means here (pipeline Run 1, cross-model adversary): the PANE exists and
             // MT has pre-registered the identity. The helper itself has NOT booted — claude has not
-            // started, /session-start has not run, and there is no channel port yet. Saying so is
-            // the contract; a caller that needs "ready" watches list_terminals for a channel port.
-            // terminalName is the identity ACTUALLY registered — a held name comes back suffixed.
+            // started, the plugin's SessionStart hook has not run, and there is no channel port yet.
+            // Saying so is the contract; a caller that needs "ready" watches list_terminals for a
+            // channel port. terminalName is the identity ACTUALLY registered — a held name comes
+            // back suffixed.
+            //
+            // Do NOT reinstate "runs /session-start" here (live test 2026-09-14). A SPAWNED helper
+            // never runs that skill: the plugin's SessionStart hook short-circuits on
+            // MULTITERMINAL_SPAWNER (session-status-hook.js, "Skip kanban/plan context for spawned
+            // agents") and returns a spawned-agent briefing INSTEAD of the auto-run instruction.
+            // What actually registers the helper — and opens its channel — is that hook, not the
+            // skill. The claim was invisible before this ticket because the flag-less spawn path
+            // loaded no plugin at all, so the branch had never once executed for a spawned pane.
             return Ok(new
             {
                 terminalName,
                 requestedName = request.AgentName,
                 docId,
                 ready = false,
-                readiness = "pane created; the helper boots, runs /session-start and registers itself in ~10-30s — it is messageable once list_terminals shows it with a channel port",
+                readiness = "pane created; the helper boots and the plugin's SessionStart hook registers it in ~10-30s — it is messageable once list_terminals shows it with a channel port",
             });
         }
 
@@ -150,9 +159,14 @@ namespace MultiTerminal.API.Controllers
         public string SpawnerName { get; set; }
 
         /// <summary>
-        /// The helper's job, delivered to it as ONE prompt once it has booted and its
-        /// /session-start menu is up. Optional. Line breaks are collapsed to spaces on delivery
-        /// (the typing path would submit on each one), so write it as prose, not a script.
+        /// The helper's job, delivered to it as ONE prompt once it has booted and is demonstrably
+        /// alive (its broker row carries a channel port). Optional. Line breaks are collapsed to
+        /// spaces on delivery (the typing path would submit on each one), so write it as prose,
+        /// not a script.
+        /// <para>Measured 2026-09-14: delivery currently waits out the 120s fallback timer for
+        /// every spawned helper, because the question-based trigger was designed around the
+        /// /session-start menu that a spawned agent never shows. Correct, but slow — follow-up
+        /// ticket, not a defect in the delivery itself.</para>
         /// </summary>
         public string InitialPrompt { get; set; }
     }
