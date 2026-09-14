@@ -1,7 +1,6 @@
 using System;
 using System.IO;
 using System.Linq;
-using System.Reflection;
 
 namespace MultiTerminal.Services
 {
@@ -13,17 +12,26 @@ namespace MultiTerminal.Services
     /// </summary>
     public static class LaunchCommandBuilder
     {
-        // Cache the MT source path after first discovery so we don't walk the filesystem every time.
-        private static string _cachedMtSourcePath = null;
-
         /// <summary>
         /// Builds the Claude Code launch command for the given project.
         /// </summary>
         /// <param name="project">Project to launch Claude Code for. May be null (launches in user profile dir).</param>
+        /// <param name="workingDirectory">
+        /// The directory the terminal will actually run in, when the caller knows it and it is
+        /// not derivable from <paramref name="project"/> — an API-driven spawn, for instance,
+        /// which receives its cwd in the request and may have no project at all. Null means
+        /// "resolve from the project as before". This is not a convenience: the flags are
+        /// cwd-dependent. <see cref="BuildFlags"/> reads the cwd's
+        /// <c>.claude/settings.local.json</c> to merge the project's hooks/deny rules before it
+        /// decides whether dropping the LOCAL settings source is safe, so computing them against
+        /// the project-resolved default instead of the real cwd would launch under
+        /// <c>--dangerously-skip-permissions</c> with that project's local hooks/deny silently
+        /// stripped (task 77d1182f).
+        /// </param>
         /// <returns>LaunchCommand with WorkingDirectory and AutoRunCommand ready for ConPtyTerminal.Start().</returns>
-        public static LaunchCommand BuildClaudeCommand(Models.Project project)
+        public static LaunchCommand BuildClaudeCommand(Models.Project project, string workingDirectory = null)
         {
-            string workingDir = ResolveWorkingDirectory(project);
+            string workingDir = workingDirectory ?? ResolveWorkingDirectory(project);
 
             // Build the claude CLI flags (just --mcp-config now — plugin handles hooks, CLAUDE.md, agents, skills)
             string flags = BuildFlags(workingDir);
@@ -57,9 +65,16 @@ namespace MultiTerminal.Services
         /// surfacing an error to the user.
         /// </summary>
         /// <param name="project">Project to launch Codex for. May be null (launches in user profile dir).</param>
-        public static LaunchCommand BuildCodexCommand(Models.Project project)
+        /// <param name="workingDirectory">
+        /// Explicit cwd, or null to resolve from <paramref name="project"/>. Same contract as
+        /// <see cref="BuildClaudeCommand"/>: the scaffolding side effects below (AGENTS.md,
+        /// config.toml) are keyed on the directory the terminal actually runs in, and
+        /// <see cref="IsDistinctProjectRoot"/> still guards them when that directory is not a
+        /// project root.
+        /// </param>
+        public static LaunchCommand BuildCodexCommand(Models.Project project, string workingDirectory = null)
         {
-            string workingDir = ResolveWorkingDirectory(project);
+            string workingDir = workingDirectory ?? ResolveWorkingDirectory(project);
             bool workingDirIsProject = IsDistinctProjectRoot(project, workingDir);
 
             // --- Preflight: clean stale Codex broker state ------------------------
@@ -251,15 +266,17 @@ namespace MultiTerminal.Services
         /// card split button) should use this instead of calling the per-kind
         /// builder directly.
         /// </summary>
-        public static LaunchCommand BuildCommand(Models.TerminalKind kind, Models.Project project)
+        public static LaunchCommand BuildCommand(Models.TerminalKind kind, Models.Project project, string workingDirectory = null)
         {
+            // workingDirectory: explicit cwd for callers that know it (API-driven spawn); null
+            // resolves from the project. See BuildClaudeCommand for why this is load-bearing.
             switch (kind)
             {
                 case Models.TerminalKind.Codex:
-                    return BuildCodexCommand(project);
+                    return BuildCodexCommand(project, workingDirectory);
                 case Models.TerminalKind.ClaudeCode:
                 default:
-                    return BuildClaudeCommand(project);
+                    return BuildClaudeCommand(project, workingDirectory);
             }
         }
 
@@ -370,7 +387,7 @@ namespace MultiTerminal.Services
         /// dir. Lives in a per-user-private dir (LocalApplicationData), not the world-shared
         /// temp root, and is swapped in atomically (write temp + rename) so a concurrently
         /// spawning terminal's <c>claude --settings</c> read never sees a truncated file. Shared
-        /// by <c>TerminalSpawner.SpawnTerminal</c> (spawned teammates), <c>BuildFlags</c> (docked
+        /// by <c>BuildFlags</c> (docked and spawned
         /// terminals), and <c>OracleService</c>.</para>
         /// </summary>
         public static (string Flag, bool CanDropLocal) BuildForcedStatuslineFlag(string workingDirectory = null)
@@ -562,50 +579,19 @@ namespace MultiTerminal.Services
         /// <c>MainForm.OnProjectLaunchRequested</c> (~line 5135). Keeps the builder
         /// and the UI in sync about what counts as a launchable project root.
         /// </summary>
-        private static bool IsUsableProjectPath(string path)
+        /// <remarks>
+        /// Internal (not private) since task 77d1182f: <c>MainForm.OnSpawnRequested</c> applies the
+        /// same rule to an API-supplied cwd before anything is created, because passing an explicit
+        /// <c>workingDirectory</c> to the builders bypasses <c>ResolveWorkingDirectory</c>'s own check.
+        /// One rule, one helper — a spawn must not accept a directory a project launch would refuse.
+        /// </remarks>
+        internal static bool IsUsableProjectPath(string path)
         {
             if (string.IsNullOrWhiteSpace(path)) return false;
             if (!Path.IsPathRooted(path)) return false;
             if (path.StartsWith("\\\\", StringComparison.Ordinal)) return false; // UNC share
             if (!Directory.Exists(path)) return false;
             return true;
-        }
-
-        /// <summary>
-        /// Finds the MT source directory by walking up from the assembly location
-        /// until a directory containing .claude/CLAUDE.md is found.
-        /// Used by TerminalSpawner to locate multiterminal-rules.md.
-        /// Caches the result after first successful discovery.
-        /// </summary>
-        public static string GetMtSourcePath()
-        {
-            if (_cachedMtSourcePath != null)
-                return _cachedMtSourcePath;
-
-            try
-            {
-                string assemblyPath = Assembly.GetExecutingAssembly().Location;
-                string dir = Path.GetDirectoryName(assemblyPath);
-
-                // Walk up the directory tree (max 6 levels to avoid infinite loops)
-                for (int i = 0; i < 6 && !string.IsNullOrEmpty(dir); i++)
-                {
-                    string marker = Path.Combine(dir, ".claude", "CLAUDE.md");
-                    if (File.Exists(marker))
-                    {
-                        _cachedMtSourcePath = dir;
-                        return dir;
-                    }
-
-                    dir = Path.GetDirectoryName(dir);
-                }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[LaunchCommandBuilder] Failed to locate MT source path: {ex.Message}");
-            }
-
-            return null;
         }
 
         /// <summary>

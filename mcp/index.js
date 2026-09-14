@@ -345,7 +345,17 @@ function formatTerminals(terminals) {
       health = `  ℹ️ ${refusals} port report(s) claiming this name were refused, but this terminal has a live channel port — its own delivery is fine.`;
     }
 
-    output += `• ${t.name} (${t.id.substring(0, 8)}) - Last active ${timeStr}\n`;
+    // Channel state, rendered — not just used for the health heuristic above (task 77d1182f,
+    // pipeline Run 2). spawn_helper tells a caller its helper is messageable "once list_terminals
+    // shows it with a channel port"; that instruction is only followable if the port is visible
+    // here. No port means the row is MT's own pre-registration (the helper has not run
+    // /session-start yet) or the channel server never registered — either way, push delivery is
+    // not possible and only polling reaches it.
+    const hasPort = t.channelPort !== null && t.channelPort !== undefined;
+    const channel = hasPort
+      ? `channel: port ${t.channelPort} (messageable)`
+      : "channel: none (not yet registered by its plugin — booting, or push-dead; polling only)";
+    output += `• ${t.name} (${t.id.substring(0, 8)}) - Last active ${timeStr} — ${channel}\n`;
     if (health) output += `${health}\n`;
   });
 
@@ -1016,6 +1026,36 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ["agentName"],
+        },
+      },
+      {
+        name: "spawn_helper",
+        description: "Spawn a HELPER: a full MultiTerminal terminal in its own docked pane — own identity, plugin + messaging channel, runs /session-start, registers itself, appears in list_terminals — with its job handed to it as one prompt. POSTs /api/spawn/terminal (the endpoint existed all along; no tool pointed at it, so agents could only find it by reading C# source).\n\nA SUBAGENT IS A WORKER; A SPAWNED HELPER IS A PEER. Default to the Agent tool (a subagent): cheaper, faster, returns a structured result directly, tool surface scoped by agent type. Spawn a helper ONLY when at least one of these holds: (1) the work outlives your turn; (2) the human needs to watch or steer it; (3) it needs MT identity — kanban claims, board presence, checklist items; (4) it needs its own process environment, worktree or machine state — a subagent inherits YOUR environment, so 'report what is in a DIFFERENT terminal's environment' cannot be done by one at all; (5) you need something that can DISAGREE with you. Measured (b42b1883 session 9): a helper used as a mere worker was strictly WORSE than a subagent — slow to boot, parked on its startup menu, a full session to run eight read-only commands. Do not replace subagents wholesale.\n\ninitialPrompt is delivered as ONE prompt once the helper's /session-start menu is up (never chunked; line breaks become spaces — write prose, not a script; max 16,000 chars). spawnerName MUST be your own name: the helper sees it as MULTITERMINAL_SPAWNER.\n\nWHAT THE RESULT MEANS: success = the PANE exists and its identity is registered — NOT that the helper has booted. It needs ~10–30s to run /session-start and register itself; it is messageable once list_terminals shows it WITH a channel port. If it never comes alive (no channel port within 120s), its job is NOT typed blindly — a spawn_failed message lands in YOUR inbox (get_inbox), and in the Owner's if your spawnerName is not a live terminal. A name that is already held on this MultiTerminal (the broker keeps every launched name for the session) comes back SUFFIXED (\"Name-2\"): always use the terminalName in the result, not the name you asked for.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            agentName: {
+              type: "string",
+              description: "Name for the NEW helper terminal. If it is already held on this MultiTerminal (the broker keeps every launched name for the session), the helper is registered under a suffixed name (\"Name-2\") — read terminalName from the result.",
+            },
+            spawnerName: {
+              type: "string",
+              description: "YOUR OWN terminal name (MULTITERMINAL_NAME). Becomes the helper's MULTITERMINAL_SPAWNER. Required — omitting it would attribute the spawn to the phone app.",
+            },
+            workingDir: {
+              type: "string",
+              description: "Absolute directory the helper starts in. Optional; ignored when projectId is given.",
+            },
+            projectId: {
+              type: "string",
+              description: "Registered project id; the helper starts in that project's source path. Optional.",
+            },
+            initialPrompt: {
+              type: "string",
+              description: "The helper's job, as prose. Delivered as ONE prompt after its /session-start menu appears; line breaks are collapsed to spaces. Optional — without it the helper waits on its menu.",
+            },
+          },
+          required: ["agentName", "spawnerName"],
         },
       },
       {
@@ -3735,6 +3775,49 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return {
           content: [{ type: "text", text: text.trim() }],
         };
+      }
+
+      case "spawn_helper": {
+        // A helper is a PEER terminal, not a worker — the decision rule lives in the tool
+        // description, where the agent reads it at the moment of choosing (task 77d1182f).
+        // Refuse a missing spawner here rather than let the API default it: "ClaudeRemote" is
+        // the phone app's fallback, and a helper that believes the phone spawned it has no way
+        // to find the agent that actually needs its answer.
+        if (!args.spawnerName || !String(args.spawnerName).trim()) {
+          return {
+            content: [{
+              type: "text",
+              text: "❌ spawnerName is required — pass YOUR OWN terminal name (MULTITERMINAL_NAME). The helper reads it as MULTITERMINAL_SPAWNER; omitted, the spawn would be attributed to the phone app.",
+            }],
+            isError: true,
+          };
+        }
+
+        // Errors propagate: apiCall attaches the controller's own Problem detail (duplicate name,
+        // unknown project, bootstrap failure) to the thrown message, and the dispatcher renders it.
+        const spawned = await apiCall("/api/spawn/terminal", "POST", {
+          agentName: args.agentName,
+          workingDir: args.workingDir || null,
+          projectId: args.projectId || null,
+          initialPrompt: args.initialPrompt || null,
+          spawnerName: String(args.spawnerName).trim(),
+        });
+
+        // What the API's success means: the PANE exists and its identity is registered. The helper
+        // has not booted. Say so — a plausible "spawned!" for a terminal that never comes alive is
+        // the failure the pipeline's adversary gate flagged. The name in the result is the one the
+        // broker actually registered; a held name comes back suffixed.
+        const spawner = String(args.spawnerName).trim();
+        const renamed = spawned.requestedName && spawned.terminalName !== spawned.requestedName;
+        let text = `🪟 Pane created for helper "${spawned.terminalName}" (docId ${spawned.docId}), spawner: ${spawner}. NOT booted yet.\n`;
+        if (renamed) {
+          text += `⚠️ "${spawned.requestedName}" was already held on this MultiTerminal, so the helper is registered as "${spawned.terminalName}" — use THAT name from here on.\n`;
+        }
+        text += args.initialPrompt
+          ? `Its job (${String(args.initialPrompt).length} chars) is typed in as ONE prompt once its /session-start menu is up. If it never comes alive (no channel port within 120s) the job is NOT typed — a spawn_failed message lands in your inbox (get_inbox), and in the Owner's inbox if your spawnerName is not a live terminal.\n`
+          : `No initialPrompt given — it will wait on its /session-start menu until told what to do.\n`;
+        text += `${spawned.readiness || "It is messageable once list_terminals shows it with a channel port (~10-30s)"}; then send_message to "${spawned.terminalName}".`;
+        return { content: [{ type: "text", text }] };
       }
 
       case "get_my_pickable_tasks": {

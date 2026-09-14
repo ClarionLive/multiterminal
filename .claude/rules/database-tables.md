@@ -33,7 +33,7 @@ paths:
 | `team_member_profiles` | display_name, avatar_url, specialties, availability | Team profiles |
 | `owner_profile` | key, value | Owner identity (git config, GitHub token) |
 | `activity_feed` | activity_type, event_data, timestamp | Activity events |
-| `user_inbox` | user_id, task_id, message_type | Notifications |
+| `user_inbox` | user_id, task_id (nullable since 77d1182f — taskless rows such as `spawn_failed`; `MigrateUserInboxTaskIdNullable` rebuilds the pre-existing NOT NULL table), type | Notifications; read by `get_inbox` / the Inbox panel |
 | `notification_events` | id, source, event_type, title, body, timestamp | Push notification events |
 | `helper_sessions` | task_id, prompt, status | Helper session tracking |
 | `helper_messages` | task_id, helper_name, role, content | Helper conversation history |

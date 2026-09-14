@@ -306,7 +306,7 @@ namespace MultiTerminal.Services
             // ⚠️ SINGLE QUOTES, NOT DOUBLE — AND THIS IS A CORRECTNESS FIX, NOT A STYLE CHOICE.
             // This was `!node "{helperPath}"` and the double quotes did not survive the launch. Every
             // caller embeds this fragment inside a PowerShell `-Command "…"` argument
-            // (ConPtyTerminal.cs — the live path — plus both TerminalSpawner sites), and
+            // (ConPtyTerminal.cs — the live path; the two TerminalSpawner sites were deleted in 77d1182f), and
             // CommandLineToArgvW consumes the inner double quotes on the way to the child. MEASURED in
             // a running MT terminal: the source built `!node "H:/…/git-credential-multiterminal.mjs"`
             // and $env:GIT_CONFIG_VALUE_1 arrived as `!node H:/…/git-credential-multiterminal.mjs`,

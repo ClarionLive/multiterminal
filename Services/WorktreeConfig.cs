@@ -22,7 +22,7 @@ namespace MultiTerminal.Services
         public const string ModeEnvVar = "MULTITERMINAL_WORKTREE_MODE";
 
         /// <summary>
-        /// Name of the env var that <see cref="TerminalSpawner"/> and
+        /// Name of the env var that MainForm.OnSpawnRequested (docked spawns) and
         /// <see cref="AgentProcess"/> inject into spawned agents to
         /// communicate the worktree path. Empty when no worktree is in play.
         /// </summary>

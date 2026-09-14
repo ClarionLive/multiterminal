@@ -6,14 +6,14 @@ namespace MultiTerminal.Services
 {
     /// <summary>
     /// Process-wide registry of worktree paths that are currently being
-    /// pruned. Lets <see cref="TerminalSpawner"/> refuse to launch a new
+    /// pruned. Lets a launch path (originally <c>TerminalSpawner</c>, deleted in 77d1182f) refuse to launch a new
     /// terminal targeting a worktree whose <c>git worktree remove</c> is
     /// already in flight — closes the TOCTOU window between
     /// <see cref="WorktreeManager.PruneForTaskAsync"/> deciding to prune and
     /// actually unregistering the path from git.
     ///
     /// <para>Task db4b18c6 cycle 2: cross-model-adversary flagged that
-    /// <see cref="TerminalSpawner.IsValidWorktree"/> succeeds during the
+    /// <c>TerminalSpawner.IsValidWorktree</c> (since deleted, 77d1182f) succeeded during the
     /// short window after the broker has resolved <c>PruneForTaskAsync</c>
     /// but before git has finished removing the dir. A spawn racing through
     /// that window lands in a soon-to-be-deleted path. The coordinator

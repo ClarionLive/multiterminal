@@ -19,7 +19,7 @@ When working on a feature area, read these files in order:
 | **Task reports/Pipeline** | TaskReportsController.cs -> TaskDatabase.cs -> TasksPanelControl.cs |
 | **Stale task tracking** | StaleTaskService.cs -> TaskDatabase.GetStaleTasks() |
 | **REST API** | MultiTerminalRestServer.cs -> Controllers/ (21 controllers) |
-| **Terminal spawning** | TerminalSpawner.cs -> SpawnController.cs -> SpawnedTeammate.cs |
+| **Terminal spawning** | SpawnController.cs -> SpawnService.cs -> MainForm.OnSpawnRequested -> LaunchCommandBuilder.cs (agents: the `spawn_helper` MCP tool) |
 | **Terminal streaming** | TerminalStreamService.cs -> TerminalsController.cs (WebSocket, api/terminals/{id}/stream) |
 | **Browser tabs (HUD)** | BrowserTabsController.cs -> HudTabContainer/ |
 | **Companion processes** | CompanionProcessManager.cs -> CompanionController.cs -> CompanionProcess.cs |

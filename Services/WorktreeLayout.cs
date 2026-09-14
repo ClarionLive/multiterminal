@@ -22,7 +22,7 @@ namespace MultiTerminal.Services
     /// </list>
     ///
     /// <para>Consumers: <see cref="WorktreeJanitorService"/> Pass 3 and
-    /// <see cref="TerminalSpawner"/> stale-path guard. Centralised here so
+    /// the launch-path stale-worktree guard (TerminalSpawner until 77d1182f deleted it). Centralised here so
     /// that fixes (e.g. requiring a <c>.git</c> presence check at the derived
     /// repo root) propagate to both sites — task db4b18c6 cycle 2 found a
     /// name-only match risked deleting source dirs in a repo legitimately
@@ -93,7 +93,7 @@ namespace MultiTerminal.Services
         /// or a <c>.git</c> file (secondary worktree). Cheap filesystem check;
         /// no subprocess. Used as a sanity gate before any destructive
         /// enumeration in Pass 3 and as a fast-path validation in
-        /// <see cref="TerminalSpawner.IsValidWorktree"/>.
+        /// what was <c>TerminalSpawner.IsValidWorktree</c> until 77d1182f deleted that class.
         /// </summary>
         public static bool IsLikelyGitRepoRoot(string path)
         {

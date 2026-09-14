@@ -182,6 +182,7 @@ namespace MultiTerminal.Services
             RunMigration(nameof(MigrateAddIsQuickTaskToTasks), MigrateAddIsQuickTaskToTasks);
             RunMigration(nameof(MigrateAddSortOrderToTasks), MigrateAddSortOrderToTasks);
             RunMigration(nameof(MigrateAddUserInbox), MigrateAddUserInbox);
+            RunMigration(nameof(MigrateUserInboxTaskIdNullable), MigrateUserInboxTaskIdNullable);
             RunMigration(nameof(MigrateAddProjectIdsToProfiles), MigrateAddProjectIdsToProfiles);
             RunMigration(nameof(MigrateAddTaskAttachments), MigrateAddTaskAttachments);
             RunMigration(nameof(MigrateAddAgentFieldsToProfiles), MigrateAddAgentFieldsToProfiles);
@@ -4124,7 +4125,7 @@ namespace MultiTerminal.Services
                     CREATE TABLE user_inbox (
                         id TEXT PRIMARY KEY,
                         user_id TEXT NOT NULL,
-                        task_id TEXT NOT NULL,
+                        task_id TEXT,
                         task_title TEXT,
                         checklist_item_index INTEGER,
                         checklist_item_name TEXT,
@@ -4146,6 +4147,106 @@ namespace MultiTerminal.Services
                 ";
                 using var cmd = new SQLiteCommand(sql, _connection);
                 cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// Migration (task 77d1182f): make <c>user_inbox.task_id</c> nullable, so an inbox message
+        /// that is not about a task can exist.
+        /// <para>WHY. The original DDL declared <c>task_id TEXT NOT NULL</c> because every inbox
+        /// message used to be a task notification. Two callers now write taskless rows — the spawn
+        /// path's "your helper never came alive, its job was NOT delivered" message, and
+        /// <c>JanitorAlertService</c>'s nullable <c>relatedTaskId</c> — and both silently lost
+        /// their rows: <see cref="SaveInboxMessage"/> bound the C# null as SQL NULL, SQLite rejected
+        /// the INSERT, and <c>MessageBroker.CreateInboxNotification</c> swallowed the exception into
+        /// <c>Success=false</c> that nobody checked. Found by the pipeline's debugger and adversary
+        /// gates independently, on the third review round; 1001 green tests missed it because the
+        /// inbox stub in the test host returns success unconditionally.</para>
+        /// <para>HOW. SQLite cannot drop a NOT NULL constraint in place, so this is the documented
+        /// table-rebuild: create the new shape, copy every row, drop the old table, rename, recreate
+        /// the indexes — inside one transaction. The FOREIGN KEY is kept: a NULL never violates a
+        /// foreign key, so tasked rows keep their ON DELETE CASCADE and taskless rows are simply
+        /// unaffected by task deletion. Idempotent on the actual schema (PRAGMA table_info), not on
+        /// the migration ledger alone, so a database created by the pre-migration CREATE TABLE and
+        /// one already rebuilt both converge.</para>
+        /// </summary>
+        private void MigrateUserInboxTaskIdNullable()
+        {
+            bool taskIdIsNotNull = false;
+            using (var info = new SQLiteCommand("PRAGMA table_info(user_inbox)", _connection))
+            using (var reader = info.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    // table_info columns: cid, name, type, notnull, dflt_value, pk
+                    if (string.Equals(reader.GetString(1), "task_id", StringComparison.OrdinalIgnoreCase))
+                    {
+                        taskIdIsNotNull = reader.GetInt32(3) == 1;
+                        break;
+                    }
+                }
+            }
+
+            if (!taskIdIsNotNull)
+            {
+                return; // already nullable (fresh DB rebuilt earlier, or table absent)
+            }
+
+            const string sql = @"
+                BEGIN;
+                CREATE TABLE user_inbox_new (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    task_id TEXT,
+                    task_title TEXT,
+                    checklist_item_index INTEGER,
+                    checklist_item_name TEXT,
+                    type TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    created_by TEXT NOT NULL,
+                    read_at DATETIME,
+                    reply_text TEXT,
+                    replied_at DATETIME,
+                    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+                );
+                INSERT INTO user_inbox_new (id, user_id, task_id, task_title, checklist_item_index,
+                    checklist_item_name, type, summary, created_at, created_by, read_at, reply_text, replied_at)
+                SELECT id, user_id, task_id, task_title, checklist_item_index,
+                    checklist_item_name, type, summary, created_at, created_by, read_at, reply_text, replied_at
+                FROM user_inbox;
+                DROP TABLE user_inbox;
+                ALTER TABLE user_inbox_new RENAME TO user_inbox;
+                CREATE INDEX idx_inbox_user ON user_inbox(user_id);
+                CREATE INDEX idx_inbox_user_unread ON user_inbox(user_id, read_at);
+                CREATE INDEX idx_inbox_task ON user_inbox(task_id);
+                CREATE INDEX idx_inbox_created ON user_inbox(created_at DESC);
+                CREATE INDEX idx_inbox_type ON user_inbox(type);
+                COMMIT;
+            ";
+            try
+            {
+                using var cmd = new SQLiteCommand(sql, _connection);
+                cmd.ExecuteNonQuery();
+            }
+            catch
+            {
+                // The database file is shared with the running app and mcp-session-history; a
+                // SQLITE_BUSY past the busy timeout mid-batch would otherwise leave the explicit
+                // BEGIN open on this connection. Roll back (best-effort — the transaction may
+                // already have unwound), then rethrow: RunMigration records the ledger entry only
+                // after success, so the next launch retries.
+                try
+                {
+                    using var rollback = new SQLiteCommand("ROLLBACK;", _connection);
+                    rollback.ExecuteNonQuery();
+                }
+                catch
+                {
+                    // nothing to roll back
+                }
+
+                throw;
             }
         }
 
@@ -4302,7 +4403,10 @@ namespace MultiTerminal.Services
             using var command = new SQLiteCommand(sql, _connection);
             command.Parameters.AddWithValue("@id", message.Id);
             command.Parameters.AddWithValue("@userId", message.UserId);
-            command.Parameters.AddWithValue("@taskId", message.TaskId);
+            // Nullable since task 77d1182f (MigrateUserInboxTaskIdNullable): a notification about a
+            // spawned helper that never booted has no task. Binding a C# null without this guard
+            // used to bind SQL NULL into a NOT NULL column and the broker swallowed the failure.
+            command.Parameters.AddWithValue("@taskId", (object)message.TaskId ?? DBNull.Value);
             command.Parameters.AddWithValue("@taskTitle", (object)message.TaskTitle ?? DBNull.Value);
             command.Parameters.AddWithValue("@checklistItemIndex", (object)message.ChecklistItemIndex ?? DBNull.Value);
             command.Parameters.AddWithValue("@checklistItemName", (object)message.ChecklistItemName ?? DBNull.Value);
@@ -4473,7 +4577,11 @@ namespace MultiTerminal.Services
             {
                 Id = reader.GetString(0),
                 UserId = reader.GetString(1),
-                TaskId = reader.GetString(2),
+                // Nullable since MigrateUserInboxTaskIdNullable (task 77d1182f). GetString on a NULL
+                // throws InvalidCastException — which the real-DB test caught the moment the write
+                // side started succeeding: the column was nullable, the row was stored, and the read
+                // still assumed NOT NULL. Both halves of the path have to agree.
+                TaskId = reader.IsDBNull(2) ? null : reader.GetString(2),
                 TaskTitle = reader.IsDBNull(3) ? null : reader.GetString(3),
                 ChecklistItemIndex = reader.IsDBNull(4) ? null : reader.GetInt32(4),
                 ChecklistItemName = reader.IsDBNull(5) ? null : reader.GetString(5),

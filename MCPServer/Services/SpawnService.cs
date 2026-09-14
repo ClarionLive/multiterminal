@@ -14,9 +14,12 @@ namespace MultiTerminal.MCPServer.Services
         /// <summary>
         /// Callback to spawn a new ConPTY terminal.
         /// Parameters: (agentName, agentType, workingDir, initialPrompt, spawnerName)
-        /// Returns: (success, docId, errorMessage)
+        /// Returns: (success, docId, errorMessage, terminalName) — terminalName is the identity the
+        /// broker ACTUALLY registered (task 77d1182f): a requested name that was already held comes
+        /// back suffixed ("Name-2"), so callers must report and address the returned name, not the
+        /// one they asked for.
         /// </summary>
-        public Func<string, string, string, string, string, Task<(bool success, string docId, string error)>> OnSpawnRequested { get; set; }
+        public Func<string, string, string, string, string, Task<(bool success, string docId, string error, string terminalName)>> OnSpawnRequested { get; set; }
 
         /// <summary>
         /// Callback to spawn a headless AgentProcess.
@@ -28,7 +31,7 @@ namespace MultiTerminal.MCPServer.Services
         /// <summary>
         /// Request to spawn a new teammate terminal (ConPTY mode).
         /// </summary>
-        public async Task<(bool success, string docId, string error)> SpawnTeammateAsync(
+        public async Task<(bool success, string docId, string error, string terminalName)> SpawnTeammateAsync(
             string agentName,
             string agentType,
             string workingDir,
@@ -37,12 +40,12 @@ namespace MultiTerminal.MCPServer.Services
         {
             if (OnSpawnRequested == null)
             {
-                return (false, null, "Spawn callback not registered. MainForm not initialized.");
+                return (false, null, "Spawn callback not registered. MainForm not initialized.", null);
             }
 
             if (string.IsNullOrWhiteSpace(agentName))
             {
-                return (false, null, "Agent name is required");
+                return (false, null, "Agent name is required", null);
             }
 
             try
@@ -52,7 +55,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                return (false, null, $"Spawn failed: {ex.Message}");
+                return (false, null, $"Spawn failed: {ex.Message}", null);
             }
         }
 

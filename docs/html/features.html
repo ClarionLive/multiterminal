@@ -459,7 +459,7 @@
         <p>MultiTerminal supports Claude Code's native team agent system (requires <code>CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1</code>). Teams are created via <code>TeamCreate</code>, and agents are spawned as subagents that appear in the Agent Panel.</p>
 
         <h3>Spawned Agents (AgentProcess)</h3>
-        <p>The TerminalSpawner service can launch Claude Code processes programmatically. Each spawned agent:</p>
+        <p>Agents spawn helpers with the <code>spawn_helper</code> MCP tool (<code>POST /api/spawn/terminal</code>), which builds the launch command through the same <code>LaunchCommandBuilder</code> as every docked terminal (task 77d1182f; the former <code>TerminalSpawner</code> class was never wired and has been deleted). Each spawned helper:</p>
         <ul>
           <li>Gets its own terminal with a unique identity</li>
           <li>Is registered in the messaging system automatically</li>

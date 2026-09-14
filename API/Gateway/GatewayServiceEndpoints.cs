@@ -139,7 +139,7 @@ namespace MultiTerminal.API.Gateway
                     workingDir = project.SourcePath;
                 }
 
-                var (success, docId, error) = await spawnService.SpawnTeammateAsync(
+                var (success, docId, error, terminalName) = await spawnService.SpawnTeammateAsync(
                     request.AgentName,
                     agentType: null,
                     workingDir,
@@ -149,7 +149,10 @@ namespace MultiTerminal.API.Gateway
                 if (!success)
                     return Results.BadRequest(new { success = false, error });
 
-                return Results.Ok(new { success = true, terminalName = request.AgentName, docId });
+                // terminalName is the identity the broker ACTUALLY registered (task 77d1182f) — a name
+                // already held on this MultiTerminal comes back suffixed. `ready` is additive: success
+                // means the pane exists; the helper boots and registers itself afterwards.
+                return Results.Ok(new { success = true, terminalName = terminalName ?? request.AgentName, requestedName = request.AgentName, docId, ready = false });
             });
         }
 

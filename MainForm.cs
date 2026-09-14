@@ -1896,7 +1896,7 @@ namespace MultiTerminal
         /// <summary>
         /// Callback for spawning new teammate terminals via MCP tool.
         /// </summary>
-        private async Task<(bool success, string docId, string error)> OnSpawnRequested(
+        private async Task<(bool success, string docId, string error, string terminalName)> OnSpawnRequested(
             string agentName,
             string agentType,
             string workingDir,
@@ -1909,80 +1909,362 @@ namespace MultiTerminal
 
                 // Oracle is always-on — reject spawn requests, it's managed by OracleService
                 if (agentName.Equals(OracleService.OracleName, StringComparison.OrdinalIgnoreCase))
-                    return (false, null, "Oracle is always-on and managed by OracleService. Send messages directly.");
+                    return (false, null, "Oracle is always-on and managed by OracleService. Send messages directly.", null);
+
+                // Names the broker deliberately lets several panes SHARE cannot be a helper's identity
+                // (pipeline Run 2, debugger): "Unassigned" is exempt from uniqueness, and "Agent …" is
+                // the temporary-subagent shape. Everything below keys liveness and the first-question
+                // trigger on the NAME, so a shared one could read another pane's evidence.
+                if (agentName.Equals("Unassigned", StringComparison.OrdinalIgnoreCase) || IsTemporaryAgent(agentName))
+                    return (false, null, $"'{agentName}' cannot be a helper's name: it is a shared/temporary identity. Choose a distinct name.", null);
+
+                // Default working directory if not provided. Resolved here rather than inside the UI
+                // lambda so it can be validated before anything is created.
+                if (string.IsNullOrWhiteSpace(workingDir))
+                {
+                    workingDir = System.IO.Path.Combine(
+                        System.IO.Directory.GetParent(System.IO.Directory.GetCurrentDirectory())?.FullName ?? "",
+                        "Deploy");
+                }
+
+                // cwd validation (pipeline Run 1, Codex security + adversary). The deleted
+                // TerminalSpawner required an absolute, local, existing directory before Process.Start;
+                // routing through the builder with an EXPLICIT cwd bypasses ResolveWorkingDirectory's
+                // own check, so without this a relative, missing or UNC path reaches
+                // BuildForcedStatuslineFlag (which probes <cwd>\.claude\settings.local.json) and the
+                // launch, and the caller gets a generic failure instead of the reason. Same rule as
+                // the builder, same helper.
+                if (!Services.LaunchCommandBuilder.IsUsableProjectPath(workingDir))
+                    return (false, null, $"workingDir must be an absolute, local (non-UNC), existing directory: '{workingDir}'", null);
 
                 _debugLogService.Info("MainForm", $"Spawning teammate: {agentName} ({agentType})");
 
-                // Track doc ID from terminal registration
-                string docId = null;
-                var registrationTcs = new TaskCompletionSource<string>();
+                // What AddNewTerminal ACTUALLY created (pipeline Run 1, debugger HIGH). The broker keeps
+                // every name it has launched for the whole session, so the second spawn of any name is
+                // refused by the name gate; with atomicIdentityUniqueness that refusal becomes a
+                // deterministic "-2" suffix under the broker lock instead of a silent pool placeholder.
+                // Everything below — liveness, prompt delivery, the name reported back — keys on the
+                // resolved identity, never on the requested one.
+                //
+                // There is deliberately NO TerminalRegistered wait any more. MT's own pre-registration
+                // raises that event synchronously INSIDE AddNewTerminal, before the shell starts, so a
+                // wait keyed on the requested name either completed trivially (the pane exists) or —
+                // when the name had been suffixed — never matched and reported a misleading timeout.
+                // The return value is the proof the pane exists; what it does NOT prove is that the
+                // helper booted, and the response says so (ready:false).
+                string resolvedName = null;
+                string resolvedDocId = null;
 
-                // Subscribe to terminal registered event to capture doc ID
-                void registeredHandler(object sender, TerminalInfo e)
-                {
-                    if (e.Name == agentName)
-                    {
-                        docId = e.DocId;
-                        registrationTcs.TrySetResult(docId);
-                        _mcpServer.Broker.TerminalRegistered -= registeredHandler;
-                    }
-                }
-                _mcpServer.Broker.TerminalRegistered += registeredHandler;
-
-                // Spawn terminal on UI thread
+                // Spawn terminal on UI thread. A builder bootstrap failure is captured here and
+                // returned as the spawn's error — never a MessageBox on an API path.
+                string bootstrapError = null;
                 await Task.Run(() =>
                 {
                     Invoke(new Action(() =>
                     {
-                        // Default working directory if not provided
-                        if (string.IsNullOrWhiteSpace(workingDir))
+                        // Route through LaunchCommandBuilder like every other launch path (task
+                        // 77d1182f). The old hardcoded "claude --dangerously-skip-permissions" had
+                        // neither --plugin-dir nor the channel flag, so a spawned terminal booted as
+                        // a bare Claude session: no SessionStart hook, no identity, no channel, and
+                        // invisible to the MT roster. The builder is what every docked terminal uses.
+                        var kind = Models.TerminalKindHelper.ParseOrDefault(agentType);
+
+                        // Project context is recovered from the cwd. It only enriches the launch
+                        // (projectId env var, gateway profile, MCP config sync); a missing or
+                        // malformed .claude/project.json must not block a spawn.
+                        Models.Project project = null;
+                        try
                         {
-                            workingDir = System.IO.Path.Combine(
-                                System.IO.Directory.GetParent(System.IO.Directory.GetCurrentDirectory())?.FullName ?? "",
-                                "Deploy");
+                            project = _projectService?.DiscoverProject(workingDir);
+                        }
+                        catch (Exception ex)
+                        {
+                            _debugLogService?.Warning("MainForm", $"Spawn: project discovery failed for '{workingDir}', launching without project context: {ex.Message}");
                         }
 
-                        // Always spawn with fresh session to avoid stale context from previous work
-                        // The auto-submit logic below will handle the "initializing..." prompt automatically
-                        string claudeCommand = "claude --dangerously-skip-permissions";
-                        _debugLogService?.Info("MainForm", $"Spawning {agentName} with fresh session");
-                        _debugLogService.Info("MainForm", $"Spawning {agentName} with fresh session (no context pollution)");
+                        // The cwd is passed EXPLICITLY. BuildFlags reads the cwd's
+                        // .claude/settings.local.json to merge the project's hooks/deny before it
+                        // decides whether dropping the LOCAL settings source is safe; computed
+                        // against the project-resolved default instead, a spawn into a project dir
+                        // would run under --dangerously-skip-permissions with that project's local
+                        // hooks/deny silently stripped (the fail-closed case BuildForcedStatuslineFlag
+                        // documents).
+                        var launchCmd = Services.LaunchCommandBuilder.BuildCommand(kind, project, workingDirectory: workingDir);
+                        if (!string.IsNullOrEmpty(launchCmd.BootstrapError))
+                        {
+                            // Not HandleBootstrapErrorIfAny: that shows a modal MessageBox, which
+                            // would block an API-driven spawn until a human clicks. The caller has
+                            // an error channel; use it.
+                            bootstrapError = launchCmd.BootstrapError;
+                            return;
+                        }
 
-                        // Spawn with Claude Code auto-run (resume if session exists, otherwise new session)
-                        AddNewTerminal(
+                        string gatewayProfile = null;
+                        if (project != null && _gatewayService != null && _gatewayService.IsGatewayInstalled())
+                            gatewayProfile = Services.GatewayIntegrationService.GetGatewayProfileName(project.Name);
+
+                        // Same guard as OnStartScreenProjectLaunched: only sync project-scoped MCP
+                        // config when the cwd is a real project root, never the user-profile fallback.
+                        if (Services.LaunchCommandBuilder.IsDistinctProjectRoot(project, workingDir))
+                        {
+                            try
+                            {
+                                _mcpConfigService?.EnsureMcpConfigsForProjectWithGateway(project.Id, workingDir, project.Name);
+                            }
+                            catch (Exception ex)
+                            {
+                                _debugLogService?.Error("MainForm", $"Spawn: MCP config sync failed: {ex.Message}");
+                            }
+                        }
+                        else
+                        {
+                            _debugLogService?.Warning("MainForm", $"Spawn: MCP config sync skipped — '{workingDir}' is not a registered project root.");
+                        }
+
+                        _debugLogService?.Info("MainForm", $"Spawning {agentName} ({kind}) with fresh session in '{workingDir}'");
+
+                        // atomicIdentityUniqueness: a held name is suffixed under the broker lock rather
+                        // than refused into a pool placeholder; the tuple is what was ACTUALLY made.
+                        (resolvedName, resolvedDocId) = AddNewTerminal(
                             workingDirectory: workingDir,
                             fontSize: null,
                             forceTabMode: false,
                             identityName: agentName,
-                            autoRunCommand: claudeCommand,
-                            spawnerName: spawnerName);
+                            autoRunCommand: launchCmd.AutoRunCommand,
+                            spawnerName: spawnerName,
+                            projectId: project?.Id,
+                            gatewayProfile: gatewayProfile,
+                            atomicIdentityUniqueness: true);
                     }));
                 });
 
-                // Wait for registration with timeout
-                var timeoutTask = Task.Delay(5000);
-                var completedTask = await Task.WhenAny(registrationTcs.Task, timeoutTask);
+                if (bootstrapError != null)
+                    return (false, null, $"Launch command could not be built: {bootstrapError}", null);
 
-                if (completedTask == timeoutTask)
+                if (string.IsNullOrEmpty(resolvedDocId))
+                    return (false, null, "Terminal document was not created (see the MainForm debug log).", null);
+
+                if (string.IsNullOrEmpty(resolvedName) || !resolvedName.StartsWith(agentName, StringComparison.OrdinalIgnoreCase))
                 {
-                    _mcpServer.Broker.TerminalRegistered -= registeredHandler;
-                    return (false, null, "Terminal spawn timed out waiting for registration");
+                    // Both the requested name and its suffixed candidates were refused, so the pane came
+                    // up as a pool placeholder. Say so — with the pane's actual name — rather than let
+                    // a timeout describe it. Effectively unreachable with atomic uniqueness; kept loud
+                    // because the alternative is an orphan nobody can address.
+                    string placeholder = string.IsNullOrEmpty(resolvedName) ? "(unnamed)" : resolvedName;
+                    _debugLogService?.Warning("MainForm", $"Spawn: the name '{agentName}' was refused; pane '{placeholder}' (DocId {resolvedDocId}) exists as a placeholder. Initial prompt NOT delivered ({(initialPrompt ?? string.Empty).Length} chars).");
+                    return (false, resolvedDocId, $"The name '{agentName}' was refused by the broker; a placeholder pane '{placeholder}' was created instead. Address it by that name or close it.", resolvedName);
                 }
 
-                _debugLogService.Info("MainForm", $"Terminal spawned for {agentName} (DocId: {docId})");
+                if (!string.Equals(resolvedName, agentName, StringComparison.OrdinalIgnoreCase))
+                    _debugLogService?.Info("MainForm", $"Spawn: '{agentName}' was already held on this MultiTerminal; helper registered as '{resolvedName}'.");
+
+                _debugLogService.Info("MainForm", $"Terminal spawned for {resolvedName} (DocId: {resolvedDocId}) — pane created; helper not yet booted.");
 
                 // Auto-initialization is handled by OnClaudeCodeDetected when Claude Code's
                 // banner appears in output. That handler uses atomic TypeInput (character-by-character
                 // via xterm.js) which is reliable and avoids the double-injection bug caused by
                 // the old InjectInputAsync retry loop. No injection needed here.
 
-                return (true, docId, null);
+                // The helper's job, if the caller supplied one, is delivered separately and later
+                // (task 77d1182f). It used to be accepted and dropped: the parameter was in this
+                // signature and never read, so a spawner had to drive the terminal afterwards via
+                // /api/terminals/{name}/submit, which chunks and was observed truncating a command.
+                // Keyed on the RESOLVED name and the document we just created, not on the request.
+                if (!string.IsNullOrWhiteSpace(initialPrompt))
+                {
+                    QueueInitialPromptDelivery(resolvedName, resolvedDocId, initialPrompt, spawnerName, workingDir);
+                }
+
+                return (true, resolvedDocId, null, resolvedName);
             }
             catch (Exception ex)
             {
                 _debugLogService.Error("MainForm", $"Spawn failed: {ex.Message}");
-                return (false, null, $"Exception during spawn: {ex.Message}");
+                return (false, null, $"Exception during spawn: {ex.Message}", null);
             }
+        }
+
+        /// <summary>
+        /// Delivers a spawned helper's initial prompt as ONE intact prompt (task 77d1182f).
+        ///
+        /// <para>WHEN — not at spawn time. <see cref="OnClaudeCodeDetected"/> types
+        /// <c>initializing...</c> as the session's first prompt; that fires the SessionStart hook
+        /// and <c>/session-start</c>, which ends on a BLOCKING <c>AskUserQuestion</c> menu. Text
+        /// typed before that menu is up is lost or interleaved; text typed into it routes as a
+        /// direct instruction. So the trigger is the helper's FIRST <c>ask_user_question</c>
+        /// notification — the ask-user-relay hook POSTs it to /api/notifications and the broker
+        /// raises <see cref="MCPServer.Services.MessageBroker.NotificationReceived"/> with
+        /// <c>raw_type</c>/<c>agent_name</c>. A fixed delay would be a guess at a 10–30s variable,
+        /// and session 9 of b42b1883 watched exactly that guess fail: the helper sat on its menu
+        /// and ignored three prompts.</para>
+        ///
+        /// <para>HOW — <c>TypeInput</c>, never <c>InjectInputAsync</c>. The latter splits anything
+        /// over 500 bytes into <c>[n/N]</c> chunks (TerminalControl.MaxChunkSize) and was observed
+        /// cutting a command in half mid-word; TypeInput sends every byte in order with a single
+        /// CR at the end. Embedded line breaks would be typed as Enter and submit early, so they
+        /// are collapsed to spaces — the prompt arrives as one line, which is the "one prompt"
+        /// the contract promises.</para>
+        ///
+        /// <para>FALLBACK — if no question arrives within the window, the prompt is typed ONLY if
+        /// the helper is demonstrably alive: its broker row carries a channel port, meaning the real
+        /// <c>register_terminal</c> from /session-start landed and it merely skipped its menu.
+        /// Otherwise the helper never booted — no claude, no plugin, no channel — and typing into
+        /// that pane would be the "job typed blindly into whatever exists" the pipeline's adversary
+        /// gate flagged (Run 1). In that case nothing is typed; the SPAWNER gets a notification
+        /// saying the job was NOT delivered, so the failure is loud to the one who cares.
+        /// Exactly-once across every path via Interlocked.</para>
+        /// </summary>
+        private void QueueInitialPromptDelivery(string agentName, string docId, string initialPrompt, string spawnerName, string workingDir)
+        {
+            const int fallbackMs = 120_000;
+            string oneLine = System.Text.RegularExpressions.Regex.Replace(initialPrompt, @"\r\n?|\n", " ").Trim();
+            int delivered = 0;
+            EventHandler<Dictionary<string, object>> onNotification = null;
+
+            void Deliver(string trigger)
+            {
+                if (System.Threading.Interlocked.Exchange(ref delivered, 1) != 0)
+                    return;
+
+                _mcpServer.Broker.NotificationReceived -= onNotification;
+
+                try
+                {
+                    if (IsDisposed || !IsHandleCreated)
+                        return;
+
+                    BeginInvoke(new Action(() =>
+                    {
+                        // Guarded inside the marshalled body too: a document or WebView2 disposed
+                        // between the check above and this running would otherwise escape to the
+                        // message loop (pipeline Run 1, code-reviewer + debugger).
+                        try
+                        {
+                            var doc = _gridManager.GetTerminalDocuments().FirstOrDefault(t => t.DocId == docId);
+                            if (doc == null)
+                            {
+                                _debugLogService?.Warning("MainForm", $"Initial prompt for {agentName} dropped: terminal {docId} no longer exists (trigger: {trigger}).");
+                                return;
+                            }
+
+                            _debugLogService?.Info("MainForm", $"Delivering initial prompt to {agentName} ({oneLine.Length} chars, trigger: {trigger}).");
+                            doc.TypeInput(oneLine, "cr", 5);
+                        }
+                        catch (Exception ex)
+                        {
+                            _debugLogService?.Warning("MainForm", $"Initial prompt for {agentName} not delivered (typing failed): {ex.Message}");
+                        }
+                    }));
+                }
+                catch (Exception ex)
+                {
+                    // BeginInvoke itself: the form went away between the check and the marshal.
+                    _debugLogService?.Warning("MainForm", $"Initial prompt for {agentName} not delivered (marshal failed): {ex.Message}");
+                }
+            }
+
+            void GiveUp(string reason)
+            {
+                if (System.Threading.Interlocked.Exchange(ref delivered, 1) != 0)
+                    return;
+
+                _mcpServer.Broker.NotificationReceived -= onNotification;
+                _debugLogService?.Warning("MainForm", $"Initial prompt for {agentName} NOT delivered ({oneLine.Length} chars): {reason}");
+
+                // Loud to the spawner — in the store an AGENT actually reads. Pipeline Run 2 caught the
+                // first version writing RecordNotification → notification_events: the attention rail
+                // drops an unknown raw type (MapState → Unknown) and get_inbox / the Inbox panel read
+                // inbox_messages, which that call never touches — so the promised signal reached nobody.
+                // CreateInboxNotification is what get_inbox surfaces. And because spawnerName is
+                // caller-supplied and unvalidated (a typo, a stale env, or the phone app's
+                // "ClaudeRemote"), a message to a name that is not a live terminal is written a second
+                // time to the Owner's inbox so it cannot be lost either way.
+                string summary = $"Helper {agentName} never came alive: {reason}. Its job ({oneLine.Length} chars) was NOT delivered — nothing was typed into the pane. Spawner: {spawnerName}. Working dir: {workingDir}.";
+                try
+                {
+                    // The write's result is CHECKED (pipeline Run 3). CreateInboxNotification swallows
+                    // its own SQLite failure into Success=false; ignoring that is how the previous
+                    // version of this block "sent" a message that violated user_inbox.task_id NOT NULL
+                    // and reached nobody. The column is nullable now (MigrateUserInboxTaskIdNullable),
+                    // but a refused write must never again be silent.
+                    var toSpawner = _mcpServer.Broker.CreateInboxNotification(
+                        userId: spawnerName,
+                        taskId: null,
+                        taskTitle: null,
+                        checklistItemIndex: null,
+                        checklistItemName: null,
+                        type: "spawn_failed",
+                        summary: summary,
+                        createdBy: "MultiTerminal");
+                    if (!toSpawner.Success)
+                        _debugLogService?.Warning("MainForm", $"spawn_failed inbox write for spawner '{spawnerName}' was REJECTED — that agent will not see that {agentName}'s job was dropped.");
+
+                    string owner = _mcpServer.Broker.DefaultInboxRecipient;
+                    bool spawnerIsLive = _mcpServer.Broker.GetTerminal(spawnerName) != null;
+                    if (!spawnerIsLive && !string.IsNullOrEmpty(owner) && !string.Equals(owner, spawnerName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _debugLogService?.Warning("MainForm", $"Spawner '{spawnerName}' is not a live terminal; copying the spawn_failed message for {agentName} to '{owner}'.");
+                        var toOwner = _mcpServer.Broker.CreateInboxNotification(
+                            userId: owner,
+                            taskId: null,
+                            taskTitle: null,
+                            checklistItemIndex: null,
+                            checklistItemName: null,
+                            type: "spawn_failed",
+                            summary: $"(spawner '{spawnerName}' is not a live terminal) {summary}",
+                            createdBy: "MultiTerminal");
+                        if (!toOwner.Success)
+                            _debugLogService?.Warning("MainForm", $"spawn_failed inbox write for '{owner}' was REJECTED as well — {agentName}'s dropped job is recorded only in this log.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _debugLogService?.Warning("MainForm", $"Could not notify {spawnerName} that {agentName}'s job was not delivered: {ex.Message}");
+                }
+            }
+
+            onNotification = (_, payload) =>
+            {
+                if (payload == null)
+                    return;
+
+                // Same predicate the attention rail uses (Trim + OrdinalIgnoreCase): the Notification
+                // hook ships from a separate repo on its own cadence, so a casing/whitespace variant
+                // must not silently degrade this to the fallback (pipeline Run 1).
+                if (!(payload.TryGetValue("raw_type", out object rawType)
+                      && rawType is string rt
+                      && MultiTerminal.MCPServer.Services.AgentAttentionService.IsQuestionTextType(rt)))
+                    return;
+                if (!(payload.TryGetValue("agent_name", out object name)
+                      && name is string n
+                      && string.Equals(n.Trim(), agentName, StringComparison.OrdinalIgnoreCase)))
+                    return;
+
+                Deliver("first question");
+            };
+            _mcpServer.Broker.NotificationReceived += onNotification;
+
+            _ = Task.Delay(fallbackMs).ContinueWith(
+                _ =>
+                {
+                    // Log-only fast path; Deliver()/GiveUp() hold the real exactly-once guard.
+                    if (delivered != 0)
+                        return;
+
+                    // Liveness is the broker's row for the RESOLVED name: a channel port is set only by
+                    // the real register_terminal from /session-start, never by MT's pre-registration.
+                    var live = _mcpServer.Broker.GetTerminal(agentName);
+                    if (live?.ChannelPort != null)
+                    {
+                        _debugLogService?.Warning("MainForm", $"No question from {agentName} within {fallbackMs / 1000}s but it is live (channel port {live.ChannelPort}); delivering its initial prompt anyway.");
+                        Deliver("fallback timer — helper live, no question");
+                    }
+                    else
+                    {
+                        GiveUp($"registered no channel within {fallbackMs / 1000}s (it never booted, or the plugin did not load)");
+                    }
+                },
+                TaskScheduler.Default);
         }
 
         /// <summary>
@@ -3323,7 +3605,15 @@ namespace MultiTerminal
             return taskWorktreePath;
         }
 
-        public void AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, bool atomicIdentityUniqueness = false)
+        /// <summary>
+        /// Creates and starts a docked terminal. Returns the identity it ACTUALLY registered and the
+        /// document it created (task 77d1182f): with <paramref name="atomicIdentityUniqueness"/> a
+        /// held name comes back suffixed (<c>Name-2</c>), and a refused one comes back as a pool
+        /// placeholder — callers that bind later work to "the terminal I just made" (the spawn path's
+        /// registration wait and initial-prompt delivery) must key on this, not on the name they asked
+        /// for. Existing callers ignore the value.
+        /// </summary>
+        public (string Name, string DocId) AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, bool atomicIdentityUniqueness = false)
         {
             _debugLogService?.Trace("AddNewTerminal", "===== START =====");
             _debugLogService?.Trace("AddNewTerminal", $"workingDirectory: '{workingDirectory ?? "null"}'");
@@ -3507,6 +3797,7 @@ namespace MultiTerminal
                 doc.FocusTerminal();
             _lastActiveTerminal = doc;
             _debugLogService?.Trace("AddNewTerminal", "Completed");
+            return (terminalName, doc.DocId);
         }
 
         /// <summary>

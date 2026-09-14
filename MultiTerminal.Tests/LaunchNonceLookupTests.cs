@@ -1,4 +1,6 @@
 using System;
+using System.Data.SQLite;
+using System.IO;
 using MultiTerminal.MCPServer.Models;
 using MultiTerminal.MCPServer.Services;
 using Xunit;
@@ -20,8 +22,33 @@ namespace MultiTerminal.Tests
     /// "does the secret identify a terminal" question being answered as "are these two values equal",
     /// and it is the exact shape of bug the sibling ticket kept producing.</para>
     /// </summary>
-    public sealed class LaunchNonceLookupTests
+    public sealed class LaunchNonceLookupTests : IDisposable
     {
+        private readonly string _testDbPath;
+
+        public LaunchNonceLookupTests()
+        {
+            // MessageBroker lazily constructs its own TaskDatabase, and TaskDatabase.GetDatabasePath
+            // falls back to %APPDATA%\multiterminal\multiterminal.db when MULTITERMINAL_TEST_DB is
+            // unset. This class never set it, so every `dotnet test` run applied TaskDatabase's
+            // migrations to the PRODUCTION database — invisible while migrations were additive, and
+            // exposed the first time one rebuilt a table (task 77d1182f, pipeline Run 4: the live
+            // user_inbox was rebuilt at 02:21Z, during a verifier's test run, while the deployed
+            // binary was still pre-migration). Same isolation idiom as every other TaskDatabase test.
+            _testDbPath = Path.Combine(Path.GetTempPath(), $"multiterminal_nonce_{Guid.NewGuid():N}.db");
+            Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_DB", _testDbPath);
+        }
+
+        public void Dispose()
+        {
+            SQLiteConnection.ClearAllPools(); // release file locks before deletion
+            foreach (var p in new[] { _testDbPath, _testDbPath + "-wal", _testDbPath + "-shm" })
+            {
+                if (File.Exists(p)) File.Delete(p);
+            }
+            Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_DB", null);
+        }
+
         [Fact]
         public void A_connected_terminals_nonce_resolves_to_that_terminal()
         {

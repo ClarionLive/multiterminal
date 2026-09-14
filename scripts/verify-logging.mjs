@@ -117,7 +117,6 @@ const ALLOWLIST_SITES = new Map([
   ['Services/SessionIndexingService.cs',        'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],
   ['Services/SessionLineageService.cs',         'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],
   ['Services/SettingsService.cs',               'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],
-  ['Services/TerminalSpawner.cs',               'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],
   ['Services/TerminalStreamService.cs',         'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],
   ['Services/TranscriptTailer.cs',              'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],
 
