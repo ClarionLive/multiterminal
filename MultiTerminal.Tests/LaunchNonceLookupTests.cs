@@ -25,6 +25,7 @@ namespace MultiTerminal.Tests
     public sealed class LaunchNonceLookupTests : IDisposable
     {
         private readonly string _testDbPath;
+        private readonly string _testMsgDbPath;
 
         public LaunchNonceLookupTests()
         {
@@ -37,16 +38,42 @@ namespace MultiTerminal.Tests
             // binary was still pre-migration). Same isolation idiom as every other TaskDatabase test.
             _testDbPath = Path.Combine(Path.GetTempPath(), $"multiterminal_nonce_{Guid.NewGuid():N}.db");
             Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_DB", _testDbPath);
+
+            // Task 2ddfc32f: the comment above closed ONE door. MessageBroker also constructs a
+            // MessageQueueDatabase, whose path is governed by a DIFFERENT variable — so this class went
+            // on opening the production %APPDATA%\multiterminal\messages.db on every run, for exactly
+            // the same reason and in the same file, until ProductionDataGuard refused it. The 77d1182f
+            // census could not see this: it was keyed on MULTITERMINAL_TEST_DB and reported the file
+            // clean. Two databases, two variables, one broker.
+            _testMsgDbPath = Path.Combine(Path.GetTempPath(), $"multiterminal_nonce_msg_{Guid.NewGuid():N}.db");
+            Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_MSGDB", _testMsgDbPath);
         }
 
         public void Dispose()
         {
             SQLiteConnection.ClearAllPools(); // release file locks before deletion
-            foreach (var p in new[] { _testDbPath, _testDbPath + "-wal", _testDbPath + "-shm" })
+            foreach (var p in new[]
             {
-                if (File.Exists(p)) File.Delete(p);
+                _testDbPath, _testDbPath + "-wal", _testDbPath + "-shm",
+                _testMsgDbPath, _testMsgDbPath + "-wal", _testMsgDbPath + "-shm",
+            })
+            {
+                // Best-effort: another test class running in parallel may still hold a handle, and a
+                // failure to delete a temp file must not fail an otherwise-passing test.
+                try
+                {
+                    if (File.Exists(p)) File.Delete(p);
+                }
+                catch (IOException)
+                {
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
             }
+
             Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_DB", null);
+            Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_MSGDB", null);
         }
 
         [Fact]

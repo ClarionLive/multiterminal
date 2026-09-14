@@ -21,6 +21,7 @@ namespace MultiTerminal.Tests
     public sealed class ActivityFeedDeliveryTests : IDisposable
     {
         private readonly string _testDbPath;
+        private readonly string _testMsgDbPath;
         private readonly TaskDatabase _taskDb;
         private readonly ActivityFeedService _activity;
 
@@ -28,6 +29,13 @@ namespace MultiTerminal.Tests
         {
             _testDbPath = Path.Combine(Path.GetTempPath(), $"multiterminal_actfeed_{Guid.NewGuid():N}.db");
             Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_DB", _testDbPath);
+
+            // Task 2ddfc32f: two of this class's facts construct a MessageBroker, which constructs a
+            // MessageQueueDatabase — a SECOND production database behind a SECOND variable. Unset, it
+            // resolved to the live %APPDATA%\multiterminal\messages.db on every run until
+            // ProductionDataGuard refused it. Setting MULTITERMINAL_TEST_DB alone was never enough.
+            _testMsgDbPath = Path.Combine(Path.GetTempPath(), $"multiterminal_actfeed_msg_{Guid.NewGuid():N}.db");
+            Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_MSGDB", _testMsgDbPath);
             _taskDb = new TaskDatabase();            // creates the base schema on the shared test DB
             _activity = new ActivityFeedService();   // owns its own connection; creates the activity_feed table
         }
@@ -37,11 +45,28 @@ namespace MultiTerminal.Tests
             _activity?.Dispose();
             _taskDb?.Dispose();
             SQLiteConnection.ClearAllPools(); // release file locks before deletion
-            foreach (var p in new[] { _testDbPath, _testDbPath + "-wal", _testDbPath + "-shm" })
+            foreach (var p in new[]
             {
-                if (File.Exists(p)) File.Delete(p);
+                _testDbPath, _testDbPath + "-wal", _testDbPath + "-shm",
+                _testMsgDbPath, _testMsgDbPath + "-wal", _testMsgDbPath + "-shm",
+            })
+            {
+                // Best-effort: a parallel test class may still hold a handle, and failing to delete a
+                // temp file must not fail an otherwise-passing test.
+                try
+                {
+                    if (File.Exists(p)) File.Delete(p);
+                }
+                catch (IOException)
+                {
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
             }
+
             Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_DB", null);
+            Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_MSGDB", null);
             GC.SuppressFinalize(this);
         }
 

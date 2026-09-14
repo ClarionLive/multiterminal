@@ -57,14 +57,41 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Gets the path to the message queue database.
         /// </summary>
-        public static string GetDatabasePath()
-        {
-            var testDb = Environment.GetEnvironmentVariable("MULTITERMINAL_TEST_MSGDB");
-            if (!string.IsNullOrEmpty(testDb)) return testDb;
+        public static string GetDatabasePath() =>
+            ResolveDatabasePath(
+                Environment.GetEnvironmentVariable("MULTITERMINAL_TEST_MSGDB"),
+                ProductionDataGuard.IsUnderTestHost(),
+                ProductionDataGuard.ProductionRoot);
 
-            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            string folder = Path.Combine(appData, "multiterminal");
-            return Path.Combine(folder, "messages.db");
+        /// <summary>
+        /// The path decision, as a pure function of its three inputs (task 2ddfc32f).
+        /// </summary>
+        /// <remarks>
+        /// <para>Guarded for the same reason as <see cref="TaskDatabase.ResolveDatabasePath"/>, but note
+        /// the override here is <c>MULTITERMINAL_TEST_MSGDB</c> — a DIFFERENT variable. That difference is
+        /// exactly why this file needed including: the incident census, and the ticket that followed it,
+        /// were both written around <c>MULTITERMINAL_TEST_DB</c>, so a guard scoped to that name would
+        /// have left this production database exposed while reporting the class closed.</para>
+        ///
+        /// <para>No test in the suite references <see cref="MessageQueueDatabase"/> today, so nothing here
+        /// is load-bearing yet. That is the point: the first test that does will be written by someone who
+        /// has never heard of <c>MULTITERMINAL_TEST_MSGDB</c>, and this is what tells them.</para>
+        /// </remarks>
+        internal static string ResolveDatabasePath(string testDbOverride, bool underTestHost, string productionRoot)
+        {
+            // SELECT first, then GUARD — see TaskDatabase.ResolveDatabasePath for the full reasoning
+            // (pipeline Run 1: the override was the only externally supplied path and the only one never
+            // checked). Identical shape here deliberately, so the two resolvers cannot drift.
+            string resolved = !string.IsNullOrEmpty(testDbOverride)
+                ? testDbOverride
+                : Path.Combine(productionRoot, "messages.db");
+
+            return ProductionDataGuard.Guard(
+                resolved,
+                "MULTITERMINAL_TEST_MSGDB",
+                nameof(MessageQueueDatabase) + "." + nameof(GetDatabasePath),
+                underTestHost,
+                productionRoot);
         }
 
         /// <summary>

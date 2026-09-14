@@ -117,14 +117,57 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Gets the path to the tasks database.
         /// </summary>
-        public static string GetDatabasePath()
-        {
-            var testDb = Environment.GetEnvironmentVariable("MULTITERMINAL_TEST_DB");
-            if (!string.IsNullOrEmpty(testDb)) return testDb;
+        public static string GetDatabasePath() =>
+            ResolveDatabasePath(
+                Environment.GetEnvironmentVariable("MULTITERMINAL_TEST_DB"),
+                ProductionDataGuard.IsUnderTestHost(),
+                ProductionDataGuard.ProductionRoot);
 
-            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            string folder = Path.Combine(appData, "multiterminal");
-            return Path.Combine(folder, "multiterminal.db");
+        /// <summary>
+        /// The path decision, as a pure function of its three inputs (task 2ddfc32f).
+        /// </summary>
+        /// <remarks>
+        /// <para>THIS resolver caused the incident. <c>MessageBroker.cs:1574</c> constructs a
+        /// <see cref="TaskDatabase"/> lazily, so a test that merely registers a terminal arrives here, and
+        /// a missing <c>MULTITERMINAL_TEST_DB</c> silently returned the LIVE database. A worktree test run
+        /// then migrated it and rebuilt <c>user_inbox</c> (3,819 rows) under a deployed binary containing
+        /// no such migration.</para>
+        ///
+        /// <para><b>Why this is split out rather than inlined above.</b> The guarded branch only runs when
+        /// the override is ABSENT, and every test in the suite sets it — so that branch never executes
+        /// during a normal run, and a typo that left the guard call unreachable would still show a fully
+        /// green suite. Exposing the decision as a pure function lets a test assert the WIRING (that this
+        /// resolver refuses a production path under a test host) without clearing a process-wide
+        /// environment variable, which outlives the class that cleared it and, on the run where the guard
+        /// is broken, perform the exact production write the guard exists to prevent.</para>
+        /// </remarks>
+        /// <param name="testDbOverride">The <c>MULTITERMINAL_TEST_DB</c> value, or null/empty when unset.</param>
+        /// <param name="underTestHost">Whether a test host is present. Injected rather than detected.</param>
+        /// <param name="productionRoot">Directory to treat as production. Injected rather than read.</param>
+        internal static string ResolveDatabasePath(string testDbOverride, bool underTestHost, string productionRoot)
+        {
+            // SELECT first, then GUARD — never the other way round (pipeline Run 1, all four gates).
+            // The first version returned the override BEFORE the guard, which meant the only externally
+            // supplied path was the only path never checked: MULTITERMINAL_TEST_DB set to
+            // %APPDATA%\multiterminal\multiterminal.db handed a test host the live database and the guard
+            // never ran. An env var is process-wide and inheritable, so that is not a hypothetical — a
+            // stale value from a shell, CI, or a developer "reproducing against real data" reproduces the
+            // original incident with the guard installed and silent.
+            //
+            // Guarding after selection costs nothing: a temp override is not under the production root, so
+            // it passes untouched. There is no legitimate reason for a test to name the live database.
+            string resolved = !string.IsNullOrEmpty(testDbOverride)
+                ? testDbOverride
+                : Path.Combine(productionRoot, "multiterminal.db");
+
+            // No-op in production: underTestHost is false in the shipped app, so this returns the same
+            // %APPDATA% path it always did.
+            return ProductionDataGuard.Guard(
+                resolved,
+                "MULTITERMINAL_TEST_DB",
+                nameof(TaskDatabase) + "." + nameof(GetDatabasePath),
+                underTestHost,
+                productionRoot);
         }
 
         /// <summary>

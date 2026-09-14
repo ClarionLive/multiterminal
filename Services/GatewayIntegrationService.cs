@@ -68,8 +68,18 @@ namespace MultiTerminal.Services
         {
             _log = log ?? ((source, msg) => System.Diagnostics.Debug.WriteLine($"[{source}] {msg}"));
 
-            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            _gatewayDbPath = Path.Combine(appData, "multiterminal", "gateway", "gateway.db");
+            // Task 2ddfc32f. The third production database a test host can reach, and the most exposed of
+            // the three: it has no test override at all, so before this guard any test that constructed
+            // this service was pointed straight at the live gateway.db with nothing to opt out of.
+            // Nothing references this type from MultiTerminal.Tests today, so guarding it breaks no
+            // existing fact — it makes the FIRST such test fail loudly instead of quietly writing to
+            // production. Passing a null override name is deliberate: the message then says "there is no
+            // override, add one" rather than naming a variable that does not exist.
+            // No-op in production: IsUnderTestHost() is false in the shipped app.
+            _gatewayDbPath = ProductionDataGuard.Guard(
+                Path.Combine(ProductionDataGuard.ProductionRoot, "gateway", "gateway.db"),
+                envVarName: null,
+                caller: nameof(GatewayIntegrationService));
             _gatewayExePath = Path.Combine(GatewayProjectPath, "bin", "Release", "net8.0", "McpGateway.exe");
         }
 
