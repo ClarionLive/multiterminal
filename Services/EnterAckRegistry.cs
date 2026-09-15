@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Threading;
@@ -45,7 +46,15 @@ namespace MultiTerminal.Services
     /// </summary>
     internal sealed class EnterAckRegistry
     {
-        private readonly ConcurrentDictionary<string, TaskCompletionSource<bool>> _waiters = new();
+        // ⚠️ StringComparer.Ordinal IS STATED, not left to the default, because the default being
+        // correct here is a fact nobody would re-derive. The id is minted here, carried to
+        // terminal.html as text, echoed back verbatim, and looked up again — and a PERMISSIVE
+        // comparison in front of an exact lookup is a bug generator, not a safety margin (the
+        // general form of task c28e6177's finding, where a case-insensitive predicate approved a
+        // delivery that the exact lookup behind it then failed to find). Every hop must compare the
+        // same way. Nothing on this path trims or case-folds the VALUE: the page takes it with
+        // substring, and the host's JSON reader lower-cases property NAMES only.
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<bool>> _waiters = new(StringComparer.Ordinal);
         private int _counter;
 
         /// <summary>Waiters currently outstanding. Test/diagnostic surface.</summary>

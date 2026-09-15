@@ -136,6 +136,52 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// The lookup does not NORMALIZE: a padded or prefixed id finds nothing rather than being
+        /// helpfully coerced into a match. A permissive comparison in front of an exact lookup is a
+        /// bug generator rather than a safety margin (the general form of task c28e6177's finding).
+        ///
+        /// <para>⚠️ SCOPE, because the obvious reading is too generous and I checked: this fact does
+        /// NOT catch a swap to <c>StringComparer.OrdinalIgnoreCase</c>. Minted ids come from an int
+        /// counter, so they are digits, and digits have no case — every assertion here passes under
+        /// either comparer. That was verified by making the swap and watching this stay green. The
+        /// comparer itself is pinned by
+        /// <see cref="The_waiter_lookup_is_pinned_to_an_ordinal_comparer"/> instead.</para>
+        /// </summary>
+        [Fact]
+        public void An_id_that_is_not_byte_for_byte_identical_matches_nothing()
+        {
+            var registry = new EnterAckRegistry();
+            var (jobId, ack) = registry.Register();
+
+            Assert.Equal(EnterAckOutcome.NoWaiter, registry.Complete(jobId + " "));
+            Assert.Equal(EnterAckOutcome.NoWaiter, registry.Complete(" " + jobId));
+            Assert.Equal(EnterAckOutcome.NoWaiter, registry.Complete("x" + jobId));
+            Assert.False(ack.IsCompleted, "A near-miss id released the waiter — the lookup is not exact.");
+
+            Assert.Equal(EnterAckOutcome.Correlated, registry.Complete(jobId));
+            Assert.True(ack.IsCompleted);
+        }
+
+        /// <summary>
+        /// Pins the comparer in source, because no behavioural test in this class can: the ids are
+        /// digits and therefore caseless, so a loosened comparer changes nothing observable TODAY.
+        /// It would matter the moment the id becomes anything else — a Guid, a name, a composite —
+        /// and at that point the loosening would already be in place and invisible.
+        /// <para>This is the one guard that actually fails on the swap, so it is doing the work the
+        /// fact above was mistakenly credited with.</para>
+        /// </summary>
+        [Fact]
+        public void The_waiter_lookup_is_pinned_to_an_ordinal_comparer()
+        {
+            string src = File.ReadAllText(RepoPath("Services", "EnterAckRegistry.cs"));
+
+            Assert.Contains("new(StringComparer.Ordinal)", src, StringComparison.Ordinal);
+            Assert.DoesNotContain("StringComparer.OrdinalIgnoreCase", src, StringComparison.Ordinal);
+            Assert.DoesNotContain("StringComparer.InvariantCultureIgnoreCase", src, StringComparison.Ordinal);
+            Assert.DoesNotContain("StringComparer.CurrentCultureIgnoreCase", src, StringComparison.Ordinal);
+        }
+
+        /// <summary>
         /// A failed injection makes up to five attempts and the renderer outlives all of them, so the
         /// sender's <c>finally</c> must actually forget the job.
         /// </summary>
