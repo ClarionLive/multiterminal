@@ -19,6 +19,13 @@ namespace MultiTerminal.Tests
     /// ConPTY and never reaches the queue, so no assertion here can see that path and none should be
     /// read as covering it. Unifying the two injection mechanisms is its own ticket.</para>
     ///
+    /// <para>That scope is UNCHANGED — but the gap it describes is no longer unwatched. Task f420feeb
+    /// found the ticket's own list of callers of the unserialized path was wrong (four listed, six
+    /// live) and that nothing anywhere forced it to stay true. <c>InjectionPathCensusTests</c> now
+    /// enumerates those callers and pins the path's shape, and <c>EnterAckCorrelationTests</c> covers
+    /// the Enter-acknowledgment half. Read the three together; each is honest about what it cannot
+    /// see, which is the only reason the set is worth anything.</para>
+    ///
     /// <para><b>Why a source census.</b> <c>QueueInitialPromptDelivery</c> is private in an 8K+ LOC
     /// WinForms file that cannot be instantiated in a test. The DECISION it makes was extracted into
     /// <see cref="MultiTerminal.Services.HelperReadinessTrigger"/> and is unit-tested properly; what

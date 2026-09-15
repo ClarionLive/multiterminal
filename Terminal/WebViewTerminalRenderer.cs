@@ -77,8 +77,10 @@ namespace MultiTerminal.Terminal
         private volatile bool _writeScheduled;
         private readonly object _writeLock = new object();
 
-        // TaskCompletionSource for Enter key acknowledgment synchronization
-        private System.Threading.Tasks.TaskCompletionSource<bool> _enterAckTcs;
+        // Enter-key acknowledgment correlation (task f420feeb, census F2). The decision itself lives
+        // in EnterAckRegistry, which is pure and therefore testable — this control cannot be
+        // instantiated in a test. See that class for what the single shared field used to get wrong.
+        private readonly EnterAckRegistry _enterAcks = new();
 
         // Output change tracking for Enter key retry mechanism
         private DateTime _lastOutputTime = DateTime.MinValue;
@@ -349,8 +351,8 @@ namespace MultiTerminal.Terminal
                         break;
 
                     case "enterAck":
-                        // Complete the TaskCompletionSource to signal Enter was processed
-                        _enterAckTcs?.TrySetResult(true);
+                        // Complete ONLY the waiter that asked for this Enter (task f420feeb).
+                        OnEnterAcknowledged(message.EnterJobId);
                         break;
                 }
             }
@@ -887,29 +889,83 @@ namespace MultiTerminal.Terminal
         }
 
         /// <summary>
+        /// Completes the waiter for one acknowledged Enter, and REPORTS WHICH PATH IT TOOK.
+        /// <para>⚠️ The compatibility path logs at Warning on success, which reads like an
+        /// over-reaction and is not. If the page's id echo were broken — a mistyped field, or an
+        /// echo added to only one of terminal.html's two ack sites — every ack would arrive id-less
+        /// and be silently rescued here. Enters would complete promptly, the suite would stay green,
+        /// and the correlation this exists to provide would never run once. So routine firing of
+        /// that path is not compatibility working; it is the fix not working, and this log is the
+        /// only thing that can tell the two apart at runtime.</para>
+        /// </summary>
+        /// <param name="jobId">Job id carried by the ack; null/empty only from a page predating it.</param>
+        private void OnEnterAcknowledged(string jobId)
+        {
+            switch (_enterAcks.Complete(jobId))
+            {
+                case EnterAckOutcome.Correlated:
+                    break;
+
+                case EnterAckOutcome.NoWaiter:
+                    // Worded for BOTH shapes. It used to name a job id unconditionally, which read as
+                    // nonsense for an id-less ack arriving when nothing was outstanding — the case
+                    // that used to be misreported as "multiple waiters" (see EnterAckOutcome).
+                    DebugLogService?.Trace(
+                        "WebViewTerminalRenderer",
+                        string.IsNullOrEmpty(jobId)
+                            ? "enterAck carried no job id and nothing was waiting — dropped"
+                            : $"enterAck for job '{jobId}' has no waiter (already timed out) — dropped");
+                    break;
+
+                case EnterAckOutcome.CompatibilitySingleWaiter:
+                    DebugLogService?.Warning("WebViewTerminalRenderer", "enterAck carried NO job id — released the single outstanding waiter via the compatibility path. If this is routine, terminal.html is not echoing the id and per-job correlation is NOT in effect.");
+                    break;
+
+                case EnterAckOutcome.AmbiguousDropped:
+                    DebugLogService?.Warning("WebViewTerminalRenderer", "enterAck carried NO job id while multiple waiters were outstanding — dropped rather than guess which caller it belonged to.");
+                    break;
+            }
+        }
+
+        /// <summary>
         /// Try sending Enter via JS with acknowledgment wait.
         /// </summary>
         private async System.Threading.Tasks.Task<bool> TrySendEnterViaJsAsync()
         {
             if (_webView?.CoreWebView2 == null) return false;
 
-            _enterAckTcs = new System.Threading.Tasks.TaskCompletionSource<bool>();
-            _webView.CoreWebView2.PostWebMessageAsString("sendEnter:");
+            // Identity per request (task f420feeb).
+            var (jobId, ack) = _enterAcks.Register();
 
-            // Increased timeout for reliability under high load (3s instead of 1.5s)
-            var timeout = System.Threading.Tasks.Task.Delay(3000);
-            var completed = await System.Threading.Tasks.Task.WhenAny(_enterAckTcs.Task, timeout);
-
-            // Log TaskCompletionSource timeout explicitly for monitoring
-            if (completed == timeout)
+            try
             {
-                DebugLogService?.Trace("WebViewTerminalRenderer", "⚠️ TaskCompletionSource TIMEOUT after 3000ms - Enter acknowledgment not received");
-                return false;
-            }
+                _webView.CoreWebView2.PostWebMessageAsString("sendEnter:" + jobId);
 
-            var result = _enterAckTcs.Task.Result;
-            DebugLogService?.Trace("WebViewTerminalRenderer", $"TaskCompletionSource completed successfully (result={result})");
-            return result;
+                // Increased timeout for reliability under high load (3s instead of 1.5s)
+                var timeout = System.Threading.Tasks.Task.Delay(3000);
+                var completed = await System.Threading.Tasks.Task.WhenAny(ack, timeout);
+
+                // Log TaskCompletionSource timeout explicitly for monitoring
+                if (completed == timeout)
+                {
+                    DebugLogService?.Trace("WebViewTerminalRenderer", $"⚠️ TaskCompletionSource TIMEOUT after 3000ms - Enter acknowledgment not received (job {jobId})");
+                    return false;
+                }
+
+                // ⚠️ AWAIT THE TASK THIS CALL CREATED. The previous version re-read the shared field
+                // here and called .Result on it, so a concurrent injection that had replaced the field
+                // turned this line into a blocking wait on an incomplete TaskCompletionSource — on the
+                // UI thread. `ack` is a local and cannot be swapped out from under it.
+                bool result = await ack;
+                DebugLogService?.Trace("WebViewTerminalRenderer", $"TaskCompletionSource completed successfully (job {jobId}, result={result})");
+                return result;
+            }
+            finally
+            {
+                // Timed-out and faulted attempts must not accumulate: this runs up to 5 times per
+                // failed injection and the renderer outlives every one of them.
+                _enterAcks.Release(jobId);
+            }
         }
 
         /// <summary>
@@ -960,12 +1016,16 @@ namespace MultiTerminal.Terminal
         /// <summary>
         /// Sends Enter key via xterm.js input path (synchronous, no acknowledgment).
         /// Use SendEnterViaXtermAsync for reliable synchronization.
+        /// <para>Sends the sentinel job id <c>fire-and-forget</c> rather than an empty one (task
+        /// f420feeb). It has no waiter by definition, and the sentinel makes the resulting ack match
+        /// nothing instead of arriving id-less and tripping OnEnterAcknowledged's single-waiter
+        /// shim — which would complete a REAL concurrent injection's wait with this method's ack.</para>
         /// </summary>
         public void SendEnterViaXterm()
         {
             if (_isInitialized && _webView?.CoreWebView2 != null)
             {
-                _webView.CoreWebView2.PostWebMessageAsString("sendEnter:");
+                _webView.CoreWebView2.PostWebMessageAsString("sendEnter:fire-and-forget");
             }
         }
 
@@ -999,6 +1059,13 @@ namespace MultiTerminal.Terminal
             public int X { get; set; }
             public int Y { get; set; }
             public string SelectedText { get; set; }
+
+            /// <summary>
+            /// Job id echoed back on an <c>enterAck</c> (task f420feeb). Carried as a STRING, not a
+            /// number: ParseJsonMessage's number branch reads digits only, so a wrapped (negative)
+            /// counter would parse as garbage. A string round-trips whatever the counter produces.
+            /// </summary>
+            public string EnterJobId { get; set; }
         }
 
         /// <summary>
@@ -1103,6 +1170,7 @@ namespace MultiTerminal.Terminal
                 case "data": msg.Data = value; break;
                 case "title": msg.Title = value; break;
                 case "selectedtext": msg.SelectedText = value; break;
+                case "enterjobid": msg.EnterJobId = value; break;
             }
         }
 

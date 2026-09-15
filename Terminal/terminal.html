@@ -517,6 +517,14 @@
                         case 'sendEnter':
                             // Simulate Enter key by sending CR through the input path
                             // This goes through the same channel as physical keypresses
+                            //
+                            // Format: "sendEnter:jobId" (task f420feeb). The id is OPAQUE here — it is
+                            // minted by the C# caller and echoed back untouched on every ack below, so
+                            // the host can match the reply to the request that sent it. Two injections
+                            // into one terminal overlap routinely (each is an async void handler on the
+                            // UI thread, so every await lets the next one start), and without this id
+                            // the host cannot tell whose Enter was acknowledged.
+                            const enterJobId = data;
 
                             // Capture cursor position BEFORE sending Enter
                             const cursorYBefore = term.buffer.active.cursorY;
@@ -537,14 +545,16 @@
                                 // Success: Cursor moved to a new line OR went back to column 0
                                 // (indicates prompt was submitted and new prompt started)
                                 if (cursorYAfter !== cursorYBefore || cursorXAfter < cursorXBefore) {
-                                    sendToHost({ type: 'enterAck' });
+                                    sendToHost({ type: 'enterAck', enterJobId: enterJobId });
                                     return;
                                 }
 
                                 // Timeout: Enter wasn't processed
                                 if (elapsed >= maxWaitMs) {
                                     console.warn(`[Terminal] Enter key timeout after ${elapsed}ms - cursor didn't move (Y: ${cursorYBefore} -> ${cursorYAfter}, X: ${cursorXBefore} -> ${cursorXAfter})`);
-                                    sendToHost({ type: 'enterAck' }); // Still ack to prevent hang
+                                    // Still ack to prevent hang — and ack the SAME job, so the caller
+                                    // that is actually waiting is the one released.
+                                    sendToHost({ type: 'enterAck', enterJobId: enterJobId });
                                     return;
                                 }
 

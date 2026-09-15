@@ -5224,11 +5224,52 @@ namespace MultiTerminal
             // Type a prompt into the terminal so the agent starts working on the task
             string prompt = $"Pick up kanban task \"{e.Title}\" (ID: {e.TaskId}). Claim it and start working on it using /kanban-task.";
 
-            // Try JS-based injection first, fall back to TypeInput
+            // ⚠️ THE FALLBACK HERE USED TO BE `doc.TypeInput(prompt)`, AND IT HAD NO REACHABLE SUCCESS
+            // CASE (task f420feeb, census F5). The argument does not depend on enumerating the ways an
+            // injection can fail, and deliberately so — the first version of this comment DID rest on
+            // such a list, named one pre-write failure when there are at least two, and read as
+            // exhaustive. A list nobody can prove complete is the wrong shape for this claim.
+            //
+            // The shape that holds regardless: the fallback could only ever HELP in the case where the
+            // text never reached ConPTY, and it could only ever WORK in the case where it would have.
+            // Those two sets do not intersect.
+            //   - Typed characters travel renderer -> OnRendererDataReceived, which discards them
+            //     unless `_terminal != null && _terminal.IsRunning` (TerminalControl.cs:600).
+            //   - A live, running terminal is exactly the condition under which InjectInputAsync's own
+            //     `_terminal.Write(text)` (TerminalControl.cs:379) already delivered the prompt — that
+            //     write happens BEFORE Enter is attempted, so a false return after it leaves the text
+            //     sitting in the composer.
+            // So whenever re-typing could have been needed it was discarded, and whenever it could run
+            // it was not needed and appended a second copy of the prompt to the first.
+            //
+            // ⚠️ WHAT MAKES THOSE SETS DISJOINT, stated because the argument silently depends on it
+            // (peer review). The shape that would break it is a write that FAILS while the terminal is
+            // running — that would put one case in both sets at once. It cannot happen, and not by
+            // luck: `_terminal.Write(text)` at TerminalControl.cs:379 sits OUTSIDE the try that wraps
+            // the rest of InjectSingleInputAsync, and TerminalDocument.InjectInputAsync does not catch
+            // either. So a throwing write PROPAGATES as an exception rather than being converted into
+            // `false`, and this `if (!injected)` block is never reached on that path at all.
+            // A disjointness claim resting on an unstated exception-propagation property is one
+            // refactor away from being wrong — wrap that write in a try that returns false, and the
+            // sets intersect again with nothing here to notice.
+            //
+            // Retry the SUBMIT instead, which is what SendEnterAsync is for ("used to retry Enter
+            // submission when text was already written"). It adds no text, so it cannot duplicate;
+            // if the composer is genuinely empty it submits nothing.
+            //
+            // ⚠️ AND NOTE WHAT THIS CORRECTS: the comment at the OnClaudeCodeDetected site above
+            // states that moving to TypeInput fixed "double-injection when the Enter key failed and
+            // the retry wrote text again". True of THAT site; this one kept the defect the whole
+            // time, three lines from a comment announcing its removal.
             bool injected = await doc.InjectInputAsync(prompt);
             if (!injected)
             {
-                doc.TypeInput(prompt);
+                _debugLogService?.Warning("MainForm", $"Task-drop injection for '{e.TaskId}' reported failure; retrying the Enter only (the prompt may already be in the composer).");
+
+                if (!await doc.SendEnterAsync())
+                {
+                    _debugLogService?.Error("MainForm", $"Task-drop prompt for '{e.TaskId}' could not be submitted to '{agentName}'. It may be sitting unsent in the composer — NOT retyped, because that is what used to submit it twice.");
+                }
             }
         }
 
