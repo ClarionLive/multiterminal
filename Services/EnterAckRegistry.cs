@@ -70,6 +70,15 @@ namespace MultiTerminal.Services
         /// <returns>The job id to send, and the task that completes when its ack arrives.</returns>
         internal (string JobId, Task<bool> Ack) Register()
         {
+            // ⚠️ IDS ARE UNIQUE PER REGISTRY, NOT PROCESS-WIDE — and that is sufficient, because a
+            // registry is never shared. The counter and the waiter table are both INSTANCE state
+            // (nothing in this class is static); WebViewTerminalRenderer holds one registry as an
+            // instance field; and TerminalControl constructs one renderer per terminal. So two
+            // panes injecting at once both mint "7" and it is harmless: each page can only post to
+            // its OWN renderer's WebView2, so an ack is matched inside the single registry that
+            // issued the id. Ids are never compared across terminals and must not start being.
+            // Sharing one registry between renderers WOULD reintroduce exactly the cross-talk this
+            // class removes, one level down and invisible until two panes inject simultaneously.
             string jobId = Interlocked.Increment(ref _counter).ToString(CultureInfo.InvariantCulture);
 
             // RunContinuationsAsynchronously: the completion runs on the WebView2 message callback,

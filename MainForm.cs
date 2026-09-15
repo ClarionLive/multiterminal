@@ -5224,11 +5224,36 @@ namespace MultiTerminal
             // Type a prompt into the terminal so the agent starts working on the task
             string prompt = $"Pick up kanban task \"{e.Title}\" (ID: {e.TaskId}). Claim it and start working on it using /kanban-task.";
 
-            // Try JS-based injection first, fall back to TypeInput
+            // ⚠️ THE FALLBACK HERE USED TO BE `doc.TypeInput(prompt)`, AND IT COULD ONLY EVER MAKE
+            // THINGS WORSE (task f420feeb, census F5). InjectInputAsync writes the text to ConPTY
+            // (TerminalControl.cs:379) and only THEN sends Enter, so every failure it can report
+            // after that point — disposed, null renderer, Enter refused, an exception in the Enter
+            // path — returns false with the prompt ALREADY SITTING IN THE COMPOSER. Re-typing it
+            // appended a second copy to the first.
+            //
+            // And in the one case where false really does mean nothing was written (`_terminal ==
+            // null`, the pre-write guard), the re-type was equally useless: typed characters travel
+            // renderer -> OnRendererDataReceived, which discards them unless `_terminal != null &&
+            // _terminal.IsRunning` (TerminalControl.cs:600). So the fallback was dropped in exactly
+            // the case it existed for, and duplicated the prompt in every case it actually ran.
+            //
+            // Retry the SUBMIT instead, which is what SendEnterAsync is for ("used to retry Enter
+            // submission when text was already written"). It adds no text, so it cannot duplicate;
+            // if the composer is genuinely empty it submits nothing.
+            //
+            // ⚠️ AND NOTE WHAT THIS CORRECTS: the comment at the OnClaudeCodeDetected site above
+            // states that moving to TypeInput fixed "double-injection when the Enter key failed and
+            // the retry wrote text again". True of THAT site; this one kept the defect the whole
+            // time, three lines from a comment announcing its removal.
             bool injected = await doc.InjectInputAsync(prompt);
             if (!injected)
             {
-                doc.TypeInput(prompt);
+                _debugLogService?.Warning("MainForm", $"Task-drop injection for '{e.TaskId}' reported failure; retrying the Enter only (the prompt may already be in the composer).");
+
+                if (!await doc.SendEnterAsync())
+                {
+                    _debugLogService?.Error("MainForm", $"Task-drop prompt for '{e.TaskId}' could not be submitted to '{agentName}'. It may be sitting unsent in the composer — NOT retyped, because that is what used to submit it twice.");
+                }
             }
         }
 

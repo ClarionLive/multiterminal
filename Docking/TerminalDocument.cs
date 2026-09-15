@@ -1969,15 +1969,6 @@ namespace MultiTerminal.Docking
 
         /// <summary>
         /// Injects text input into the terminal as if the user typed it.
-        /// </summary>
-        /// <param name="text">The text to inject.</param>
-        public void InjectInput(string text)
-        {
-            _terminal?.InjectInput(text);
-        }
-
-        /// <summary>
-        /// Injects text input into the terminal as if the user typed it.
         /// Returns a Task<bool> that completes when the Enter key has been sent.
         /// </summary>
         /// <param name="text">The text to inject.</param>

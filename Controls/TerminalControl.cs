@@ -581,12 +581,6 @@ namespace MultiTerminal.Controls
         /// </summary>
         /// <param name="text">The text to inject.</param>
         /// <returns>True for backward compatibility (actual result is discarded).</returns>
-        public bool InjectInput(string text)
-        {
-            _ = InjectInputAsync(text);
-            return true;
-        }
-
         /// <summary>
         /// Sends Ctrl+C to interrupt the current process.
         /// </summary>
