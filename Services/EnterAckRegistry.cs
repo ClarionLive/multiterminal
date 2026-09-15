@@ -44,6 +44,46 @@ namespace MultiTerminal.Services
     /// two overlapping injections then shared one field. That produced cross-talk (B's ack completed
     /// A's wait) and, because the old code re-read the field for <c>.Result</c> after awaiting it, a
     /// blocking wait on an incomplete TaskCompletionSource on the UI thread.</para>
+    ///
+    /// <para><b>⚠️ THREADING — THIS CLASS ASSUMES NOTHING ABOUT ITS CALLERS, AND THAT IS THE POINT.</b>
+    /// Every mutation runs under <c>_gate</c>. Read that as deliberate rather than defensive, because
+    /// the honest position is uncomfortable: <b>the lock is belt-and-braces TODAY and load-bearing the
+    /// moment anyone calls in from a pool thread</b>, and nothing anywhere makes today's situation a
+    /// rule.</para>
+    ///
+    /// <para>Every caller is currently confined to the UI thread. <c>Complete</c> is reached from
+    /// <c>WebViewTerminalRenderer.OnWebMessageReceived</c>, a WebView2 event with UI-thread affinity by
+    /// contract; <c>Register</c> and <c>Release</c> from <c>TrySendEnterViaJsAsync</c>, whose awaits
+    /// resume through <c>WindowsFormsSynchronizationContext</c>. Upstream, every caller of
+    /// <c>InjectInputAsync</c> marshals before reaching it — the six are enumerated in
+    /// <c>InjectionPathCensusTests.Every_caller_of_the_unserialized_injection_path_is_enumerated_here</c>,
+    /// so the trace can be RE-RUN rather than re-derived. The least obvious one: <c>/new-project</c>
+    /// hangs off <c>ClaudeCodeDetected</c>, raised at <c>TerminalControl.cs:946</c> INSIDE
+    /// <c>OnTerminalDataReceived</c>, which marshals at its own top — so even that path starts on the
+    /// UI thread.</para>
+    ///
+    /// <para><b>⚠️ THAT IS TRACED, NOT ENFORCED, AND NOT PROVEN.</b> It is an accident of every caller
+    /// that exists, not a property of this class — there is no attribute, no assert and no test holding
+    /// it. Two of the six were re-checked independently (the broker-driven inject handler, likeliest to
+    /// arrive on an HTTP/pool thread, and the <c>/new-project</c> path); the other four rest on one
+    /// reading. A single future caller reaching this from a <c>Task.Run</c> continuation would make the
+    /// interleaving live with NO compile error, no failing test, and one Enter of cross-talk as the only
+    /// symptom. So: do not delete the lock on the grounds that everything is on the UI thread. That
+    /// sentence is true and is not a guarantee.</para>
+    ///
+    /// <para><b>Why a lock rather than a concurrent collection.</b> This was a
+    /// <c>ConcurrentDictionary</c> and the change reads like a step backwards, so the reason is written
+    /// down: the compatibility branch in <see cref="Complete"/> must decide "is EXACTLY ONE waiter
+    /// outstanding, and if so take it". That needs two operations to be atomic, and a concurrent
+    /// collection offers no primitive for it — the previous code read <c>Count == 1</c> and then
+    /// enumerated-and-removed, which is two steps wearing one. The lock is the fix, not a retreat from
+    /// one.</para>
+    ///
+    /// <para><b>Honest severity of the defect that prompted this</b> (corrected after the fact): the
+    /// non-atomic version was wrong IN THE CODE but unreachable BY ANY CURRENT CALLER, for the
+    /// confinement reason above. Unreachable is not the same as correct, which is why the fix stayed —
+    /// but the first commit describing it said the guarantee was "not held" without that qualifier, and
+    /// overstated it.</para>
     /// </summary>
     internal sealed class EnterAckRegistry
     {
