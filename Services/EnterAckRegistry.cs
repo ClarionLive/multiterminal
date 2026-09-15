@@ -1,6 +1,7 @@
 using System;
-using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -54,11 +55,42 @@ namespace MultiTerminal.Services
         // delivery that the exact lookup behind it then failed to find). Every hop must compare the
         // same way. Nothing on this path trims or case-folds the VALUE: the page takes it with
         // substring, and the host's JSON reader lower-cases property NAMES only.
-        private readonly ConcurrentDictionary<string, TaskCompletionSource<bool>> _waiters = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, TaskCompletionSource<bool>> _waiters = new(StringComparer.Ordinal);
         private int _counter;
 
+        // ⚠️ A PLAIN LOCK, DELIBERATELY, REPLACING A ConcurrentDictionary (peer review of this ticket,
+        // self-reported). The compatibility branch below has to decide "is EXACTLY ONE waiter
+        // outstanding, and if so take it" — and a concurrent collection cannot do that, because the
+        // count and the take are two operations. The previous version read `Count == 1` and then
+        // enumerated-and-removed, so a Register() landing in between completed a waiter while TWO were
+        // outstanding: precisely the "drop rather than guess" guarantee the comment claimed to hold,
+        // not held. Worse, the dictionary enumerates by hash bucket, so the waiter taken could be the
+        // NEWLY ADDED one rather than the one that was there at the check.
+        //
+        // Every operation here is a handful of instructions and happens once per Enter attempt, so
+        // there is nothing to win by being lock-free and a correctness guarantee to lose. Completing a
+        // TaskCompletionSource under the lock is safe BECAUSE Register creates them with
+        // RunContinuationsAsynchronously: a waiter's continuation is scheduled, never run inline, so it
+        // cannot re-enter this class while the lock is held.
+        private readonly object _gate = new();
+
         /// <summary>Waiters currently outstanding. Test/diagnostic surface.</summary>
-        internal int OutstandingCount => _waiters.Count;
+        internal int OutstandingCount
+        {
+            get { lock (_gate) { return _waiters.Count; } }
+        }
+
+        /// <summary>
+        /// The comparer the waiter table actually uses, exposed so a test can pin it STRUCTURALLY
+        /// rather than by scanning this file for the name of a comparer.
+        /// <para>The textual version of that pin was a defect in its own right (found in peer review):
+        /// a source scan for a FORBIDDEN comparer name goes RED when someone writes that name in a
+        /// REFUSAL COMMENT — which is this codebase's house style, and which the comment above very
+        /// nearly does. A false failure is worse here than a false pass: it punishes the documenting
+        /// instinct and pressures the next reader to change correct code to make a test green. Both
+        /// directions were demonstrated before this replaced it.</para>
+        /// </summary>
+        internal IEqualityComparer<string> KeyComparer => _waiters.Comparer;
 
         /// <summary>
         /// Mints a job id and registers a waiter for it.
@@ -79,13 +111,25 @@ namespace MultiTerminal.Services
             // issued the id. Ids are never compared across terminals and must not start being.
             // Sharing one registry between renderers WOULD reintroduce exactly the cross-talk this
             // class removes, one level down and invisible until two panes inject simultaneously.
-            string jobId = Interlocked.Increment(ref _counter).ToString(CultureInfo.InvariantCulture);
-
-            // RunContinuationsAsynchronously: the completion runs on the WebView2 message callback,
-            // and the waiter's continuation should not.
+            // RunContinuationsAsynchronously: the completion runs on the WebView2 message callback, and
+            // the waiter's continuation should not — which is also what makes completing under the lock
+            // safe (see _gate).
             var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _waiters[jobId] = tcs;
-            return (jobId, tcs.Task);
+
+            lock (_gate)
+            {
+                // Counter under the lock too, so the id and the table entry are minted as one step.
+                // ⚠️ KNOWN, UNREACHABLE, AND NOT CODED AGAINST: after 2^31 injections into a single
+                // pane the counter wraps, and the indexer would then OVERWRITE a live waiter rather
+                // than refuse — orphaning it until its own 3s timeout. Noted rather than guarded
+                // because the guard would be dead code at ~2.1 billion Enters in one renderer's
+                // lifetime. Raised by Carol in peer review, who declined to report it as a finding for
+                // that reason and mentioned it only because the doc below reasons about wrap for a
+                // different consequence. Recorded here so the next reader gets the same courtesy.
+                string jobId = (++_counter).ToString(CultureInfo.InvariantCulture);
+                _waiters[jobId] = tcs;
+                return (jobId, tcs.Task);
+            }
         }
 
         /// <summary>
@@ -94,9 +138,11 @@ namespace MultiTerminal.Services
         /// </summary>
         internal void Release(string jobId)
         {
-            if (!string.IsNullOrEmpty(jobId))
+            if (string.IsNullOrEmpty(jobId)) return;
+
+            lock (_gate)
             {
-                _waiters.TryRemove(jobId, out _);
+                _waiters.Remove(jobId);
             }
         }
 
@@ -106,14 +152,21 @@ namespace MultiTerminal.Services
         /// <param name="jobId">Id echoed by the page, or null/empty from a page predating the echo.</param>
         internal EnterAckOutcome Complete(string jobId)
         {
-            if (!string.IsNullOrEmpty(jobId))
+            lock (_gate)
             {
-                // An ack for a job that already timed out is DROPPED. Using it to release some later
-                // caller's wait would be exactly the cross-talk this class exists to remove.
-                return _waiters.TryRemove(jobId, out var waiter) && waiter.TrySetResult(true)
-                    ? EnterAckOutcome.Correlated
-                    : EnterAckOutcome.NoWaiter;
-            }
+                if (!string.IsNullOrEmpty(jobId))
+                {
+                    // An ack for a job that already timed out is DROPPED. Using it to release some
+                    // later caller's wait would be exactly the cross-talk this class exists to remove.
+                    if (_waiters.TryGetValue(jobId, out var waiter))
+                    {
+                        _waiters.Remove(jobId);
+                        waiter.TrySetResult(true);
+                        return EnterAckOutcome.Correlated;
+                    }
+
+                    return EnterAckOutcome.NoWaiter;
+                }
 
             // ── COMPATIBILITY PATH — see the removal condition below ────────────────────────────
             // An ack with no id can only come from a terminal.html predating the echo (a cached
@@ -132,24 +185,19 @@ namespace MultiTerminal.Services
             // AmbiguousDropped) once no deployed build can still be serving a terminal.html without
             // the echo — in practice, one release after the Owner confirms the warning below has
             // stopped appearing in the debug log.
-            if (_waiters.Count == 1)
-            {
-                foreach (var pair in _waiters)
+                // ⚠️ THE COUNT AND THE TAKE ARE ONE STEP, under the lock held since the top of this
+                // method. They used to be two, and that made the guarantee below conditional on
+                // nothing registering in between — see _gate for what that cost.
+                if (_waiters.Count != 1)
                 {
-                    if (_waiters.TryRemove(pair.Key, out var only))
-                    {
-                        only.TrySetResult(true);
-                        return EnterAckOutcome.CompatibilitySingleWaiter;
-                    }
-
-                    break;
+                    return EnterAckOutcome.AmbiguousDropped;
                 }
 
-                // The single waiter was removed by its own timeout between the count and the take.
-                return EnterAckOutcome.NoWaiter;
+                var single = _waiters.First();
+                _waiters.Remove(single.Key);
+                single.Value.TrySetResult(true);
+                return EnterAckOutcome.CompatibilitySingleWaiter;
             }
-
-            return EnterAckOutcome.AmbiguousDropped;
         }
     }
 }

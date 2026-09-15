@@ -56,10 +56,14 @@ namespace MultiTerminal.Tests
             string body = MethodBody("private async void OnTaskDroppedOnTerminal");
 
             Assert.Contains("SendEnterAsync()", body, StringComparison.Ordinal);
-            Assert.DoesNotContain(
-                "TypeInput(prompt)",
-                body,
-                StringComparison.Ordinal);
+
+            // ⚠️ NO TypeInput AT ALL, not "no TypeInput(prompt)" (self-reported in peer review). The
+            // earlier assertion named the local variable, so renaming `prompt` to `taskPrompt` would
+            // have made it vacuous while the defect walked back in — and the falsification I ran
+            // reinstated the call VERBATIM, which is the one edit a name-coupled assertion still
+            // catches. This handler has no business typing anything: it injects, and on failure it
+            // retries the submit.
+            Assert.DoesNotContain("TypeInput", body, StringComparison.Ordinal);
         }
 
         /// <summary>
@@ -77,6 +81,16 @@ namespace MultiTerminal.Tests
         [Fact]
         public void Every_caller_of_the_unserialized_injection_path_is_enumerated_here()
         {
+            // ⚠️ SCANS THE WHOLE TREE, because the NAME of this fact says "every caller" and it used to
+            // read MainForm.cs alone (self-reported in peer review of this ticket). TerminalDocument
+            // .InjectInputAsync is public, so a panel, a dialog or a future service can call it from
+            // any file and would have been neither counted nor enumerated — the fact's own failure
+            // message said "MainForm.cs calls InjectInputAsync…" while its name claimed the path. The
+            // description was wider than the code, which is the defect this ticket keeps finding, in
+            // the test written to enforce this ticket's own census.
+            //
+            // Widened rather than renamed: "every caller in one file" is not the property worth having.
+            var callSites = RepoCallSites();
             string src = Strip(File.ReadAllText(RepoPath("MainForm.cs")));
 
             // The known census, from the f420feeb investigation. Each entry is a live caller of
@@ -91,13 +105,31 @@ namespace MultiTerminal.Tests
                 "OnTaskDroppedOnTerminal",        // drag a card onto a pane
             };
 
-            int actual = Regex.Matches(src, @"InjectInputAsync\s*\(").Count;
+            // The ONE legitimate call outside MainForm: TerminalDocument's passthrough to the control.
+            // It is a delegation, not a caller — every real caller reaches the path through it.
+            const string Passthrough = "Docking/TerminalDocument.cs";
+
+            var callers = callSites
+                .Where(s => !string.Equals(s.File, Passthrough, StringComparison.Ordinal))
+                .ToList();
 
             Assert.True(
-                actual == census.Length,
-                $"MainForm.cs calls InjectInputAsync {actual} time(s); this census lists {census.Length}: {string.Join(", ", census)}.\n" +
+                callSites.Any(s => string.Equals(s.File, Passthrough, StringComparison.Ordinal)),
+                $"{Passthrough} no longer delegates to InjectInputAsync; this census's model of the path is stale.");
+
+            string found = string.Join("\n  ", callers.Select(c => $"{c.File}:{c.Line}"));
+            Assert.True(
+                callers.Count == census.Length,
+                $"The repo has {callers.Count} call(s) of InjectInputAsync outside the {Passthrough} passthrough; this census lists {census.Length}.\n" +
+                $"Listed: {string.Join(", ", census)}\n" +
+                $"Found:\n  {found}\n" +
                 "If you ADDED a caller: you are writing straight to ConPTY, bypassing terminal.html's typing queue, with no ordering against any concurrent typing — see task f420feeb before deciding that is what you want, then add yourself here.\n" +
                 "If you REMOVED one: delete it from this list.");
+
+            Assert.True(
+                callers.All(c => string.Equals(c.File, "MainForm.cs", StringComparison.Ordinal)),
+                "A caller of the unserialized injection path appeared OUTSIDE MainForm.cs:\n  " + found +
+                "\nThat is not forbidden, but this census resolves its named methods against MainForm.cs, so it must be taught about the new home before it can keep its promise.");
 
             // ⚠️ THE NAMES ARE CHECKED, NOT JUST THE COUNT. A matching count with a wrong name is a
             // census that reads authoritative and documents nothing — and this list HAD one: it said
@@ -151,6 +183,43 @@ namespace MultiTerminal.Tests
 
             Assert.True(declaration.Success, $"No declaration of '{name}' found — renamed or removed.");
             return BodyFrom(strippedSrc, declaration.Index, name);
+        }
+
+        /// <summary>
+        /// Every CALL of <c>InjectInputAsync</c> in the production tree, comments stripped.
+        /// <para>Matched on a leading dot (<c>.InjectInputAsync(</c>) so the method's own declarations
+        /// are not counted as calls. Test sources are excluded — a test may legitimately drive the path
+        /// and is not a production caller.</para>
+        /// </summary>
+        private static List<(string File, int Line)> RepoCallSites()
+        {
+            string root = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(ThisFile()) ?? ".", ".."));
+            var sites = new List<(string, int)>();
+
+            foreach (string path in Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories))
+            {
+                string rel = Path.GetRelativePath(root, path).Replace('\\', '/');
+                if (rel.Contains("/obj/", StringComparison.Ordinal)
+                    || rel.Contains("/bin/", StringComparison.Ordinal)
+                    || rel.StartsWith("obj/", StringComparison.Ordinal)
+                    || rel.StartsWith("bin/", StringComparison.Ordinal)
+                    || rel.StartsWith(".claude/", StringComparison.Ordinal)
+                    || rel.StartsWith("MultiTerminal.Tests/", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                string[] lines = Strip(File.ReadAllText(path)).Split('\n');
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    if (Regex.IsMatch(lines[i], @"\.InjectInputAsync\s*\("))
+                    {
+                        sites.Add((rel, i + 1));
+                    }
+                }
+            }
+
+            return sites;
         }
 
         private static string MethodBody(string signature, params string[] file)

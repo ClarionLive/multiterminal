@@ -5224,18 +5224,23 @@ namespace MultiTerminal
             // Type a prompt into the terminal so the agent starts working on the task
             string prompt = $"Pick up kanban task \"{e.Title}\" (ID: {e.TaskId}). Claim it and start working on it using /kanban-task.";
 
-            // ⚠️ THE FALLBACK HERE USED TO BE `doc.TypeInput(prompt)`, AND IT COULD ONLY EVER MAKE
-            // THINGS WORSE (task f420feeb, census F5). InjectInputAsync writes the text to ConPTY
-            // (TerminalControl.cs:379) and only THEN sends Enter, so every failure it can report
-            // after that point — disposed, null renderer, Enter refused, an exception in the Enter
-            // path — returns false with the prompt ALREADY SITTING IN THE COMPOSER. Re-typing it
-            // appended a second copy to the first.
+            // ⚠️ THE FALLBACK HERE USED TO BE `doc.TypeInput(prompt)`, AND IT HAD NO REACHABLE SUCCESS
+            // CASE (task f420feeb, census F5). The argument does not depend on enumerating the ways an
+            // injection can fail, and deliberately so — the first version of this comment DID rest on
+            // such a list, named one pre-write failure when there are at least two, and read as
+            // exhaustive. A list nobody can prove complete is the wrong shape for this claim.
             //
-            // And in the one case where false really does mean nothing was written (`_terminal ==
-            // null`, the pre-write guard), the re-type was equally useless: typed characters travel
-            // renderer -> OnRendererDataReceived, which discards them unless `_terminal != null &&
-            // _terminal.IsRunning` (TerminalControl.cs:600). So the fallback was dropped in exactly
-            // the case it existed for, and duplicated the prompt in every case it actually ran.
+            // The shape that holds regardless: the fallback could only ever HELP in the case where the
+            // text never reached ConPTY, and it could only ever WORK in the case where it would have.
+            // Those two sets do not intersect.
+            //   - Typed characters travel renderer -> OnRendererDataReceived, which discards them
+            //     unless `_terminal != null && _terminal.IsRunning` (TerminalControl.cs:600).
+            //   - A live, running terminal is exactly the condition under which InjectInputAsync's own
+            //     `_terminal.Write(text)` (TerminalControl.cs:379) already delivered the prompt — that
+            //     write happens BEFORE Enter is attempted, so a false return after it leaves the text
+            //     sitting in the composer.
+            // So whenever re-typing could have been needed it was discarded, and whenever it could run
+            // it was not needed and appended a second copy of the prompt to the first.
             //
             // Retry the SUBMIT instead, which is what SendEnterAsync is for ("used to retry Enter
             // submission when text was already written"). It adds no text, so it cannot duplicate;

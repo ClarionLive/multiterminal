@@ -1,6 +1,8 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using MultiTerminal.Services;
 using Xunit;
@@ -163,22 +165,82 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
-        /// Pins the comparer in source, because no behavioural test in this class can: the ids are
-        /// digits and therefore caseless, so a loosened comparer changes nothing observable TODAY.
-        /// It would matter the moment the id becomes anything else — a Guid, a name, a composite —
-        /// and at that point the loosening would already be in place and invisible.
-        /// <para>This is the one guard that actually fails on the swap, so it is doing the work the
-        /// fact above was mistakenly credited with.</para>
+        /// Pins the comparer the waiter table ACTUALLY USES, by asking it — no source scan.
+        ///
+        /// <para>⚠️ THIS REPLACED A TEXTUAL PIN THAT WAS A DEFECT IN ITS OWN RIGHT (peer review, this
+        /// ticket). That version read <c>EnterAckRegistry.cs</c> and asserted the file did not contain
+        /// "OrdinalIgnoreCase". A source scan for a FORBIDDEN name has a failure direction that a scan
+        /// for a required one does not: writing the wrong answer's name in a REFUSAL COMMENT turns the
+        /// test RED against completely correct code. This codebase writes exactly those comments — the
+        /// registry's own comment about permissive comparisons comes within a word of it — so the test
+        /// punished the documenting instinct, and the natural response to a red test is to change the
+        /// CODE. A false pass costs a defect; a false failure costs the documentation and points the
+        /// next reader at the wrong fix.</para>
+        ///
+        /// <para>Asserted behaviourally rather than by identity (<c>Assert.Same(StringComparer.Ordinal, …)</c>)
+        /// so that any correctly case-sensitive, non-trimming comparer passes. What matters is what the
+        /// table does, not which static it was handed.</para>
+        ///
+        /// <para>No behavioural fact in this class can reach this: minted ids are digits and therefore
+        /// caseless, so a loosened comparer changes nothing observable today. It becomes live the moment
+        /// the id is a Guid, a name or a composite — by which time the loosening is already in place.</para>
         /// </summary>
         [Fact]
-        public void The_waiter_lookup_is_pinned_to_an_ordinal_comparer()
+        public void The_waiter_table_compares_keys_exactly()
         {
-            string src = File.ReadAllText(RepoPath("Services", "EnterAckRegistry.cs"));
+            var comparer = new EnterAckRegistry().KeyComparer;
 
-            Assert.Contains("new(StringComparer.Ordinal)", src, StringComparison.Ordinal);
-            Assert.DoesNotContain("StringComparer.OrdinalIgnoreCase", src, StringComparison.Ordinal);
-            Assert.DoesNotContain("StringComparer.InvariantCultureIgnoreCase", src, StringComparison.Ordinal);
-            Assert.DoesNotContain("StringComparer.CurrentCultureIgnoreCase", src, StringComparison.Ordinal);
+            Assert.True(comparer.Equals("7", "7"));
+            Assert.False(comparer.Equals("a", "A"));
+            Assert.False(comparer.Equals("7 ", "7"));
+            Assert.False(comparer.Equals(" 7", "7"));
+        }
+
+        /// <summary>
+        /// ⚠️ THE COMPATIBILITY PATH MUST BE AUDIBLE, and nothing asserted that it was (peer review,
+        /// this ticket). The enum value was pinned; the log that gives it its purpose was not, so
+        /// downgrading the call to Trace — or deleting the case body outright — left the whole suite
+        /// green.
+        ///
+        /// <para>That log is the ONLY runtime signal distinguishing "a cached page is being tolerated"
+        /// from "the id echo is broken and nothing is correlated at all". Both look identical from
+        /// outside: Enters complete promptly either way. Without it the shim can silently carry the
+        /// entire feature, which is the exact failure the shim was reviewed for in the first place.</para>
+        ///
+        /// <para>A source census because <c>WebViewTerminalRenderer</c> is a WebView2-hosting
+        /// <c>UserControl</c> and cannot be instantiated here. Comments stripped: the handler's own doc
+        /// explains at length why it logs at Warning, so an unstripped scan would pass on the
+        /// explanation rather than the call.</para>
+        /// </summary>
+        [Fact]
+        public void The_renderer_logs_a_warning_when_the_compatibility_path_fires()
+        {
+            string src = StripComments(File.ReadAllText(RepoPath("Terminal", "WebViewTerminalRenderer.cs")));
+
+            foreach (string outcome in new[] { "CompatibilitySingleWaiter", "AmbiguousDropped" })
+            {
+                int label = src.IndexOf("case EnterAckOutcome." + outcome + ":", StringComparison.Ordinal);
+                Assert.True(label >= 0, $"The {outcome} case is gone from the ack handler.");
+
+                int next = src.IndexOf("case ", label + 10, StringComparison.Ordinal);
+                string arm = next > label ? src[label..next] : src[label..];
+
+                Assert.True(
+                    arm.Contains("Warning(", StringComparison.Ordinal),
+                    $"The {outcome} arm no longer logs at Warning. That log is the only runtime signal "
+                    + "separating a tolerated stale page from a broken id echo — without it the "
+                    + "compatibility path can carry the whole feature silently, which is what it was "
+                    + "reviewed for.");
+            }
+        }
+
+        /// <summary>Block and line comments removed, so a census cannot be satisfied by prose.</summary>
+        private static string StripComments(string src)
+        {
+            string noBlocks = Regex.Replace(src, @"/\*.*?\*/", " ", RegexOptions.Singleline);
+            return string.Join(
+                "\n",
+                noBlocks.Split('\n').Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
         }
 
         /// <summary>
