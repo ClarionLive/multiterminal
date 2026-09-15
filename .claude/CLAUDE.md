@@ -20,10 +20,10 @@ A multi-agent coordination system for Claude Code. WinForms desktop app (C#/.NET
 ## Architecture
 
 ```
-MainForm.cs (5.2K LOC) - UI Host, 11 WebView2 panels
+MainForm.cs (8.4K LOC) - UI Host, 11 WebView2 panels
   REST API (port 5050) - 24 controllers in API/Controllers/
-  MessageBroker.cs (5.5K LOC) - Central hub, routes messages, fires events
-  SQLite (TaskDatabase.cs 4.6K LOC) - 21+ tables: tasks, sessions, knowledge, profiles
+  MessageBroker.cs (8.0K LOC) - Central hub, routes messages, fires events
+  SQLite (TaskDatabase.cs 7.3K LOC) - 21+ tables: tasks, sessions, knowledge, profiles
   CodeGraph (Roslyn) - CodeGraphDatabase + CSharpCodeGraphIndexer, cg_ tables in same SQLite
   MCP Server (Node.js) - 92 tools at %APPDATA%/multiterminal/mcp
 ```
@@ -46,12 +46,19 @@ Present-but-unparseable or clamped values are logged (`DebugLogService` "CodeGra
 
 | File | LOC | Role |
 |------|-----|------|
-| `MCPServer/Services/MessageBroker.cs` | 5,512 | Central hub. Routes messages, caches tasks/terminals/profiles, fires events. |
-| `Services/TaskDatabase.cs` | 4,621 | SQLite CRUD for 21+ tables. |
-| `MainForm.cs` | 5,162 | UI host. Creates/docks panels, wires events. |
-| `MCPServer/Models/KanbanTask.cs` | 476 | Core task model with status, checklist, plan, continuation notes. |
-| `Services/CSharpCodeGraphIndexer.cs` | 380 | Roslyn-based 2-pass C# code indexer (symbols + relationships). |
-| `Services/CodeGraphDatabase.cs` | 250 | SQLite CRUD for code graph (cg_symbols, cg_relationships, cg_projects). |
+| `MCPServer/Services/MessageBroker.cs` | 7,963 | Central hub. Routes messages, caches tasks/terminals/profiles, fires events. |
+| `Services/TaskDatabase.cs` | 7,282 | SQLite CRUD for 21+ tables. |
+| `MainForm.cs` | 8,440 | UI host. Creates/docks panels, wires events. |
+| `MCPServer/Models/KanbanTask.cs` | 634 | Core task model with status, checklist, plan, continuation notes. |
+| `Services/CSharpCodeGraphIndexer.cs` | 857 | Roslyn-based 2-pass C# code indexer (symbols + relationships). |
+| `Services/CodeGraphDatabase.cs` | 414 | SQLite CRUD for code graph (cg_symbols, cg_relationships, cg_projects). |
+
+> **LOC measured 2026-09-15 (`wc -l`).** Re-measure before quoting these anywhere; do not copy a figure
+> from here into a code comment. Every one of them was wrong when last checked — by 33% to 126%, with
+> MainForm listed as 5,162 against an actual 8,440 — and the stale figures had been repeated verbatim
+> into source comments, which is how task 7806024f ended up correcting the same false "5.2K LOC" claim
+> in three files. A precise-looking number nobody re-measures is worse than "large": the precision is
+> what stops the next reader checking.
 
 ## Key Patterns
 
