@@ -2133,6 +2133,11 @@ namespace MultiTerminal
             const int fallbackMs = 120_000;
             string oneLine = System.Text.RegularExpressions.Regex.Replace(initialPrompt, @"\r\n?|\n", " ").Trim();
             int delivered = 0;
+
+            // When the wait for this helper started. The renderer-readiness gate below spends the
+            // REMAINDER of this same budget rather than a second, independent constant — see the
+            // comment at that gate for why a fixed 5s was wrong (task 7806024f, pipeline Run 2).
+            DateTime queuedAt = DateTime.UtcNow;
             EventHandler<Dictionary<string, object>> onNotification = null;
             EventHandler<TerminalInfo> onRegistered = null;
 
@@ -2175,14 +2180,53 @@ namespace MultiTerminal
                             // always up long before delivery. At ~5s it races WebView2 init, and a
                             // loss here is PERMANENT: the guard above has already disarmed the
                             // question trigger and the give-up timer.
-                            if (!await WaitForRendererReadyAsync(doc, 5000))
+                            //
+                            // ⚠️ THE TIMEOUT IS THE REMAINING GIVE-UP BUDGET, NOT A FIXED 5s (Run 2,
+                            // debugger MEDIUM). A fixed 5s was a SECOND deadline layered under the
+                            // 120s one, and because the guard is already taken, blowing it abandoned
+                            // the job for good — reporting spawn_failed with ~115s of the real budget
+                            // untouched. Worst case is the `alreadyLive` branch below, which calls
+                            // Deliver SYNCHRONOUSLY during the spawn: the WebView2 it waits on is
+                            // milliseconds old, and a cold EnsureCoreWebView2Async + navigate + xterm
+                            // load regularly exceeds 5s. So this gate would have manufactured spawn
+                            // failures that the defect it fixes never caused.
+                            // Floor of 5s so a trigger arriving near the deadline still gets a fair
+                            // chance; total wait stays bounded by fallbackMs from queue time.
+                            int readinessBudgetMs = Math.Max(
+                                5_000,
+                                fallbackMs - (int)Math.Min(fallbackMs, (DateTime.UtcNow - queuedAt).TotalMilliseconds));
+
+                            // Do not START a wait into a form that is already going away: the
+                            // continuation would resume through WindowsFormsSynchronizationContext
+                            // onto a destroyed handle (Run 2, debugger LOW).
+                            // ⚠️ RESIDUAL, STATED RATHER THAN PAPERED OVER: this narrows the window,
+                            // it does not close it — MT can still shut down DURING the wait, and that
+                            // post throws inside the awaiter where this method cannot catch it. The
+                            // shape is identical to the ratified precedent at the message-injection
+                            // site (same helper, same await, also on the UI thread), so it is left
+                            // consistent with that rather than restructured on this ticket. Closing
+                            // it properly means ConfigureAwait(false) plus an explicit disposal-
+                            // tolerant marshal back, which is a change to make deliberately and
+                            // measure — not as a third-cycle add-on to an unrelated fix.
+                            if (IsDisposed || !IsHandleCreated)
                             {
-                                ReportUndelivered($"the terminal's renderer was still not ready 5s after the helper came alive (trigger: {trigger}); nothing was typed");
+                                ReportUndelivered($"the main window was closing before the renderer wait could start (trigger: {trigger})");
                                 return;
                             }
 
-                            // Re-resolve after the await: the pane can be closed while we wait.
-                            if (IsDisposed || !_gridManager.GetTerminalDocuments().Any(t => t.DocId == docId))
+                            if (!await WaitForRendererReadyAsync(doc, readinessBudgetMs))
+                            {
+                                ReportUndelivered($"the terminal's renderer never became ready within {readinessBudgetMs / 1000}s (trigger: {trigger}); nothing was typed");
+                                return;
+                            }
+
+                            // RE-RESOLVE — and it really is a re-resolve now. The previous version
+                            // only tested that SOME document still carried this DocId and then typed
+                            // through the reference captured before the await, so a pane re-created
+                            // during the wait would have been typed into after disposal (Run 2,
+                            // code-reviewer + debugger, independently).
+                            doc = _gridManager.GetTerminalDocuments().FirstOrDefault(t => t.DocId == docId);
+                            if (IsDisposed || doc == null)
                             {
                                 ReportUndelivered($"terminal {docId} went away while waiting for its renderer (trigger: {trigger})");
                                 return;
@@ -2304,9 +2348,12 @@ namespace MultiTerminal
             // THE NORMAL PATH FOR A SPAWNED HELPER (task 7806024f). The question trigger above was built
             // around the /session-start menu, which a spawned helper never shows — its SessionStart hook
             // short-circuits on MULTITERMINAL_SPAWNER — so that trigger never fires and delivery used to
-            // fall through to the 120s timer EVERY time. Measured: spawn 09:05:18, alive at 09:05:23, job
-            // delivered 09:07:18. The channel port is the signal the fallback was already using to decide
-            // the helper was alive; this just stops waiting two minutes to ask the question.
+            // fall through to the 120s timer EVERY time. The channel port is the signal the fallback was
+            // already using to decide the helper was alive; this just stops waiting two minutes to ask the
+            // question. (Measurements deliberately NOT repeated here — HelperReadinessTrigger's class doc
+            // holds them, and the header above promises that is the only copy. Run 1 flagged this exact
+            // narrative being triplicated; Run 2 caught the promise itself being false because this block
+            // still carried a second copy.)
             onRegistered = (_, row) =>
             {
                 if (row != null

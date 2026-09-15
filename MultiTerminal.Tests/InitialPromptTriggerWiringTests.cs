@@ -9,7 +9,15 @@ namespace MultiTerminal.Tests
 {
     /// <summary>
     /// Pins the wiring of the spawned-helper readiness trigger inside
-    /// <c>MainForm.QueueInitialPromptDelivery</c> (task 7806024f).
+    /// <c>MainForm.QueueInitialPromptDelivery</c> (task 7806024f), plus one cross-file fact about
+    /// <c>Terminal/terminal.html</c>'s typing queue — the delivery path ends in that file, and a fact
+    /// about it is meaningless anywhere else. Precedent: <c>BoardHudDoorwayTests</c> likewise binds a
+    /// C#-named census class to a panel's HTML. Cohesion by defect, not by file.
+    ///
+    /// <para>⚠️ SCOPE OF THE QUEUE FACT, because the obvious reading is too generous: it observes the
+    /// <c>typeInput</c>/xterm path ONLY. <c>TerminalControl.InjectInputAsync</c> writes STRAIGHT to
+    /// ConPTY and never reaches the queue, so no assertion here can see that path and none should be
+    /// read as covering it. Unifying the two injection mechanisms is its own ticket.</para>
     ///
     /// <para><b>Why a source census.</b> <c>QueueInitialPromptDelivery</c> is private in an 8K+ LOC
     /// WinForms file that cannot be instantiated in a test. The DECISION it makes was extracted into
@@ -213,9 +221,7 @@ namespace MultiTerminal.Tests
             string handlerBody = nextCase > handler ? src[handler..nextCase] : src[handler..];
 
             Assert.Contains("enqueueTypeInput(", handlerBody, StringComparison.Ordinal);
-            Assert.DoesNotContain(
-                "typeNextChar()",
-                handlerBody);
+            Assert.DoesNotContain("typeNextChar()", handlerBody, StringComparison.Ordinal);
 
             // The next job may start ONLY from the previous one's completion. A drainTypeQueue call that
             // exists solely in enqueueTypeInput would let a second message run concurrently again.

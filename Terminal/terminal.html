@@ -412,14 +412,29 @@
             typeInFlight = true;
             let charIndex = 0;
             const typeNextChar = () => {
-                if (charIndex < job.decoded.length) {
-                    sendToHost({ type: 'input', data: btoa(job.decoded[charIndex]) });
-                    charIndex++;
-                    setTimeout(typeNextChar, job.charDelay);
-                } else {
-                    // This job's last character — including its trailing CR — has been sent.
-                    // Only now does the next job start. One charDelay has already elapsed since
-                    // that final character, so successive jobs keep the same inter-key spacing.
+                // The try/catch is the UNWEDGE PATH, and it is deliberate belt-and-braces.
+                // Run 2's debugger enumerated the throw sources and found none reachable today:
+                // sendToHost is feature-guarded, btoa only ever sees atob output (all code points
+                // <= 255), and a zero-length payload throws in the handler before it is ever
+                // queued. The code-reviewer still wanted the guard, and that call was taken,
+                // because the cost of being wrong is asymmetric: an escaping throw would leave
+                // typeInFlight true forever and every later keystroke in this pane would queue
+                // and silently never be typed. A per-message failure is recoverable; a permanently
+                // wedged pane is the exact silent-failure class this ticket exists to remove.
+                try {
+                    if (charIndex < job.decoded.length) {
+                        sendToHost({ type: 'input', data: btoa(job.decoded[charIndex]) });
+                        charIndex++;
+                        setTimeout(typeNextChar, job.charDelay);
+                    } else {
+                        // This job's last character — including its trailing CR — has been sent.
+                        // Only now does the next job start. One charDelay has already elapsed since
+                        // that final character, so successive jobs keep the same inter-key spacing.
+                        drainTypeQueue();
+                    }
+                } catch (e) {
+                    // Drop THIS job, not every future one, and make the loss loud rather than silent.
+                    sendToHost({ type: 'log', level: 'error', message: 'typeInput job aborted: ' + e });
                     drainTypeQueue();
                 }
             };
