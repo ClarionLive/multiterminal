@@ -232,6 +232,30 @@ precisely the case the prose claimed to cover.**
 Reading the assertions, they look exhaustive. The gap surfaced only by *running candidates against
 them*. When a pin claims to cover a class of wrong answers, supply a wrong answer and watch it fail.
 
+> **A pin constrains what it pins, not what you said it pins.**
+
+## Check whether your instrument changes what it measures
+
+Three times in one day, the obvious way to observe something would have altered it — and two of the
+three would have failed *convincingly* rather than obviously:
+
+| Question | Obvious instrument | Why it lies |
+|---|---|---|
+| Does a channel message arrive with untrusted-data framing? | read the recipient's transcript | the CLI **strips** framing on persist — the transcript of a message known to have arrived framed records it as unframed |
+| Is that agent still alive? | call `list_terminals` | "last active" tracks tool calls, so **the check itself refreshes the timestamp** it is checking |
+| Where does a synthetic `SendInput` keystroke land? | bring a window forward and watch | `SendInput` targets the **foreground-focus** window, so observing it **moves the focus that determines the answer** |
+
+The first was caught only by controlling against a transcript of a message *known* to have arrived
+framed. The second was caught by arithmetic on timestamps already in hand, because running the
+confirming call would have destroyed the evidence. The third has not been attempted yet, and is the
+worst of the three: **a focus-stealing instrument fails silently and plausibly** — it returns a
+clean, confident, wrong answer.
+
+**Before measuring, ask what your instrument touches.** Anything the harness adds at request time,
+anything whose value is "when did this last happen", and anything that depends on focus, ordering or
+timing, is a candidate. When the answer looks instantly confirmatory, that is exactly when to test
+whether the instrument can lie — point it at a case whose answer you already know.
+
 ## Review: the author and the reviewer find disjoint sets
 
 Measured on this program. An author self-reported four defects in his own work immediately before
