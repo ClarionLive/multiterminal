@@ -433,7 +433,11 @@
                         drainTypeQueue();
                     }
                 } catch (e) {
-                    // Drop THIS job, not every future one, and make the loss loud rather than silent.
+                    // Drop THIS job and keep the pane usable, rather than wedging every future one.
+                    // ⚠️ NOT a clean abort: characters already sent are sitting in the composer with
+                    // no trailing CR, so the next job types onto that same line. This trades a
+                    // permanently dead pane for one corrupted line — deliberately, because the pane
+                    // can be recovered by the human and a wedge cannot.
                     sendToHost({ type: 'log', level: 'error', message: 'typeInput job aborted: ' + e });
                     drainTypeQueue();
                 }

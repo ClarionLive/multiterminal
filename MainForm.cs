@@ -2134,10 +2134,14 @@ namespace MultiTerminal
             string oneLine = System.Text.RegularExpressions.Regex.Replace(initialPrompt, @"\r\n?|\n", " ").Trim();
             int delivered = 0;
 
-            // When the wait for this helper started. The renderer-readiness gate below spends the
+            // How long this helper has been waited on. The renderer-readiness gate below spends the
             // REMAINDER of this same budget rather than a second, independent constant — see the
             // comment at that gate for why a fixed 5s was wrong (task 7806024f, pipeline Run 2).
-            DateTime queuedAt = DateTime.UtcNow;
+            // Stopwatch, NOT DateTime.UtcNow: the latter is wall-clock, so a backwards NTP step
+            // during the wait yields a NEGATIVE elapsed and inflates the budget instead of shrinking
+            // it — a one-hour correction would buy a ~62-minute readiness wait. Stopwatch is
+            // monotonic and cannot do that (Run 2 delta re-review, debugger LOW).
+            var sinceQueued = System.Diagnostics.Stopwatch.StartNew();
             EventHandler<Dictionary<string, object>> onNotification = null;
             EventHandler<TerminalInfo> onRegistered = null;
 
@@ -2194,7 +2198,7 @@ namespace MultiTerminal
                             // chance; total wait stays bounded by fallbackMs from queue time.
                             int readinessBudgetMs = Math.Max(
                                 5_000,
-                                fallbackMs - (int)Math.Min(fallbackMs, (DateTime.UtcNow - queuedAt).TotalMilliseconds));
+                                fallbackMs - (int)Math.Min(fallbackMs, sinceQueued.Elapsed.TotalMilliseconds));
 
                             // Do not START a wait into a form that is already going away: the
                             // continuation would resume through WindowsFormsSynchronizationContext
@@ -2220,11 +2224,17 @@ namespace MultiTerminal
                                 return;
                             }
 
-                            // RE-RESOLVE — and it really is a re-resolve now. The previous version
-                            // only tested that SOME document still carried this DocId and then typed
-                            // through the reference captured before the await, so a pane re-created
-                            // during the wait would have been typed into after disposal (Run 2,
-                            // code-reviewer + debugger, independently).
+                            // Re-bind rather than merely test-and-reuse, so the reference typed into
+                            // is the one just proven to exist.
+                            // ⚠️ HONEST SCOPE: this is defensive, NOT a bug fix. The earlier version
+                            // tested `Any(t => t.DocId == docId)` and then typed through the
+                            // pre-await reference, which sounds like a stale-instance hazard — but
+                            // TerminalDocument._docId is Guid.NewGuid() per instance, so a
+                            // re-created pane can never carry the old DocId and that test could only
+                            // ever have matched the SAME instance. Behaviourally neutral. Said plainly
+                            // because the first version of this comment claimed a fix it did not make,
+                            // which is the third time on this ticket a comment outran its code
+                            // (Run 2 delta re-review, debugger LOW).
                             doc = _gridManager.GetTerminalDocuments().FirstOrDefault(t => t.DocId == docId);
                             if (IsDisposed || doc == null)
                             {
