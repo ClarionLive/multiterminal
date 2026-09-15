@@ -2117,7 +2117,11 @@ namespace MultiTerminal
         /// are collapsed to spaces — the prompt arrives as one line, which is the "one prompt"
         /// the contract promises.</para>
         ///
-        /// <para>FALLBACK — the NORMAL path for a spawned helper (see above), not the exception.
+        /// <para>FALLBACK — the LAST RESORT, and no longer the normal path. This sentence used to
+        /// say the opposite, and was correct when task 77d1182f wrote it: every spawned helper's job
+        /// really did land here. Task 7806024f moved delivery onto the registration trigger above
+        /// (measured 4.9s), so reaching this timer now means the helper took over two minutes to
+        /// register a channel port — which is a fault, not the norm. Kept as the give-up bound.
         /// The prompt is typed ONLY if the helper is demonstrably alive: its broker row carries a
         /// channel port, meaning the plugin loaded and its real registration landed.
         /// Otherwise the helper never booted — no claude, no plugin, no channel — and typing into
