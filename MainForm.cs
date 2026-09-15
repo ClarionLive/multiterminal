@@ -2199,7 +2199,14 @@ namespace MultiTerminal
                             // load regularly exceeds 5s. So this gate would have manufactured spawn
                             // failures that the defect it fixes never caused.
                             // Floor of 5s so a trigger arriving near the deadline still gets a fair
-                            // chance; total wait stays bounded by fallbackMs from queue time.
+                            // chance. ⚠️ The floor DELIBERATELY BREAKS the fallbackMs bound, so do not
+                            // read it as preserved: the wait ends at fallbackMs from queue time only
+                            // while elapsed < 115s, and at elapsed + 5s otherwise. The fallback timer
+                            // fires AT fallbackMs and therefore takes the floor every time — that path
+                            // always runs to ~125s, never 120s. Five seconds of overrun buys a real
+                            // delivery attempt on a helper that only just registered; refusing it to
+                            // keep a tidy bound would abandon the job at the exact moment it became
+                            // deliverable, which is the failure this ticket exists to remove.
                             int readinessBudgetMs = Math.Max(
                                 5_000,
                                 fallbackMs - (int)Math.Min(fallbackMs, sinceQueued.Elapsed.TotalMilliseconds));
