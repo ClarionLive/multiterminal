@@ -39,6 +39,27 @@ evidence **only if you also know it could not have gone green by accident**. The
 until convinced — it was to force the broken implementation to be wrong in at least one direction
 *whichever way the buckets fall*.
 
+### A falsification that passes may mean your edit was too small
+
+When you break the code and the test **stays green**, there are two explanations and they look
+identical:
+
+1. the guard is broken — the finding you were chasing is real; or
+2. **you did not actually break the thing.**
+
+A census over a tool description was being re-falsified by deleting the sentence that announced a
+feature. The test passed. It passed *correctly* — a second clause elsewhere in the same block still
+contained the literal being searched for, so the property had not been removed at all. Recorded as
+"the guard is broken", that would have been a false finding; recorded as "the fix works", a false
+clearance. Either way the run proved nothing.
+
+It was caught because the **occurrence count did not match what was expected**, not because the
+result looked wrong. The result looked exactly right.
+
+**So: before believing a falsification, confirm your edit removed the property.** Count the
+occurrences, or assert the broken state directly. And run both directions against the *same* file
+state, so "green before / red after" is a comparison rather than two anecdotes.
+
 ### A test that hangs is worse than one that fails
 
 Awaiting the task you expect, under a broken registry, **hangs the suite**. Checking `IsCompleted`
