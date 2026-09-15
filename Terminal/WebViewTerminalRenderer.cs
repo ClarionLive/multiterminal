@@ -77,8 +77,24 @@ namespace MultiTerminal.Terminal
         private volatile bool _writeScheduled;
         private readonly object _writeLock = new object();
 
-        // TaskCompletionSource for Enter key acknowledgment synchronization
-        private System.Threading.Tasks.TaskCompletionSource<bool> _enterAckTcs;
+        // Enter-key acknowledgment synchronization, keyed by job id (task f420feeb, census F2).
+        //
+        // ⚠️ THIS WAS A SINGLE FIELD, AND A SINGLE FIELD CANNOT BE CORRECT HERE. Every caller of
+        // InjectInputAsync is an `async void` handler on the UI thread, so each await inside an
+        // injection pumps the message loop and lets the NEXT click / task-drop / broker event start
+        // its own injection into the same terminal. With one shared TaskCompletionSource that gave
+        // two distinct failures:
+        //   1. CROSS-TALK — the ack for caller B's Enter completed caller A's wait. The two are
+        //      indistinguishable, so A concluded its Enter had been processed when B's had.
+        //   2. A UI-THREAD HANG — the old code awaited WhenAny on the field, then re-read the FIELD
+        //      for `.Result`. If B replaced it in between, A called .Result on an INCOMPLETE
+        //      TaskCompletionSource and blocked the UI thread on a reply for a request that no
+        //      longer existed. Every other finding in the f420feeb census garbles text; that one
+        //      freezes the app, which is why it was fixed first.
+        // The dictionary gives each request its own waiter and its own identity; TrySendEnterViaJsAsync
+        // awaits the TCS IT CREATED and never reads this collection back to get its own result.
+        private readonly ConcurrentDictionary<string, System.Threading.Tasks.TaskCompletionSource<bool>> _enterAckWaiters = new();
+        private int _enterJobCounter;
 
         // Output change tracking for Enter key retry mechanism
         private DateTime _lastOutputTime = DateTime.MinValue;
@@ -349,8 +365,8 @@ namespace MultiTerminal.Terminal
                         break;
 
                     case "enterAck":
-                        // Complete the TaskCompletionSource to signal Enter was processed
-                        _enterAckTcs?.TrySetResult(true);
+                        // Complete ONLY the waiter that asked for this Enter (task f420feeb).
+                        OnEnterAcknowledged(message.EnterJobId);
                         break;
                 }
             }
@@ -887,29 +903,97 @@ namespace MultiTerminal.Terminal
         }
 
         /// <summary>
+        /// Completes the waiter for one acknowledged Enter, identified by the job id the JS side
+        /// echoes back. An ack whose job has already timed out finds no waiter and is DROPPED — that
+        /// attempt was abandoned, and using it to complete some later caller's wait would be exactly
+        /// the cross-talk this identity exists to prevent.
+        /// </summary>
+        /// <param name="jobId">Job id carried by the ack; null/empty only from a page predating it.</param>
+        private void OnEnterAcknowledged(string jobId)
+        {
+            if (!string.IsNullOrEmpty(jobId))
+            {
+                if (_enterAckWaiters.TryRemove(jobId, out var waiter))
+                {
+                    waiter.TrySetResult(true);
+                }
+                else
+                {
+                    DebugLogService?.Trace("WebViewTerminalRenderer", $"enterAck for job {jobId} has no waiter (already timed out) — dropped");
+                }
+
+                return;
+            }
+
+            // TRANSITION SHIM, not a design. An ack with no id can only come from a terminal.html
+            // predating this change (a cached page); the shipped pair always carries one. Completing
+            // the wait when EXACTLY ONE is outstanding restores the old behaviour for the only case
+            // in which the old behaviour was unambiguous. With two or more, drop rather than guess:
+            // picking one is precisely the cross-talk bug. Dropping costs a 3s timeout; guessing
+            // costs a false "Enter processed" recorded as a successful delivery.
+            if (_enterAckWaiters.Count == 1)
+            {
+                foreach (var pair in _enterAckWaiters)
+                {
+                    if (_enterAckWaiters.TryRemove(pair.Key, out var only))
+                    {
+                        DebugLogService?.Trace("WebViewTerminalRenderer", "enterAck carried no job id — completing the single outstanding waiter (stale terminal.html?)");
+                        only.TrySetResult(true);
+                    }
+
+                    break;
+                }
+
+                return;
+            }
+
+            DebugLogService?.Warning("WebViewTerminalRenderer", $"enterAck carried no job id and {_enterAckWaiters.Count} waiters are outstanding — dropped rather than guess");
+        }
+
+        /// <summary>
         /// Try sending Enter via JS with acknowledgment wait.
         /// </summary>
         private async System.Threading.Tasks.Task<bool> TrySendEnterViaJsAsync()
         {
             if (_webView?.CoreWebView2 == null) return false;
 
-            _enterAckTcs = new System.Threading.Tasks.TaskCompletionSource<bool>();
-            _webView.CoreWebView2.PostWebMessageAsString("sendEnter:");
+            // Identity per request (task f420feeb). RunContinuationsAsynchronously keeps this waiter's
+            // continuation off the WebView2 message callback that completes it.
+            string jobId = System.Threading.Interlocked.Increment(ref _enterJobCounter)
+                .ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var ackTcs = new System.Threading.Tasks.TaskCompletionSource<bool>(
+                System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);
+            _enterAckWaiters[jobId] = ackTcs;
 
-            // Increased timeout for reliability under high load (3s instead of 1.5s)
-            var timeout = System.Threading.Tasks.Task.Delay(3000);
-            var completed = await System.Threading.Tasks.Task.WhenAny(_enterAckTcs.Task, timeout);
-
-            // Log TaskCompletionSource timeout explicitly for monitoring
-            if (completed == timeout)
+            try
             {
-                DebugLogService?.Trace("WebViewTerminalRenderer", "⚠️ TaskCompletionSource TIMEOUT after 3000ms - Enter acknowledgment not received");
-                return false;
-            }
+                _webView.CoreWebView2.PostWebMessageAsString("sendEnter:" + jobId);
 
-            var result = _enterAckTcs.Task.Result;
-            DebugLogService?.Trace("WebViewTerminalRenderer", $"TaskCompletionSource completed successfully (result={result})");
-            return result;
+                // Increased timeout for reliability under high load (3s instead of 1.5s)
+                var timeout = System.Threading.Tasks.Task.Delay(3000);
+                var completed = await System.Threading.Tasks.Task.WhenAny(ackTcs.Task, timeout);
+
+                // Log TaskCompletionSource timeout explicitly for monitoring
+                if (completed == timeout)
+                {
+                    DebugLogService?.Trace("WebViewTerminalRenderer", $"⚠️ TaskCompletionSource TIMEOUT after 3000ms - Enter acknowledgment not received (job {jobId})");
+                    return false;
+                }
+
+                // ⚠️ AWAIT THE TASK THIS CALL CREATED. The previous version re-read the shared field
+                // here and called .Result on it, so a concurrent injection that had replaced the field
+                // turned this line into a blocking wait on an incomplete TaskCompletionSource — on the
+                // UI thread. `ackTcs` is a local and cannot be swapped out from under it.
+                bool result = await ackTcs.Task;
+                DebugLogService?.Trace("WebViewTerminalRenderer", $"TaskCompletionSource completed successfully (job {jobId}, result={result})");
+                return result;
+            }
+            finally
+            {
+                // Timed-out and faulted attempts must not accumulate: this runs up to 5 times per
+                // failed injection and the renderer outlives every one of them.
+                _enterAckWaiters.TryRemove(jobId, out _);
+            }
         }
 
         /// <summary>
@@ -960,12 +1044,16 @@ namespace MultiTerminal.Terminal
         /// <summary>
         /// Sends Enter key via xterm.js input path (synchronous, no acknowledgment).
         /// Use SendEnterViaXtermAsync for reliable synchronization.
+        /// <para>Sends the sentinel job id <c>fire-and-forget</c> rather than an empty one (task
+        /// f420feeb). It has no waiter by definition, and the sentinel makes the resulting ack match
+        /// nothing instead of arriving id-less and tripping OnEnterAcknowledged's single-waiter
+        /// shim — which would complete a REAL concurrent injection's wait with this method's ack.</para>
         /// </summary>
         public void SendEnterViaXterm()
         {
             if (_isInitialized && _webView?.CoreWebView2 != null)
             {
-                _webView.CoreWebView2.PostWebMessageAsString("sendEnter:");
+                _webView.CoreWebView2.PostWebMessageAsString("sendEnter:fire-and-forget");
             }
         }
 
@@ -999,6 +1087,13 @@ namespace MultiTerminal.Terminal
             public int X { get; set; }
             public int Y { get; set; }
             public string SelectedText { get; set; }
+
+            /// <summary>
+            /// Job id echoed back on an <c>enterAck</c> (task f420feeb). Carried as a STRING, not a
+            /// number: ParseJsonMessage's number branch reads digits only, so a wrapped (negative)
+            /// counter would parse as garbage. A string round-trips whatever the counter produces.
+            /// </summary>
+            public string EnterJobId { get; set; }
         }
 
         /// <summary>
@@ -1103,6 +1198,7 @@ namespace MultiTerminal.Terminal
                 case "data": msg.Data = value; break;
                 case "title": msg.Title = value; break;
                 case "selectedtext": msg.SelectedText = value; break;
+                case "enterjobid": msg.EnterJobId = value; break;
             }
         }
 
