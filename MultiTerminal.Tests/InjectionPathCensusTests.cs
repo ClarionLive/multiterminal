@@ -190,6 +190,19 @@ namespace MultiTerminal.Tests
         /// <c>TypeInput(prompt)</c> to explain why it is gone — so an unstripped scan would be
         /// satisfied by the explanation of the defect instead of its absence. That exact failure was
         /// found in task 2ddfc32f, where a census passed on a <c>&lt;see cref&gt;</c>.
+        ///
+        /// <para>⚠️ KNOWN RESIDUAL, shared with every census idiom in this repo
+        /// (<c>ReadMainFormStripped</c> and <c>SpawnIdentityCanonicalizationTests.ReadRepoFile</c> are
+        /// the same three lines). A line is dropped only when its FIRST non-whitespace is <c>//</c>, so
+        /// a TRAILING comment on a line of real code survives and can still satisfy a scan:
+        /// <code>doc.SendEnterAsync();  // replaced doc.TypeInput(prompt)</code>
+        /// would keep the 1d fact green with the defect reintroduced. Found while re-checking task
+        /// c28e6177, by running the same defeating edit in both forms.</para>
+        ///
+        /// <para>Left as-is deliberately: stripping trailing <c>//</c> naively corrupts string literals
+        /// containing it — every URL in <c>mcp/index.js</c>, which this class scans — so the fix is a
+        /// real tokenizer, not a regex, and that is a change to make for the whole repo at once rather
+        /// than in one test file. Recorded so the limit is known rather than assumed away.</para>
         /// </summary>
         private static string Strip(string src)
         {
