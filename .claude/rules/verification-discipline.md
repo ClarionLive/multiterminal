@@ -81,6 +81,27 @@ Also: **scope the scan to the method, not the file** (a file-wide scan is satisf
 site elsewhere), and **assert the extraction succeeded** (`body.Length > 2000`) — otherwise a rename
 makes every other fact in the file vacuous against an empty string.
 
+### ⚠️ And everything in this section has already failed as advice
+
+On the day it was written, **three agents wrote three censuses in three files and all three were
+defective in this exact way** — two hid a defect, one manufactured a failure — each found by a
+different reviewer, none by its author. They were people *actively hunting this defect class*.
+
+That is not carelessness. It is a technique requiring four decisions (strip, scope, assert-extracted,
+know-the-direction) to be re-made correctly at every call site, and **a rule that must be remembered
+N times fails at a rate proportional to N.** "Strip comments before scanning" *is* per-file vigilance,
+which is the thing that failed.
+
+So, in order of preference:
+
+1. **Prefer a structural pin.** The best outcome on that program was not a better census — it was one
+   deleted: the class exposed the comparer its table actually uses and the test asked it
+   behaviourally. A structural pin has *neither* failure direction, because there is no text to be
+   satisfied or falsified by. Reach for this first, every time.
+2. **Failing that, use the shared helper** (ticket `3cf4846d`), so the four decisions are made once.
+3. **Only hand-roll a census** when neither is possible — and then falsify it in *both* directions
+   before you believe it.
+
 ## Pinning a known gap requires a self-destruct line
 
 A test asserting that a defect *is present* goes red the day someone fixes it — and in a repo whose
