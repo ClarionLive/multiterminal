@@ -2135,6 +2135,7 @@ namespace MultiTerminal
             string oneLine = System.Text.RegularExpressions.Regex.Replace(initialPrompt, @"\r\n?|\n", " ").Trim();
             int delivered = 0;
             EventHandler<Dictionary<string, object>> onNotification = null;
+            EventHandler<TerminalInfo> onRegistered = null;
 
             void Deliver(string trigger)
             {
@@ -2142,6 +2143,7 @@ namespace MultiTerminal
                     return;
 
                 _mcpServer.Broker.NotificationReceived -= onNotification;
+                _mcpServer.Broker.TerminalRegistered -= onRegistered;
 
                 try
                 {
@@ -2184,6 +2186,7 @@ namespace MultiTerminal
                     return;
 
                 _mcpServer.Broker.NotificationReceived -= onNotification;
+                _mcpServer.Broker.TerminalRegistered -= onRegistered;
                 _debugLogService?.Warning("MainForm", $"Initial prompt for {agentName} NOT delivered ({oneLine.Length} chars): {reason}");
 
                 // Loud to the spawner — in the store an AGENT actually reads. Pipeline Run 2 caught the
@@ -2258,6 +2261,36 @@ namespace MultiTerminal
                 Deliver("first question");
             };
             _mcpServer.Broker.NotificationReceived += onNotification;
+
+            // THE NORMAL PATH FOR A SPAWNED HELPER (task 7806024f). The question trigger above was built
+            // around the /session-start menu, which a spawned helper never shows — its SessionStart hook
+            // short-circuits on MULTITERMINAL_SPAWNER — so that trigger never fires and delivery used to
+            // fall through to the 120s timer EVERY time. Measured: spawn 09:05:18, alive at 09:05:23, job
+            // delivered 09:07:18. The channel port is the signal the fallback was already using to decide
+            // the helper was alive; this just stops waiting two minutes to ask the question.
+            onRegistered = (_, row) =>
+            {
+                if (row != null
+                    && HelperReadinessTrigger.IsHelperAlive(row.Name, row.ChannelPort, agentName))
+                {
+                    Deliver("helper registered a channel port");
+                }
+            };
+            _mcpServer.Broker.TerminalRegistered += onRegistered;
+
+            // SUBSCRIBE, THEN CHECK — in that order, and the order is the point. The port can already be
+            // set by the time we get here (a fast helper, or a name reused from a row that is still live),
+            // and an event-only trigger would then wait for a registration that has already happened —
+            // reintroducing the exact 120s stall this change removes, just in a narrower window.
+            // Checking BEFORE subscribing would leave the opposite gap: a registration landing between the
+            // check and the subscribe would be missed entirely. Exactly-once is already guaranteed by the
+            // Interlocked guard in Deliver, so the overlap this ordering creates is free.
+            var alreadyLive = _mcpServer.Broker.GetTerminal(agentName);
+            if (alreadyLive != null
+                && HelperReadinessTrigger.IsHelperAlive(alreadyLive.Name, alreadyLive.ChannelPort, agentName))
+            {
+                Deliver("helper already had a channel port");
+            }
 
             _ = Task.Delay(fallbackMs).ContinueWith(
                 _ =>
