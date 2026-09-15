@@ -287,6 +287,57 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// ⚠️ THE SAME GUARD, POINTED AT THE TEST THAT DEMONSTRATES THE FIX — added because the fact
+        /// above was not enough, and the way it was not enough is instructive.
+        ///
+        /// <para><c>Readiness_is_decided_on_the_docid_and_never_on_a_display_name</c> exists because
+        /// <c>IsHelperAlive</c>'s two identity parameters are <c>string</c>, so handing it a display name
+        /// compiles at zero warnings and silently restores the defect. That guard scans
+        /// <c>MainForm.cs</c>. It does not scan <c>HelperReadinessIdentityAsymmetryTests</c> — and that is
+        /// exactly where the mistake landed: its call-site model kept passing <c>.Name</c> after the
+        /// re-key, so all five of its facts stayed green while no longer demonstrating that the predicate
+        /// keys on the pane at all. Its class doc meanwhile stated the line had been rewritten.</para>
+        ///
+        /// <para>A hazard worth guarding at the call site is worth guarding in the file built to prove
+        /// the call site is right. Peer review caught this one; the point of the fact is that the suite
+        /// should catch the next.</para>
+        /// </summary>
+        [Fact]
+        public void The_asymmetry_tests_model_the_call_site_on_docids_too()
+        {
+            string here = Path.GetDirectoryName(ThisFile()) ?? ".";
+            string path = Path.GetFullPath(Path.Combine(here, "HelperReadinessIdentityAsymmetryTests.cs"));
+            Assert.True(File.Exists(path), $"Could not locate the asymmetry tests at '{path}'.");
+
+            // Comments stripped for the same reason every other census here strips them: this file
+            // DISCUSSES passing .Name at length, in prose, deliberately.
+            string src = StripComments(File.ReadAllText(path));
+
+            var calls = Regex.Matches(src, @"IsHelperAlive\(\s*([A-Za-z_][\w.]*)\s*,");
+            Assert.True(calls.Count > 0, "No IsHelperAlive call found; this census is vacuous.");
+
+            foreach (Match call in calls)
+            {
+                string firstArg = call.Groups[1].Value;
+                Assert.True(
+                    firstArg.EndsWith(".DocId", StringComparison.Ordinal),
+                    $"The asymmetry tests pass '{firstArg}' as the registered identity. Both parameters "
+                    + "are strings, so a display name compiles silently here and every fact in that file "
+                    + "stays green while proving something weaker than it claims — it would then hold "
+                    + "against any exact-match predicate, docId or not (task c28e6177).");
+            }
+        }
+
+        /// <summary>Block and line comments removed, so a census cannot be satisfied by prose.</summary>
+        private static string StripComments(string src)
+        {
+            string noBlocks = Regex.Replace(src, @"/\*.*?\*/", " ", RegexOptions.Singleline);
+            return string.Join(
+                "\n",
+                noBlocks.Split('\n').Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+        }
+
+        /// <summary>
         /// ⚠️ CROSS-FILE, and the compiler checks none of it. The typing queue lives in
         /// <c>Terminal/terminal.html</c>; the C# side cannot observe it. Two concurrent typeInput
         /// payloads used to interleave their characters into one composer and submit two garbled

@@ -2434,7 +2434,12 @@ namespace MultiTerminal
             // check and the subscribe would be missed entirely. Exactly-once is already guaranteed by the
             // Interlocked guard in Deliver, so the overlap this ordering creates is free.
             // Looked up by DOCID, not the name (task c28e6177). GetTerminal resolves a terminal id, a
-            // docId or a name, and the docId is the one key that cannot name somebody else's row.
+            // docId OR a name, so it is more permissive than this predicate — it would also return a row
+            // whose NAME happened to equal this docId. Unreachable in practice (docIds are Guids, names
+            // are not) and the failure would be degradation rather than misdelivery, since IsHelperAlive
+            // then compares DocId against DocId and refuses. Stated because the resolver being permissive
+            // in front of an exact predicate is the inverse of the rule this ticket is built on, and a
+            // reader should not have to rediscover that it is safe only by accident of value shape.
             var alreadyLive = _mcpServer.Broker.GetTerminal(docId);
             if (alreadyLive != null
                 && HelperReadinessTrigger.IsHelperAlive(alreadyLive.DocId, alreadyLive.ChannelPort, docId))

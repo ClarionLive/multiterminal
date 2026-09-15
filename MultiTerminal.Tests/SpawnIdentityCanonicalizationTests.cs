@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -170,13 +171,34 @@ namespace MultiTerminal.Tests
             Assert.True(guard < trim, "The presence check must run before the value is stringified.");
         }
 
-        /// <summary>Reads a file from the repo root, which is two directories above the test binary's project.</summary>
+        /// <summary>
+        /// Reads a repo file with block and line comments REMOVED.
+        ///
+        /// <para>⚠️ The stripping is load-bearing, and shipping without it was a real defect found in peer
+        /// review. These censuses locate code with <c>IndexOf</c> over file text, so a comment mentioning
+        /// the identifier satisfies them. Demonstrated, not theorised: deleting the real canonicalisation
+        /// and leaving the comment anyone would naturally write while removing it —
+        /// "// Canonicalisation moved upstream, so request.AgentName.Trim() is no longer done here" —
+        /// left the census GREEN with no live canonicalisation in the region. The defeating edit is the
+        /// most NATURAL future edit, which is the worst property a census can have.</para>
+        ///
+        /// <para>This is also the second time the same gap has been found in this repo. Task 2ddfc32f had
+        /// a census satisfied by a <c>&lt;see cref&gt;</c> in a doc comment, which is why
+        /// <c>InitialPromptTriggerWiringTests</c> strips before scanning. This file cited that file as
+        /// its precedent and then adopted the technique without the half that made it work.</para>
+        /// </summary>
         private static string ReadRepoFile(string relativePath)
         {
             string here = Path.GetDirectoryName(ThisFile()) ?? ".";
             string path = Path.GetFullPath(Path.Combine(here, "..", relativePath));
             Assert.True(File.Exists(path), $"Could not locate '{relativePath}' at '{path}'.");
-            return File.ReadAllText(path);
+
+            string src = File.ReadAllText(path);
+            string noBlocks = Regex.Replace(src, @"/\*.*?\*/", " ", RegexOptions.Singleline);
+
+            return string.Join(
+                "\n",
+                noBlocks.Split('\n').Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
         }
 
         private static string ThisFile([CallerFilePath] string path = null) => path;
