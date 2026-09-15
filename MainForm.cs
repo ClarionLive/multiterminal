@@ -2099,17 +2099,16 @@ namespace MultiTerminal
         /// and session 9 of b42b1883 watched exactly that guess fail: the helper sat on its menu
         /// and ignored three prompts.</para>
         ///
-        /// <para>⚠️ MEASURED 2026-09-14 — for a SPAWNED helper that question never arrives, so this
-        /// trigger never fires and delivery ALWAYS falls through to the 120s timer below. The
-        /// plugin's SessionStart hook short-circuits on <c>MULTITERMINAL_SPAWNER</c> ("Skip
-        /// kanban/plan context for spawned agents") and hands the helper a spawned-agent briefing
-        /// instead of the auto-run instruction — so there is no <c>/session-start</c>, no menu, and
-        /// no <c>ask_user_question</c>. Observed end to end: spawn 09:05:18 → delivery 09:07:18,
-        /// trigger "fallback timer — helper live, no question". The prompt still arrives intact and
-        /// the liveness guard still holds, so this is a LATENCY defect, not a correctness one; the
-        /// fix (a trigger that fires when the broker first sees the helper's channel port) is a
-        /// follow-up ticket rather than a change here. Nothing about this was visible before this
-        /// ticket: the flag-less spawn path loaded no plugin, so the branch never ran.</para>
+        /// <para>⚠️ For a SPAWNED helper that question NEVER arrives, so this trigger alone would
+        /// never fire. The plugin's SessionStart hook short-circuits on
+        /// <c>MULTITERMINAL_SPAWNER</c> ("Skip kanban/plan context for spawned agents") and hands
+        /// the helper a spawned-agent briefing instead of the auto-run instruction — so there is no
+        /// <c>/session-start</c>, no menu, and no <c>ask_user_question</c>. Until task 7806024f
+        /// every spawned helper therefore waited out the full 120s timer below. FIXED by the
+        /// registration trigger further down (search "THE NORMAL PATH FOR A SPAWNED HELPER"),
+        /// which fires when the broker first sees the helper's channel port; the measurements are
+        /// in <see cref="Services.HelperReadinessTrigger"/>'s class doc, which is the single copy.
+        /// This trigger is RETAINED for any caller that does show a menu.</para>
         ///
         /// <para>HOW — <c>TypeInput</c>, never <c>InjectInputAsync</c>. The latter splits anything
         /// over 500 bytes into <c>[n/N]</c> chunks (TerminalControl.MaxChunkSize) and was observed
@@ -2148,9 +2147,12 @@ namespace MultiTerminal
                 try
                 {
                     if (IsDisposed || !IsHandleCreated)
+                    {
+                        ReportUndelivered($"the main window was gone before the prompt could be typed (trigger: {trigger})");
                         return;
+                    }
 
-                    BeginInvoke(new Action(() =>
+                    BeginInvoke(new Action(async () =>
                     {
                         // Guarded inside the marshalled body too: a document or WebView2 disposed
                         // between the check above and this running would otherwise escape to the
@@ -2160,7 +2162,29 @@ namespace MultiTerminal
                             var doc = _gridManager.GetTerminalDocuments().FirstOrDefault(t => t.DocId == docId);
                             if (doc == null)
                             {
-                                _debugLogService?.Warning("MainForm", $"Initial prompt for {agentName} dropped: terminal {docId} no longer exists (trigger: {trigger}).");
+                                ReportUndelivered($"terminal {docId} no longer exists (trigger: {trigger})");
+                                return;
+                            }
+
+                            // READINESS GATE (task 7806024f, pipeline Run 1, debugger HIGH).
+                            // TypeInputViaXterm returns SILENTLY when the renderer is not yet
+                            // initialized (WebViewTerminalRenderer.cs:620) — it reports nothing to
+                            // the caller. Every other typing site in this file already waits
+                            // (MainForm.cs OnClaudeCodeDetected, TerminalControl's own 3s spin);
+                            // this one did not, because at the old 120s trigger the renderer was
+                            // always up long before delivery. At ~5s it races WebView2 init, and a
+                            // loss here is PERMANENT: the guard above has already disarmed the
+                            // question trigger and the give-up timer.
+                            if (!await WaitForRendererReadyAsync(doc, 5000))
+                            {
+                                ReportUndelivered($"the terminal's renderer was still not ready 5s after the helper came alive (trigger: {trigger}); nothing was typed");
+                                return;
+                            }
+
+                            // Re-resolve after the await: the pane can be closed while we wait.
+                            if (IsDisposed || !_gridManager.GetTerminalDocuments().Any(t => t.DocId == docId))
+                            {
+                                ReportUndelivered($"terminal {docId} went away while waiting for its renderer (trigger: {trigger})");
                                 return;
                             }
 
@@ -2169,24 +2193,27 @@ namespace MultiTerminal
                         }
                         catch (Exception ex)
                         {
-                            _debugLogService?.Warning("MainForm", $"Initial prompt for {agentName} not delivered (typing failed): {ex.Message}");
+                            ReportUndelivered($"typing failed: {ex.Message} (trigger: {trigger})");
                         }
                     }));
                 }
                 catch (Exception ex)
                 {
                     // BeginInvoke itself: the form went away between the check and the marshal.
-                    _debugLogService?.Warning("MainForm", $"Initial prompt for {agentName} not delivered (marshal failed): {ex.Message}");
+                    ReportUndelivered($"marshal to the UI thread failed: {ex.Message} (trigger: {trigger})");
                 }
             }
 
-            void GiveUp(string reason)
+            // The failure REPORT, split out of GiveUp so that a delivery which fails AFTER the
+            // exactly-once guard has already been taken can still tell the spawner (task 7806024f,
+            // pipeline Run 1, debugger HIGH). Before the split, Deliver took the guard as its first
+            // statement and then typed; if the typing silently did nothing, the guard had already
+            // disarmed both other triggers and GiveUp could never run — the job vanished with the
+            // log still claiming "Delivering initial prompt".
+            // GiveUp owns the guard. This does NOT: every caller must already hold it, or have
+            // established that it can no longer be taken.
+            void ReportUndelivered(string reason)
             {
-                if (System.Threading.Interlocked.Exchange(ref delivered, 1) != 0)
-                    return;
-
-                _mcpServer.Broker.NotificationReceived -= onNotification;
-                _mcpServer.Broker.TerminalRegistered -= onRegistered;
                 _debugLogService?.Warning("MainForm", $"Initial prompt for {agentName} NOT delivered ({oneLine.Length} chars): {reason}");
 
                 // Loud to the spawner — in the store an AGENT actually reads. Pipeline Run 2 caught the
@@ -2197,7 +2224,10 @@ namespace MultiTerminal
                 // caller-supplied and unvalidated (a typo, a stale env, or the phone app's
                 // "ClaudeRemote"), a message to a name that is not a live terminal is written a second
                 // time to the Owner's inbox so it cannot be lost either way.
-                string summary = $"Helper {agentName} never came alive: {reason}. Its job ({oneLine.Length} chars) was NOT delivered — nothing was typed into the pane. Spawner: {spawnerName}. Working dir: {workingDir}.";
+                // Wording stays neutral about the CAUSE: this now reports both "never came alive"
+                // (the 120s give-up) and "came alive but could not be typed into" (renderer never
+                // ready). The specific cause travels in {reason}.
+                string summary = $"Helper {agentName}'s job ({oneLine.Length} chars) was NOT delivered: {reason}. Nothing was typed into the pane. Spawner: {spawnerName}. Working dir: {workingDir}.";
                 try
                 {
                     // The write's result is CHECKED (pipeline Run 3). CreateInboxNotification swallows
@@ -2241,6 +2271,16 @@ namespace MultiTerminal
                 }
             }
 
+            void GiveUp(string reason)
+            {
+                if (System.Threading.Interlocked.Exchange(ref delivered, 1) != 0)
+                    return;
+
+                _mcpServer.Broker.NotificationReceived -= onNotification;
+                _mcpServer.Broker.TerminalRegistered -= onRegistered;
+                ReportUndelivered(reason);
+            }
+
             onNotification = (_, payload) =>
             {
                 if (payload == null)
@@ -2260,7 +2300,6 @@ namespace MultiTerminal
 
                 Deliver("first question");
             };
-            _mcpServer.Broker.NotificationReceived += onNotification;
 
             // THE NORMAL PATH FOR A SPAWNED HELPER (task 7806024f). The question trigger above was built
             // around the /session-start menu, which a spawned helper never shows — its SessionStart hook
@@ -2276,6 +2315,15 @@ namespace MultiTerminal
                     Deliver("helper registered a channel port");
                 }
             };
+
+            // BOTH handlers are ASSIGNED above before EITHER is subscribed, and the two
+            // subscriptions sit adjacent. The ordering is load-bearing: while onNotification was
+            // subscribed first and onRegistered was still null, a question landing in that window
+            // ran Deliver, whose `-= onRegistered` was a no-op against null — and the `+=` below
+            // then subscribed a handler nothing would ever remove, pinning MainForm, the docId and
+            // the whole prompt string for the life of the process and firing on every heartbeat
+            // registration thereafter (pipeline Run 1: code-reviewer MINOR, debugger LOW).
+            _mcpServer.Broker.NotificationReceived += onNotification;
             _mcpServer.Broker.TerminalRegistered += onRegistered;
 
             // SUBSCRIBE, THEN CHECK — in that order, and the order is the point. The port can already be
@@ -2301,8 +2349,13 @@ namespace MultiTerminal
 
                     // Liveness is the broker's row for the RESOLVED name: a channel port is set only by
                     // the real register_terminal from /session-start, never by MT's pre-registration.
+                    // Routed through the SAME predicate as the registration trigger — this site used to
+                    // hand-roll `live?.ChannelPort != null`, which is the rule HelperReadinessTrigger was
+                    // extracted from, leaving two implementations of one rule in one method that would
+                    // silently diverge the next time the seam changed (pipeline Run 1, code-reviewer).
                     var live = _mcpServer.Broker.GetTerminal(agentName);
-                    if (live?.ChannelPort != null)
+                    if (live != null
+                        && HelperReadinessTrigger.IsHelperAlive(live.Name, live.ChannelPort, agentName))
                     {
                         _debugLogService?.Warning("MainForm", $"No question from {agentName} within {fallbackMs / 1000}s but it is live (channel port {live.ChannelPort}); delivering its initial prompt anyway.");
                         Deliver("fallback timer — helper live, no question");

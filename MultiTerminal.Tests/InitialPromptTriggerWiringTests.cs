@@ -11,7 +11,7 @@ namespace MultiTerminal.Tests
     /// Pins the wiring of the spawned-helper readiness trigger inside
     /// <c>MainForm.QueueInitialPromptDelivery</c> (task 7806024f).
     ///
-    /// <para><b>Why a source census.</b> <c>QueueInitialPromptDelivery</c> is private in a 5.2K-LOC
+    /// <para><b>Why a source census.</b> <c>QueueInitialPromptDelivery</c> is private in an 8K+ LOC
     /// WinForms file that cannot be instantiated in a test. The DECISION it makes was extracted into
     /// <see cref="MultiTerminal.Services.HelperReadinessTrigger"/> and is unit-tested properly; what
     /// cannot be reached any other way is whether that decision is actually CALLED, and whether the
@@ -122,6 +122,106 @@ namespace MultiTerminal.Tests
                 body.Length > 2000,
                 $"Extracted only {body.Length} chars for QueueInitialPromptDelivery. The method was "
                 + "renamed or the brace matching broke; every other fact in this file is now vacuous.");
+        }
+
+        /// <summary>
+        /// ⚠️ THE SILENT-LOSS GUARD (pipeline Run 1, debugger HIGH). <c>TypeInputViaXterm</c> returns
+        /// without typing when the renderer is not initialized and tells the caller NOTHING. Because
+        /// <c>Deliver</c> takes the exactly-once guard as its FIRST statement, a loss there is permanent:
+        /// the question trigger and the 120s give-up are both already disarmed. So readiness must be
+        /// awaited BEFORE the typing call, not merely checked somewhere in the method.
+        /// <para>Ordering is asserted, not presence — a readiness wait placed AFTER the TypeInput would
+        /// satisfy a contains-check while protecting nothing, which is the exact shape of the vacuous
+        /// assertion this file already shipped once.</para>
+        /// </summary>
+        [Fact]
+        public void Readiness_is_awaited_before_the_prompt_is_typed()
+        {
+            string body = DeliveryMethodBody();
+
+            int wait = body.IndexOf("WaitForRendererReadyAsync", StringComparison.Ordinal);
+            int type = body.IndexOf("TypeInput(oneLine", StringComparison.Ordinal);
+
+            Assert.True(
+                wait >= 0,
+                "Deliver does not wait for renderer readiness. TypeInputViaXterm returns silently when "
+                + "the renderer is not initialized, so at the ~5s trigger a slow WebView2 start drops the "
+                + "job with the log still claiming it was delivered.");
+            Assert.True(type >= 0, "The prompt is never typed at all.");
+            Assert.True(
+                wait < type,
+                "Renderer readiness is awaited AFTER the prompt is typed. That is not a guard — the "
+                + "typing it is supposed to protect has already happened.");
+        }
+
+        /// <summary>
+        /// A delivery that fails after the guard is taken must still reach the spawner. Before this,
+        /// every failure path inside <c>Deliver</c> logged and returned, so the spawner was told nothing
+        /// and <c>GiveUp</c> — the only thing that writes <c>spawn_failed</c> — could never run, because
+        /// the guard it checks was already set.
+        /// </summary>
+        [Fact]
+        public void Every_delivery_failure_path_reports_to_the_spawner()
+        {
+            string body = DeliveryMethodBody();
+
+            Assert.Contains("void ReportUndelivered", body, StringComparison.Ordinal);
+
+            // GiveUp must delegate rather than carry its own copy of the notification code: two copies
+            // would drift, and the inbox-routing rules in it were themselves the subject of two earlier
+            // pipeline rounds.
+            int giveUp = body.IndexOf("void GiveUp", StringComparison.Ordinal);
+            Assert.True(giveUp >= 0, "GiveUp is gone — the 120s give-up no longer notifies anyone.");
+            Assert.Contains(
+                "ReportUndelivered(reason)",
+                body[giveUp..],
+                StringComparison.Ordinal);
+
+            // The readiness failure is the path the debugger found; it must report, not just return.
+            Assert.True(
+                Regex.IsMatch(body, @"WaitForRendererReadyAsync[^;]*\)\s*\)\s*\{\s*ReportUndelivered", RegexOptions.Singleline),
+                "The renderer-not-ready branch does not call ReportUndelivered. That is the silent "
+                + "permanent job loss this fact exists to prevent.");
+        }
+
+        /// <summary>
+        /// ⚠️ CROSS-FILE, and the compiler checks none of it. The typing queue lives in
+        /// <c>Terminal/terminal.html</c>; the C# side cannot observe it. Two concurrent typeInput
+        /// payloads used to interleave their characters into one composer and submit two garbled
+        /// prompts — reachable only once delivery moved from t+120s to t+~5s, into the same window as
+        /// the "initializing..." injection.
+        /// <para>Asserts the queue is USED, not merely defined: a handler that defines
+        /// <c>enqueueTypeInput</c> and then still starts its own <c>typeNextChar()</c> chain is exactly
+        /// the bug, and would pass a definition-only check.</para>
+        /// </summary>
+        [Fact]
+        public void Terminal_html_serializes_typing_through_one_queue()
+        {
+            string here = Path.GetDirectoryName(ThisFile()) ?? ".";
+            string path = Path.GetFullPath(Path.Combine(here, "..", "Terminal", "terminal.html"));
+            Assert.True(File.Exists(path), $"Could not locate terminal.html at '{path}'.");
+
+            string src = File.ReadAllText(path);
+
+            Assert.Contains("function enqueueTypeInput", src, StringComparison.Ordinal);
+            Assert.Contains("function drainTypeQueue", src, StringComparison.Ordinal);
+
+            int handler = src.IndexOf("case 'typeInput':", StringComparison.Ordinal);
+            Assert.True(handler >= 0, "The typeInput message handler is gone.");
+
+            int nextCase = src.IndexOf("case '", handler + 10, StringComparison.Ordinal);
+            string handlerBody = nextCase > handler ? src[handler..nextCase] : src[handler..];
+
+            Assert.Contains("enqueueTypeInput(", handlerBody, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "typeNextChar()",
+                handlerBody);
+
+            // The next job may start ONLY from the previous one's completion. A drainTypeQueue call that
+            // exists solely in enqueueTypeInput would let a second message run concurrently again.
+            int drain = src.IndexOf("function drainTypeQueue", StringComparison.Ordinal);
+            string drainBody = src[drain..Math.Min(src.Length, drain + 1200)];
+            Assert.Contains("drainTypeQueue()", drainBody, StringComparison.Ordinal);
         }
 
         /// <summary>

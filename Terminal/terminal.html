@@ -374,6 +374,58 @@
             }
         }
 
+        // ── Typing queue ────────────────────────────────────────────────────────────────────
+        // Every 'typeInput' payload is typed to completion before the next one starts.
+        //
+        // WHY A QUEUE AND NOT A BARE setTimeout CHAIN (task 7806024f, pipeline Run 1 debugger):
+        // each message used to start its OWN independent chain, with no queue and no mutual
+        // exclusion. Two overlapping senders therefore interleaved their characters into a single
+        // composer — and because every payload carries its own trailing CR (see
+        // WebViewTerminalRenderer.TypeInputViaXterm, which appends the line ending to the text
+        // before base64), the result was not one corrupted line but TWO garbled submissions.
+        // Nothing detected it: the C# side had already recorded the delivery as complete.
+        //
+        // The overlap only became reachable when spawned-helper delivery moved from t+120s to
+        // t+~5s, which put it in the same window as OnClaudeCodeDetected's "initializing..."
+        // injection (banner + 1.5s, 20ms/char). At 120s the two spans could never meet, which is
+        // why this latent race survived until the trigger changed.
+        //
+        // The ordering below IS the fix: drainTypeQueue() runs the next job only from the
+        // completion of the previous one. Do not "optimize" it into a per-message chain.
+        const typeQueue = [];
+        let typeInFlight = false;
+
+        function enqueueTypeInput(decoded, charDelay) {
+            typeQueue.push({ decoded, charDelay });
+            if (!typeInFlight) {
+                drainTypeQueue();
+            }
+        }
+
+        function drainTypeQueue() {
+            const job = typeQueue.shift();
+            if (!job) {
+                typeInFlight = false;
+                return;
+            }
+
+            typeInFlight = true;
+            let charIndex = 0;
+            const typeNextChar = () => {
+                if (charIndex < job.decoded.length) {
+                    sendToHost({ type: 'input', data: btoa(job.decoded[charIndex]) });
+                    charIndex++;
+                    setTimeout(typeNextChar, job.charDelay);
+                } else {
+                    // This job's last character — including its trailing CR — has been sent.
+                    // Only now does the next job start. One charDelay has already elapsed since
+                    // that final character, so successive jobs keep the same inter-key spacing.
+                    drainTypeQueue();
+                }
+            };
+            typeNextChar();
+        }
+
         // Handle messages from C#
         function handleHostMessage(message) {
             if (!term) return;
@@ -436,16 +488,10 @@
                                     charDelay = parseInt(delayMatch[1], 10);
                                     charData = delayMatch[2];
                                 }
-                                const decoded = atob(charData);
-                                let charIndex = 0;
-                                const typeNextChar = () => {
-                                    if (charIndex < decoded.length) {
-                                        sendToHost({ type: 'input', data: btoa(decoded[charIndex]) });
-                                        charIndex++;
-                                        setTimeout(typeNextChar, charDelay);
-                                    }
-                                };
-                                typeNextChar();
+                                // Queued, not started directly: a second typeInput arriving while
+                                // this one is still typing must wait its turn rather than
+                                // interleave its characters into the same composer.
+                                enqueueTypeInput(atob(charData), charDelay);
                             }
                             break;
 

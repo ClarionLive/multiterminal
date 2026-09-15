@@ -24,16 +24,11 @@ namespace MultiTerminal.Services
     /// one layer up. The channel port comes from MultiTerminal's OWN registration path, is already the
     /// 120s fallback's liveness predicate, and was measured arriving five seconds after spawn.</para>
     ///
-    /// <para>⚠️ A narrower argument was tempting and is recorded here as CONTESTED rather than used:
-    /// <c>AgentActivityWatcher</c> states that <c>AskUserQuestion</c> "emits no hook event AT ALL
-    /// (verified: zero <c>tool=AskUserQuestion</c> entries across 150k+ hook invocations)", which would
-    /// make <c>TURN_END</c> straightforwardly unreliable. But <c>.claude/rules/folder-map.md</c> corrects
-    /// exactly that sentence — since task <c>ee17f42d</c> it DOES fire PreToolUse into
-    /// <c>ask-user-relay-hook.js</c>. The two sources disagree, the blocking-so-no-TURN_END half is
-    /// untouched by the correction, and neither was re-measured here. The decision above stands without
-    /// needing to settle it.</para>
+    /// <para>⚠️ A narrower argument against <c>TURN_END</c> — that <c>AskUserQuestion</c> emits no hook
+    /// event at all — is CONTESTED between two in-repo sources and is deliberately not relied on; see
+    /// task 7806024f for the full contradiction. The decision above stands without settling it.</para>
     ///
-    /// <para><b>Pure by construction.</b> No broker, no UI, no clock. <c>MainForm</c> is a 5.2K-LOC
+    /// <para><b>Pure by construction.</b> No broker, no UI, no clock. <c>MainForm</c> is an 8K+ LOC
     /// WinForms file whose logic the suite can otherwise only reach by scanning source text
     /// (<c>AgentActivityObservationTests.ReadMainFormStripped</c>), so the rule that decides when an
     /// agent's instructions get typed lives here instead, where a test can call it. Same precedent as
