@@ -196,6 +196,42 @@ front of them without asking whether it was the right one.
 written by someone who already has a model of the problem, and that model is the least reviewed
 artifact in the process.
 
+### The question determines the finding — so state the question your pass answered
+
+One ~80-line class was reviewed four times by two people. Every pass asked a different question, and
+every pass found something the others structurally could not:
+
+| Question asked | Found |
+|---|---|
+| Is the count-and-take **atomic**? | the race |
+| Is the lock **sufficient**? | nothing — and missed the next question |
+| Is there any **concurrency at all**? | the race was unreachable by any caller |
+| Is the locking **complete**? | a plain `Dictionary` makes one unguarded access worse than the `ConcurrentDictionary` it replaced |
+
+None was redundant; none would have found the others' answers. "More eyes" undersells why. **A
+reviewer handed "check X" inherits the asker's model of what could be wrong**, and will verify X
+thoroughly without ever asking what makes X the right thing to check.
+
+**Operational form: record the question your pass answered, not just the verdict.** Then the next
+reviewer can see which questions have *not* been asked, instead of inferring coverage from "it was
+reviewed". On the program above that would have exposed the gap immediately — three passes all
+answering *"is the lock right"* and none answering *"is there anything for it to be right about"*.
+
+### A structural pin is not self-documenting
+
+Replacing a textual census with a structural pin removes both text-matching failure directions. It
+does **not** remove the overstatement — it moves where it can hide.
+
+A comparer pin asked the class for the comparer its table actually used: no text to satisfy or
+falsify, and it passed review. Its *doc* said it existed "for the moment the id is a Guid, a name or
+a composite". Running candidate comparers against it showed `StringComparer.InvariantCulture`
+satisfying every assertion while treating composed and decomposed `Å` as equal — a culture-sensitive
+comparison in front of an exact lookup, which is the exact hazard the class warns about, **live in
+precisely the case the prose claimed to cover.**
+
+Reading the assertions, they look exhaustive. The gap surfaced only by *running candidates against
+them*. When a pin claims to cover a class of wrong answers, supply a wrong answer and watch it fail.
+
 ## Review: the author and the reviewer find disjoint sets
 
 Measured on this program. An author self-reported four defects in his own work immediately before
