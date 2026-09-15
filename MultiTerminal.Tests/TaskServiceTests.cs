@@ -631,6 +631,179 @@ namespace MultiTerminal.Tests
         /// <summary>
         /// Seed a task with a two-item checklist, both un-glossed.
         /// </summary>
+        // ── Reopen: done → testing (task dc813ddd) ──────────────────────────────────────────────
+        //
+        // Before this, "done" had no outgoing transitions at all, for anyone. The API answered
+        // "Valid transitions from 'done': none" to the PM and the Owner exactly as it did to an
+        // agent — so an ordinary misclick was as permanent as a deliberate bypass of the review
+        // gate, and the only tool that could force a status back was the deprecated full-array
+        // replace whose damage LostUpdate_IsExactlyWhatAFullArrayWriteDoes demonstrates above.
+
+        /// <summary>
+        /// The door opens. Reaching done and coming back is the whole ticket.
+        /// </summary>
+        [Fact]
+        public void AnItemMarkedDone_CanBeReopenedForMoreTesting()
+        {
+            var id = MakeGlossTask();
+            DriveItemToDone(id, 0);
+
+            var reopen = _svc.TransitionChecklistItem(id, 0, "testing", "reopened: the census was vacuous", "alice");
+
+            Assert.True(reopen.Success, reopen.Error);
+            Assert.Equal("testing", _svc.GetTask(id).GetChecklist()[0].Status);
+        }
+
+        /// <summary>
+        /// ⚠️ THE PROPERTY THAT MAKES THE REOPEN SAFE, and the reason this fix needed no new storage.
+        /// Notes are APPENDED, never replaced, so reopening cannot quietly erase that a pass happened.
+        /// The reopen's own note lands AFTER the pass it undoes, in order, carrying who and when — the
+        /// history reads "passed, then reopened because X" rather than losing the pass.
+        /// <para>This is also the second, independent reason <c>update_checklist</c> is the wrong route
+        /// back: a full-array replace overwrites the note list wholesale.</para>
+        /// </summary>
+        [Fact]
+        public void Reopening_PreservesEveryEarlierNote_AndRecordsItselfAfterThem()
+        {
+            var id = MakeGlossTask();
+            DriveItemToDone(id, 0);
+
+            int notesBefore = _svc.GetTask(id).GetChecklist()[0].Notes.Count;
+            Assert.True(notesBefore >= 3, "Expected a note per transition on the way to done.");
+
+            Assert.True(_svc.TransitionChecklistItem(id, 0, "testing", "reopened: peer review found the test vacuous", "alice").Success);
+
+            var notes = _svc.GetTask(id).GetChecklist()[0].Notes;
+            Assert.Equal(notesBefore + 1, notes.Count);
+
+            // The pass is still there, and the reopen is recorded after it rather than over it.
+            Assert.Contains(notes, n => n.Transition == "testing → done");
+
+            var last = notes[^1];
+            Assert.Equal("done → testing", last.Transition);
+            Assert.Equal("alice", last.By);
+            Assert.False(string.IsNullOrWhiteSpace(last.At));
+            Assert.Contains("peer review", last.Text, StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// A reopen undoes a recorded pass, so it is the transition where a reason matters most. Without
+        /// this it would have been the ONLY one that could be performed silently.
+        /// </summary>
+        [Fact]
+        public void Reopening_WithoutARreason_IsRefused()
+        {
+            var id = MakeGlossTask();
+            DriveItemToDone(id, 0);
+
+            var blank = _svc.TransitionChecklistItem(id, 0, "testing", "   ", "alice");
+
+            Assert.False(blank.Success);
+            Assert.Contains("Notes are required", blank.Error, StringComparison.Ordinal);
+            Assert.Equal("done", _svc.GetTask(id).GetChecklist()[0].Status);
+        }
+
+        /// <summary>
+        /// The legacy <c>Done</c> mirror has to come back with the status, or a reopened item reads as
+        /// finished to every consumer still using it.
+        /// </summary>
+        [Fact]
+        public void Reopening_ClearsTheLegacyDoneMirror()
+        {
+            var id = MakeGlossTask();
+            DriveItemToDone(id, 0);
+            Assert.True(_svc.GetTask(id).GetChecklist()[0].Done);
+
+            Assert.True(_svc.TransitionChecklistItem(id, 0, "testing", "reopened", "alice").Success);
+
+            Assert.False(_svc.GetTask(id).GetChecklist()[0].Done);
+        }
+
+        /// <summary>
+        /// Reopening opens exactly one door and no others: done still cannot jump straight back to
+        /// coding or pending. The reopen returns an item to REVIEW, which is where the decision that
+        /// closed it early was made.
+        /// </summary>
+        [Theory]
+        [InlineData("coding")]
+        [InlineData("pending")]
+        [InlineData("done")]
+        public void FromDone_NoOtherTransitionIsPermitted(string target)
+        {
+            var id = MakeGlossTask();
+            DriveItemToDone(id, 0);
+
+            var r = _svc.TransitionChecklistItem(id, 0, target, "trying it on", "alice");
+
+            Assert.False(r.Success, $"done → {target} should not be permitted.");
+            Assert.Contains("Invalid transition", r.Error, StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// ⚠️ THE PARENT ONLY FOLLOWS WHEN <c>AutoStatus</c> IS ON, and it is OFF by default — a fact I
+        /// asserted the wrong way round before running this, and which narrows the ticket's one open
+        /// design question considerably.
+        ///
+        /// <para><c>RecalculateAutoStatus</c> early-returns unless the flag is set. The flag is set in
+        /// TWO places, both in <c>TaskLifecycleBoardForm</c> — on open (:66, "AutoStatus = true for any
+        /// task opened in the lifecycle board") and from <c>HandleSetAutoStatus</c> (:667), a user
+        /// toggle on the board page. No REST route and no MCP tool sets it, so a task that has never
+        /// been opened in the lifecycle board does not have it. For such a task a reopen changes the
+        /// ITEM and nothing else — the parent's status stays whatever a human last set.</para>
+        ///
+        /// <para>⚠️ This paragraph said "exactly one place" until peer review counted. Both claims
+        /// support the same conclusion, so nothing downstream moves — but a precise-sounding number
+        /// that is wider than the code is exactly the defect this comment exists to record, and it was
+        /// sitting in the correction itself.</para>
+        ///
+        /// <para>This is the DEFAULT half of the pair. The board half is below.</para>
+        /// </summary>
+        [Fact]
+        public void Reopening_LeavesTheParentAlone_WhenAutoStatusIsOff()
+        {
+            var id = MakeGlossTask();
+            DriveItemToDone(id, 0);
+            DriveItemToDone(id, 1);
+
+            string before = _svc.GetTask(id).Status;
+            Assert.True(_svc.TransitionChecklistItem(id, 1, "testing", "reopened", "alice").Success);
+
+            Assert.Equal(before, _svc.GetTask(id).Status);
+        }
+
+        /// <summary>
+        /// The board half: with <c>AutoStatus</c> on, the parent follows the item back out of done. That
+        /// is the chosen behaviour (task dc813ddd, option (b)) rather than a side effect nobody looked
+        /// at — work genuinely is being redone, so a task reporting done while one of its items sits in
+        /// testing would be the dishonest option.
+        ///
+        /// <para>Safe because the destructive half of task completion — worktree prune and auto-merge —
+        /// lives in <c>UpdateTaskStatus</c>, NOT in the recalculation this goes through, so a reopen
+        /// cannot fire either. If the worktree was already pruned, the task returning to in_progress is
+        /// what makes it eligible for backfill on the next activation.</para>
+        /// </summary>
+        [Fact]
+        public void Reopening_ReturnsTheParentToInProgress_WhenAutoStatusIsOn()
+        {
+            var id = MakeGlossTask();
+            _svc.SetAutoStatus(id, true);
+
+            DriveItemToDone(id, 0);
+            DriveItemToDone(id, 1);
+            Assert.Equal("done", _svc.GetTask(id).Status);
+
+            Assert.True(_svc.TransitionChecklistItem(id, 1, "testing", "reopened", "alice").Success);
+
+            Assert.Equal("in_progress", _svc.GetTask(id).Status);
+        }
+
+        private void DriveItemToDone(string id, int index)
+        {
+            Assert.True(_svc.TransitionChecklistItem(id, index, "coding", "starting", "carol").Success);
+            Assert.True(_svc.TransitionChecklistItem(id, index, "testing", "ready for review", "carol").Success);
+            Assert.True(_svc.TransitionChecklistItem(id, index, "done", "looks good", "alice").Success);
+        }
+
         private string MakeGlossTask()
         {
             var id = _svc.CreateTask("t", "d", "diana").TaskId;
