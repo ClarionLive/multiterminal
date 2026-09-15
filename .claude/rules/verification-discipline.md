@@ -60,6 +60,10 @@ result looked wrong. The result looked exactly right.
 occurrences, or assert the broken state directly. And run both directions against the *same* file
 state, so "green before / red after" is a comparison rather than two anecdotes.
 
+⚠️ **The count only works as an expectation formed *before* the run.** Checking it afterwards
+rationalises whatever number appears — the same check, applied in the other order, produces
+agreement with any result instead of disagreement with a wrong one.
+
 ### A test that hangs is worse than one that fails
 
 Awaiting the task you expect, under a broken registry, **hangs the suite**. Checking `IsCompleted`
@@ -157,6 +161,12 @@ This is worth its own entry because of how it fails, not what it is:
 
 **Rule: mint the id first, then write the citation.** Never the other way round. And when citing an
 existing symbol as precedent, open it.
+
+**Corollary — search, don't transcribe.** A line number carried across from someone else's message
+has no check attached; a `grep` has one for free, at the same cost. Two agents on this program
+reported different line numbers for the same method and **neither was wrong** — one was correct on
+`main`, the other on a branch where an earlier commit had shifted it by 11. Only the one who
+searched noticed the world had moved underneath the reference.
 
 ## A permissive comparison in front of an exact one is a bug generator
 
