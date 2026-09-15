@@ -29,8 +29,12 @@ namespace MultiTerminal.API.Controllers
             if (string.IsNullOrWhiteSpace(request.AgentName))
                 return Problem(detail: "agentName is required", statusCode: 400);
 
+            // Canonical identity, once, at the top (task c28e6177) — and echoed back below, so the
+            // caller is told the name that was actually used rather than the one it typed.
+            string agentName = request.AgentName.Trim();
+
             var (success, agent, error) = await _spawnService.SpawnAgentAsync(
-                request.AgentName,
+                agentName,
                 request.WorkingDir,
                 request.InitialPrompt,
                 request.McpConfigPath,
@@ -43,7 +47,7 @@ namespace MultiTerminal.API.Controllers
 
             return Ok(new
             {
-                agentName = request.AgentName,
+                agentName,
                 processId = agent?.ProcessId ?? -1,
                 sessionId = agent?.SessionId
             });
@@ -60,8 +64,18 @@ namespace MultiTerminal.API.Controllers
             if (string.IsNullOrWhiteSpace(request.AgentName))
                 return Problem(detail: "agentName is required", statusCode: 400);
 
+            // ⚠️ CANONICALISE BEFORE ANY OTHER CHECK READS IT (task c28e6177). This endpoint is the
+            // phone app's spawn route, and a mobile keyboard's auto-space after a word is the most
+            // plausible real source of a stray trailing space in the whole system.
+            //
+            // The ORDER is load-bearing, not tidiness: the Oracle guard below compares this name, and
+            // an untrimmed "Oracle " would sail past an ordinal-ignore-case equality check and spawn a
+            // second Oracle — the exact class of defect this ticket is about, in the guard that exists
+            // to prevent it.
+            string agentName = request.AgentName.Trim();
+
             // Oracle is always-on — managed by OracleService, not spawnable via API
-            if (request.AgentName.Equals(OracleService.OracleName, System.StringComparison.OrdinalIgnoreCase))
+            if (agentName.Equals(OracleService.OracleName, System.StringComparison.OrdinalIgnoreCase))
                 return Problem(detail: "Oracle is always-on and managed by OracleService. Send messages to Oracle directly.", statusCode: 400);
 
             string workingDir = request.WorkingDir;
@@ -109,7 +123,7 @@ namespace MultiTerminal.API.Controllers
             }
 
             var (success, docId, error, terminalName) = await _spawnService.SpawnTeammateAsync(
-                request.AgentName,
+                agentName,
                 agentType: null,
                 workingDir,
                 initialPrompt: initialPrompt,
@@ -135,7 +149,13 @@ namespace MultiTerminal.API.Controllers
             return Ok(new
             {
                 terminalName,
-                requestedName = request.AgentName,
+
+                // The CANONICAL requested name, not the raw one. Callers compare these two to decide
+                // whether the broker suffixed a held name — mcp/index.js renders "X was already held,
+                // so the helper is registered as Y" off exactly this. Echoing the untrimmed input would
+                // make "Alice " vs "Alice" look like a collision and print that sentence about a name
+                // nothing was holding.
+                requestedName = agentName,
                 docId,
                 ready = false,
                 readiness = "pane created; the helper boots and the plugin's SessionStart hook registers it in ~10-30s — it is messageable once list_terminals shows it with a channel port",

@@ -3793,10 +3793,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
+        // ⚠️ THIS GUARD IS REQUIRED BY THE TRIM BELOW, not merely tidy (task c28e6177). agentName used
+        // to be forwarded raw, so a missing one arrived at the API as null and came back as a clean 400.
+        // String(undefined) is the literal "undefined", so trimming without checking first would turn
+        // that 400 into a successfully spawned terminal NAMED "undefined". Schema-required is not the
+        // same as present.
+        if (!args.agentName || !String(args.agentName).trim()) {
+          return {
+            content: [{
+              type: "text",
+              text: "❌ agentName is required — the name for the NEW helper terminal.",
+            }],
+            isError: true,
+          };
+        }
+
         // Errors propagate: apiCall attaches the controller's own Problem detail (duplicate name,
         // unknown project, bootstrap failure) to the thrown message, and the dispatcher renders it.
         const spawned = await apiCall("/api/spawn/terminal", "POST", {
-          agentName: args.agentName,
+          // Trimmed for the same reason spawnerName is, one line down: the broker never trims a name,
+          // so " Alice" and "Alice" would be two terminals with one apparent identity. Normalising at
+          // the edge, before any row exists, is the only place that can be fixed without merging two
+          // identities that already do.
+          agentName: String(args.agentName).trim(),
           workingDir: args.workingDir || null,
           projectId: args.projectId || null,
           initialPrompt: args.initialPrompt || null,

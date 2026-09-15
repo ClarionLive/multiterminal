@@ -125,7 +125,13 @@ namespace MultiTerminal.API.Gateway
                 if (string.IsNullOrWhiteSpace(request.AgentName))
                     return Results.BadRequest(new { success = false, error = "agentName is required" });
 
-                if (request.AgentName.Equals(OracleService.OracleName, StringComparison.OrdinalIgnoreCase))
+                // ⚠️ Canonical identity BEFORE the Oracle guard reads it (task c28e6177), mirroring
+                // SpawnController. This is the phone PWA's own spawn route — the one whose callers type
+                // names on a mobile keyboard — so it is the likeliest origin of a stray trailing space
+                // in the entire system, and it must not be the one surface that skips the rule.
+                string agentName = request.AgentName.Trim();
+
+                if (agentName.Equals(OracleService.OracleName, StringComparison.OrdinalIgnoreCase))
                     return Results.BadRequest(new { success = false, error = "Oracle is always-on and managed by OracleService. Send messages to Oracle directly." });
 
                 string workingDir = request.WorkingDir;
@@ -140,7 +146,7 @@ namespace MultiTerminal.API.Gateway
                 }
 
                 var (success, docId, error, terminalName) = await spawnService.SpawnTeammateAsync(
-                    request.AgentName,
+                    agentName,
                     agentType: null,
                     workingDir,
                     initialPrompt: null,
@@ -152,7 +158,7 @@ namespace MultiTerminal.API.Gateway
                 // terminalName is the identity the broker ACTUALLY registered (task 77d1182f) — a name
                 // already held on this MultiTerminal comes back suffixed. `ready` is additive: success
                 // means the pane exists; the helper boots and registers itself afterwards.
-                return Results.Ok(new { success = true, terminalName = terminalName ?? request.AgentName, requestedName = request.AgentName, docId, ready = false });
+                return Results.Ok(new { success = true, terminalName = terminalName ?? agentName, requestedName = agentName, docId, ready = false });
             });
         }
 

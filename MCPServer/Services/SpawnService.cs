@@ -48,6 +48,22 @@ namespace MultiTerminal.MCPServer.Services
                 return (false, null, "Agent name is required", null);
             }
 
+            // ⚠️ THE CANONICAL IDENTITY IS MINTED HERE (task c28e6177). Every comparison downstream —
+            // the broker's uniqueness scan and row lookup, the plugin channel server's roster lookup and
+            // isAddressedToMe — is untrimmed, deliberately. So " Alice" and "Alice" are two different
+            // terminals from the moment a row exists, and the ONLY safe place to reconcile them is
+            // before one does. Normalising here cannot merge two existing identities, because there is
+            // nothing to merge yet; normalising in any of those comparisons would, which is why this
+            // fix lives at the boundary and not there (see HelperReadinessTrigger for the refusal).
+            //
+            // This is the choke point, not the only trim: all three HTTP surfaces (SpawnController's
+            // two endpoints and the phone gateway's /api/spawn) trim before calling, because they echo
+            // a requestedName back to the caller and it must be the name that was actually used. Those
+            // are the same idempotent operation, not a second rule that could disagree — by the time
+            // execution reaches here the value is usually already canonical. This line is what makes it
+            // true for a caller that has not been written yet.
+            agentName = agentName.Trim();
+
             try
             {
                 var result = await OnSpawnRequested(agentName, agentType, workingDir, initialPrompt, spawnerName);
@@ -81,6 +97,10 @@ namespace MultiTerminal.MCPServer.Services
             {
                 return (false, null, "Agent name is required");
             }
+
+            // Same canonical-identity rule as SpawnTeammateAsync above — a headless agent is registered
+            // with the broker too, so it can hold a whitespace-variant name just as a pane can.
+            agentName = agentName.Trim();
 
             try
             {
