@@ -37,8 +37,8 @@ namespace MultiTerminal.Services
     internal static class HelperReadinessTrigger
     {
         /// <summary>
-        /// True when a registration for <paramref name="registeredName"/> means the helper called
-        /// <paramref name="awaitedName"/> is alive and can be typed into.
+        /// True when a registration for the row identified by <paramref name="registeredDocId"/> means the
+        /// helper occupying <paramref name="awaitedDocId"/>'s pane is alive and can be typed into.
         /// </summary>
         /// <remarks>
         /// <para>⚠️ <b>The port, never the event.</b> <c>TerminalRegistered</c> fires TWICE per spawn:
@@ -46,24 +46,66 @@ namespace MultiTerminal.Services
         /// real registration, which does. A trigger keyed on "did a registration happen" would fire on the
         /// first — before <c>claude</c> has started — and type a job into a pane with nothing in it.</para>
         ///
-        /// <para>Name comparison is ordinal-case-insensitive and trimmed, matching
-        /// <c>AgentAttentionService.IsQuestionTextType</c>'s handling of agent names: the registration
-        /// arrives from a separate process on its own release cadence, so a casing or whitespace variant
-        /// must not silently degrade this back to the 120s path.</para>
+        /// <para>⚠️ <b>DOCID, NOT THE DISPLAY NAME</b> (task c28e6177). This predicate used to compare
+        /// TRIMMED display names, and nothing else in the system trims one. The broker's uniqueness scan
+        /// (<c>FindUniqueCandidate</c>) and its row lookup (<c>GetTerminal</c>) both compare
+        /// ordinal-ignore-case with no trim, as do the plugin channel server's roster lookup and its
+        /// <c>isAddressedToMe</c>. So a helper spawned as <c>"Alice "</c> while <c>"Alice"</c> was live got
+        /// a SECOND broker row — the name was not held, so it was never suffixed — and this predicate then
+        /// answered TRUE for the live Alice's registration. Reproduced in
+        /// <c>HelperReadinessIdentityAsymmetryTests</c>; the ticket arrived as an unreproduced review
+        /// inference and was demonstrated before being touched.</para>
         ///
-        /// <para>The awaited name is the RESOLVED one — a held name comes back suffixed ("Name-2"), and
-        /// binding to the requested name instead would wait for a registration that never comes (the
-        /// orphan-pane class of defect from 77d1182f item 8).</para>
+        /// <para>A docId is minted by MT per pane (<c>Guid.NewGuid</c>), never round-trips through another
+        /// process, and is the SAME key <c>Deliver</c> uses to find the document it is about to type into
+        /// (<c>t.DocId == docId</c>). Comparing it is therefore not a stricter name check — it is the
+        /// actual invariant: the row that registered is the row whose pane we are about to type into.
+        /// <c>StringComparison.Ordinal</c> matches that lookup exactly; ignoring case here would let this
+        /// approve a delivery the pane lookup then fails to find.</para>
+        ///
+        /// <para>The registering row carries the pane's docId even though the helper's own registration
+        /// sends none: the channel server posts name + port + nonce + ownerPid, which lands in
+        /// <c>DecideRegistration</c>'s name-match reuse branch and re-raises the PRE-REGISTERED row —
+        /// and that row was created with <c>doc.DocId</c>.</para>
+        ///
+        /// <para>Binding to the docId also removes the suffixed-name hazard rather than handling it: a
+        /// held name comes back as "Name-2", and a predicate keyed on the REQUESTED name would wait for a
+        /// registration that never comes (the orphan-pane defect from 77d1182f item 8). There is no
+        /// requested-vs-resolved distinction for a docId.</para>
         /// </remarks>
-        /// <param name="registeredName">Name on the row the registration event carried.</param>
+        /// <param name="registeredDocId">DocId on the row the registration event carried.</param>
         /// <param name="registeredChannelPort">That row's channel port; null before the helper registers.</param>
-        /// <param name="awaitedName">The identity actually created for this spawn.</param>
-        internal static bool IsHelperAlive(string registeredName, int? registeredChannelPort, string awaitedName)
+        /// <param name="awaitedDocId">DocId of the pane this spawn created.</param>
+        internal static bool IsHelperAlive(string registeredDocId, int? registeredChannelPort, string awaitedDocId)
         {
             if (registeredChannelPort == null) return false;
-            if (string.IsNullOrWhiteSpace(registeredName) || string.IsNullOrWhiteSpace(awaitedName)) return false;
 
-            return string.Equals(registeredName.Trim(), awaitedName.Trim(), StringComparison.OrdinalIgnoreCase);
+            // An absent docId must never match an absent docId. Rows exist with no docId (an adopted
+            // session registers without one), and treating two blanks as the same pane would fire this
+            // trigger for a terminal that has no relationship to the spawn at all.
+            if (string.IsNullOrWhiteSpace(registeredDocId) || string.IsNullOrWhiteSpace(awaitedDocId)) return false;
+
+            // ⛔ DO NOT "FIX" AN IDENTITY MISMATCH BY TRIMMING. Not here, and above all not in
+            // MessageBroker.FindUniqueCandidate, MessageBroker.GetTerminal, or the plugin channel
+            // server (multiterminal-channel.mjs: the roster lookup and isAddressedToMe).
+            //
+            // Those four comparisons agree today — ordinal-ignore-case, untrimmed — and that agreement
+            // is the system's definition of "one terminal". This predicate was the fifth and the only
+            // one that trimmed, which is what task c28e6177 was: NOT a missing trim somewhere, but one
+            // extra trim here. The tempting cleanup is to make the other four match this one. It is
+            // exactly backwards, and it is not a tidy-up — adding Trim to those comparisons MERGES two
+            // rows the broker deliberately keeps separate, inside the comparison that decides which
+            // agent receives a message. Two terminals would answer to one name.
+            //
+            // The asymmetry is reproduced against a real broker in HelperReadinessIdentityAsymmetryTests,
+            // including two CONTROL facts (an exact collision, and a cased variant) that go red if
+            // anyone teaches the broker to trim. If the trim question comes up again, run that file
+            // before arguing from first principles.
+            //
+            // Whitespace in a name is a real problem; the place to deal with it is the EDGE, by
+            // normalising a requested name before any row is created from it — never in a comparison
+            // between rows that already exist.
+            return string.Equals(registeredDocId, awaitedDocId, StringComparison.Ordinal);
         }
     }
 }

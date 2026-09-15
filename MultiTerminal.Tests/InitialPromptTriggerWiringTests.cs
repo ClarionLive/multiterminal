@@ -163,6 +163,48 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// ⚠️ WHY A WRONG TRIGGER IS UNRECOVERABLE (task <c>c28e6177</c>). <c>Deliver</c> takes the
+        /// exactly-once guard as its FIRST statement and immediately unsubscribes both other triggers —
+        /// before the document is found, before readiness is awaited, before anything is typed.
+        ///
+        /// <para>That ordering is CORRECT and must stay: exactly-once is the whole point, and a guard
+        /// taken later would let two triggers both type into the pane. It is pinned here because it is
+        /// also what sets the price of firing on the wrong evidence. A delivery triggered by the wrong
+        /// broker row cannot be retracted, retried, or noticed — the question trigger and the 120s
+        /// give-up are already gone by the time the mistake is knowable. That is what makes the
+        /// readiness predicate's correctness load-bearing rather than merely tidy, and it is the reason
+        /// <c>c28e6177</c> re-keys that predicate instead of widening it.</para>
+        ///
+        /// <para>Only the FIRST unsubscribe is located: <c>GiveUp</c> carries the matching pair later in
+        /// the same method, and <see cref="Both_exit_paths_unsubscribe_the_trigger"/> owns that fact.</para>
+        /// </summary>
+        [Fact]
+        public void The_exactly_once_guard_is_taken_before_any_trigger_is_disarmed_or_anything_is_typed()
+        {
+            string body = DeliveryMethodBody();
+
+            int guard = body.IndexOf("Interlocked.Exchange(ref delivered", StringComparison.Ordinal);
+            int unsubscribe = body.IndexOf("TerminalRegistered -= onRegistered", StringComparison.Ordinal);
+            int type = body.IndexOf("TypeInput(oneLine", StringComparison.Ordinal);
+
+            Assert.True(
+                guard >= 0,
+                "Deliver no longer takes an exactly-once guard. Two triggers can now both type into the "
+                + "pane, which garbles the prompt rather than merely duplicating it.");
+            Assert.True(unsubscribe >= 0, "Deliver does not unsubscribe the registration trigger.");
+            Assert.True(type >= 0, "The prompt is never typed at all.");
+
+            Assert.True(
+                guard < unsubscribe,
+                "The guard is taken AFTER the handlers are removed. Two concurrent triggers could both "
+                + "pass the removal and both proceed to type.");
+            Assert.True(
+                guard < type,
+                "The guard is taken AFTER the typing. Exactly-once no longer protects the thing it "
+                + "exists to protect.");
+        }
+
+        /// <summary>
         /// A delivery that fails after the guard is taken must still reach the spawner. Before this,
         /// every failure path inside <c>Deliver</c> logged and returned, so the spawner was told nothing
         /// and <c>GiveUp</c> — the only thing that writes <c>spawn_failed</c> — could never run, because
@@ -190,6 +232,58 @@ namespace MultiTerminal.Tests
                 Regex.IsMatch(body, @"WaitForRendererReadyAsync[^;]*\)\s*\)\s*\{\s*ReportUndelivered", RegexOptions.Singleline),
                 "The renderer-not-ready branch does not call ReportUndelivered. That is the silent "
                 + "permanent job loss this fact exists to prevent.");
+        }
+
+        /// <summary>
+        /// ⚠️ REMOVAL PROOF for task <c>c28e6177</c>: readiness is decided on the pane's DOCID, and no
+        /// call in this method decides it on a display name.
+        ///
+        /// <para><b>Why the census and not the unit tests.</b> <see cref="MultiTerminal.Services.HelperReadinessTrigger"/>
+        /// takes three parameters, two of which are <c>string</c>. Re-keying it changed what those strings
+        /// MEAN and not one thing the compiler can see — passing <c>row.Name</c> to a parameter named
+        /// <c>registeredDocId</c> builds cleanly and silently restores the defect. The unit tests cannot
+        /// catch it either, because they only ever see the values a caller chose to hand over. The only
+        /// place the binding is observable is the call site, and the call site is private inside an 8K+ LOC
+        /// form.</para>
+        ///
+        /// <para>The lookups are asserted too, not just the predicate. <c>GetTerminal</c> resolves a
+        /// terminal id, a docId OR a name, so a fixed predicate fed from <c>GetTerminal(agentName)</c>
+        /// would still be reading a row that a whitespace- or case-variant name could resolve to.</para>
+        /// </summary>
+        [Fact]
+        public void Readiness_is_decided_on_the_docid_and_never_on_a_display_name()
+        {
+            string body = DeliveryMethodBody();
+
+            var calls = Regex.Matches(body, @"IsHelperAlive\(\s*([A-Za-z_][\w.]*)\s*,");
+            Assert.True(
+                calls.Count >= 3,
+                $"Found {calls.Count} IsHelperAlive call(s); expected 3 — the registration handler, the "
+                + "post-subscribe check and the fallback timer. A missing one means a trigger stopped "
+                + "consulting the shared rule and is deciding readiness for itself again.");
+
+            foreach (Match call in calls)
+            {
+                string firstArg = call.Groups[1].Value;
+                Assert.True(
+                    firstArg.EndsWith(".DocId", StringComparison.Ordinal),
+                    $"IsHelperAlive is passed '{firstArg}' as the registered identity. It must be a "
+                    + ".DocId. Display names are not identities here: the broker never trims one, so a "
+                    + "helper spawned as \"Alice \" while \"Alice\" is live is TWO rows to the broker, and "
+                    + "keying on the name lets the live Alice's registration deliver that helper's job "
+                    + "(task c28e6177).");
+            }
+
+            Assert.False(
+                Regex.IsMatch(body, @"IsHelperAlive\([^)]*agentName"),
+                "An IsHelperAlive call still passes agentName. The awaited side must be the docId of the "
+                + "pane this spawn created; agentName is a display name and is only fit for log lines.");
+
+            Assert.DoesNotContain(
+                "GetTerminal(agentName)",
+                body,
+                StringComparison.Ordinal);
+            Assert.Contains("GetTerminal(docId)", body, StringComparison.Ordinal);
         }
 
         /// <summary>

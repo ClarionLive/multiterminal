@@ -2351,16 +2351,41 @@ namespace MultiTerminal
                 if (payload == null)
                     return;
 
-                // Same predicate the attention rail uses (Trim + OrdinalIgnoreCase): the Notification
-                // hook ships from a separate repo on its own cadence, so a casing/whitespace variant
-                // must not silently degrade this to the fallback (pipeline Run 1).
+                // raw_type IS trimmed, by AgentAttentionService.IsQuestionTextType. That is a
+                // vocabulary token from a hook in a separate repo on its own cadence — normalising it
+                // can merge nothing, because the set of valid values is fixed and known here.
                 if (!(payload.TryGetValue("raw_type", out object rawType)
                       && rawType is string rt
                       && MultiTerminal.MCPServer.Services.AgentAttentionService.IsQuestionTextType(rt)))
                     return;
+
+                // ⚠️ THE NAME IS NOT TRIMMED, ON EITHER SIDE (task c28e6177), and the two lines above
+                // are not a precedent for trimming it — a type token and an identity are different
+                // kinds of string.
+                //
+                // This used to read `string.Equals(n.Trim(), agentName, ...)`: trimmed on one side
+                // only, which is arbitrary in both directions. A helper whose resolved name carried a
+                // trailing space could never match its OWN question, while a foreign question with a
+                // stray space matched a helper whose name had none.
+                //
+                // Fixed by removing the trim rather than adding the second one, because trimming BOTH
+                // sides is the c28e6177 defect one level down: the broker will hand out "Alice" and
+                // "Alice " as two separate terminals, so a predicate that folds them together lets one
+                // helper's question deliver a DIFFERENT helper's job. Removing tolerance can only ever
+                // cause fewer matches; adding it can cause wrong ones.
+                //
+                // The other two triggers were re-keyed onto the pane's docId, which is not an option
+                // here: the notification payload carries agent_name and session_id and no docId at all
+                // (NotificationsController.cs, payload construction). So this comparison stays
+                // name-based and its correctness rests on being EXACT.
+                //
+                // ⚠️ CAVEAT, NOT A JUSTIFICATION: a missed match here is cheap TODAY only because the
+                // channel-port trigger below covers the same job in about five seconds. That is a
+                // property of the other trigger, not of this one. If the port trigger is ever narrowed
+                // or removed, this becomes load-bearing on its own.
                 if (!(payload.TryGetValue("agent_name", out object name)
                       && name is string n
-                      && string.Equals(n.Trim(), agentName, StringComparison.OrdinalIgnoreCase)))
+                      && string.Equals(n, agentName, StringComparison.OrdinalIgnoreCase)))
                     return;
 
                 Deliver("first question");
@@ -2377,8 +2402,15 @@ namespace MultiTerminal
             // still carried a second copy.)
             onRegistered = (_, row) =>
             {
+                // ⚠️ Matched on DOCID, not the display name (task c28e6177). This handler is raised for
+                // EVERY row the broker registers, not just this spawn's, so the comparison is the only
+                // thing standing between "a terminal came alive" and "MY helper came alive". A trimmed
+                // name is not that: the broker never trims, so a live "Alice" and a helper spawned as
+                // "Alice " are two rows to it and were one identity to this predicate — Alice's own
+                // registration then fired this handler, and Deliver's exactly-once guard made the
+                // mistake permanent and silent.
                 if (row != null
-                    && HelperReadinessTrigger.IsHelperAlive(row.Name, row.ChannelPort, agentName))
+                    && HelperReadinessTrigger.IsHelperAlive(row.DocId, row.ChannelPort, docId))
                 {
                     Deliver("helper registered a channel port");
                 }
@@ -2401,9 +2433,11 @@ namespace MultiTerminal
             // Checking BEFORE subscribing would leave the opposite gap: a registration landing between the
             // check and the subscribe would be missed entirely. Exactly-once is already guaranteed by the
             // Interlocked guard in Deliver, so the overlap this ordering creates is free.
-            var alreadyLive = _mcpServer.Broker.GetTerminal(agentName);
+            // Looked up by DOCID, not the name (task c28e6177). GetTerminal resolves a terminal id, a
+            // docId or a name, and the docId is the one key that cannot name somebody else's row.
+            var alreadyLive = _mcpServer.Broker.GetTerminal(docId);
             if (alreadyLive != null
-                && HelperReadinessTrigger.IsHelperAlive(alreadyLive.Name, alreadyLive.ChannelPort, agentName))
+                && HelperReadinessTrigger.IsHelperAlive(alreadyLive.DocId, alreadyLive.ChannelPort, docId))
             {
                 Deliver("helper already had a channel port");
             }
@@ -2415,15 +2449,16 @@ namespace MultiTerminal
                     if (delivered != 0)
                         return;
 
-                    // Liveness is the broker's row for the RESOLVED name: a channel port is set only by
-                    // the real register_terminal from /session-start, never by MT's pre-registration.
+                    // Liveness is the broker's row for THIS PANE's docId (task c28e6177; it was the
+                    // resolved name): a channel port is set only by the real register_terminal from
+                    // /session-start, never by MT's pre-registration.
                     // Routed through the SAME predicate as the registration trigger — this site used to
                     // hand-roll `live?.ChannelPort != null`, which is the rule HelperReadinessTrigger was
                     // extracted from, leaving two implementations of one rule in one method that would
                     // silently diverge the next time the seam changed (pipeline Run 1, code-reviewer).
-                    var live = _mcpServer.Broker.GetTerminal(agentName);
+                    var live = _mcpServer.Broker.GetTerminal(docId);
                     if (live != null
-                        && HelperReadinessTrigger.IsHelperAlive(live.Name, live.ChannelPort, agentName))
+                        && HelperReadinessTrigger.IsHelperAlive(live.DocId, live.ChannelPort, docId))
                     {
                         _debugLogService?.Warning("MainForm", $"No question from {agentName} within {fallbackMs / 1000}s but it is live (channel port {live.ChannelPort}); delivering its initial prompt anyway.");
                         Deliver("fallback timer — helper live, no question");
