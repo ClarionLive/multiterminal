@@ -117,9 +117,15 @@ namespace MultiTerminal.Tests
         /// <summary>
         /// The queue is a property of <c>terminal.html</c>, and <c>InjectInputAsync</c> reaches it
         /// through nothing. This pins the GAP rather than a fix — so that when the paths are unified
-        /// (task f420feeb Phase 2) this fact goes red and has to be rewritten deliberately, instead
-        /// of the unification quietly landing while a stale comment elsewhere still describes two
-        /// mechanisms.
+        /// this fact goes red and has to be dealt with deliberately, instead of the unification
+        /// quietly landing while stale prose elsewhere still describes two mechanisms.
+        ///
+        /// <para>🔴 <b>WHEN THIS GOES RED, DELETE THIS TEST AND RETURN TO TASK f420feeb PHASE 2
+        /// (OPTION A) TO CLOSE IT OUT. THE GAP HAS BEEN CLOSED — THIS IS NOT A REGRESSION.</b>
+        /// A pinned gap and a pinned invariant are indistinguishable without this line, and the
+        /// difference matters in the exact direction that hurts: read as an invariant, a red here
+        /// says "someone broke the separation" and the next person reverts the UNIFICATION to
+        /// restore the green. That would delete the improvement to save the test.</para>
         /// </summary>
         [Fact]
         public void The_direct_conpty_write_still_bypasses_the_typing_queue()
