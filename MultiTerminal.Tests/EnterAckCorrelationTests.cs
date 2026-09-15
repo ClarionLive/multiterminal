@@ -194,6 +194,20 @@ namespace MultiTerminal.Tests
             Assert.False(comparer.Equals("a", "A"));
             Assert.False(comparer.Equals("7 ", "7"));
             Assert.False(comparer.Equals(" 7", "7"));
+
+            // ⚠️ THE ASSERTION THAT EXCLUDES A CULTURE-SENSITIVE COMPARER, and without it this pin
+            // accepted one. StringComparer.InvariantCulture passes all four assertions above —
+            // case-sensitive, no trimming — while treating these two as EQUAL: U+00C5 and the
+            // decomposed A + combining ring are the same character to a culture-aware comparison and
+            // different byte sequences to an ordinal one. A culture-sensitive comparer in front of an
+            // exact lookup is the permissive-in-front-of-exact shape this class's own comment warns
+            // about, citing c28e6177 — so the pin was admitting the very thing it exists to refuse.
+            //
+            // Found by Carol RUNNING the candidate comparers against these assertions rather than
+            // reasoning about them. Note where the defect was: the structural pin had removed the
+            // text-matching failure directions, and then the PROSE describing what it guaranteed
+            // outran what it asserted. A structural pin is not self-documenting.
+            Assert.False(comparer.Equals("Å", "Å"));
         }
 
         /// <summary>
@@ -241,6 +255,30 @@ namespace MultiTerminal.Tests
             return string.Join(
                 "\n",
                 noBlocks.Split('\n').Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+        }
+
+        /// <summary>
+        /// Zero waiters is NOT ambiguous, and saying so is the point (peer review of this ticket).
+        /// <para><c>Count != 1</c> reported <see cref="EnterAckOutcome.AmbiguousDropped"/> for an empty
+        /// table as well as a crowded one, so the renderer logged "multiple waiters were outstanding"
+        /// when none were. Reachable: an id-less ack from a cached page arriving after the sender's
+        /// <c>finally</c> released the job — i.e. after the 3s timeout. The drop was right either way,
+        /// so this is noise rather than misbehaviour — but it is noise in the ONE runtime channel that
+        /// separates "a stale page is being tolerated" from "the echo is broken and nothing is
+        /// correlated", which is the only reason that Warning exists.</para>
+        /// </summary>
+        [Fact]
+        public void An_id_less_ack_with_nothing_outstanding_is_not_reported_as_ambiguous()
+        {
+            var registry = new EnterAckRegistry();
+            Assert.Equal(0, registry.OutstandingCount);
+
+            Assert.Equal(EnterAckOutcome.NoWaiter, registry.Complete(null));
+
+            // And after a job has been released, which is the reachable shape.
+            var (jobId, _) = registry.Register();
+            registry.Release(jobId);
+            Assert.Equal(EnterAckOutcome.NoWaiter, registry.Complete(string.Empty));
         }
 
         /// <summary>

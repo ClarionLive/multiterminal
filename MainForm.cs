@@ -5242,6 +5242,17 @@ namespace MultiTerminal
             // So whenever re-typing could have been needed it was discarded, and whenever it could run
             // it was not needed and appended a second copy of the prompt to the first.
             //
+            // ⚠️ WHAT MAKES THOSE SETS DISJOINT, stated because the argument silently depends on it
+            // (peer review). The shape that would break it is a write that FAILS while the terminal is
+            // running — that would put one case in both sets at once. It cannot happen, and not by
+            // luck: `_terminal.Write(text)` at TerminalControl.cs:379 sits OUTSIDE the try that wraps
+            // the rest of InjectSingleInputAsync, and TerminalDocument.InjectInputAsync does not catch
+            // either. So a throwing write PROPAGATES as an exception rather than being converted into
+            // `false`, and this `if (!injected)` block is never reached on that path at all.
+            // A disjointness claim resting on an unstated exception-propagation property is one
+            // refactor away from being wrong — wrap that write in a try that returns false, and the
+            // sets intersect again with nothing here to notice.
+            //
             // Retry the SUBMIT instead, which is what SendEnterAsync is for ("used to retry Enter
             // submission when text was already written"). It adds no text, so it cannot duplicate;
             // if the composer is genuinely empty it submits nothing.

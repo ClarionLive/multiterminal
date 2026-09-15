@@ -907,7 +907,14 @@ namespace MultiTerminal.Terminal
                     break;
 
                 case EnterAckOutcome.NoWaiter:
-                    DebugLogService?.Trace("WebViewTerminalRenderer", $"enterAck for job '{jobId}' has no waiter (already timed out) — dropped");
+                    // Worded for BOTH shapes. It used to name a job id unconditionally, which read as
+                    // nonsense for an id-less ack arriving when nothing was outstanding — the case
+                    // that used to be misreported as "multiple waiters" (see EnterAckOutcome).
+                    DebugLogService?.Trace(
+                        "WebViewTerminalRenderer",
+                        string.IsNullOrEmpty(jobId)
+                            ? "enterAck carried no job id and nothing was waiting — dropped"
+                            : $"enterAck for job '{jobId}' has no waiter (already timed out) — dropped");
                     break;
 
                 case EnterAckOutcome.CompatibilitySingleWaiter:

@@ -18,13 +18,19 @@ namespace MultiTerminal.Services
         /// <summary>Matched a waiting job by id. The normal path; anything else is a signal.</summary>
         Correlated,
 
-        /// <summary>No waiter held that id — the attempt had already timed out. Dropped.</summary>
+        /// <summary>
+        /// Nothing was waiting, so the ack is dropped. Covers BOTH shapes: an id whose job had already
+        /// timed out, and an id-less ack arriving when no waiter is outstanding at all.
+        /// <para>The second shape used to return <see cref="AmbiguousDropped"/>, which made the
+        /// renderer log "multiple waiters were outstanding" when there were none — noise in the one
+        /// runtime channel that distinguishes a tolerated stale page from a broken id echo.</para>
+        /// </summary>
         NoWaiter,
 
         /// <summary>No id on the ack and exactly one waiter outstanding: the compatibility path.</summary>
         CompatibilitySingleWaiter,
 
-        /// <summary>No id and two or more waiters outstanding. Dropped rather than guessed.</summary>
+        /// <summary>No id and TWO OR MORE waiters outstanding. Dropped rather than guessed.</summary>
         AmbiguousDropped,
     }
 
@@ -228,6 +234,17 @@ namespace MultiTerminal.Services
                 // ⚠️ THE COUNT AND THE TAKE ARE ONE STEP, under the lock held since the top of this
                 // method. They used to be two, and that made the guarantee below conditional on
                 // nothing registering in between — see _gate for what that cost.
+                //
+                // Zero and two-or-more are DIFFERENT outcomes, and collapsing them was a real defect:
+                // `Count != 1` returned AmbiguousDropped for an empty table too, so the renderer
+                // logged "multiple waiters were outstanding" when none were. Reachable — an id-less
+                // ack from a cached page arriving after the sender's finally released the job, i.e.
+                // after the 3s timeout. Nothing was ambiguous there; nothing was waiting.
+                if (_waiters.Count == 0)
+                {
+                    return EnterAckOutcome.NoWaiter;
+                }
+
                 if (_waiters.Count != 1)
                 {
                     return EnterAckOutcome.AmbiguousDropped;
