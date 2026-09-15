@@ -1,9 +1,10 @@
 # MessageBroker region-extraction pattern
 
 Proven by ticket **e7e89f4b** (Kanban Tasks → `TaskService`) and **validated on a second region** by
-**86f3fd21** (Profiles → `ProfileService`). Use this to peel the remaining regions off the ~9K-LOC
-`MessageBroker` god-file one at a time. It is **refactor-by-relocation**: move method bodies, do not redesign.
-The broker keeps its full public surface, so callers never change.
+**86f3fd21** (Profiles → `ProfileService`). Use this to peel the remaining regions off the ~8K-LOC
+`MessageBroker` god-file one at a time (7,963 lines on 2026-09-15 — re-measure rather than quoting
+this figure; see the LOC note in CLAUDE.md for why). It is **refactor-by-relocation**: move method
+bodies, do not redesign. The broker keeps its full public surface, so callers never change.
 
 > **Second-region result (86f3fd21):** the Profile extraction built **0/0 on the first compile** (vs
 > TaskService's 23 error-driven iterations) — a smaller region, but the clean first build is the payoff of
