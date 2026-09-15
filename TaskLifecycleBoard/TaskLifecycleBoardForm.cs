@@ -453,11 +453,19 @@ namespace MultiTerminal.TaskLifecycleBoard
             // If status changed, validate the transition
             if (oldStatus != newStatus)
             {
+                // ⚠️ SECOND OF THREE COPIES (task dc813ddd), and the one that surprises people: this
+                // method does NOT call TaskService.TransitionChecklistItem. It reimplements the whole
+                // transition — validation, status, Done, CycleCount, note append — so the board's drag
+                // path never passes through the API gate. Keep this table identical to the one in
+                // TaskService.TransitionChecklistItem and to VALID_TRANSITIONS in lifecycle-board.html;
+                // ChecklistTransitionRuleCensusTests parses all three and fails if they diverge.
+                // Collapsing the duplication is ticket 12eb1e7c.
                 var validTransitions = new Dictionary<string, string[]>
                 {
                     { "pending", new[] { "coding" } },
                     { "coding", new[] { "testing" } },
-                    { "testing", new[] { "coding", "done" } }
+                    { "testing", new[] { "coding", "done" } },
+                    { "done", new[] { "testing" } }
                 };
 
                 if (!validTransitions.ContainsKey(oldStatus) || !validTransitions[oldStatus].Contains(newStatus))
@@ -467,8 +475,11 @@ namespace MultiTerminal.TaskLifecycleBoard
                     return;
                 }
 
-                // Notes required for transitions from coding or testing
-                if ((oldStatus == "coding" || oldStatus == "testing") && string.IsNullOrWhiteSpace(notes))
+                // Notes required for transitions from coding, testing, or done (the reopen — task
+                // dc813ddd). Must match TaskService.TransitionChecklistItem and
+                // transitionRequiresNotes() in lifecycle-board.html.
+                if ((oldStatus == "coding" || oldStatus == "testing" || oldStatus == "done")
+                    && string.IsNullOrWhiteSpace(notes))
                 {
                     SendTaskToWebView();
                     return;

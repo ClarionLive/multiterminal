@@ -2846,11 +2846,17 @@ body.light .helper-chip {
     // -----------------------------------------------------------
     // Transition Validation
     // -----------------------------------------------------------
+    // ⚠️ THIRD OF THREE COPIES (task dc813ddd). The others are the dictionaries in
+    // TaskService.TransitionChecklistItem (the API gate) and TaskLifecycleBoardForm (which
+    // reimplements the transition rather than calling it). All three must agree;
+    // ChecklistTransitionRuleCensusTests parses all three and fails if they do not.
+    // NOTE this copy states "done" EXPLICITLY where the C# ones omit the key — same outcome
+    // before, but it means a reopen is a CHANGED cell here and an ADDED one there.
     var VALID_TRANSITIONS = {
         "pending":  ["coding"],
         "coding":   ["testing"],
         "testing":  ["coding", "done"],
-        "done":     []
+        "done":     ["testing"]
     };
 
     function isValidTransition(fromStatus, toStatus) {
@@ -2902,8 +2908,9 @@ body.light .helper-chip {
 
     function transitionRequiresNotes(fromStatus, toStatus) {
         if (fromStatus === toStatus) return false;
-        // Notes required when leaving coding or testing
-        return fromStatus === "coding" || fromStatus === "testing";
+        // Notes required when leaving coding, testing, or done (the reopen — task dc813ddd).
+        // Must match TaskService.TransitionChecklistItem and TaskLifecycleBoardForm.
+        return fromStatus === "coding" || fromStatus === "testing" || fromStatus === "done";
     }
 
     function getTransitionPromptText(fromStatus, toStatus) {

@@ -231,7 +231,7 @@
   <!-- update_task_checklist (transition) -->
   <div class="tool-block" id="update_task_checklist">
     <h3>update_task_checklist</h3>
-    <p>Transition a checklist item to a new status with mandatory notes. Enforces state machine: <code>pending &rarr; coding &rarr; testing &rarr; done</code> (cycling allowed between <code>coding</code> and <code>testing</code>). Notes required for <code>coding&rarr;testing</code>, <code>testing&rarr;coding</code>, and <code>testing&rarr;done</code> transitions.</p>
+    <p>Transition a checklist item to a new status with mandatory notes. Enforces state machine: <code>pending &rarr; coding &rarr; testing &rarr; done</code> (cycling allowed between <code>coding</code> and <code>testing</code>). <strong>Reopen:</strong> <code>done&rarr;testing</code> is allowed, so a pass is not permanent. Notes required for <code>coding&rarr;testing</code>, <code>testing&rarr;coding</code>, <code>testing&rarr;done</code>, and <code>done&rarr;testing</code>; the reopen note is appended after the pass it undoes, so the history keeps both.</p>
     <h4>Parameters</h4>
     <table>
       <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>

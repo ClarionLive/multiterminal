@@ -2528,12 +2528,27 @@ namespace MultiTerminal.MCPServer.Services
                 item = checklist[itemIndex];
                 previousStatus = item.Status ?? "pending";
 
-                // Validate the transition
+                // Validate the transition.
+                //
+                // ⚠️ THIS TABLE EXISTS THREE TIMES (task dc813ddd). Here; in
+                // TaskLifecycleBoardForm.ValidateAndApplyDrag, which reimplements the whole transition
+                // rather than calling this method; and as VALID_TRANSITIONS in lifecycle-board.html.
+                // They agree today and ChecklistTransitionRuleCensusTests parses all three and asserts
+                // they still do — because nothing else can. Change one, change all three.
+                // Collapsing the duplication is ticket 12eb1e7c, deliberately NOT done here.
+                //
+                // "done" → "testing" is the REOPEN, and it is the whole point of this ticket. Before it,
+                // done was terminal for EVERYONE — not just for an agent that reached it early, but for
+                // the PM and the Owner too, so an ordinary misclick was as permanent as a deliberate
+                // bypass of the review gate. There was no route back from a status anyone set.
+                // This is a REVERSIBILITY fix, not an authorisation one: it does not change WHO may
+                // close the gate, only whether closing it can be undone.
                 var validTransitions = new Dictionary<string, string[]>
                 {
                     { "pending", new[] { "coding" } },
                     { "coding", new[] { "testing" } },
-                    { "testing", new[] { "coding", "done" } }
+                    { "testing", new[] { "coding", "done" } },
+                    { "done", new[] { "testing" } }
                 };
 
                 if (!validTransitions.ContainsKey(previousStatus) || !validTransitions[previousStatus].Contains(newStatus))
@@ -2545,8 +2560,16 @@ namespace MultiTerminal.MCPServer.Services
                     };
                 }
 
-                // Notes are mandatory for coding→testing, testing→coding, testing→done
-                if ((previousStatus == "coding" || previousStatus == "testing") && string.IsNullOrWhiteSpace(notes))
+                // Notes are mandatory for coding→testing, testing→coding, testing→done, and done→testing.
+                //
+                // The reopen is included deliberately (task dc813ddd). Reopening undoes a recorded pass,
+                // so it is the transition where a reason matters MOST — and because notes are appended
+                // rather than replaced, the requirement is what turns a reopen into an audit entry
+                // instead of a silent reversal. The note lands AFTER the pass it undoes, in order, with
+                // By and At, so the history reads "passed, then reopened because X" rather than losing
+                // the fact that a pass ever happened.
+                if ((previousStatus == "coding" || previousStatus == "testing" || previousStatus == "done")
+                    && string.IsNullOrWhiteSpace(notes))
                 {
                     return new UpdateChecklistItemResult
                     {

@@ -840,7 +840,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       // Kanban Workflow: Enhanced Checklist Tools
       {
         name: "update_task_checklist",
-        description: "Transition a checklist item to a new status with mandatory notes. Enforces state machine: pending→coding→testing→done (cycling allowed between coding↔testing). Notes required for coding→testing, testing→coding, and testing→done transitions.",
+        description: "Transition a checklist item to a new status with mandatory notes. Enforces state machine: pending→coding→testing→done (cycling allowed between coding↔testing). REOPEN: done→testing is allowed, so a pass is no longer permanent — it is how a review gate closed early, or by mistake, gets reopened. Notes required for coding→testing, testing→coding, testing→done, and done→testing; the reopen note is APPENDED after the pass it undoes, so the history keeps both. Agents still do not move items to done themselves — only the PM/tester does — but that rule is now recoverable rather than a one-way door.",
         inputSchema: {
           type: "object",
           properties: {
