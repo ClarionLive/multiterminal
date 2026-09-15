@@ -143,12 +143,27 @@ test("no spawn_helper surface claims the helper runs /session-start", () => {
   }
 });
 
-test("spawn_helper warns that the job is not delivered immediately", () => {
-  // Same live test: delivery falls through to the 120s fallback timer for every spawned helper,
-  // because the question-based trigger was built around the /session-start menu above. Correct
-  // but slow — so the surfaces must set the expectation, rather than let a caller read silence
-  // in the first two minutes as a failed spawn and stack a second helper on top of the first.
+test("spawn_helper states prompt delivery, and that a long silence is a failure", () => {
+  // Task 7806024f made delivery fire on the helper registering a channel port — MEASURED 4.9s from
+  // spawn to delivery (2026-09-15, deployed 977ab2d), replacing the ~120s fallback every spawned
+  // helper used to wait out. The surfaces previously told callers to EXPECT ~120s and to read two
+  // minutes of silence as normal; that is now false and inverted — a wait of minutes means the
+  // helper never came alive.
+  //
+  // ⚠️ Do NOT weaken this back to /120s|120 s|two minutes/. That regex was satisfied by the
+  // corrected text's mention of the give-up BOUND, so it stayed green across the very change it
+  // existed to catch. Each surface must carry BOTH halves, asserted separately.
   for (const [name, text] of [["description", defBlock()], ["result text", handlerBlock()]]) {
-    assert.ok(/120s|120 s|two minutes/.test(text), `${name} must state the delivery delay`);
+    assert.ok(
+      /within seconds|4\.9s/.test(text),
+      `${name} must state that delivery is prompt, not a ~120s wait`);
+    assert.ok(
+      !/about 120s|two minutes as a failure|silence before then is normal/.test(text),
+      `${name} still tells callers to expect the pre-7806024f ~120s delay`);
   }
+
+  // The 120s itself must survive as the give-up bound — it is still the real deadline after which
+  // the job is never typed and spawn_failed is sent. Dropping it would trade one wrong expectation
+  // for no expectation at all.
+  assert.ok(/120s/.test(defBlock()), "description must still document the 120s give-up bound");
 });
