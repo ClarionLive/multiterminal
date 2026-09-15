@@ -96,6 +96,26 @@ Without it, a gap is indistinguishable from an invariant. The default is to keep
 of the suite entirely and put them in ticket evidence; pin one only when the pin forces a conscious
 decision later, which a TODO cannot do because a TODO cannot fail.
 
+## Mint the id before you cite it
+
+A ticket id was written into three code comments **before the ticket existed** — guessed as
+`12eb7de7`, where the real id turned out to be `12eb1e7c`. Caught before commit, by chance.
+
+This is worth its own entry because of how it fails, not what it is:
+
+- **Review cannot catch it.** A reviewer seeing a plausible ticket id has no reason to look it up.
+  Every other citation defect on this list is visible by comparing a sentence against code; this one
+  is only visible by leaving the file.
+- **It degrades into a dangling pointer** that outlives everyone who could have spotted it. A
+  reference to a ticket that does not exist reads exactly like a reference to one that does.
+- The related failure with the same surface but a different cause: a citation that points at
+  something **real but irrelevant**. One comment justified a `Trim` by citing a method that trims a
+  `raw_type` token, not a name — the cited precedent did not do what it was cited for, so the trim
+  was defending a path nothing travels.
+
+**Rule: mint the id first, then write the citation.** Never the other way round. And when citing an
+existing symbol as precedent, open it.
+
 ## A permissive comparison in front of an exact one is a bug generator
 
 If a predicate decides *whether* to act and a lookup then decides *what to act on*, they must use the
@@ -139,6 +159,21 @@ can lie.
 distinguish four outcomes rather than two — did it, noted it, *asked and blocked*, lost — because
 "asked and blocked" is indistinguishable from "noted" at the sender and looks like a hung process in
 production.
+
+## Sufficient is not the same as necessary — ask what makes X the right thing to check
+
+A reviewer was asked to check whether a lock was **sufficient**. It was, and they said so. Neither
+author nor reviewer asked the prior question: **is there any concurrency here at all?** There was
+not — every caller was UI-thread confined, so the race being fixed was real in the code and
+unreachable by any caller.
+
+Nothing was wasted (the fix stayed: confinement was an accident of every current caller, not a
+property of the class, and *unreachable is not correct*). But both passes answered the question in
+front of them without asking whether it was the right one.
+
+**A reviewer handed "check X" should ask what makes X the thing worth checking.** The brief is
+written by someone who already has a model of the problem, and that model is the least reviewed
+artifact in the process.
 
 ## Review: the author and the reviewer find disjoint sets
 
