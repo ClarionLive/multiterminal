@@ -96,11 +96,25 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
-        /// ⚠️ THE CELL THIS TICKET ADDED, asserted separately from the table comparison above.
-        /// <para>Without this, all three copies could lose the reopen together and the comparison would
-        /// stay green — they would still agree, just on the old rule. Agreement and correctness are
-        /// different properties and a census that only checks the first can go green on a full
-        /// revert.</para>
+        /// ⚠️ THE CELL THIS TICKET ADDED, asserted separately from the table comparison above — and
+        /// the separation earns its place for a narrower reason than this comment first gave.
+        ///
+        /// <para><b>The reason originally stated here was wrong</b> (peer review). It claimed that
+        /// without this fact all three copies could lose the reopen together and the comparison above
+        /// would stay green, "still agreeing, just on the old rule". That cannot happen:
+        /// <see cref="Every_copy_of_the_transition_table_says_the_same_thing"/> does not compare the
+        /// copies to EACH OTHER, it compares each one to the hardcoded <see cref="Expected"/> — so a
+        /// coordinated revert fails it too. The scenario was impossible as described.</para>
+        ///
+        /// <para><b>The real reason it is not decorative:</b> this fact hardcodes <c>done → testing</c>
+        /// INDEPENDENTLY of <see cref="Expected"/>. So it survives the revert that also edits
+        /// <see cref="Expected"/> to match — which is what a coordinated revert looks like when someone
+        /// does it properly, and is the only version of that scenario the agreement fact cannot
+        /// see.</para>
+        ///
+        /// <para>Kept rather than rewritten away, because the distinction it rests on is still true and
+        /// worth stating plainly: agreement and correctness are different properties. Three copies
+        /// agreeing says nothing about whether they agree on the right rule.</para>
         /// </summary>
         [Theory]
         [InlineData(ApiGate)]
@@ -163,7 +177,19 @@ namespace MultiTerminal.Tests
         [Fact]
         public void The_mcp_tool_description_tells_agents_the_reopen_exists()
         {
-            string src = ReadRepoFile("mcp/index.js");
+            // ⚠️ STRIPPED, and it was NOT when this shipped (peer review demonstrated the miss:
+            // the reopen text was removed from the description, named in a `//` comment inside the
+            // tool block, and this census still passed).
+            //
+            // The other two census methods in this file strip; this one read the file directly. That
+            // is the HIDING direction — and on the target where hiding costs most, because this string
+            // is the one handed to agents at runtime and read as the rule. A stale description that a
+            // green test vouches for misinforms every caller continuously.
+            //
+            // The lesson is not "remember to strip". This is the third census defect from the same
+            // copy-paste idiom in three passes by three people, so per-file vigilance is what failed,
+            // not any one author's care.
+            string src = StripComments(ReadRepoFile("mcp/index.js"));
 
             int def = src.IndexOf("name: \"update_task_checklist\"", StringComparison.Ordinal);
             Assert.True(def >= 0, "The update_task_checklist tool definition is gone; this fact is vacuous.");

@@ -744,11 +744,17 @@ namespace MultiTerminal.Tests
         /// asserted the wrong way round before running this, and which narrows the ticket's one open
         /// design question considerably.
         ///
-        /// <para><c>RecalculateAutoStatus</c> early-returns unless the flag is set, and the flag is set
-        /// in exactly one place: opening the task in the lifecycle board
-        /// (<c>TaskLifecycleBoardForm</c>, "AutoStatus = true for any task opened in the lifecycle
-        /// board"). So for an ordinary task a reopen changes the ITEM and nothing else — the parent's
-        /// status is whatever a human last set.</para>
+        /// <para><c>RecalculateAutoStatus</c> early-returns unless the flag is set. The flag is set in
+        /// TWO places, both in <c>TaskLifecycleBoardForm</c> — on open (:66, "AutoStatus = true for any
+        /// task opened in the lifecycle board") and from <c>HandleSetAutoStatus</c> (:667), a user
+        /// toggle on the board page. No REST route and no MCP tool sets it, so a task that has never
+        /// been opened in the lifecycle board does not have it. For such a task a reopen changes the
+        /// ITEM and nothing else — the parent's status stays whatever a human last set.</para>
+        ///
+        /// <para>⚠️ This paragraph said "exactly one place" until peer review counted. Both claims
+        /// support the same conclusion, so nothing downstream moves — but a precise-sounding number
+        /// that is wider than the code is exactly the defect this comment exists to record, and it was
+        /// sitting in the correction itself.</para>
         ///
         /// <para>This is the DEFAULT half of the pair. The board half is below.</para>
         /// </summary>
