@@ -77,24 +77,10 @@ namespace MultiTerminal.Terminal
         private volatile bool _writeScheduled;
         private readonly object _writeLock = new object();
 
-        // Enter-key acknowledgment synchronization, keyed by job id (task f420feeb, census F2).
-        //
-        // ⚠️ THIS WAS A SINGLE FIELD, AND A SINGLE FIELD CANNOT BE CORRECT HERE. Every caller of
-        // InjectInputAsync is an `async void` handler on the UI thread, so each await inside an
-        // injection pumps the message loop and lets the NEXT click / task-drop / broker event start
-        // its own injection into the same terminal. With one shared TaskCompletionSource that gave
-        // two distinct failures:
-        //   1. CROSS-TALK — the ack for caller B's Enter completed caller A's wait. The two are
-        //      indistinguishable, so A concluded its Enter had been processed when B's had.
-        //   2. A UI-THREAD HANG — the old code awaited WhenAny on the field, then re-read the FIELD
-        //      for `.Result`. If B replaced it in between, A called .Result on an INCOMPLETE
-        //      TaskCompletionSource and blocked the UI thread on a reply for a request that no
-        //      longer existed. Every other finding in the f420feeb census garbles text; that one
-        //      freezes the app, which is why it was fixed first.
-        // The dictionary gives each request its own waiter and its own identity; TrySendEnterViaJsAsync
-        // awaits the TCS IT CREATED and never reads this collection back to get its own result.
-        private readonly ConcurrentDictionary<string, System.Threading.Tasks.TaskCompletionSource<bool>> _enterAckWaiters = new();
-        private int _enterJobCounter;
+        // Enter-key acknowledgment correlation (task f420feeb, census F2). The decision itself lives
+        // in EnterAckRegistry, which is pure and therefore testable — this control cannot be
+        // instantiated in a test. See that class for what the single shared field used to get wrong.
+        private readonly EnterAckRegistry _enterAcks = new();
 
         // Output change tracking for Enter key retry mechanism
         private DateTime _lastOutputTime = DateTime.MinValue;
@@ -903,51 +889,35 @@ namespace MultiTerminal.Terminal
         }
 
         /// <summary>
-        /// Completes the waiter for one acknowledged Enter, identified by the job id the JS side
-        /// echoes back. An ack whose job has already timed out finds no waiter and is DROPPED — that
-        /// attempt was abandoned, and using it to complete some later caller's wait would be exactly
-        /// the cross-talk this identity exists to prevent.
+        /// Completes the waiter for one acknowledged Enter, and REPORTS WHICH PATH IT TOOK.
+        /// <para>⚠️ The compatibility path logs at Warning on success, which reads like an
+        /// over-reaction and is not. If the page's id echo were broken — a mistyped field, or an
+        /// echo added to only one of terminal.html's two ack sites — every ack would arrive id-less
+        /// and be silently rescued here. Enters would complete promptly, the suite would stay green,
+        /// and the correlation this exists to provide would never run once. So routine firing of
+        /// that path is not compatibility working; it is the fix not working, and this log is the
+        /// only thing that can tell the two apart at runtime.</para>
         /// </summary>
         /// <param name="jobId">Job id carried by the ack; null/empty only from a page predating it.</param>
         private void OnEnterAcknowledged(string jobId)
         {
-            if (!string.IsNullOrEmpty(jobId))
+            switch (_enterAcks.Complete(jobId))
             {
-                if (_enterAckWaiters.TryRemove(jobId, out var waiter))
-                {
-                    waiter.TrySetResult(true);
-                }
-                else
-                {
-                    DebugLogService?.Trace("WebViewTerminalRenderer", $"enterAck for job {jobId} has no waiter (already timed out) — dropped");
-                }
-
-                return;
-            }
-
-            // TRANSITION SHIM, not a design. An ack with no id can only come from a terminal.html
-            // predating this change (a cached page); the shipped pair always carries one. Completing
-            // the wait when EXACTLY ONE is outstanding restores the old behaviour for the only case
-            // in which the old behaviour was unambiguous. With two or more, drop rather than guess:
-            // picking one is precisely the cross-talk bug. Dropping costs a 3s timeout; guessing
-            // costs a false "Enter processed" recorded as a successful delivery.
-            if (_enterAckWaiters.Count == 1)
-            {
-                foreach (var pair in _enterAckWaiters)
-                {
-                    if (_enterAckWaiters.TryRemove(pair.Key, out var only))
-                    {
-                        DebugLogService?.Trace("WebViewTerminalRenderer", "enterAck carried no job id — completing the single outstanding waiter (stale terminal.html?)");
-                        only.TrySetResult(true);
-                    }
-
+                case EnterAckOutcome.Correlated:
                     break;
-                }
 
-                return;
+                case EnterAckOutcome.NoWaiter:
+                    DebugLogService?.Trace("WebViewTerminalRenderer", $"enterAck for job '{jobId}' has no waiter (already timed out) — dropped");
+                    break;
+
+                case EnterAckOutcome.CompatibilitySingleWaiter:
+                    DebugLogService?.Warning("WebViewTerminalRenderer", "enterAck carried NO job id — released the single outstanding waiter via the compatibility path. If this is routine, terminal.html is not echoing the id and per-job correlation is NOT in effect.");
+                    break;
+
+                case EnterAckOutcome.AmbiguousDropped:
+                    DebugLogService?.Warning("WebViewTerminalRenderer", "enterAck carried NO job id while multiple waiters were outstanding — dropped rather than guess which caller it belonged to.");
+                    break;
             }
-
-            DebugLogService?.Warning("WebViewTerminalRenderer", $"enterAck carried no job id and {_enterAckWaiters.Count} waiters are outstanding — dropped rather than guess");
         }
 
         /// <summary>
@@ -957,13 +927,8 @@ namespace MultiTerminal.Terminal
         {
             if (_webView?.CoreWebView2 == null) return false;
 
-            // Identity per request (task f420feeb). RunContinuationsAsynchronously keeps this waiter's
-            // continuation off the WebView2 message callback that completes it.
-            string jobId = System.Threading.Interlocked.Increment(ref _enterJobCounter)
-                .ToString(System.Globalization.CultureInfo.InvariantCulture);
-            var ackTcs = new System.Threading.Tasks.TaskCompletionSource<bool>(
-                System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);
-            _enterAckWaiters[jobId] = ackTcs;
+            // Identity per request (task f420feeb).
+            var (jobId, ack) = _enterAcks.Register();
 
             try
             {
@@ -971,7 +936,7 @@ namespace MultiTerminal.Terminal
 
                 // Increased timeout for reliability under high load (3s instead of 1.5s)
                 var timeout = System.Threading.Tasks.Task.Delay(3000);
-                var completed = await System.Threading.Tasks.Task.WhenAny(ackTcs.Task, timeout);
+                var completed = await System.Threading.Tasks.Task.WhenAny(ack, timeout);
 
                 // Log TaskCompletionSource timeout explicitly for monitoring
                 if (completed == timeout)
@@ -983,8 +948,8 @@ namespace MultiTerminal.Terminal
                 // ⚠️ AWAIT THE TASK THIS CALL CREATED. The previous version re-read the shared field
                 // here and called .Result on it, so a concurrent injection that had replaced the field
                 // turned this line into a blocking wait on an incomplete TaskCompletionSource — on the
-                // UI thread. `ackTcs` is a local and cannot be swapped out from under it.
-                bool result = await ackTcs.Task;
+                // UI thread. `ack` is a local and cannot be swapped out from under it.
+                bool result = await ack;
                 DebugLogService?.Trace("WebViewTerminalRenderer", $"TaskCompletionSource completed successfully (job {jobId}, result={result})");
                 return result;
             }
@@ -992,7 +957,7 @@ namespace MultiTerminal.Terminal
             {
                 // Timed-out and faulted attempts must not accumulate: this runs up to 5 times per
                 // failed injection and the renderer outlives every one of them.
-                _enterAckWaiters.TryRemove(jobId, out _);
+                _enterAcks.Release(jobId);
             }
         }
 
