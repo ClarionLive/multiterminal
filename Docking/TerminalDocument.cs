@@ -1996,12 +1996,35 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
-        /// Types text into the terminal character-by-character via xterm.js.
+        /// Types text into the terminal character-by-character via xterm.js, and waits for the page
+        /// to acknowledge that typing job.
         /// Mimics real keyboard typing to avoid paste detection.
+        /// <para><b>⚠️ TRUE MEANS TYPED, NOT SUBMITTED</b> (task 8b270b37, item 2) — see
+        /// <see cref="WebViewTerminalRenderer.TypeInputViaXtermAsync"/>.</para>
         /// </summary>
-        public void TypeInput(string text, string lineEnding = "cr", int charDelayMs = 15)
+        /// <returns>
+        /// True when the page acknowledged that every character, trailing line ending included, had
+        /// been sent. False when there is no terminal control, when the page dropped the job, or when
+        /// no acknowledgment arrived in time.
+        /// </returns>
+        public System.Threading.Tasks.Task<bool> TypeInputAsync(string text, string lineEnding = "cr", int charDelayMs = 15)
         {
-            _terminal?.TypeInput(text, lineEnding, charDelayMs);
+            return _terminal?.TypeInputAsync(text, lineEnding, charDelayMs) ?? System.Threading.Tasks.Task.FromResult(false);
+        }
+
+        /// <summary>
+        /// Types text and then CONFIRMS it left the composer, retrying the submit (never the text)
+        /// once if it did not. Pass-through to
+        /// <see cref="WebViewTerminalRenderer.TypeAndConfirmSubmissionAsync"/>.
+        /// <para>This is the call to use for a prompt something is waiting on;
+        /// <see cref="TypeInputAsync"/> can only say the characters were typed (task 8b270b37).</para>
+        /// </summary>
+        internal System.Threading.Tasks.Task<SubmissionCheck> TypeInputAndConfirmSubmissionAsync(string text, string lineEnding = "cr", int charDelayMs = 15)
+        {
+            return _terminal?.TypeInputAndConfirmSubmissionAsync(text, lineEnding, charDelayMs)
+                ?? System.Threading.Tasks.Task.FromResult(SubmissionCheck.NotConfirmed(
+                    "this terminal document has no terminal control, so nothing was typed and nothing was submitted",
+                    "Nothing reached the pane. It is safe to send the text again once the terminal is up."));
         }
 
         /// <summary>

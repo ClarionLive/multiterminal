@@ -2180,9 +2180,12 @@ namespace MultiTerminal
                             }
 
                             // READINESS GATE (task 7806024f, pipeline Run 1, debugger HIGH).
-                            // TypeInputViaXterm returns SILENTLY when the renderer is not yet
-                            // initialized (WebViewTerminalRenderer.cs:620) — it reports nothing to
-                            // the caller. Every other typing site in this file already waits
+                            // TypeInputViaXtermAsync returns false without typing when the
+                            // renderer is not yet initialized — and until task 8b270b37 item 2 it was
+                            // void, so it reported nothing to the caller at all. THE WAIT BELOW IS
+                            // STILL LOAD-BEARING: the return value only became observable in item 2,
+                            // and it is not observed here yet (item 4). Every other typing site in
+                            // this file already waits
                             // (MainForm.cs OnClaudeCodeDetected, TerminalControl's own 3s spin);
                             // this one did not, because at the old 120s trigger the renderer was
                             // always up long before delivery. At ~5s it races WebView2 init, and a
@@ -2253,8 +2256,48 @@ namespace MultiTerminal
                                 return;
                             }
 
-                            _debugLogService?.Info("MainForm", $"Delivering initial prompt to {agentName} ({oneLine.Length} chars, trigger: {trigger}).");
-                            doc.TypeInput(oneLine, "cr", 5);
+                            // ⚠️ AN ATTEMPT, NOT AN OUTCOME (task 8b270b37, item 4). This line used
+                            // to read "Delivering initial prompt to X" and was the LAST thing said
+                            // about the job — a success-shaped sentence logged before anything had
+                            // confirmed anything, which is why a prompt sitting unsent in a composer
+                            // looked, in the log, exactly like a prompt that had been answered. The
+                            // outcome is logged separately below, whichever way it goes.
+                            _debugLogService?.Info("MainForm", $"Typing initial prompt into {agentName} ({oneLine.Length} chars, trigger: {trigger}) — outcome to follow.");
+
+                            var check = await doc.TypeInputAndConfirmSubmissionAsync(oneLine, "cr", 5);
+                            switch (check.Verdict)
+                            {
+                                case SubmissionVerdict.Confirmed:
+                                    // Submitted OR queued. Both are successes and are deliberately
+                                    // NOT told apart — see ComposerOracle for why an oracle that
+                                    // called a queued prompt a failure would deliver the job twice.
+                                    _debugLogService?.Info("MainForm", $"Initial prompt for {agentName} left the composer (trigger: {trigger}): {check.Reason}");
+                                    break;
+
+                                case SubmissionVerdict.NotConfirmed:
+                                    // The disposition is RELAYED, not chosen here. The default —
+                                    // "Nothing was typed into the pane" — is false for at least one
+                                    // kind of NotConfirmed (the payload IS in that composer) and
+                                    // unknowable for another (the typing was never acknowledged, so
+                                    // a partial line may be sitting there). Nothing at this site can
+                                    // tell those apart; the code that established the failure can,
+                                    // and says so in check.Advice.
+                                    ReportUndelivered(
+                                        $"{check.Reason} (trigger: {trigger})",
+                                        disposition: check.Advice);
+                                    break;
+
+                                default:
+                                    // ⚠️ NOT reported as a failure, and not reported as a success.
+                                    // Unknown means the check could not run — no boxed composer, no
+                                    // probe function in the page, a payload with too little
+                                    // distinctive text. Filing a spawn_failed on that would
+                                    // manufacture failures out of the detector's own blind spots,
+                                    // which is the defect class this ticket is fixing rather than a
+                                    // new instance of it. Loud in the log, silent in the inbox.
+                                    _debugLogService?.Warning("MainForm", $"Initial prompt for {agentName} was typed, but whether it submitted COULD NOT BE CHECKED (trigger: {trigger}): {check.Reason}");
+                                    break;
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -2277,8 +2320,25 @@ namespace MultiTerminal
             // log still claiming "Delivering initial prompt".
             // GiveUp owns the guard. This does NOT: every caller must already hold it, or have
             // established that it can no longer be taken.
-            void ReportUndelivered(string reason)
+            // ⚠️ THE DISPOSITION IS A PARAMETER BECAUSE THE HARD-CODED SENTENCE BECAME A LIE (task
+            // 8b270b37, item 4). Every caller before this ticket failed BEFORE typing, so "Nothing
+            // was typed into the pane" was a fact for all of them. The submission-oracle caller is
+            // the first for which it is not, and the difference matters to the recipient more than
+            // the reason does: it is the difference between "retype it" and "do NOT retype it, that
+            // sends it twice". Leaving the sentence hard-coded would have written a false statement
+            // into an agent's inbox, on the one ticket that exists because a false statement was
+            // written into a log.
+            void ReportUndelivered(string reason, string disposition = null)
             {
+                // An empty disposition falls back to the sentence every pre-8b270b37 caller relied
+                // on, which is TRUE for all of them: each fails before anything is typed. It is the
+                // default rather than the only option precisely because the oracle's callers are the
+                // first for which it is not true.
+                if (string.IsNullOrWhiteSpace(disposition))
+                {
+                    disposition = "Nothing was typed into the pane.";
+                }
+
                 _debugLogService?.Warning("MainForm", $"Initial prompt for {agentName} NOT delivered ({oneLine.Length} chars): {reason}");
 
                 // Loud to the spawner — in the store an AGENT actually reads. Pipeline Run 2 caught the
@@ -2289,10 +2349,11 @@ namespace MultiTerminal
                 // caller-supplied and unvalidated (a typo, a stale env, or the phone app's
                 // "ClaudeRemote"), a message to a name that is not a live terminal is written a second
                 // time to the Owner's inbox so it cannot be lost either way.
-                // Wording stays neutral about the CAUSE: this now reports both "never came alive"
-                // (the 120s give-up) and "came alive but could not be typed into" (renderer never
-                // ready). The specific cause travels in {reason}.
-                string summary = $"Helper {agentName}'s job ({oneLine.Length} chars) was NOT delivered: {reason}. Nothing was typed into the pane. Spawner: {spawnerName}. Working dir: {workingDir}.";
+                // Wording stays neutral about the CAUSE: this now reports "never came alive"
+                // (the 120s give-up), "came alive but could not be typed into" (renderer never
+                // ready), and "was typed but never submitted" (task 8b270b37). The specific cause
+                // travels in {reason} and what to DO about it in {disposition}.
+                string summary = $"Helper {agentName}'s job ({oneLine.Length} chars) was NOT delivered: {reason}. {disposition} Spawner: {spawnerName}. Working dir: {workingDir}.";
                 try
                 {
                     // The write's result is CHECKED (pipeline Run 3). CreateInboxNotification swallows
@@ -5187,8 +5248,44 @@ namespace MultiTerminal
                 // Detection fires when "Claude Code" appears in output, but the input prompt
                 // may not be ready yet. Wait 1.5s for the prompt to appear.
                 await Task.Delay(1500);
-                _debugLogService?.Trace("MainForm", "Post-detection delay complete, injecting 'initializing...' via TypeInput");
-                doc.TypeInput("initializing...", "cr", 20);
+                _debugLogService?.Trace("MainForm", "Post-detection delay complete, injecting 'initializing...' via TypeInputAndConfirmSubmissionAsync");
+
+                var bannerCheck = await doc.TypeInputAndConfirmSubmissionAsync("initializing...", "cr", 20);
+
+                // ⚠️ A FAILED BANNER IS LOGGED LOUDLY AND SENT TO NOBODY'S INBOX — a decision, not
+                // an omission (task 8b270b37, item 4).
+                //
+                // The spawned-helper JOB above does write an inbox message, and the asymmetry is
+                // the point. Three reasons, in order of weight:
+                //   1. THE INBOX IS THE CHANNEL THAT CARRIES "a helper's work was dropped". This
+                //      fires for every pane in which Claude Code is detected, including every one a
+                //      human opens by hand. Routine noise on that channel teaches people to skim
+                //      it, and the next real spawn_failed is the message that gets skimmed.
+                //   2. THERE IS NOBODY TO TELL. The job has a spawner who is waiting on it. This
+                //      has no requester at all — it is MT's own housekeeping — so the only possible
+                //      recipient is the Owner, unconditionally, forever.
+                //   3. IT IS RECOVERABLE AND VISIBLE. A lost banner means the SessionStart hook did
+                //      not fire; the pane is sitting right there with "initializing..." in its
+                //      composer, and the retry Enter inside the call above has already had one go
+                //      at it. A dropped helper job is neither visible nor recoverable — that is
+                //      what earns it an inbox message.
+                switch (bannerCheck.Verdict)
+                {
+                    case SubmissionVerdict.Confirmed:
+                        _debugLogService?.Trace("MainForm", $"'initializing...' left the composer: {bannerCheck.Reason}");
+                        break;
+
+                    case SubmissionVerdict.NotConfirmed:
+                        // The advice is RELAYED for the same reason as at the job site: this branch
+                        // covers both "the text is in the composer" and "the typing was never
+                        // acknowledged", and only the code that established the failure knows which.
+                        _debugLogService?.Error("MainForm", $"'initializing...' was NOT submitted, even after a retry Enter: {bannerCheck.Reason}. The SessionStart hook has not fired for this terminal. {bannerCheck.Advice} NOT retyped by MT: that is what submits it twice.");
+                        break;
+
+                    default:
+                        _debugLogService?.Warning("MainForm", $"'initializing...' was typed, but whether it submitted COULD NOT BE CHECKED: {bannerCheck.Reason}");
+                        break;
+                }
             }
         }
 

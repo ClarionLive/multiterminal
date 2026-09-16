@@ -464,13 +464,46 @@ namespace MultiTerminal.Controls
         }
 
         /// <summary>
-        /// Types text into the terminal character-by-character via xterm.js.
+        /// Types text into the terminal character-by-character via xterm.js, and waits for the page
+        /// to acknowledge that typing job.
         /// Mimics real keyboard typing to avoid paste detection.
+        /// <para><b>⚠️ TRUE MEANS TYPED, NOT SUBMITTED</b> (task 8b270b37, item 2). See
+        /// <see cref="WebViewTerminalRenderer.TypeInputViaXtermAsync"/> for the full statement; the
+        /// short version is that a trailing CR taken as a newline by Claude's composer produces a
+        /// true here with the prompt still sitting unsent.</para>
         /// </summary>
-        public void TypeInput(string text, string lineEnding = "cr", int charDelayMs = 15)
+        /// <returns>
+        /// True when the page acknowledged that every character, trailing line ending included, had
+        /// been sent. False when there is no renderer, when the page dropped the job, or when no
+        /// acknowledgment arrived in time.
+        /// </returns>
+        public Task<bool> TypeInputAsync(string text, string lineEnding = "cr", int charDelayMs = 15)
         {
-            LogTrace($"TypeInput: charDelay={charDelayMs}ms, lineEnding={lineEnding}, text=\"{text}\"");
-            _renderer?.TypeInputViaXterm(text, lineEnding, charDelayMs);
+            LogTrace($"TypeInputAsync: charDelay={charDelayMs}ms, lineEnding={lineEnding}, text=\"{text}\"");
+
+            // No renderer is a FALSE, not a silently-swallowed success. That swallowing is the
+            // shape of the defect this ticket fixes, one layer down.
+            return _renderer?.TypeInputViaXtermAsync(text, lineEnding, charDelayMs) ?? Task.FromResult(false);
+        }
+
+        /// <summary>
+        /// Types text and then CONFIRMS it left the composer, retrying the submit (never the text)
+        /// once if it did not. See
+        /// <see cref="WebViewTerminalRenderer.TypeAndConfirmSubmissionAsync"/> — this is a pass-through.
+        /// <para>Prefer this over <see cref="TypeInputAsync"/> wherever the text is a PROMPT that
+        /// something is waiting on. <c>TypeInputAsync</c>'s true means "the characters were typed",
+        /// which is exactly the claim that was mistaken for delivery (task 8b270b37).</para>
+        /// </summary>
+        internal Task<SubmissionCheck> TypeInputAndConfirmSubmissionAsync(string text, string lineEnding = "cr", int charDelayMs = 15)
+        {
+            LogTrace($"TypeInputAndConfirmSubmissionAsync: charDelay={charDelayMs}ms, lineEnding={lineEnding}, text=\"{text}\"");
+
+            // No renderer is NotConfirmed, not Unknown: nothing was typed, so nothing was submitted.
+            // That is a known answer, not an unobservable one.
+            return _renderer?.TypeAndConfirmSubmissionAsync(text, lineEnding, charDelayMs)
+                ?? Task.FromResult(SubmissionCheck.NotConfirmed(
+                    "this terminal has no renderer, so nothing was typed and nothing was submitted",
+                    "Nothing reached the pane. It is safe to send the text again once the terminal has a renderer."));
         }
 
         /// <summary>
@@ -788,7 +821,12 @@ namespace MultiTerminal.Controls
             }
 
             LogTrace($"Injecting '{text}' after /clear to trigger session-start (renderer ready after {waitedMs}ms)");
-            TypeInput(text, "cr", 20);
+            // ⚠️ FIRE-AND-FORGET ON PURPOSE, AND EXPLICITLY (task 8b270b37, item 2). The discard
+            // is named so this cannot be read as an accidentally unobserved Task. Consuming the
+            // result — reporting a prompt that was never typed — is item 4 of the same ticket; item
+            // 2 only builds the channel. ⚠️ And when item 4 does consume it, a true means the
+            // characters were TYPED, never that they were submitted.
+            _ = TypeInputAsync(text, "cr", 20);
         }
 
         /// <summary>
@@ -928,7 +966,13 @@ namespace MultiTerminal.Controls
                                 {
                                     // Send just the digit '1' (no line ending): on the select
                                     // prompt this picks option 1 and proceeds.
-                                    TypeInput("1", "none");
+                                    //
+                                    // ⚠️ FIRE-AND-FORGET ON PURPOSE, AND EXPLICITLY (task 8b270b37,
+                                    // item 2). Named discard so this cannot be read as an
+                                    // accidentally unobserved Task — and note that this lambda is
+                                    // not async, so nothing would have warned. Consuming the result
+                                    // is item 4.
+                                    _ = TypeInputAsync("1", "none");
                                     LogTrace("Dev-channel auto-accept: sent '1'");
                                 }));
                             }

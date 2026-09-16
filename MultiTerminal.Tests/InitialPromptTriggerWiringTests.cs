@@ -34,6 +34,14 @@ namespace MultiTerminal.Tests
     /// <c>AgentActivityObservationTests.MainForm_constructs_starts_and_disposes_the_activity_watcher</c>
     /// already uses against this file.</para>
     ///
+    /// <para><b>Since task 8b270b37 item 5 it also pins what <c>Deliver</c> DOES with the submission
+    /// oracle's answer</b> — the <c>switch (check.Verdict)</c> arms. Same technique and same reason:
+    /// <c>ComposerOracle</c> decides, and is unit-tested properly in <c>ComposerOracleTests</c>, but
+    /// the routing of its three verdicts to a log line or an inbox message is inline in this private
+    /// method and reachable no other way. Those facts are sliced to a single switch ARM, not to the
+    /// method, because two of them are negative and a method-wide scan would be satisfied by the
+    /// other arms.</para>
+    ///
     /// <para><b>Scoped to the METHOD, and comments stripped first.</b> Both matter. A file-wide scan
     /// would be satisfied by <c>MainForm</c>'s other, unrelated <c>TerminalRegistered</c> subscription at
     /// startup — the "already-listed file hides the real site" failure this codebase has now been bitten
@@ -43,6 +51,19 @@ namespace MultiTerminal.Tests
     /// </summary>
     public class InitialPromptTriggerWiringTests
     {
+        /// <summary>
+        /// The typing call inside <c>Deliver</c>, as it is spelled in <c>MainForm.cs</c>. Two ordering
+        /// facts below locate it, and it has now been renamed twice (<c>TypeInput</c> →
+        /// <c>TypeInputAsync</c> → <c>TypeInputAndConfirmSubmissionAsync</c>, task 8b270b37), so it is
+        /// named once here rather than transcribed into each of them.
+        /// <para>⚠️ A rename makes both facts fail LOUDLY on "the prompt is never typed at all" —
+        /// which is the correct behaviour and must stay that way. Do not soften this to a regex that
+        /// matches any <c>TypeInput*</c>: what the facts are ordering against is the specific call
+        /// that types the job, and a looser needle would happily match some future second typing site
+        /// that the readiness wait does not protect.</para>
+        /// </summary>
+        private const string TypingCall = "TypeInputAndConfirmSubmissionAsync(oneLine";
+
         /// <summary>
         /// The trigger must be subscribed, or a spawned helper's job waits out the 120s timer — the
         /// defect this ticket exists to remove.
@@ -140,11 +161,17 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
-        /// ⚠️ THE SILENT-LOSS GUARD (pipeline Run 1, debugger HIGH). <c>TypeInputViaXterm</c> returns
-        /// without typing when the renderer is not initialized and tells the caller NOTHING. Because
-        /// <c>Deliver</c> takes the exactly-once guard as its FIRST statement, a loss there is permanent:
-        /// the question trigger and the 120s give-up are both already disarmed. So readiness must be
-        /// awaited BEFORE the typing call, not merely checked somewhere in the method.
+        /// ⚠️ THE SILENT-LOSS GUARD (pipeline Run 1, debugger HIGH). <c>TypeInputViaXtermAsync</c>
+        /// returns without typing when the renderer is not initialized. Because <c>Deliver</c> takes
+        /// the exactly-once guard as its FIRST statement, a loss there is permanent: the question
+        /// trigger and the 120s give-up are both already disarmed. So readiness must be awaited
+        /// BEFORE the typing call, not merely checked somewhere in the method.
+        /// <para>⚠️ TASK 8b270b37 DID NOT MAKE THIS WAIT REDUNDANT, and the tempting reading is the
+        /// wrong one. Item 2 made that method return false instead of telling the caller nothing, and
+        /// item 4 made <c>Deliver</c> consume the answer — so a loss here is no longer SILENT. It is
+        /// still a loss. Without this wait, a slow WebView2 start turns a deliverable job into a
+        /// <c>spawn_failed</c> report; the wait is what makes it a delivery instead. Reporting the
+        /// failure accurately was never the goal — not having one was.</para>
         /// <para>Ordering is asserted, not presence — a readiness wait placed AFTER the TypeInput would
         /// satisfy a contains-check while protecting nothing, which is the exact shape of the vacuous
         /// assertion this file already shipped once.</para>
@@ -155,13 +182,13 @@ namespace MultiTerminal.Tests
             string body = DeliveryMethodBody();
 
             int wait = body.IndexOf("WaitForRendererReadyAsync", StringComparison.Ordinal);
-            int type = body.IndexOf("TypeInput(oneLine", StringComparison.Ordinal);
+            int type = body.IndexOf(TypingCall, StringComparison.Ordinal);
 
             Assert.True(
                 wait >= 0,
-                "Deliver does not wait for renderer readiness. TypeInputViaXterm returns silently when "
-                + "the renderer is not initialized, so at the ~5s trigger a slow WebView2 start drops the "
-                + "job with the log still claiming it was delivered.");
+                "Deliver does not wait for renderer readiness. TypeInputViaXtermAsync returns false without "
+                + "typing when the renderer is not initialized, and Deliver discards that result, so at the "
+                + "~5s trigger a slow WebView2 start drops the job with the log still claiming it was delivered.");
             Assert.True(type >= 0, "The prompt is never typed at all.");
             Assert.True(
                 wait < type,
@@ -192,7 +219,7 @@ namespace MultiTerminal.Tests
 
             int guard = body.IndexOf("Interlocked.Exchange(ref delivered", StringComparison.Ordinal);
             int unsubscribe = body.IndexOf("TerminalRegistered -= onRegistered", StringComparison.Ordinal);
-            int type = body.IndexOf("TypeInput(oneLine", StringComparison.Ordinal);
+            int type = body.IndexOf(TypingCall, StringComparison.Ordinal);
 
             Assert.True(
                 guard >= 0,
@@ -239,6 +266,190 @@ namespace MultiTerminal.Tests
                 Regex.IsMatch(body, @"WaitForRendererReadyAsync[^;]*\)\s*\)\s*\{\s*ReportUndelivered", RegexOptions.Singleline),
                 "The renderer-not-ready branch does not call ReportUndelivered. That is the silent "
                 + "permanent job loss this fact exists to prevent.");
+        }
+
+        // ────────────────────────────────────── what each submission verdict is DONE with (8b270b37) ──
+
+        /// <summary>
+        /// The three arms of <c>switch (check.Verdict)</c> inside <c>Deliver</c>, in the order the
+        /// method writes them. Named once because four facts below slice on them and a transcribed
+        /// label drifts.
+        /// </summary>
+        private static readonly string[] OutcomeArmLabels =
+        {
+            "case SubmissionVerdict.Confirmed:",
+            "case SubmissionVerdict.NotConfirmed:",
+            "default:",
+        };
+
+        /// <summary>
+        /// The vacuity guard for the three facts below — stated at the strength the falsification runs
+        /// actually support, which is less than the obvious wording would claim.
+        ///
+        /// <para><b>⚠️ IT IS A DIAGNOSTIC, NOT AN INDEPENDENT GUARD.</b> Breaking the extraction
+        /// (renaming the switch expression so <see cref="OutcomeSwitchBody"/>'s needle is gone) does
+        /// turn this fact red — and turns the other three red in the same run, because all four share
+        /// the extractor and its asserts. It has NOT been shown to fail on its own. What it buys is
+        /// attribution: when four facts go red together, this one says the cause is the slicing rather
+        /// than the routing.</para>
+        ///
+        /// <para><b>⚠️ AND THE LENGTH FLOORS DO NOT CATCH AN EMPTIED ARM.</b> Deleting the Confirmed
+        /// arm's only statement was run. The slice still measured well over the floor, this fact
+        /// stayed GREEN, and the red came from <see cref="The_unknown_arm_is_not_logged_as_a_success"/>
+        /// instead. The floors catch an extraction that collapsed to nothing, which is what they are
+        /// for; do not read them as checking that an arm still does anything.</para>
+        /// </summary>
+        [Fact]
+        public void The_outcome_switch_and_all_three_of_its_arms_were_actually_located()
+        {
+            string sw = OutcomeSwitchBody();
+
+            Assert.True(
+                sw.Length > 400,
+                $"Extracted only {sw.Length} chars for the verdict switch; every outcome fact below is now vacuous.");
+
+            foreach (string label in OutcomeArmLabels)
+            {
+                string arm = OutcomeArm(label);
+                Assert.True(
+                    arm.Length > 80,
+                    $"The '{label}' arm sliced down to {arm.Length} chars, so the slicing has collapsed and "
+                    + "the facts below are no longer reading the region they name. (This floor does NOT "
+                    + "detect an arm whose statements were deleted — that stays well above it.)");
+            }
+        }
+
+        /// <summary>
+        /// ⚠️ NotConfirmed MUST RELAY THE ORACLE'S OWN ADVICE. <c>ReportUndelivered</c>'s default
+        /// disposition — "Nothing was typed into the pane." — is FALSE for this caller: the text is in
+        /// that composer, which is the entire finding. It is written into a <c>spawn_failed</c> inbox
+        /// message that an agent holding an undelivered job reads, and the obvious response to
+        /// "nothing was typed" is to type it again, onto a composer that already contains it.
+        ///
+        /// <para>Asserted positively (the arm passes <c>check.Advice</c>) rather than by checking the
+        /// default sentence is absent. The negative form is the direction that MANUFACTURES failures:
+        /// this codebase's house style is to explain in a comment above the code why the other option
+        /// was rejected, and that comment names the sentence verbatim — as the one in this very arm
+        /// does today.</para>
+        /// </summary>
+        [Fact]
+        public void The_not_confirmed_arm_relays_the_oracles_advice_to_the_spawner()
+        {
+            string arm = OutcomeArm("case SubmissionVerdict.NotConfirmed:");
+
+            Assert.Contains("ReportUndelivered(", arm, StringComparison.Ordinal);
+            Assert.True(
+                Regex.IsMatch(arm, @"disposition:\s*check\.Advice"),
+                "The NotConfirmed arm no longer passes check.Advice as the disposition, so the report "
+                + "falls back to \"Nothing was typed into the pane.\" — which is false for this caller, "
+                + "and is read by an agent whose response to it is to retype the job.");
+        }
+
+        /// <summary>
+        /// ⚠️ Unknown MUST NOT FILE A <c>spawn_failed</c>. Unknown means the check could not run — no
+        /// boxed composer, no probe function, too little distinctive text. Reporting that as a
+        /// delivery failure manufactures failures out of the detector's own blind spots, which is the
+        /// defect class this ticket removes rather than a new instance of it.
+        ///
+        /// <para>The NotConfirmed arm is asserted to CONTAIN the call in the same fact. That is the
+        /// discriminator, not decoration: without it, a slicing bug that returned the wrong region
+        /// would satisfy the <c>DoesNotContain</c> and this fact would pass while proving nothing.</para>
+        /// </summary>
+        [Fact]
+        public void The_unknown_arm_files_no_spawn_failed()
+        {
+            Assert.Contains(
+                "ReportUndelivered",
+                OutcomeArm("case SubmissionVerdict.NotConfirmed:"),
+                StringComparison.Ordinal);
+
+            Assert.DoesNotContain(
+                "ReportUndelivered",
+                OutcomeArm("default:"),
+                StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// ⚠️ THE OTHER DIRECTION, AND THE ONE THAT IS THE ORIGINAL BUG. Unknown must not be logged as
+        /// a success either. The whole ticket exists because a prompt sitting unsent in a composer read,
+        /// in the log, exactly like a prompt that had been answered — so an Info line on the one path
+        /// that admits it does not know is that defect restored under a new name.
+        ///
+        /// <para>"A success log" is pinned as <c>Info</c> specifically, because the Confirmed arm is
+        /// asserted here to be the thing that uses it: the two arms must not be indistinguishable to
+        /// someone reading the log. The Unknown arm must still say something — silence there is its own
+        /// failure — so <c>Warning</c> is required to be present, not merely <c>Info</c> absent.</para>
+        /// </summary>
+        [Fact]
+        public void The_unknown_arm_is_not_logged_as_a_success()
+        {
+            Assert.Contains(
+                "?.Info(",
+                OutcomeArm("case SubmissionVerdict.Confirmed:"),
+                StringComparison.Ordinal);
+
+            string unknown = OutcomeArm("default:");
+
+            Assert.DoesNotContain("?.Info(", unknown, StringComparison.Ordinal);
+            Assert.Contains("?.Warning(", unknown, StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// The <c>switch (check.Verdict)</c> block inside <c>Deliver</c>, comments already stripped by
+        /// <see cref="DeliveryMethodBody"/>, located by brace matching.
+        /// <para>Stripping is load-bearing here in BOTH directions: the arms are documented with the
+        /// identifiers these facts look for (an unstripped <c>Contains</c> would pass on prose alone),
+        /// and the Unknown arm's comment explains at length why it does NOT file a failure report (an
+        /// unstripped <c>DoesNotContain</c> would be tripped by that explanation). The known residual
+        /// is the one already recorded on <see cref="StripComments"/>: a TRAILING comment on a line of
+        /// real code survives.</para>
+        /// </summary>
+        private static string OutcomeSwitchBody()
+        {
+            string body = DeliveryMethodBody();
+
+            int start = body.IndexOf("switch (check.Verdict)", StringComparison.Ordinal);
+            Assert.True(
+                start >= 0,
+                "Deliver no longer switches on check.Verdict. Either the oracle's answer is being "
+                + "discarded again, or it is consumed somewhere these facts cannot see.");
+
+            int open = body.IndexOf('{', start);
+            Assert.True(open >= 0, "No opening brace after the verdict switch.");
+
+            int depth = 0;
+            for (int i = open; i < body.Length; i++)
+            {
+                if (body[i] == '{') depth++;
+                else if (body[i] == '}')
+                {
+                    depth--;
+                    if (depth == 0) return body[open..(i + 1)];
+                }
+            }
+
+            Assert.Fail("Braces never balanced for the verdict switch.");
+            return string.Empty;
+        }
+
+        /// <summary>One arm of the verdict switch: from its label to the next label, or to the end.</summary>
+        private static string OutcomeArm(string label)
+        {
+            string sw = OutcomeSwitchBody();
+
+            int start = sw.IndexOf(label, StringComparison.Ordinal);
+            Assert.True(start >= 0, $"The verdict switch has no '{label}' arm.");
+
+            int end = sw.Length;
+            foreach (string other in OutcomeArmLabels)
+            {
+                if (string.Equals(other, label, StringComparison.Ordinal)) continue;
+
+                int at = sw.IndexOf(other, StringComparison.Ordinal);
+                if (at > start && at < end) end = at;
+            }
+
+            return sw[start..end];
         }
 
         /// <summary>
