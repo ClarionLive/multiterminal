@@ -925,6 +925,7 @@ namespace MultiTerminal
                 _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 18: Setting OnSpawnRequested");
                 _mcpServer.SpawnService.OnSpawnRequested = OnSpawnRequested;
                 _mcpServer.SpawnService.OnSpawnAgentRequested = OnSpawnAgentRequested;
+                _mcpServer.SpawnService.Jobs.Collected += OnSpawnJobCollected;
 
                 // Gloss backfill writer (task a455e295). The broker decides WHETHER to run one and
                 // throttles them; MainForm owns process spawning, so it supplies the how.
@@ -2085,218 +2086,137 @@ namespace MultiTerminal
         }
 
         /// <summary>
-        /// Delivers a spawned helper's initial prompt as ONE channel message (task 8b270b37, Owner
-        /// decision 2026-09-16).
+        /// Holds a spawned helper's initial prompt until the helper COLLECTS it (task 8b270b37, Owner
+        /// decision 2026-09-16), and reports a job nobody collected.
         ///
-        /// <para>WHEN — the moment the broker first sees the helper's CHANNEL PORT (task 7806024f). A
-        /// spawned helper never shows the <c>/session-start</c> menu — its SessionStart hook
-        /// short-circuits on <c>MULTITERMINAL_SPAWNER</c> — so the port is the earliest signal that
-        /// the plugin loaded and the helper can be reached. The rule lives in
-        /// <see cref="Services.HelperReadinessTrigger"/>, whose class doc holds the measurements.</para>
+        /// <para>WHY PULL — both push paths lost jobs silently. Typed, the trailing CR could become a
+        /// newline in the composer and leave the job unsent. Sent over the channel, a message that went
+        /// out before Claude Code had started listening for channel messages was dropped: live, Lv1x2's job
+        /// went 41ms early and vanished while the channel server answered 200 "delivered" (that 200 only
+        /// means the frame was written to stdout). A helper asking for its job is ready by definition.</para>
         ///
-        /// <para>HOW — <see cref="DeliverViaChannel"/>, never typing. The job used to be TYPED into the
-        /// pane with a trailing CR. Live, that CR could land in Claude Code's turn-start transition and
-        /// become a newline in the composer, leaving the job unsent while MT logged success; the
-        /// check built to detect that could not read the real composer, and its typing timeout filed
-        /// a false <c>spawn_failed</c> for a job that arrived a minute later. Measured on 2026-09-16
-        /// with the channel instead: 15/15 probe messages and 15/15 real tool-using jobs (Read, git,
-        /// Write, verified against a random nonce) arrived and were carried out, including jobs that
-        /// landed during the helper's startup turn — Claude Code queues them. Line breaks are kept:
-        /// a channel message has no Enter to submit early.</para>
+        /// <para>HOW — the job goes into <see cref="SpawnJobStore"/> keyed by docId. The helper's
+        /// SessionStart hook tells it to call <c>get_my_spawn_job</c>, which POSTs
+        /// <c>/api/spawn/job/{docId}/collect</c>. Line breaks are kept: nothing is typed.</para>
         ///
-        /// <para>RETRY — a non-2xx is retried with the SAME message id. The channel server records an
-        /// id only after it has injected the message and answers a repeat with 200
-        /// <c>duplicate_ignored</c>, so a retry cannot deliver the job twice. It also answers 409 until
-        /// its session has bound a name, which a send at the instant of registration can hit.</para>
-        ///
-        /// <para>GIVE-UP — no channel port within 120s, or every send attempt failed: the SPAWNER gets
-        /// a <c>spawn_failed</c> INBOX message (get_inbox / the Inbox panel), copied to the Owner when
-        /// the spawner is not a live terminal. Exactly-once across every path via Interlocked.</para>
+        /// <para>GIVE-UP — not collected within 120s: the SPAWNER gets a <c>spawn_failed</c> INBOX message
+        /// (copied to the Owner when the spawner is not a live terminal). This covers every way the job can
+        /// fail to arrive, including a helper that never boots and a helper whose first turn never starts,
+        /// because in every one of those cases nobody collects it. A collection after the report still
+        /// works and is logged as late.</para>
         /// </summary>
         private void QueueInitialPromptDelivery(string agentName, string docId, string initialPrompt, string spawnerName, string workingDir)
         {
-            const int fallbackMs = 120_000;
+            const int giveUpMs = 120_000;
             string job = initialPrompt.Trim();
+            var jobs = _mcpServer.SpawnService.Jobs;
 
-            // One id for every attempt: it is what makes a retry safe (see RETRY above).
-            string messageId = $"spawn-job-{docId}-{Guid.NewGuid():N}";
-            int delivered = 0;
-            EventHandler<TerminalInfo> onRegistered = null;
-
-            void Deliver(string trigger, int channelPort)
+            if (!jobs.TryAdd(docId, agentName, spawnerName, job))
             {
-                if (System.Threading.Interlocked.Exchange(ref delivered, 1) != 0)
-                    return;
-
-                _mcpServer.Broker.TerminalRegistered -= onRegistered;
-                _ = SendJobAsync(trigger, channelPort);
+                // A docId names one pane, so this is a bug in the caller, not a helper failure. Report it
+                // anyway: the spawner was told the job travels with the spawn, and it will not.
+                ReportUndeliveredSpawnJob(
+                    agentName,
+                    job.Length,
+                    spawnerName,
+                    workingDir,
+                    $"MT could not store it (DocId '{docId}' already has a job, or the DocId is blank)",
+                    "Nothing was sent to the helper.");
+                return;
             }
 
-            async Task SendJobAsync(string trigger, int channelPort)
+            // An ATTEMPT, not an outcome. The receipt is the "collected" line logged by the Collected
+            // subscriber; until that appears, nothing has reached the helper.
+            _debugLogService?.Info("MainForm", $"Holding initial prompt for {agentName} (DocId {docId}, {job.Length} chars) until the helper collects it — outcome to follow.");
+
+            _ = Task.Delay(giveUpMs).ContinueWith(
+                _ =>
+                {
+                    if (!jobs.TryClaimGiveUpReport(docId))
+                        return;
+
+                    ReportUndeliveredSpawnJob(
+                        agentName,
+                        job.Length,
+                        spawnerName,
+                        workingDir,
+                        $"the helper did not collect it within {giveUpMs / 1000}s (it never booted, its plugin did not load, or its first turn never started)",
+                        "Nothing has reached the helper. Look at its pane before acting: if it is now working, it collected the job late and MT's log will say so.");
+                },
+                TaskScheduler.Default);
+        }
+
+        /// <summary>
+        /// Logs the receipt for a collected spawn job. Subscribed once to <see cref="SpawnJobStore.Collected"/>.
+        /// </summary>
+        private void OnSpawnJobCollected(object sender, PendingSpawnJob entry)
+        {
+            double seconds = ((entry.CollectedUtc ?? DateTime.UtcNow) - entry.CreatedUtc).TotalSeconds;
+            if (entry.GiveUpReported)
             {
-                // Retry delays between attempts; the attempt count is one more than this.
-                int[] backoffMs = { 1_000, 2_000, 4_000 };
-                try
-                {
-                    // An ATTEMPT, not an outcome — the outcome is logged separately below. The typed
-                    // path's "Delivering initial prompt" line announced success before anything had
-                    // confirmed it, which is how an unsent job looked exactly like a delivered one.
-                    _debugLogService?.Info("MainForm", $"Sending initial prompt to {agentName} over its channel (port {channelPort}, {job.Length} chars, trigger: {trigger}) — outcome to follow.");
-
-                    for (int attempt = 1; ; attempt++)
-                    {
-                        if (await DeliverViaChannel(channelPort, spawnerName, job, "normal", messageId, agentName).ConfigureAwait(false))
-                        {
-                            _debugLogService?.Info("MainForm", $"Initial prompt for {agentName} was accepted by its channel on attempt {attempt} (trigger: {trigger}).");
-                            return;
-                        }
-
-                        if (attempt > backoffMs.Length)
-                            break;
-
-                        _debugLogService?.Warning("MainForm", $"Initial prompt for {agentName}: channel send attempt {attempt} failed; retrying in {backoffMs[attempt - 1] / 1000}s with the same message id.");
-                        await Task.Delay(backoffMs[attempt - 1]).ConfigureAwait(false);
-                    }
-
-                    // ⚠️ "Look before resending", NOT "nothing was sent". A failure that is an exception
-                    // rather than a status code can happen AFTER the channel server injected the
-                    // message, so MT cannot say it did not arrive — and a resent job runs twice.
-                    ReportUndelivered(
-                        $"its channel (port {channelPort}) did not accept the message after {backoffMs.Length + 1} attempts (trigger: {trigger})",
-                        disposition: "MT cannot confirm whether the job reached the helper. Check the helper's pane before sending the job again — if it did arrive, resending runs it twice.");
-                }
-                catch (Exception ex)
-                {
-                    ReportUndelivered(
-                        $"sending over the channel failed: {ex.Message} (trigger: {trigger})",
-                        disposition: "MT cannot confirm whether the job reached the helper. Check the helper's pane before sending the job again — if it did arrive, resending runs it twice.");
-                }
+                _debugLogService?.Warning("MainForm", $"Initial prompt for {entry.AgentName} was collected LATE, {seconds:F1}s after the spawn and after spawn_failed was already sent to {entry.SpawnerName}. The helper has its job; that report is now wrong.");
+                return;
             }
 
-            // The failure REPORT. Callers must already hold the exactly-once guard. The disposition is
-            // a parameter because what the recipient should DO differs by failure: nothing was sent
-            // when the helper never came alive, while a failed send may still have landed.
-            void ReportUndelivered(string reason, string disposition = null)
+            _debugLogService?.Info("MainForm", $"Initial prompt for {entry.AgentName} was collected by the helper {seconds:F1}s after the spawn ({entry.Job.Length} chars).");
+        }
+
+        /// <summary>
+        /// The failure REPORT for a spawn job that did not reach its helper. The disposition is a parameter
+        /// because what the recipient should DO differs by failure.
+        /// </summary>
+        private void ReportUndeliveredSpawnJob(string agentName, int jobLength, string spawnerName, string workingDir, string reason, string disposition)
+        {
+            _debugLogService?.Warning("MainForm", $"Initial prompt for {agentName} NOT delivered ({jobLength} chars): {reason}");
+
+            // Loud to the spawner — in the store an AGENT actually reads. Pipeline Run 2 caught the
+            // first version writing RecordNotification → notification_events: the attention rail
+            // drops an unknown raw type (MapState → Unknown) and get_inbox / the Inbox panel read
+            // inbox_messages, which that call never touches — so the promised signal reached nobody.
+            // CreateInboxNotification is what get_inbox surfaces. And because spawnerName is
+            // caller-supplied and unvalidated (a typo, a stale env, or the phone app's
+            // "ClaudeRemote"), a message to a name that is not a live terminal is written a second
+            // time to the Owner's inbox so it cannot be lost either way.
+            string summary = $"Helper {agentName}'s job ({jobLength} chars) was NOT delivered: {reason}. {disposition} Spawner: {spawnerName}. Working dir: {workingDir}.";
+            try
             {
-                if (string.IsNullOrWhiteSpace(disposition))
-                {
-                    disposition = "Nothing was sent to the helper.";
-                }
+                // The write's result is CHECKED (pipeline Run 3). CreateInboxNotification swallows
+                // its own SQLite failure into Success=false; ignoring that is how an earlier version
+                // of this block "sent" a message that reached nobody.
+                var toSpawner = _mcpServer.Broker.CreateInboxNotification(
+                    userId: spawnerName,
+                    taskId: null,
+                    taskTitle: null,
+                    checklistItemIndex: null,
+                    checklistItemName: null,
+                    type: "spawn_failed",
+                    summary: summary,
+                    createdBy: "MultiTerminal");
+                if (!toSpawner.Success)
+                    _debugLogService?.Warning("MainForm", $"spawn_failed inbox write for spawner '{spawnerName}' was REJECTED — that agent will not see that {agentName}'s job was dropped.");
 
-                _debugLogService?.Warning("MainForm", $"Initial prompt for {agentName} NOT delivered ({job.Length} chars): {reason}");
-
-                // Loud to the spawner — in the store an AGENT actually reads. Pipeline Run 2 caught the
-                // first version writing RecordNotification → notification_events: the attention rail
-                // drops an unknown raw type (MapState → Unknown) and get_inbox / the Inbox panel read
-                // inbox_messages, which that call never touches — so the promised signal reached nobody.
-                // CreateInboxNotification is what get_inbox surfaces. And because spawnerName is
-                // caller-supplied and unvalidated (a typo, a stale env, or the phone app's
-                // "ClaudeRemote"), a message to a name that is not a live terminal is written a second
-                // time to the Owner's inbox so it cannot be lost either way.
-                string summary = $"Helper {agentName}'s job ({job.Length} chars) was NOT delivered: {reason}. {disposition} Spawner: {spawnerName}. Working dir: {workingDir}.";
-                try
+                string owner = _mcpServer.Broker.DefaultInboxRecipient;
+                bool spawnerIsLive = _mcpServer.Broker.GetTerminal(spawnerName) != null;
+                if (!spawnerIsLive && !string.IsNullOrEmpty(owner) && !string.Equals(owner, spawnerName, StringComparison.OrdinalIgnoreCase))
                 {
-                    // The write's result is CHECKED (pipeline Run 3). CreateInboxNotification swallows
-                    // its own SQLite failure into Success=false; ignoring that is how an earlier version
-                    // of this block "sent" a message that reached nobody.
-                    var toSpawner = _mcpServer.Broker.CreateInboxNotification(
-                        userId: spawnerName,
+                    _debugLogService?.Warning("MainForm", $"Spawner '{spawnerName}' is not a live terminal; copying the spawn_failed message for {agentName} to '{owner}'.");
+                    var toOwner = _mcpServer.Broker.CreateInboxNotification(
+                        userId: owner,
                         taskId: null,
                         taskTitle: null,
                         checklistItemIndex: null,
                         checklistItemName: null,
                         type: "spawn_failed",
-                        summary: summary,
+                        summary: $"(spawner '{spawnerName}' is not a live terminal) {summary}",
                         createdBy: "MultiTerminal");
-                    if (!toSpawner.Success)
-                        _debugLogService?.Warning("MainForm", $"spawn_failed inbox write for spawner '{spawnerName}' was REJECTED — that agent will not see that {agentName}'s job was dropped.");
-
-                    string owner = _mcpServer.Broker.DefaultInboxRecipient;
-                    bool spawnerIsLive = _mcpServer.Broker.GetTerminal(spawnerName) != null;
-                    if (!spawnerIsLive && !string.IsNullOrEmpty(owner) && !string.Equals(owner, spawnerName, StringComparison.OrdinalIgnoreCase))
-                    {
-                        _debugLogService?.Warning("MainForm", $"Spawner '{spawnerName}' is not a live terminal; copying the spawn_failed message for {agentName} to '{owner}'.");
-                        var toOwner = _mcpServer.Broker.CreateInboxNotification(
-                            userId: owner,
-                            taskId: null,
-                            taskTitle: null,
-                            checklistItemIndex: null,
-                            checklistItemName: null,
-                            type: "spawn_failed",
-                            summary: $"(spawner '{spawnerName}' is not a live terminal) {summary}",
-                            createdBy: "MultiTerminal");
-                        if (!toOwner.Success)
-                            _debugLogService?.Warning("MainForm", $"spawn_failed inbox write for '{owner}' was REJECTED as well — {agentName}'s dropped job is recorded only in this log.");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _debugLogService?.Warning("MainForm", $"Could not notify {spawnerName} that {agentName}'s job was not delivered: {ex.Message}");
+                    if (!toOwner.Success)
+                        _debugLogService?.Warning("MainForm", $"spawn_failed inbox write for '{owner}' was REJECTED as well — {agentName}'s dropped job is recorded only in this log.");
                 }
             }
-
-            void GiveUp(string reason)
+            catch (Exception ex)
             {
-                if (System.Threading.Interlocked.Exchange(ref delivered, 1) != 0)
-                    return;
-
-                _mcpServer.Broker.TerminalRegistered -= onRegistered;
-                ReportUndelivered(reason);
+                _debugLogService?.Warning("MainForm", $"Could not notify {spawnerName} that {agentName}'s job was not delivered: {ex.Message}");
             }
-
-            // THE TRIGGER. Raised for EVERY row the broker registers, so the predicate is the only thing
-            // standing between "a terminal came alive" and "MY helper came alive".
-            // ⚠️ Matched on DOCID, not the display name (task c28e6177): the broker never trims, so a
-            // live "Alice" and a helper spawned as "Alice " are two rows to it, and a trimmed-name match
-            // let Alice's own registration fire this handler — made permanent by the exactly-once guard.
-            onRegistered = (_, row) =>
-            {
-                if (row != null
-                    && HelperReadinessTrigger.IsHelperAlive(row.DocId, row.ChannelPort, docId))
-                {
-                    Deliver("helper registered a channel port", row.ChannelPort.Value);
-                }
-            };
-
-            _mcpServer.Broker.TerminalRegistered += onRegistered;
-
-            // SUBSCRIBE, THEN CHECK — in that order, and the order is the point. The port can already be
-            // set by the time we get here (a fast helper, or a name reused from a row that is still live),
-            // and an event-only trigger would then wait for a registration that has already happened.
-            // Checking BEFORE subscribing would leave the opposite gap: a registration landing between the
-            // check and the subscribe would be missed entirely. Exactly-once is guaranteed by the
-            // Interlocked guard in Deliver, so the overlap this ordering creates is free.
-            // Looked up by DOCID, not the name (task c28e6177); IsHelperAlive then compares DocId against
-            // DocId, so the permissive GetTerminal resolver cannot hand back a different helper's row.
-            var alreadyLive = _mcpServer.Broker.GetTerminal(docId);
-            if (alreadyLive != null
-                && HelperReadinessTrigger.IsHelperAlive(alreadyLive.DocId, alreadyLive.ChannelPort, docId))
-            {
-                Deliver("helper already had a channel port", alreadyLive.ChannelPort.Value);
-            }
-
-            _ = Task.Delay(fallbackMs).ContinueWith(
-                _ =>
-                {
-                    // Log-only fast path; Deliver()/GiveUp() hold the real exactly-once guard.
-                    if (delivered != 0)
-                        return;
-
-                    // Routed through the SAME predicate as the registration trigger, so the two cannot
-                    // silently diverge (pipeline Run 1, code-reviewer).
-                    var live = _mcpServer.Broker.GetTerminal(docId);
-                    if (live != null
-                        && HelperReadinessTrigger.IsHelperAlive(live.DocId, live.ChannelPort, docId))
-                    {
-                        _debugLogService?.Warning("MainForm", $"No registration event seen for {agentName} within {fallbackMs / 1000}s but it is live (channel port {live.ChannelPort}); delivering its initial prompt anyway.");
-                        Deliver("fallback timer — helper live, event missed", live.ChannelPort.Value);
-                    }
-                    else
-                    {
-                        GiveUp($"registered no channel within {fallbackMs / 1000}s (it never booted, or the plugin did not load)");
-                    }
-                },
-                TaskScheduler.Default);
         }
 
         /// <summary>

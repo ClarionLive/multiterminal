@@ -111,8 +111,8 @@ namespace MultiTerminal.API.Controllers
                 : request.InitialPrompt;
 
             // Size cap (pipeline Run 1, Codex security). Set when the prompt was TYPED one character at
-            // a time and trace-logged; since task 8b270b37 it is one channel message instead, so the
-            // typing-time DoS is gone. The cap stays: an unbounded job is still an unbounded message
+            // a time and trace-logged; since task 8b270b37 the helper collects it in one call instead, so
+            // the typing-time DoS is gone. The cap stays: an unbounded job is still an unbounded message
             // into another agent's context, and 16k chars is well past any prose job description —
             // anything larger belongs in a file the helper can read.
             if (initialPrompt != null && initialPrompt.Length > MaxInitialPromptChars)
@@ -162,6 +162,56 @@ namespace MultiTerminal.API.Controllers
             });
         }
 
+        /// <summary>
+        /// Whether a pane has a job waiting: <c>pending</c>, <c>collected</c> or <c>no_job</c> (task 8b270b37).
+        /// <para>Read-only, and it NEVER returns the job text. It exists for the plugin's SessionStart hook,
+        /// which decides whether to tell a spawned helper to call <c>get_my_spawn_job</c> without consuming
+        /// anything. The hook treats any non-200, including a 404 from an MT build that predates this route,
+        /// as "nothing to collect", so the hook and the app can be updated in either order.</para>
+        /// </summary>
+        [HttpGet("job/{docId}")]
+        public IActionResult GetJobStatus(string docId)
+        {
+            var entry = _spawnService.Jobs.Get(docId);
+            string status = entry == null ? "no_job" : entry.IsCollected ? "collected" : "pending";
+            return Ok(new { status, docId });
+        }
+
+        /// <summary>
+        /// A spawned helper collects its own job (task 8b270b37). Called by the helper's
+        /// <c>get_my_spawn_job</c> tool with its <c>MULTITERMINAL_DOC_ID</c>.
+        /// <para>The job is returned at most once. <c>status</c> is <c>collected</c> (with <c>job</c>),
+        /// <c>already_collected</c> (with <c>collectedUtc</c>, no job), or <c>no_job</c>. All three are
+        /// 200: "this pane has no job" is a normal answer for a pane spawned without one, not an error.</para>
+        /// <para>POST, not GET, because the call changes state: a GET could be replayed by anything that
+        /// treats GETs as safe, and that replay would consume the job.</para>
+        /// </summary>
+        [HttpPost("job/{docId}/collect")]
+        public IActionResult CollectJob(string docId)
+        {
+            var outcome = _spawnService.Jobs.TryCollect(docId, out var entry);
+            return outcome switch
+            {
+                SpawnJobCollectOutcome.Collected => Ok(new
+                {
+                    status = "collected",
+                    docId,
+                    agentName = entry.AgentName,
+                    spawnerName = entry.SpawnerName,
+                    job = entry.Job,
+                }),
+                SpawnJobCollectOutcome.AlreadyCollected => Ok(new
+                {
+                    status = "already_collected",
+                    docId,
+                    agentName = entry.AgentName,
+                    spawnerName = entry.SpawnerName,
+                    collectedUtc = entry.CollectedUtc,
+                }),
+                _ => Ok(new { status = "no_job", docId }),
+            };
+        }
+
         /// <summary>Upper bound on <see cref="SpawnTerminalRequest.InitialPrompt"/>, in characters.</summary>
         internal const int MaxInitialPromptChars = 16_000;
     }
@@ -179,14 +229,9 @@ namespace MultiTerminal.API.Controllers
         public string SpawnerName { get; set; }
 
         /// <summary>
-        /// The helper's job, delivered to it as ONE prompt once it has booted and is demonstrably
-        /// alive (its broker row carries a channel port). Optional. Line breaks are collapsed to
-        /// spaces on delivery (the typing path would submit on each one), so write it as prose,
-        /// not a script.
-        /// <para>Measured 2026-09-14: delivery currently waits out the 120s fallback timer for
-        /// every spawned helper, because the question-based trigger was designed around the
-        /// /session-start menu that a spawned agent never shows. Correct, but slow — follow-up
-        /// ticket, not a defect in the delivery itself.</para>
+        /// The helper's job. Optional. MT holds it and the helper COLLECTS it with <c>get_my_spawn_job</c> as its
+        /// first action (task 8b270b37); nothing is typed or pushed, so line breaks are kept. A job not collected
+        /// within 120s is reported to the spawner as <c>spawn_failed</c>.
         /// </summary>
         public string InitialPrompt { get; set; }
     }

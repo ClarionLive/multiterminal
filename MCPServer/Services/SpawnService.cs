@@ -29,6 +29,13 @@ namespace MultiTerminal.MCPServer.Services
         public Func<string, string, string, string, string, string, string, Task<(bool success, AgentProcess agent, string error)>> OnSpawnAgentRequested { get; set; }
 
         /// <summary>
+        /// Spawned helpers' jobs, held until each helper collects its own (task 8b270b37). Lives here
+        /// because this service is the one singleton that MainForm (which stores a job) and both REST
+        /// hosts (which serve the collect endpoint) already share.
+        /// </summary>
+        public SpawnJobStore Jobs { get; } = new SpawnJobStore();
+
+        /// <summary>
         /// Request to spawn a new teammate terminal (ConPTY mode).
         /// </summary>
         public async Task<(bool success, string docId, string error, string terminalName)> SpawnTeammateAsync(
@@ -54,7 +61,7 @@ namespace MultiTerminal.MCPServer.Services
             // terminals from the moment a row exists, and the ONLY safe place to reconcile them is
             // before one does. Normalising here cannot merge two existing identities, because there is
             // nothing to merge yet; normalising in any of those comparisons would, which is why this
-            // fix lives at the boundary and not there (see HelperReadinessTrigger for the refusal).
+            // fix lives at the boundary and not there (task c28e6177 records the refusal).
             //
             // This is the choke point, not the only trim: all three HTTP surfaces (SpawnController's
             // two endpoints and the phone gateway's /api/spawn) trim before calling, because they echo

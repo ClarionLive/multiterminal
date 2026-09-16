@@ -11,8 +11,9 @@ namespace MultiTerminal.Tests
     /// Census of the UNSERIALIZED injection path — <c>TerminalControl.InjectInputAsync</c>, which
     /// writes straight to ConPTY and never reaches <c>terminal.html</c>'s typing queue (task f420feeb).
     ///
-    /// <para><b>Why this class exists at all.</b> <c>InitialPromptTriggerWiringTests</c> pins the
-    /// typing queue, and its own class doc states that it "structurally cannot observe" this path.
+    /// <para><b>Why this class exists at all.</b> <c>InitialPromptTriggerWiringTests</c> (now
+    /// <c>SpawnJobWiringTests</c>) pinned the typing queue, and its class doc stated that it "structurally
+    /// cannot observe" this path.
     /// That was true and remained true while the gap went unwatched — the suite gave confidence
     /// exactly where the hole was. These facts watch the other half.</para>
     ///

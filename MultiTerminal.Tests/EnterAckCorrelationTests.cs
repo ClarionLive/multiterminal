@@ -24,7 +24,7 @@ namespace MultiTerminal.Tests
     /// <para>The last two facts are cross-file, against <c>Terminal/terminal.html</c>: the id is a
     /// string contract across a WebView2 boundary that no compiler checks, and the C# half can be
     /// perfect while the page never sends the field. Precedent for binding a C#-named test class to
-    /// that page: <c>InitialPromptTriggerWiringTests.Terminal_html_serializes_typing_through_one_queue</c>
+    /// that page: <c>SpawnJobWiringTests.Terminal_html_serializes_typing_through_one_queue</c>
     /// and <c>BoardHudDoorwayTests</c>. Cohesion by defect, not by file.</para>
     /// </summary>
     public class EnterAckCorrelationTests

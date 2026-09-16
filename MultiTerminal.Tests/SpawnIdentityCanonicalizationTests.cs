@@ -18,12 +18,14 @@ namespace MultiTerminal.Tests
     /// channel server's roster lookup and <c>isAddressedToMe</c>. Trimming in any of THOSE would merge
     /// two rows that already exist, inside the comparison that decides which agent receives a message.
     /// Trimming here cannot merge anything, because nothing has been created yet. That asymmetry is the
-    /// whole design and <see cref="MultiTerminal.Services.HelperReadinessTrigger"/> carries the matching
-    /// refusal comment.</para>
+    /// whole design.</para>
     ///
     /// <para>Fix B does not replace fix A. It removes the likeliest SOURCE of a whitespace-variant name;
-    /// fix A makes the readiness trigger correct even when one exists, which it still can via
-    /// <c>register_terminal</c> from a session whose <c>MULTITERMINAL_NAME</c> carries a space.</para>
+    /// fix A keyed a spawned helper's job on its pane's docId, never a display name, so a variant name
+    /// cannot receive another helper's job even when one exists, which it still can via
+    /// <c>register_terminal</c> from a session whose <c>MULTITERMINAL_NAME</c> carries a space. Since task
+    /// 8b270b37 that key is <see cref="MultiTerminal.MCPServer.Services.SpawnJobStore"/>'s, which replaced
+    /// the readiness trigger fix A was written for.</para>
     /// </summary>
     public sealed class SpawnIdentityCanonicalizationTests
     {
@@ -110,7 +112,7 @@ namespace MultiTerminal.Tests
         ///
         /// <para>Asserted as a source census because both sites are HTTP handlers: the controller needs
         /// an <c>HttpContext</c> for <c>Problem()</c>, and the gateway route is a minimal-API lambda with
-        /// no seam to call. Same technique as <c>InitialPromptTriggerWiringTests</c>.</para>
+        /// no seam to call. Same technique as <c>SpawnJobWiringTests</c>.</para>
         /// </summary>
         [Theory]
         [InlineData("API/Controllers/SpawnController.cs", "SpawnTerminal")]
@@ -184,7 +186,7 @@ namespace MultiTerminal.Tests
         ///
         /// <para>This is also the second time the same gap has been found in this repo. Task 2ddfc32f had
         /// a census satisfied by a <c>&lt;see cref&gt;</c> in a doc comment, which is why
-        /// <c>InitialPromptTriggerWiringTests</c> strips before scanning. This file cited that file as
+        /// <c>InitialPromptTriggerWiringTests</c> (now <c>SpawnJobWiringTests</c>) strips before scanning. This file cited that file as
         /// its precedent and then adopted the technique without the half that made it work.</para>
         /// </summary>
         private static string ReadRepoFile(string relativePath)

@@ -1030,7 +1030,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "spawn_helper",
-        description: "Spawn a HELPER: a full MultiTerminal terminal in its own docked pane — own identity, plugin + messaging channel, registers itself, appears in list_terminals — with its job handed to it as one prompt. POSTs /api/spawn/terminal (the endpoint existed all along; no tool pointed at it, so agents could only find it by reading C# source).\n\nA SUBAGENT IS A WORKER; A SPAWNED HELPER IS A PEER. Default to the Agent tool (a subagent): cheaper, faster, returns a structured result directly, tool surface scoped by agent type. Spawn a helper ONLY when at least one of these holds: (1) the work outlives your turn; (2) the human needs to watch or steer it; (3) it needs MT identity — kanban claims, board presence, checklist items; (4) it needs its own process environment, worktree or machine state — a subagent inherits YOUR environment, so 'report what is in a DIFFERENT terminal's environment' cannot be done by one at all; (5) you need something that can DISAGREE with you. Measured (b42b1883 session 9): a helper used as a mere worker was strictly WORSE than a subagent — slow to boot, parked on its startup menu, a full session to run eight read-only commands. Do not replace subagents wholesale.\n\ninitialPrompt is delivered as ONE prompt once the helper is alive: a single message over the helper's MultiTerminal channel, never typed into its pane, so line breaks are kept (max 16,000 chars). DELIVERY IS PROMPT: the job is sent within seconds of the helper registering a channel port — about 20s after the spawn, measured 2026-09-16 (task 7806024f removed the old ~120s wait; task 8b270b37 moved delivery from typing to the channel). The 120s below is the GIVE-UP BOUND, not the expected wait, so silence lasting minutes is a FAILURE signal rather than the norm. spawnerName MUST be your own name: the helper sees it as MULTITERMINAL_SPAWNER.\n\nWHAT THE RESULT MEANS: success = the PANE exists and its identity is registered — NOT that the helper has booted. It needs ~10–30s to boot and register itself (its SessionStart hook does that — a spawned helper does NOT run /session-start, so do not wait for a startup menu that never appears); it is messageable once list_terminals shows it WITH a channel port. If it never comes alive (no channel port within 120s), its job is NOT sent — a spawn_failed message lands in YOUR inbox (get_inbox), and in the Owner's if your spawnerName is not a live terminal. A name that is already held on this MultiTerminal (the broker keeps every launched name for the session) comes back SUFFIXED (\"Name-2\"): always use the terminalName in the result, not the name you asked for.",
+        description: "Spawn a HELPER: a full MultiTerminal terminal in its own docked pane — own identity, plugin + messaging channel, registers itself, appears in list_terminals — with its job handed to it as one prompt. POSTs /api/spawn/terminal (the endpoint existed all along; no tool pointed at it, so agents could only find it by reading C# source).\n\nA SUBAGENT IS A WORKER; A SPAWNED HELPER IS A PEER. Default to the Agent tool (a subagent): cheaper, faster, returns a structured result directly, tool surface scoped by agent type. Spawn a helper ONLY when at least one of these holds: (1) the work outlives your turn; (2) the human needs to watch or steer it; (3) it needs MT identity — kanban claims, board presence, checklist items; (4) it needs its own process environment, worktree or machine state — a subagent inherits YOUR environment, so 'report what is in a DIFFERENT terminal's environment' cannot be done by one at all; (5) you need something that can DISAGREE with you. Measured (b42b1883 session 9): a helper used as a mere worker was strictly WORSE than a subagent — slow to boot, parked on its startup menu, a full session to run eight read-only commands. Do not replace subagents wholesale.\n\ninitialPrompt is handed over as ONE prompt that the helper COLLECTS itself: its startup instruction tells it to call get_my_spawn_job as its first action. Nothing is typed into its pane or pushed at it, so line breaks are kept (max 16,000 chars) and the job cannot be lost to a helper that was not yet listening (task 8b270b37: both push paths lost jobs silently). DELIVERY IS PROMPT: the helper collects it within seconds of booting, and MT logs the collection as the receipt. The 120s below is the GIVE-UP BOUND, not the expected wait, so silence lasting minutes is a FAILURE signal rather than the norm. spawnerName MUST be your own name: the helper sees it as MULTITERMINAL_SPAWNER.\n\nWHAT THE RESULT MEANS: success = the PANE exists and its identity is registered — NOT that the helper has booted. It needs ~10–30s to boot and register itself (its SessionStart hook does that — a spawned helper does NOT run /session-start, so do not wait for a startup menu that never appears); it is messageable once list_terminals shows it WITH a channel port. If it does not collect its job within 120s (it never booted, or its first turn never started), a spawn_failed message lands in YOUR inbox (get_inbox), and in the Owner's if your spawnerName is not a live terminal. A name that is already held on this MultiTerminal (the broker keeps every launched name for the session) comes back SUFFIXED (\"Name-2\"): always use the terminalName in the result, not the name you asked for.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1052,10 +1052,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             initialPrompt: {
               type: "string",
-              description: "The helper's job, as prose. Delivered as ONE channel message once the helper is alive (within seconds of it registering a channel port; the 120s elsewhere is the give-up bound, not the expected wait); line breaks are kept. Optional — without it the helper boots and waits, idle, for someone to tell it what to do.",
+              description: "The helper's job. Handed over as ONE prompt that the helper collects itself (get_my_spawn_job) within seconds of booting; the 120s elsewhere is the give-up bound, not the expected wait. Line breaks are kept. Optional — without it the helper boots and waits, idle, for someone to tell it what to do.",
             },
           },
           required: ["agentName", "spawnerName"],
+        },
+      },
+      {
+        name: "get_my_spawn_job",
+        description: "FOR A SPAWNED HELPER: collect the job your spawner gave you. Call it as your FIRST action when your startup context says you were spawned, then carry out what it returns. It identifies you by YOUR pane's MULTITERMINAL_DOC_ID, so it can only ever return your own job, and it takes no arguments for that reason.\n\nThe job is handed over AT MOST ONCE. The first call returns it; every later call says it was already collected and when. If you get 'already collected' with no memory of the job (e.g. after a context compaction), do NOT guess what it was: message your spawner and ask. 'No job' means you were spawned without one; wait for your spawner to message you.\n\nThis call is also MultiTerminal's receipt that the job reached you. A helper that never calls it is reported to its spawner as not delivered after 120s.",
+        inputSchema: {
+          type: "object",
+          properties: {},
         },
       },
       {
@@ -3833,10 +3841,59 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           text += `⚠️ "${spawned.requestedName}" was already held on this MultiTerminal, so the helper is registered as "${spawned.terminalName}" — use THAT name from here on.\n`;
         }
         text += args.initialPrompt
-          ? `Its job (${String(args.initialPrompt).length} chars) is sent as ONE message over its channel once it is alive — expect that within seconds of it coming alive, NOT minutes. If it never comes alive (no channel port within 120s) the job is NOT sent — a spawn_failed message lands in your inbox (get_inbox), and in the Owner's inbox if your spawnerName is not a live terminal.\n`
+          ? `Its job (${String(args.initialPrompt).length} chars) is held until the helper collects it as its first action — expect that within seconds of it booting, NOT minutes. If it has not collected the job within 120s, a spawn_failed message lands in your inbox (get_inbox), and in the Owner's inbox if your spawnerName is not a live terminal.\n`
           : `No initialPrompt given — it will boot and sit idle until told what to do.\n`;
         text += `${spawned.readiness || "It is messageable once list_terminals shows it with a channel port (~10-30s)"}; then send_message to "${spawned.terminalName}".`;
         return { content: [{ type: "text", text }] };
+      }
+
+      case "get_my_spawn_job": {
+        // Task 8b270b37: a spawned helper PULLS its job. Every push path lost jobs silently — typed,
+        // the submit could become a newline in the composer; over the channel, a message sent before
+        // Claude Code started listening was dropped while the channel server answered 200.
+        //
+        // The docId comes ONLY from this process's environment, never from args: MT launched this
+        // pane with it, so it names this helper and no other. Accepting an argument would let any
+        // agent collect, and thereby consume, a different helper's job.
+        const docId = process.env.MULTITERMINAL_DOC_ID;
+        if (!docId || !String(docId).trim()) {
+          return {
+            content: [{
+              type: "text",
+              text: "❌ MULTITERMINAL_DOC_ID is not set in this session, so there is no pane to collect a job for. This tool only works inside a terminal MultiTerminal launched.",
+            }],
+            isError: true,
+          };
+        }
+
+        // POST: collecting changes state (the job is handed over once). Errors propagate to the
+        // dispatcher with the controller's own detail.
+        const r = await apiCall(`/api/spawn/job/${seg(String(docId).trim())}/collect`, "POST");
+
+        if (r.status === "collected") {
+          return {
+            content: [{
+              type: "text",
+              text: `📋 YOUR JOB from ${r.spawnerName} (you are ${r.agentName}). Carry it out now. When you report back, message ${r.spawnerName}.\n\n${r.job}`,
+            }],
+          };
+        }
+
+        if (r.status === "already_collected") {
+          return {
+            content: [{
+              type: "text",
+              text: `⚠️ Your job was already collected at ${r.collectedUtc} UTC and is not handed over twice. If you are working on it, carry on. If you have no record of it (for example after a context compaction), do NOT guess: message ${r.spawnerName} and ask them to resend it.`,
+            }],
+          };
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: "No job is waiting for this pane: you were spawned without one. Wait for your spawner to message you.",
+          }],
+        };
       }
 
       case "get_my_pickable_tasks": {

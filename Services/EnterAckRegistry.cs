@@ -38,7 +38,7 @@ namespace MultiTerminal.Services
     /// Correlates Enter-key acknowledgments with the injections that asked for them.
     ///
     /// <para><b>Why this is its own class.</b> It lives in <c>WebViewTerminalRenderer</c>'s problem
-    /// space but not in its file, for the reason <see cref="HelperReadinessTrigger"/> exists: the
+    /// space but not in its file, for a reason common in this codebase: the
     /// renderer is a <c>UserControl</c> hosting WebView2 and cannot be instantiated in a test, so a
     /// decision left inside it can only ever be asserted by scanning its source. The DECISION —
     /// which waiter, if any, a given ack releases — is pure, so it moves somewhere it can be
