@@ -121,7 +121,10 @@ test("spawn_helper's result text promises the same failure delivery the descript
 test("spawn_helper's description states the initialPrompt delivery contract", () => {
   const d = defBlock();
   assert.ok(d.includes("ONE prompt"), "must say the prompt arrives as one prompt");
-  assert.ok(/line breaks become spaces|line breaks are collapsed/i.test(d), "must warn that line breaks are collapsed");
+  // Task 8b270b37: the job goes over the channel, not typed, so line breaks now SURVIVE. The old
+  // assertion required the description to warn they were collapsed, which is now false.
+  assert.ok(/line breaks are kept/i.test(d), "must say line breaks are kept");
+  assert.ok(!/line breaks become spaces|line breaks are collapsed/i.test(d), "must not claim line breaks are collapsed");
   assert.ok(d.includes("MULTITERMINAL_SPAWNER"), "must say what spawnerName becomes in the child");
 });
 
@@ -163,7 +166,7 @@ test("spawn_helper states prompt delivery, and that a long silence is a failure"
   }
 
   // The 120s itself must survive as the give-up bound — it is still the real deadline after which
-  // the job is never typed and spawn_failed is sent. Dropping it would trade one wrong expectation
+  // the job is never sent and spawn_failed is sent. Dropping it would trade one wrong expectation
   // for no expectation at all.
   assert.ok(/120s/.test(defBlock()), "description must still document the 120s give-up bound");
 });

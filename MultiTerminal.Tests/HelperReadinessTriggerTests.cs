@@ -5,7 +5,7 @@ namespace MultiTerminal.Tests
 {
     /// <summary>
     /// Covers <see cref="HelperReadinessTrigger"/> (task 7806024f) — the rule that decides when a spawned
-    /// helper's job is typed into its pane.
+    /// helper's job is sent to it (over its channel, since task 8b270b37).
     ///
     /// <para><b>⚠️ RE-KEYED FROM DISPLAY NAME TO DOCID (task c28e6177), and the facts below changed
     /// polarity because of it.</b> The predicate used to compare TRIMMED, case-insensitive display names.
@@ -34,7 +34,7 @@ namespace MultiTerminal.Tests
         /// pre-registration, which has no channel port because <c>claude</c> has not started, and again for
         /// the helper's real registration. A trigger keyed on "a registration happened" fires on the first
         /// and types the job into an empty pane, which is strictly worse than the 120s wait this change
-        /// exists to remove: slow is recoverable, typing into nothing loses the job.
+        /// exists to remove: slow is recoverable, sending to nothing loses the job.
         /// <para>Note this fact is about the PORT and survives the docId re-key untouched — both raises
         /// carry the same docId, so the port is the only thing distinguishing them.</para>
         /// </summary>

@@ -475,7 +475,7 @@
     <div class="flow-arrow">&darr;</div>
     <div class="flow-step">
       <div class="flow-label">4. The job arrives as one prompt</div>
-      <div class="flow-detail">Once the helper's <code>/session-start</code> menu is up (its first <code>ask_user_question</code> notification), <code>initialPrompt</code> is typed in via <code>TypeInput</code> &mdash; never the chunking <code>/submit</code> path. The helper runs <code>/session-start</code>, registers, and is visible in <code>list_terminals</code> with <code>MULTITERMINAL_SPAWNER</code> naming the real spawner.</div>
+      <div class="flow-detail">Once the helper registers a channel port, <code>initialPrompt</code> is sent to it as one message over its MultiTerminal channel &mdash; never typed into the pane, never the chunking <code>/submit</code> path (task 8b270b37). The helper is visible in <code>list_terminals</code> with <code>MULTITERMINAL_SPAWNER</code> naming the real spawner.</div>
     </div>
   </div>
 

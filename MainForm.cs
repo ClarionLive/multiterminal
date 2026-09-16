@@ -2085,261 +2085,105 @@ namespace MultiTerminal
         }
 
         /// <summary>
-        /// Delivers a spawned helper's initial prompt as ONE intact prompt (task 77d1182f).
+        /// Delivers a spawned helper's initial prompt as ONE channel message (task 8b270b37, Owner
+        /// decision 2026-09-16).
         ///
-        /// <para>WHEN — not at spawn time. <see cref="OnClaudeCodeDetected"/> types
-        /// <c>initializing...</c> as the session's first prompt; that fires the SessionStart hook.
-        /// For a terminal the human opens, the hook then orders <c>/session-start</c>, which ends on
-        /// a BLOCKING <c>AskUserQuestion</c> menu. Text typed before that menu is up is lost or
-        /// interleaved; text typed into it routes as a direct instruction. So the trigger is the
-        /// helper's FIRST <c>ask_user_question</c> notification — the ask-user-relay hook POSTs it
-        /// to /api/notifications and the broker raises
-        /// <see cref="MCPServer.Services.MessageBroker.NotificationReceived"/> with
-        /// <c>raw_type</c>/<c>agent_name</c>. A fixed delay would be a guess at a 10–30s variable,
-        /// and session 9 of b42b1883 watched exactly that guess fail: the helper sat on its menu
-        /// and ignored three prompts.</para>
+        /// <para>WHEN — the moment the broker first sees the helper's CHANNEL PORT (task 7806024f). A
+        /// spawned helper never shows the <c>/session-start</c> menu — its SessionStart hook
+        /// short-circuits on <c>MULTITERMINAL_SPAWNER</c> — so the port is the earliest signal that
+        /// the plugin loaded and the helper can be reached. The rule lives in
+        /// <see cref="Services.HelperReadinessTrigger"/>, whose class doc holds the measurements.</para>
         ///
-        /// <para>⚠️ For a SPAWNED helper that question NEVER arrives, so this trigger alone would
-        /// never fire. The plugin's SessionStart hook short-circuits on
-        /// <c>MULTITERMINAL_SPAWNER</c> ("Skip kanban/plan context for spawned agents") and hands
-        /// the helper a spawned-agent briefing instead of the auto-run instruction — so there is no
-        /// <c>/session-start</c>, no menu, and no <c>ask_user_question</c>. Until task 7806024f
-        /// every spawned helper therefore waited out the full 120s timer below. FIXED by the
-        /// registration trigger further down (search "THE NORMAL PATH FOR A SPAWNED HELPER"),
-        /// which fires when the broker first sees the helper's channel port; the measurements are
-        /// in <see cref="Services.HelperReadinessTrigger"/>'s class doc, which is the single copy.
-        /// This trigger is RETAINED for any caller that does show a menu.</para>
+        /// <para>HOW — <see cref="DeliverViaChannel"/>, never typing. The job used to be TYPED into the
+        /// pane with a trailing CR. Live, that CR could land in Claude Code's turn-start transition and
+        /// become a newline in the composer, leaving the job unsent while MT logged success; the
+        /// check built to detect that could not read the real composer, and its typing timeout filed
+        /// a false <c>spawn_failed</c> for a job that arrived a minute later. Measured on 2026-09-16
+        /// with the channel instead: 15/15 probe messages and 15/15 real tool-using jobs (Read, git,
+        /// Write, verified against a random nonce) arrived and were carried out, including jobs that
+        /// landed during the helper's startup turn — Claude Code queues them. Line breaks are kept:
+        /// a channel message has no Enter to submit early.</para>
         ///
-        /// <para>HOW — <c>TypeInput</c>, never <c>InjectInputAsync</c>. The latter splits anything
-        /// over 500 bytes into <c>[n/N]</c> chunks (TerminalControl.MaxChunkSize) and was observed
-        /// cutting a command in half mid-word; TypeInput sends every byte in order with a single
-        /// CR at the end. Embedded line breaks would be typed as Enter and submit early, so they
-        /// are collapsed to spaces — the prompt arrives as one line, which is the "one prompt"
-        /// the contract promises.</para>
+        /// <para>RETRY — a non-2xx is retried with the SAME message id. The channel server records an
+        /// id only after it has injected the message and answers a repeat with 200
+        /// <c>duplicate_ignored</c>, so a retry cannot deliver the job twice. It also answers 409 until
+        /// its session has bound a name, which a send at the instant of registration can hit.</para>
         ///
-        /// <para>FALLBACK — the LAST RESORT, and no longer the normal path. This sentence used to
-        /// say the opposite, and was correct when task 77d1182f wrote it: every spawned helper's job
-        /// really did land here. Task 7806024f moved delivery onto the registration trigger above
-        /// (measured 4.9s), so reaching this timer now means the helper took over two minutes to
-        /// register a channel port — which is a fault, not the norm. Kept as the give-up bound.
-        /// The prompt is typed ONLY if the helper is demonstrably alive: its broker row carries a
-        /// channel port, meaning the plugin loaded and its real registration landed.
-        /// Otherwise the helper never booted — no claude, no plugin, no channel — and typing into
-        /// that pane would be the "job typed blindly into whatever exists" the pipeline's adversary
-        /// gate flagged (Run 1). In that case nothing is typed; the SPAWNER gets a <c>spawn_failed</c>
-        /// INBOX message (get_inbox / the Inbox panel — not a notification_events row, which the
-        /// attention rail drops and no agent-facing reader consults), so the failure is loud to the
-        /// one who cares.
-        /// Exactly-once across every path via Interlocked.</para>
+        /// <para>GIVE-UP — no channel port within 120s, or every send attempt failed: the SPAWNER gets
+        /// a <c>spawn_failed</c> INBOX message (get_inbox / the Inbox panel), copied to the Owner when
+        /// the spawner is not a live terminal. Exactly-once across every path via Interlocked.</para>
         /// </summary>
         private void QueueInitialPromptDelivery(string agentName, string docId, string initialPrompt, string spawnerName, string workingDir)
         {
             const int fallbackMs = 120_000;
-            string oneLine = System.Text.RegularExpressions.Regex.Replace(initialPrompt, @"\r\n?|\n", " ").Trim();
-            int delivered = 0;
+            string job = initialPrompt.Trim();
 
-            // How long this helper has been waited on. The renderer-readiness gate below spends the
-            // REMAINDER of this same budget rather than a second, independent constant — see the
-            // comment at that gate for why a fixed 5s was wrong (task 7806024f, pipeline Run 2).
-            // Stopwatch, NOT DateTime.UtcNow: the latter is wall-clock, so a backwards NTP step
-            // during the wait yields a NEGATIVE elapsed and inflates the budget instead of shrinking
-            // it — a one-hour correction would buy a ~62-minute readiness wait. Stopwatch is
-            // monotonic and cannot do that (Run 2 delta re-review, debugger LOW).
-            var sinceQueued = System.Diagnostics.Stopwatch.StartNew();
-            EventHandler<Dictionary<string, object>> onNotification = null;
+            // One id for every attempt: it is what makes a retry safe (see RETRY above).
+            string messageId = $"spawn-job-{docId}-{Guid.NewGuid():N}";
+            int delivered = 0;
             EventHandler<TerminalInfo> onRegistered = null;
 
-            void Deliver(string trigger)
+            void Deliver(string trigger, int channelPort)
             {
                 if (System.Threading.Interlocked.Exchange(ref delivered, 1) != 0)
                     return;
 
-                _mcpServer.Broker.NotificationReceived -= onNotification;
                 _mcpServer.Broker.TerminalRegistered -= onRegistered;
+                _ = SendJobAsync(trigger, channelPort);
+            }
 
+            async Task SendJobAsync(string trigger, int channelPort)
+            {
+                // Retry delays between attempts; the attempt count is one more than this.
+                int[] backoffMs = { 1_000, 2_000, 4_000 };
                 try
                 {
-                    if (IsDisposed || !IsHandleCreated)
+                    // An ATTEMPT, not an outcome — the outcome is logged separately below. The typed
+                    // path's "Delivering initial prompt" line announced success before anything had
+                    // confirmed it, which is how an unsent job looked exactly like a delivered one.
+                    _debugLogService?.Info("MainForm", $"Sending initial prompt to {agentName} over its channel (port {channelPort}, {job.Length} chars, trigger: {trigger}) — outcome to follow.");
+
+                    for (int attempt = 1; ; attempt++)
                     {
-                        ReportUndelivered($"the main window was gone before the prompt could be typed (trigger: {trigger})");
-                        return;
+                        if (await DeliverViaChannel(channelPort, spawnerName, job, "normal", messageId, agentName).ConfigureAwait(false))
+                        {
+                            _debugLogService?.Info("MainForm", $"Initial prompt for {agentName} was accepted by its channel on attempt {attempt} (trigger: {trigger}).");
+                            return;
+                        }
+
+                        if (attempt > backoffMs.Length)
+                            break;
+
+                        _debugLogService?.Warning("MainForm", $"Initial prompt for {agentName}: channel send attempt {attempt} failed; retrying in {backoffMs[attempt - 1] / 1000}s with the same message id.");
+                        await Task.Delay(backoffMs[attempt - 1]).ConfigureAwait(false);
                     }
 
-                    BeginInvoke(new Action(async () =>
-                    {
-                        // Guarded inside the marshalled body too: a document or WebView2 disposed
-                        // between the check above and this running would otherwise escape to the
-                        // message loop (pipeline Run 1, code-reviewer + debugger).
-                        try
-                        {
-                            var doc = _gridManager.GetTerminalDocuments().FirstOrDefault(t => t.DocId == docId);
-                            if (doc == null)
-                            {
-                                ReportUndelivered($"terminal {docId} no longer exists (trigger: {trigger})");
-                                return;
-                            }
-
-                            // READINESS GATE (task 7806024f, pipeline Run 1, debugger HIGH).
-                            // TypeInputViaXtermAsync returns false without typing when the
-                            // renderer is not yet initialized — and until task 8b270b37 item 2 it was
-                            // void, so it reported nothing to the caller at all. THE WAIT BELOW IS
-                            // STILL LOAD-BEARING: the return value only became observable in item 2,
-                            // and it is not observed here yet (item 4). Every other typing site in
-                            // this file already waits
-                            // (MainForm.cs OnClaudeCodeDetected, TerminalControl's own 3s spin);
-                            // this one did not, because at the old 120s trigger the renderer was
-                            // always up long before delivery. At ~5s it races WebView2 init, and a
-                            // loss here is PERMANENT: the guard above has already disarmed the
-                            // question trigger and the give-up timer.
-                            //
-                            // ⚠️ THE TIMEOUT IS THE REMAINING GIVE-UP BUDGET, NOT A FIXED 5s (Run 2,
-                            // debugger MEDIUM). A fixed 5s was a SECOND deadline layered under the
-                            // 120s one, and because the guard is already taken, blowing it abandoned
-                            // the job for good — reporting spawn_failed with ~115s of the real budget
-                            // untouched. Worst case is the `alreadyLive` branch below, which calls
-                            // Deliver SYNCHRONOUSLY during the spawn: the WebView2 it waits on is
-                            // milliseconds old, and a cold EnsureCoreWebView2Async + navigate + xterm
-                            // load regularly exceeds 5s. So this gate would have manufactured spawn
-                            // failures that the defect it fixes never caused.
-                            // Floor of 5s so a trigger arriving near the deadline still gets a fair
-                            // chance. ⚠️ The floor DELIBERATELY BREAKS the fallbackMs bound, so do not
-                            // read it as preserved: the wait ends at fallbackMs from queue time only
-                            // while elapsed < 115s, and at elapsed + 5s otherwise. The fallback timer
-                            // fires AT fallbackMs and therefore takes the floor every time — that path
-                            // always runs to ~125s, never 120s. Five seconds of overrun buys a real
-                            // delivery attempt on a helper that only just registered; refusing it to
-                            // keep a tidy bound would abandon the job at the exact moment it became
-                            // deliverable, which is the failure this ticket exists to remove.
-                            int readinessBudgetMs = Math.Max(
-                                5_000,
-                                fallbackMs - (int)Math.Min(fallbackMs, sinceQueued.Elapsed.TotalMilliseconds));
-
-                            // Do not START a wait into a form that is already going away: the
-                            // continuation would resume through WindowsFormsSynchronizationContext
-                            // onto a destroyed handle (Run 2, debugger LOW).
-                            // ⚠️ RESIDUAL, STATED RATHER THAN PAPERED OVER: this narrows the window,
-                            // it does not close it — MT can still shut down DURING the wait, and that
-                            // post throws inside the awaiter where this method cannot catch it. The
-                            // shape is identical to the ratified precedent at the message-injection
-                            // site (same helper, same await, also on the UI thread), so it is left
-                            // consistent with that rather than restructured on this ticket. Closing
-                            // it properly means ConfigureAwait(false) plus an explicit disposal-
-                            // tolerant marshal back, which is a change to make deliberately and
-                            // measure — not as a third-cycle add-on to an unrelated fix.
-                            if (IsDisposed || !IsHandleCreated)
-                            {
-                                ReportUndelivered($"the main window was closing before the renderer wait could start (trigger: {trigger})");
-                                return;
-                            }
-
-                            if (!await WaitForRendererReadyAsync(doc, readinessBudgetMs))
-                            {
-                                ReportUndelivered($"the terminal's renderer never became ready within {readinessBudgetMs / 1000}s (trigger: {trigger}); nothing was typed");
-                                return;
-                            }
-
-                            // Re-bind rather than merely test-and-reuse, so the reference typed into
-                            // is the one just proven to exist.
-                            // ⚠️ HONEST SCOPE: this is defensive, NOT a bug fix. The earlier version
-                            // tested `Any(t => t.DocId == docId)` and then typed through the
-                            // pre-await reference, which sounds like a stale-instance hazard — but
-                            // TerminalDocument._docId is Guid.NewGuid() per instance, so a
-                            // re-created pane can never carry the old DocId and that test could only
-                            // ever have matched the SAME instance. Behaviourally neutral. Said plainly
-                            // because the first version of this comment claimed a fix it did not make,
-                            // which is the third time on this ticket a comment outran its code
-                            // (Run 2 delta re-review, debugger LOW).
-                            doc = _gridManager.GetTerminalDocuments().FirstOrDefault(t => t.DocId == docId);
-                            if (IsDisposed || doc == null)
-                            {
-                                ReportUndelivered($"terminal {docId} went away while waiting for its renderer (trigger: {trigger})");
-                                return;
-                            }
-
-                            // ⚠️ AN ATTEMPT, NOT AN OUTCOME (task 8b270b37, item 4). This line used
-                            // to read "Delivering initial prompt to X" and was the LAST thing said
-                            // about the job — a success-shaped sentence logged before anything had
-                            // confirmed anything, which is why a prompt sitting unsent in a composer
-                            // looked, in the log, exactly like a prompt that had been answered. The
-                            // outcome is logged separately below, whichever way it goes.
-                            _debugLogService?.Info("MainForm", $"Typing initial prompt into {agentName} ({oneLine.Length} chars, trigger: {trigger}) — outcome to follow.");
-
-                            var check = await doc.TypeInputAndConfirmSubmissionAsync(oneLine, "cr", 5);
-                            switch (check.Verdict)
-                            {
-                                case SubmissionVerdict.Confirmed:
-                                    // Submitted OR queued. Both are successes and are deliberately
-                                    // NOT told apart — see ComposerOracle for why an oracle that
-                                    // called a queued prompt a failure would deliver the job twice.
-                                    _debugLogService?.Info("MainForm", $"Initial prompt for {agentName} left the composer (trigger: {trigger}): {check.Reason}");
-                                    break;
-
-                                case SubmissionVerdict.NotConfirmed:
-                                    // The disposition is RELAYED, not chosen here. The default —
-                                    // "Nothing was typed into the pane" — is false for at least one
-                                    // kind of NotConfirmed (the payload IS in that composer) and
-                                    // unknowable for another (the typing was never acknowledged, so
-                                    // a partial line may be sitting there). Nothing at this site can
-                                    // tell those apart; the code that established the failure can,
-                                    // and says so in check.Advice.
-                                    ReportUndelivered(
-                                        $"{check.Reason} (trigger: {trigger})",
-                                        disposition: check.Advice);
-                                    break;
-
-                                default:
-                                    // ⚠️ NOT reported as a failure, and not reported as a success.
-                                    // Unknown means the check could not run — no boxed composer, no
-                                    // probe function in the page, a payload with too little
-                                    // distinctive text. Filing a spawn_failed on that would
-                                    // manufacture failures out of the detector's own blind spots,
-                                    // which is the defect class this ticket is fixing rather than a
-                                    // new instance of it. Loud in the log, silent in the inbox.
-                                    _debugLogService?.Warning("MainForm", $"Initial prompt for {agentName} was typed, but whether it submitted COULD NOT BE CHECKED (trigger: {trigger}): {check.Reason}");
-                                    break;
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            ReportUndelivered($"typing failed: {ex.Message} (trigger: {trigger})");
-                        }
-                    }));
+                    // ⚠️ "Look before resending", NOT "nothing was sent". A failure that is an exception
+                    // rather than a status code can happen AFTER the channel server injected the
+                    // message, so MT cannot say it did not arrive — and a resent job runs twice.
+                    ReportUndelivered(
+                        $"its channel (port {channelPort}) did not accept the message after {backoffMs.Length + 1} attempts (trigger: {trigger})",
+                        disposition: "MT cannot confirm whether the job reached the helper. Check the helper's pane before sending the job again — if it did arrive, resending runs it twice.");
                 }
                 catch (Exception ex)
                 {
-                    // BeginInvoke itself: the form went away between the check and the marshal.
-                    ReportUndelivered($"marshal to the UI thread failed: {ex.Message} (trigger: {trigger})");
+                    ReportUndelivered(
+                        $"sending over the channel failed: {ex.Message} (trigger: {trigger})",
+                        disposition: "MT cannot confirm whether the job reached the helper. Check the helper's pane before sending the job again — if it did arrive, resending runs it twice.");
                 }
             }
 
-            // The failure REPORT, split out of GiveUp so that a delivery which fails AFTER the
-            // exactly-once guard has already been taken can still tell the spawner (task 7806024f,
-            // pipeline Run 1, debugger HIGH). Before the split, Deliver took the guard as its first
-            // statement and then typed; if the typing silently did nothing, the guard had already
-            // disarmed both other triggers and GiveUp could never run — the job vanished with the
-            // log still claiming "Delivering initial prompt".
-            // GiveUp owns the guard. This does NOT: every caller must already hold it, or have
-            // established that it can no longer be taken.
-            // ⚠️ THE DISPOSITION IS A PARAMETER BECAUSE THE HARD-CODED SENTENCE BECAME A LIE (task
-            // 8b270b37, item 4). Every caller before this ticket failed BEFORE typing, so "Nothing
-            // was typed into the pane" was a fact for all of them. The submission-oracle caller is
-            // the first for which it is not, and the difference matters to the recipient more than
-            // the reason does: it is the difference between "retype it" and "do NOT retype it, that
-            // sends it twice". Leaving the sentence hard-coded would have written a false statement
-            // into an agent's inbox, on the one ticket that exists because a false statement was
-            // written into a log.
+            // The failure REPORT. Callers must already hold the exactly-once guard. The disposition is
+            // a parameter because what the recipient should DO differs by failure: nothing was sent
+            // when the helper never came alive, while a failed send may still have landed.
             void ReportUndelivered(string reason, string disposition = null)
             {
-                // An empty disposition falls back to the sentence every pre-8b270b37 caller relied
-                // on, which is TRUE for all of them: each fails before anything is typed. It is the
-                // default rather than the only option precisely because the oracle's callers are the
-                // first for which it is not true.
                 if (string.IsNullOrWhiteSpace(disposition))
                 {
-                    disposition = "Nothing was typed into the pane.";
+                    disposition = "Nothing was sent to the helper.";
                 }
 
-                _debugLogService?.Warning("MainForm", $"Initial prompt for {agentName} NOT delivered ({oneLine.Length} chars): {reason}");
+                _debugLogService?.Warning("MainForm", $"Initial prompt for {agentName} NOT delivered ({job.Length} chars): {reason}");
 
                 // Loud to the spawner — in the store an AGENT actually reads. Pipeline Run 2 caught the
                 // first version writing RecordNotification → notification_events: the attention rail
@@ -2349,18 +2193,12 @@ namespace MultiTerminal
                 // caller-supplied and unvalidated (a typo, a stale env, or the phone app's
                 // "ClaudeRemote"), a message to a name that is not a live terminal is written a second
                 // time to the Owner's inbox so it cannot be lost either way.
-                // Wording stays neutral about the CAUSE: this now reports "never came alive"
-                // (the 120s give-up), "came alive but could not be typed into" (renderer never
-                // ready), and "was typed but never submitted" (task 8b270b37). The specific cause
-                // travels in {reason} and what to DO about it in {disposition}.
-                string summary = $"Helper {agentName}'s job ({oneLine.Length} chars) was NOT delivered: {reason}. {disposition} Spawner: {spawnerName}. Working dir: {workingDir}.";
+                string summary = $"Helper {agentName}'s job ({job.Length} chars) was NOT delivered: {reason}. {disposition} Spawner: {spawnerName}. Working dir: {workingDir}.";
                 try
                 {
                     // The write's result is CHECKED (pipeline Run 3). CreateInboxNotification swallows
-                    // its own SQLite failure into Success=false; ignoring that is how the previous
-                    // version of this block "sent" a message that violated user_inbox.task_id NOT NULL
-                    // and reached nobody. The column is nullable now (MigrateUserInboxTaskIdNullable),
-                    // but a refused write must never again be silent.
+                    // its own SQLite failure into Success=false; ignoring that is how an earlier version
+                    // of this block "sent" a message that reached nobody.
                     var toSpawner = _mcpServer.Broker.CreateInboxNotification(
                         userId: spawnerName,
                         taskId: null,
@@ -2402,110 +2240,39 @@ namespace MultiTerminal
                 if (System.Threading.Interlocked.Exchange(ref delivered, 1) != 0)
                     return;
 
-                _mcpServer.Broker.NotificationReceived -= onNotification;
                 _mcpServer.Broker.TerminalRegistered -= onRegistered;
                 ReportUndelivered(reason);
             }
 
-            onNotification = (_, payload) =>
-            {
-                if (payload == null)
-                    return;
-
-                // raw_type IS trimmed, by AgentAttentionService.IsQuestionTextType. That is a
-                // vocabulary token from a hook in a separate repo on its own cadence — normalising it
-                // can merge nothing, because the set of valid values is fixed and known here.
-                if (!(payload.TryGetValue("raw_type", out object rawType)
-                      && rawType is string rt
-                      && MultiTerminal.MCPServer.Services.AgentAttentionService.IsQuestionTextType(rt)))
-                    return;
-
-                // ⚠️ THE NAME IS NOT TRIMMED, ON EITHER SIDE (task c28e6177), and the two lines above
-                // are not a precedent for trimming it — a type token and an identity are different
-                // kinds of string.
-                //
-                // This used to read `string.Equals(n.Trim(), agentName, ...)`: trimmed on one side
-                // only, which is arbitrary in both directions. A helper whose resolved name carried a
-                // trailing space could never match its OWN question, while a foreign question with a
-                // stray space matched a helper whose name had none.
-                //
-                // Fixed by removing the trim rather than adding the second one, because trimming BOTH
-                // sides is the c28e6177 defect one level down: the broker will hand out "Alice" and
-                // "Alice " as two separate terminals, so a predicate that folds them together lets one
-                // helper's question deliver a DIFFERENT helper's job. Removing tolerance can only ever
-                // cause fewer matches; adding it can cause wrong ones.
-                //
-                // The other two triggers were re-keyed onto the pane's docId, which is not an option
-                // here: the notification payload carries agent_name and session_id and no docId at all
-                // (NotificationsController.cs, payload construction). So this comparison stays
-                // name-based and its correctness rests on being EXACT.
-                //
-                // ⚠️ CAVEAT, NOT A JUSTIFICATION: a missed match here is cheap TODAY only because the
-                // channel-port trigger below covers the same job in about five seconds. That is a
-                // property of the other trigger, not of this one. If the port trigger is ever narrowed
-                // or removed, this becomes load-bearing on its own.
-                if (!(payload.TryGetValue("agent_name", out object name)
-                      && name is string n
-                      && string.Equals(n, agentName, StringComparison.OrdinalIgnoreCase)))
-                    return;
-
-                Deliver("first question");
-            };
-
-            // THE NORMAL PATH FOR A SPAWNED HELPER (task 7806024f). The question trigger above was built
-            // around the /session-start menu, which a spawned helper never shows — its SessionStart hook
-            // short-circuits on MULTITERMINAL_SPAWNER — so that trigger never fires and delivery used to
-            // fall through to the 120s timer EVERY time. The channel port is the signal the fallback was
-            // already using to decide the helper was alive; this just stops waiting two minutes to ask the
-            // question. (Measurements deliberately NOT repeated here — HelperReadinessTrigger's class doc
-            // holds them, and the header above promises that is the only copy. Run 1 flagged this exact
-            // narrative being triplicated; Run 2 caught the promise itself being false because this block
-            // still carried a second copy.)
+            // THE TRIGGER. Raised for EVERY row the broker registers, so the predicate is the only thing
+            // standing between "a terminal came alive" and "MY helper came alive".
+            // ⚠️ Matched on DOCID, not the display name (task c28e6177): the broker never trims, so a
+            // live "Alice" and a helper spawned as "Alice " are two rows to it, and a trimmed-name match
+            // let Alice's own registration fire this handler — made permanent by the exactly-once guard.
             onRegistered = (_, row) =>
             {
-                // ⚠️ Matched on DOCID, not the display name (task c28e6177). This handler is raised for
-                // EVERY row the broker registers, not just this spawn's, so the comparison is the only
-                // thing standing between "a terminal came alive" and "MY helper came alive". A trimmed
-                // name is not that: the broker never trims, so a live "Alice" and a helper spawned as
-                // "Alice " are two rows to it and were one identity to this predicate — Alice's own
-                // registration then fired this handler, and Deliver's exactly-once guard made the
-                // mistake permanent and silent.
                 if (row != null
                     && HelperReadinessTrigger.IsHelperAlive(row.DocId, row.ChannelPort, docId))
                 {
-                    Deliver("helper registered a channel port");
+                    Deliver("helper registered a channel port", row.ChannelPort.Value);
                 }
             };
 
-            // BOTH handlers are ASSIGNED above before EITHER is subscribed, and the two
-            // subscriptions sit adjacent. The ordering is load-bearing: while onNotification was
-            // subscribed first and onRegistered was still null, a question landing in that window
-            // ran Deliver, whose `-= onRegistered` was a no-op against null — and the `+=` below
-            // then subscribed a handler nothing would ever remove, pinning MainForm, the docId and
-            // the whole prompt string for the life of the process and firing on every heartbeat
-            // registration thereafter (pipeline Run 1: code-reviewer MINOR, debugger LOW).
-            _mcpServer.Broker.NotificationReceived += onNotification;
             _mcpServer.Broker.TerminalRegistered += onRegistered;
 
             // SUBSCRIBE, THEN CHECK — in that order, and the order is the point. The port can already be
             // set by the time we get here (a fast helper, or a name reused from a row that is still live),
-            // and an event-only trigger would then wait for a registration that has already happened —
-            // reintroducing the exact 120s stall this change removes, just in a narrower window.
+            // and an event-only trigger would then wait for a registration that has already happened.
             // Checking BEFORE subscribing would leave the opposite gap: a registration landing between the
-            // check and the subscribe would be missed entirely. Exactly-once is already guaranteed by the
+            // check and the subscribe would be missed entirely. Exactly-once is guaranteed by the
             // Interlocked guard in Deliver, so the overlap this ordering creates is free.
-            // Looked up by DOCID, not the name (task c28e6177). GetTerminal resolves a terminal id, a
-            // docId OR a name, so it is more permissive than this predicate — it would also return a row
-            // whose NAME happened to equal this docId. Unreachable in practice (docIds are Guids, names
-            // are not) and the failure would be degradation rather than misdelivery, since IsHelperAlive
-            // then compares DocId against DocId and refuses. Stated because the resolver being permissive
-            // in front of an exact predicate is the inverse of the rule this ticket is built on, and a
-            // reader should not have to rediscover that it is safe only by accident of value shape.
+            // Looked up by DOCID, not the name (task c28e6177); IsHelperAlive then compares DocId against
+            // DocId, so the permissive GetTerminal resolver cannot hand back a different helper's row.
             var alreadyLive = _mcpServer.Broker.GetTerminal(docId);
             if (alreadyLive != null
                 && HelperReadinessTrigger.IsHelperAlive(alreadyLive.DocId, alreadyLive.ChannelPort, docId))
             {
-                Deliver("helper already had a channel port");
+                Deliver("helper already had a channel port", alreadyLive.ChannelPort.Value);
             }
 
             _ = Task.Delay(fallbackMs).ContinueWith(
@@ -2515,19 +2282,14 @@ namespace MultiTerminal
                     if (delivered != 0)
                         return;
 
-                    // Liveness is the broker's row for THIS PANE's docId (task c28e6177; it was the
-                    // resolved name): a channel port is set only by the real register_terminal from
-                    // /session-start, never by MT's pre-registration.
-                    // Routed through the SAME predicate as the registration trigger — this site used to
-                    // hand-roll `live?.ChannelPort != null`, which is the rule HelperReadinessTrigger was
-                    // extracted from, leaving two implementations of one rule in one method that would
-                    // silently diverge the next time the seam changed (pipeline Run 1, code-reviewer).
+                    // Routed through the SAME predicate as the registration trigger, so the two cannot
+                    // silently diverge (pipeline Run 1, code-reviewer).
                     var live = _mcpServer.Broker.GetTerminal(docId);
                     if (live != null
                         && HelperReadinessTrigger.IsHelperAlive(live.DocId, live.ChannelPort, docId))
                     {
-                        _debugLogService?.Warning("MainForm", $"No question from {agentName} within {fallbackMs / 1000}s but it is live (channel port {live.ChannelPort}); delivering its initial prompt anyway.");
-                        Deliver("fallback timer — helper live, no question");
+                        _debugLogService?.Warning("MainForm", $"No registration event seen for {agentName} within {fallbackMs / 1000}s but it is live (channel port {live.ChannelPort}); delivering its initial prompt anyway.");
+                        Deliver("fallback timer — helper live, event missed", live.ChannelPort.Value);
                     }
                     else
                     {
@@ -5248,44 +5010,8 @@ namespace MultiTerminal
                 // Detection fires when "Claude Code" appears in output, but the input prompt
                 // may not be ready yet. Wait 1.5s for the prompt to appear.
                 await Task.Delay(1500);
-                _debugLogService?.Trace("MainForm", "Post-detection delay complete, injecting 'initializing...' via TypeInputAndConfirmSubmissionAsync");
-
-                var bannerCheck = await doc.TypeInputAndConfirmSubmissionAsync("initializing...", "cr", 20);
-
-                // ⚠️ A FAILED BANNER IS LOGGED LOUDLY AND SENT TO NOBODY'S INBOX — a decision, not
-                // an omission (task 8b270b37, item 4).
-                //
-                // The spawned-helper JOB above does write an inbox message, and the asymmetry is
-                // the point. Three reasons, in order of weight:
-                //   1. THE INBOX IS THE CHANNEL THAT CARRIES "a helper's work was dropped". This
-                //      fires for every pane in which Claude Code is detected, including every one a
-                //      human opens by hand. Routine noise on that channel teaches people to skim
-                //      it, and the next real spawn_failed is the message that gets skimmed.
-                //   2. THERE IS NOBODY TO TELL. The job has a spawner who is waiting on it. This
-                //      has no requester at all — it is MT's own housekeeping — so the only possible
-                //      recipient is the Owner, unconditionally, forever.
-                //   3. IT IS RECOVERABLE AND VISIBLE. A lost banner means the SessionStart hook did
-                //      not fire; the pane is sitting right there with "initializing..." in its
-                //      composer, and the retry Enter inside the call above has already had one go
-                //      at it. A dropped helper job is neither visible nor recoverable — that is
-                //      what earns it an inbox message.
-                switch (bannerCheck.Verdict)
-                {
-                    case SubmissionVerdict.Confirmed:
-                        _debugLogService?.Trace("MainForm", $"'initializing...' left the composer: {bannerCheck.Reason}");
-                        break;
-
-                    case SubmissionVerdict.NotConfirmed:
-                        // The advice is RELAYED for the same reason as at the job site: this branch
-                        // covers both "the text is in the composer" and "the typing was never
-                        // acknowledged", and only the code that established the failure knows which.
-                        _debugLogService?.Error("MainForm", $"'initializing...' was NOT submitted, even after a retry Enter: {bannerCheck.Reason}. The SessionStart hook has not fired for this terminal. {bannerCheck.Advice} NOT retyped by MT: that is what submits it twice.");
-                        break;
-
-                    default:
-                        _debugLogService?.Warning("MainForm", $"'initializing...' was typed, but whether it submitted COULD NOT BE CHECKED: {bannerCheck.Reason}");
-                        break;
-                }
+                _debugLogService?.Trace("MainForm", "Post-detection delay complete, injecting 'initializing...' via TypeInput");
+                doc.TypeInput("initializing...", "cr", 20);
             }
         }
 

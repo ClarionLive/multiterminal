@@ -110,15 +110,15 @@ namespace MultiTerminal.API.Controllers
                 ? null
                 : request.InitialPrompt;
 
-            // Size cap (pipeline Run 1, Codex security): the prompt is typed into the helper one
-            // character at a time and trace-logged by the terminal control, so an unbounded value is
-            // both a cheap local DoS and a way to push a large secret-bearing blob into the debug log.
-            // 16k chars is far above the 500-byte /submit chunking threshold the tool exists to avoid
-            // and well past any prose job description; anything larger belongs in a file.
+            // Size cap (pipeline Run 1, Codex security). Set when the prompt was TYPED one character at
+            // a time and trace-logged; since task 8b270b37 it is one channel message instead, so the
+            // typing-time DoS is gone. The cap stays: an unbounded job is still an unbounded message
+            // into another agent's context, and 16k chars is well past any prose job description —
+            // anything larger belongs in a file the helper can read.
             if (initialPrompt != null && initialPrompt.Length > MaxInitialPromptChars)
             {
                 return Problem(
-                    detail: $"initialPrompt is {initialPrompt.Length} chars; the limit is {MaxInitialPromptChars}. It is typed into the helper character by character — send a prose brief, and put anything longer in a file the helper can read.",
+                    detail: $"initialPrompt is {initialPrompt.Length} chars; the limit is {MaxInitialPromptChars}. Send a prose brief, and put anything longer in a file the helper can read.",
                     statusCode: 400);
             }
 

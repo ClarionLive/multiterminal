@@ -56,7 +56,7 @@ namespace MultiTerminal.Tests
         public async Task Initial_prompt_reaches_the_callback_verbatim()
         {
             // The controller forwards; it does not reshape. Line-break collapsing is MainForm's
-            // delivery concern (the typing path), not the API's, so a multi-line prompt must
+            // delivery concern (MainForm's delivery path), not the API's, so a multi-line prompt must
             // arrive here exactly as sent.
             var (controller, captured) = Harness();
             string prompt = "Sweep the env of this terminal.\nReport MULTITERMINAL_* to Alice.";
@@ -91,7 +91,7 @@ namespace MultiTerminal.Tests
         [Fact]
         public async Task Initial_prompt_over_the_cap_is_rejected_before_any_spawn()
         {
-            // Pipeline Run 1 (Codex security): the prompt is typed into the helper one character at
+            // Pipeline Run 1 (Codex security), set when the prompt was TYPED into the helper one character at
             // a time and trace-logged by the terminal control, so an unbounded value is a cheap local
             // DoS and a log-leak channel. The cap must refuse BEFORE the callback — no pane, no job.
             var (controller, captured) = Harness();

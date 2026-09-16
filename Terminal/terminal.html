@@ -381,7 +381,7 @@
         // each message used to start its OWN independent chain, with no queue and no mutual
         // exclusion. Two overlapping senders therefore interleaved their characters into a single
         // composer — and because every payload carries its own trailing CR (see
-        // WebViewTerminalRenderer.TypeInputViaXtermAsync, which appends the line ending to the text
+        // WebViewTerminalRenderer.TypeInputViaXterm, which appends the line ending to the text
         // before base64), the result was not one corrupted line but TWO garbled submissions.
         // Nothing detected it: the C# side had already recorded the delivery as complete.
         //
@@ -395,23 +395,11 @@
         const typeQueue = [];
         let typeInFlight = false;
 
-        // jobId is OPAQUE here (task 8b270b37, item 2): it is minted by the C# caller, carried in
-        // the 'typeInput' message, and echoed back untouched on this job's one terminal ack. Nothing
-        // on this side parses it, compares it, or generates one — exactly as with enterJobId.
-        function enqueueTypeInput(jobId, decoded, charDelay) {
-            typeQueue.push({ jobId, decoded, charDelay });
+        function enqueueTypeInput(decoded, charDelay) {
+            typeQueue.push({ decoded, charDelay });
             if (!typeInFlight) {
                 drainTypeQueue();
             }
-        }
-
-        // A typing job ends EXACTLY ONCE, either way, and the host's waiter is released by that one
-        // message. 'typeAck' means every character of this job's payload — its trailing line ending
-        // included — was handed to the input path. ⚠️ IT DOES NOT MEAN THE TEXT WAS SUBMITTED. That
-        // conflation is the defect task 8b270b37 exists to fix; see the 'sendEnter' case below.
-        function ackTypeJob(jobId, typed) {
-            if (!jobId) return;
-            sendToHost({ type: typed ? 'typeAck' : 'typeAbort', typeJobId: jobId });
         }
 
         function drainTypeQueue() {
@@ -442,12 +430,6 @@
                         // This job's last character — including its trailing CR — has been sent.
                         // Only now does the next job start. One charDelay has already elapsed since
                         // that final character, so successive jobs keep the same inter-key spacing.
-                        //
-                        // The ack goes out HERE, at the same point, because this is the only moment
-                        // at which "the payload was typed" becomes true (task 8b270b37, item 2).
-                        // Acking at enqueue time would report success for characters still queued,
-                        // which is the same species of premature claim as the one this ticket fixes.
-                        ackTypeJob(job.jobId, true);
                         drainTypeQueue();
                     }
                 } catch (e) {
@@ -457,9 +439,6 @@
                     // permanently dead pane for one corrupted line — deliberately, because the pane
                     // can be recovered by the human and a wedge cannot.
                     sendToHost({ type: 'log', level: 'error', message: 'typeInput job aborted: ' + e });
-                    // Report the drop rather than letting the host's waiter sit out its whole budget
-                    // to reach the same answer. The host completes this job as NOT typed.
-                    ackTypeJob(job.jobId, false);
                     drainTypeQueue();
                 }
             };
@@ -517,32 +496,21 @@
                         case 'typeInput':
                             // Character-by-character injection — mimics real keyboard typing
                             // (e.g. the "initializing..." banner and prompt auto-answers).
-                            // Format: "typeInput:jobId:delayMs:base64data"  (task 8b270b37, item 2)
+                            // Format: "typeInput:delayMs:base64data"
                             // Each character is sent individually through the xterm input path
                             // with a configurable delay between keystrokes.
-                            //
-                            // Split positionally rather than by regex: the id is opaque, so nothing
-                            // here should be asserting a shape for it beyond "contains no colon".
-                            // base64 contains no colon either, so the first two colons delimit the
-                            // payload unambiguously.
                             {
-                                const firstColon = data.indexOf(':');
-                                const secondColon = firstColon < 0 ? -1 : data.indexOf(':', firstColon + 1);
-                                if (secondColon < 0) {
-                                    // Malformed. Dropped LOUDLY and without acking: host and page
-                                    // ship from the same folder, so a format mismatch is a bug, and
-                                    // the host's waiter timing out is the correct report for it.
-                                    sendToHost({ type: 'log', level: 'error', message: 'typeInput: malformed payload, dropped' });
-                                    break;
+                                let charDelay = 15;
+                                let charData = data;
+                                const delayMatch = data.match(/^(\d+):(.+)$/);
+                                if (delayMatch) {
+                                    charDelay = parseInt(delayMatch[1], 10);
+                                    charData = delayMatch[2];
                                 }
-                                const typeJobId = data.substring(0, firstColon);
-                                const parsedDelay = parseInt(data.substring(firstColon + 1, secondColon), 10);
-                                const charDelay = Number.isFinite(parsedDelay) ? parsedDelay : 15;
-                                const charData = data.substring(secondColon + 1);
                                 // Queued, not started directly: a second typeInput arriving while
                                 // this one is still typing must wait its turn rather than
                                 // interleave its characters into the same composer.
-                                enqueueTypeInput(typeJobId, atob(charData), charDelay);
+                                enqueueTypeInput(atob(charData), charDelay);
                             }
                             break;
 
@@ -565,25 +533,10 @@
                             sendToHost({ type: 'input', data: btoa('\r') });
 
                             // Poll for cursor movement after the CR.
-                            //
-                            // ⚠️ WHAT THIS PROVES: that SOMETHING moved the cursor within 500ms of
-                            // the CR being written. That is all it proves. It does NOT prove a
-                            // prompt was submitted — this comment used to say "if cursor moves to a
-                            // new line, the prompt was submitted", and that inference is the exact
-                            // defect task 8b270b37 exists to fix. A CR that the composer takes as a
-                            // NEWLINE moves the cursor to a new line too, so the check below passes
-                            // just as readily in the failure case as in the success case. Observed
-                            // live: a spawned helper's prompt sitting typed-but-unsubmitted in the
-                            // composer while the host recorded a successful delivery.
-                            //
-                            // ⚠️ AND THE ACK IS CLOSE TO UNCONDITIONAL ANYWAY: the timeout branch
-                            // below acks too, so that the host cannot hang. So an ack means "the
-                            // page handled the request" — not "the cursor moved", and certainly not
-                            // "it submitted".
-                            //
-                            // The BEHAVIOUR is deliberately left exactly as it is: other callers
-                            // depend on it, and a real submission oracle is checklist item 3 of
-                            // task 8b270b37.
+                            // ⚠️ This proves only that SOMETHING moved the cursor within 500ms. It
+                            // does NOT prove a prompt was submitted (task 8b270b37): a CR the
+                            // composer takes as a NEWLINE moves the cursor to a new line too, and
+                            // the timeout branch below acks anyway so the host cannot hang.
                             const startTime = Date.now();
                             const maxWaitMs = 500; // Wait up to 500ms for cursor movement
 
@@ -592,9 +545,8 @@
                                 const cursorXAfter = term.buffer.active.cursorX;
                                 const elapsed = Date.now() - startTime;
 
-                                // The cursor moved (to another row, or back towards column 0).
-                                // SOMETHING happened — see the warning above for why that is not
-                                // the same as "the prompt was submitted".
+                                // The cursor moved (to another row, or back towards column 0) —
+                                // not necessarily a submission; see the warning above.
                                 if (cursorYAfter !== cursorYBefore || cursorXAfter < cursorXBefore) {
                                     sendToHost({ type: 'enterAck', enterJobId: enterJobId });
                                     return;
@@ -647,55 +599,6 @@
             return (term && term.hasSelection()) ? term.getSelection() : '';
         }
         window.terminalGetSelection = getSelectedText;
-
-        // ── Composer probe (task 8b270b37, item 3) ──────────────────────────────────────────
-        // Hands the host a WINDOW of raw buffer rows around the cursor, and says which row the
-        // cursor is on. That is the whole of its job.
-        //
-        // ⚠️ IT MAKES NO JUDGEMENT, DELIBERATELY. "Is the payload still sitting in the composer"
-        // is decided in Services/ComposerOracle.cs, in C#, where it can be run against real rows in
-        // a unit test. A decision taken here could only ever be asserted by scanning this file's
-        // text — which is the same weakness that let the cursor-movement claim above survive for as
-        // long as it did.
-        //
-        // Reached through CoreWebView2.ExecuteScriptAsync rather than postMessage, so the answer IS
-        // the return value of the call. No job id, no waiter table, no correlation — there is
-        // nothing to correlate, and so nothing to get wrong. (Contrast the typeAck/enterAck paths,
-        // which are notifications and therefore have to carry identity.)
-        function sampleComposerRegion(rowsAbove, rowsBelow) {
-            try {
-                if (!term || !term.buffer || !term.buffer.active) {
-                    return { ok: false, reason: 'the terminal buffer is not available' };
-                }
-
-                const buf = term.buffer.active;
-                // baseY + cursorY, not cursorY: cursorY is viewport-relative, and getLine() indexes
-                // the whole buffer including scrollback. Mixing the two reads a row from somewhere
-                // else entirely — and would read it CONFIDENTLY.
-                const cursorAbsolute = buf.baseY + buf.cursorY;
-                const first = Math.max(0, cursorAbsolute - rowsAbove);
-                const last = Math.min(buf.length - 1, cursorAbsolute + rowsBelow);
-                if (last < first) {
-                    return { ok: false, reason: 'the terminal buffer has no rows' };
-                }
-
-                const rows = [];
-                for (let i = first; i <= last; i++) {
-                    const line = buf.getLine(i);
-                    // trimRight: the box pads its interior out to the full width, and the host
-                    // strips whitespace anyway — this just keeps the payload smaller.
-                    rows.push(line ? line.translateToString(true) : '');
-                }
-
-                return { ok: true, cursorRow: cursorAbsolute - first, rows: rows };
-            } catch (e) {
-                // Reported, never swallowed into an empty sample: an empty sample would be read by
-                // the host as "the box is not there", and the host would answer Unknown for a
-                // reason that is not the true one.
-                return { ok: false, reason: 'reading the terminal buffer threw: ' + e };
-            }
-        }
-        window.mtSampleComposerRegion = sampleComposerRegion;
 
         // Listen for messages from C#
         if (window.chrome && window.chrome.webview) {

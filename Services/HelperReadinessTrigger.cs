@@ -19,7 +19,7 @@ namespace MultiTerminal.Services
     /// <para><b>Why the channel port and not <c>TURN_END</c>.</b> "The helper finished its startup turn"
     /// is the semantically perfect signal and is deliberately NOT used, for a reason that does not depend
     /// on any contested detail: <c>TURN_END</c> is written by a HOOK, shipped from the plugin repo on its
-    /// own release cadence. This trigger decides when an agent's instructions are typed into a live pane —
+    /// own release cadence. This trigger decides when an agent's instructions are sent to it —
     /// resting that on a signal another repository can stop emitting is how the present defect happened,
     /// one layer up. The channel port comes from MultiTerminal's OWN registration path, is already the
     /// 120s fallback's liveness predicate, and was measured arriving five seconds after spawn.</para>
@@ -31,20 +31,20 @@ namespace MultiTerminal.Services
     /// <para><b>Pure by construction.</b> No broker, no UI, no clock. <c>MainForm</c> is an 8K+ LOC
     /// WinForms file whose logic the suite can otherwise only reach by scanning source text
     /// (<c>AgentActivityObservationTests.ReadMainFormStripped</c>), so the rule that decides when an
-    /// agent's instructions get typed lives here instead, where a test can call it. Same precedent as
+    /// agent's instructions get sent lives here instead, where a test can call it. Same precedent as
     /// <see cref="LaunchCommandBuilder"/> and <see cref="WorktreePruneCoordinator"/>.</para>
     /// </summary>
     internal static class HelperReadinessTrigger
     {
         /// <summary>
         /// True when a registration for the row identified by <paramref name="registeredDocId"/> means the
-        /// helper occupying <paramref name="awaitedDocId"/>'s pane is alive and can be typed into.
+        /// helper occupying <paramref name="awaitedDocId"/>'s pane is alive and can be sent its job (over its channel, since task 8b270b37).
         /// </summary>
         /// <remarks>
         /// <para>⚠️ <b>The port, never the event.</b> <c>TerminalRegistered</c> fires TWICE per spawn:
         /// once for MT's own pre-registration, which carries no channel port, and again for the helper's
         /// real registration, which does. A trigger keyed on "did a registration happen" would fire on the
-        /// first — before <c>claude</c> has started — and type a job into a pane with nothing in it.</para>
+        /// first — before <c>claude</c> has started — and send a job to a helper with no channel to receive it.</para>
         ///
         /// <para>⚠️ <b>DOCID, NOT THE DISPLAY NAME</b> (task c28e6177). This predicate used to compare
         /// TRIMMED display names, and nothing else in the system trims one. The broker's uniqueness scan
