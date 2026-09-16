@@ -2531,7 +2531,7 @@ namespace MultiTerminal.MCPServer.Services
                 // Validate the transition.
                 //
                 // ⚠️ THIS TABLE EXISTS THREE TIMES (task dc813ddd). Here; in
-                // TaskLifecycleBoardForm.ValidateAndApplyDrag, which reimplements the whole transition
+                // TaskLifecycleBoardForm.HandleMoveCard, which reimplements the whole transition
                 // rather than calling this method; and as VALID_TRANSITIONS in lifecycle-board.html.
                 // They agree today and ChecklistTransitionRuleCensusTests parses all three and asserts
                 // they still do — because nothing else can. Change one, change all three.
