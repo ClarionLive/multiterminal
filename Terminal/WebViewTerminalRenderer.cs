@@ -749,7 +749,7 @@ namespace MultiTerminal.Terminal
         /// reported as success whether or not a prompt was submitted, because the acknowledgment
         /// cannot tell the two apart (see the <c>sendEnter</c> case in <c>Terminal/terminal.html</c>).
         /// Nothing in MT checks that a typed prompt was submitted; a spawned helper's job avoids the
-        /// question by arriving over its channel instead.</para>
+        /// question: the helper collects it with <c>get_my_spawn_job</c>, so it is never typed.</para>
         /// </summary>
         /// <param name="maxRetries">Maximum number of attempts, across all three methods.</param>
         /// <param name="initialDelayMs">Currently UNUSED: threaded in from <c>ConfigureEnterRetry</c> and the public overloads, read by nothing. Left in place because removing it is an API change.</param>

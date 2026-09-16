@@ -1,3 +1,4 @@
+using System;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using MultiTerminal.MCPServer.Services;
@@ -9,13 +10,18 @@ namespace MultiTerminal.API.Controllers
     [Route("api/spawn")]
     public class SpawnController : ControllerBase
     {
+        /// <summary>The header a helper presents its launch nonce in: the same header name the GitHub token mint reads.</summary>
+        internal const string LaunchNonceHeader = "X-MultiTerminal-Launch-Nonce";
+
         private readonly SpawnService _spawnService;
         private readonly ProjectDatabase _projectDatabase;
+        private readonly MessageBroker _broker;
 
-        public SpawnController(SpawnService spawnService, ProjectDatabase projectDatabase)
+        public SpawnController(SpawnService spawnService, ProjectDatabase projectDatabase, MessageBroker broker)
         {
             _spawnService = spawnService;
             _projectDatabase = projectDatabase;
+            _broker = broker;
         }
 
         /// <summary>
@@ -166,8 +172,13 @@ namespace MultiTerminal.API.Controllers
         /// Whether a pane has a job waiting: <c>pending</c>, <c>collected</c> or <c>no_job</c> (task 8b270b37).
         /// <para>Read-only, and it NEVER returns the job text. It exists for the plugin's SessionStart hook,
         /// which decides whether to tell a spawned helper to call <c>get_my_spawn_job</c> without consuming
-        /// anything. The hook treats any non-200, including a 404 from an MT build that predates this route,
-        /// as "nothing to collect", so the hook and the app can be updated in either order.</para>
+        /// anything. Deliberately not nonce-checked: it discloses only whether a job is waiting, and the
+        /// hook calls it without a nonce.</para>
+        /// <para>⚠️ <b>The hook and the app can NOT be updated in either order.</b> Only one mix is safe.
+        /// An old app with the new hook works: this route 404s and the hook falls back to its old wording.
+        /// A NEW app with the OLD hook delivers no job at all, because nothing tells the helper to collect;
+        /// every job goes uncollected and is reported after 120s. Ship the hook first, or together
+        /// (pipeline Run 1, task 8b270b37).</para>
         /// </summary>
         [HttpGet("job/{docId}")]
         public IActionResult GetJobStatus(string docId)
@@ -180,16 +191,37 @@ namespace MultiTerminal.API.Controllers
         /// <summary>
         /// A spawned helper collects its own job (task 8b270b37). Called by the helper's
         /// <c>get_my_spawn_job</c> tool with its <c>MULTITERMINAL_DOC_ID</c>.
-        /// <para>The job is returned at most once. <c>status</c> is <c>collected</c> (with <c>job</c>),
-        /// <c>already_collected</c> (with <c>collectedUtc</c>, no job), or <c>no_job</c>. All three are
-        /// 200: "this pane has no job" is a normal answer for a pane spawned without one, not an error.</para>
+        /// <para><b>Only the pane's own helper may collect.</b> The caller presents its launch nonce in the
+        /// <c>X-MultiTerminal-Launch-Nonce</c> header, and the collect goes ahead only if that nonce belongs to
+        /// a connected terminal whose docId is exactly <paramref name="docId"/>. Otherwise any local caller
+        /// holding a docId could take the job, and MT would log a receipt for a job the helper never got
+        /// and skip the 120s report (pipeline Run 1: Codex security HIGH, adversary MEDIUM). The API is
+        /// loopback and unauthenticated, so this is an integrity check on the receipt, not a wall against a
+        /// hostile local process, which could read the nonce from the helper's environment.</para>
+        /// <para><c>status</c> is <c>collected</c> (with <c>job</c>; the receipt), <c>refetched</c> (with
+        /// <c>job</c> and <c>collectedUtc</c>; NOT a receipt: a repeat within the re-fetch window, e.g. after
+        /// a lost response), <c>already_collected</c> (with <c>collectedUtc</c>, no job), or <c>no_job</c>. All four
+        /// are 200. A caller that fails the nonce check gets 401 with one message for every reason, and
+        /// nothing in the store is touched, not even to say whether a job exists.</para>
         /// <para>POST, not GET, because the call changes state: a GET could be replayed by anything that
         /// treats GETs as safe, and that replay would consume the job.</para>
         /// </summary>
         [HttpPost("job/{docId}/collect")]
-        public IActionResult CollectJob(string docId)
+        public IActionResult CollectJob(string docId, [FromHeader(Name = LaunchNonceHeader)] string launchNonce)
         {
-            var outcome = _spawnService.Jobs.TryCollect(docId, out var entry);
+            var caller = _broker?.GetConnectedTerminalByLaunchNonce(launchNonce);
+            if (caller == null || string.IsNullOrEmpty(docId) || !string.Equals(caller.DocId, docId, StringComparison.Ordinal))
+            {
+                // Identical for no nonce, a wrong nonce, and another pane's nonce: the difference only helps
+                // someone probing. Checked before the store so a refused caller learns nothing about the job.
+                return StatusCode(401, new
+                {
+                    error = "This request did not present the launch nonce of the pane it names. "
+                          + "Only the helper MultiTerminal launched in that pane can collect its job.",
+                });
+            }
+
+            var outcome = _spawnService.Jobs.TryCollect(docId, out var entry, out string job);
             return outcome switch
             {
                 SpawnJobCollectOutcome.Collected => Ok(new
@@ -198,7 +230,16 @@ namespace MultiTerminal.API.Controllers
                     docId,
                     agentName = entry.AgentName,
                     spawnerName = entry.SpawnerName,
-                    job = entry.Job,
+                    job,
+                }),
+                SpawnJobCollectOutcome.Refetched => Ok(new
+                {
+                    status = "refetched",
+                    docId,
+                    agentName = entry.AgentName,
+                    spawnerName = entry.SpawnerName,
+                    collectedUtc = entry.CollectedUtc,
+                    job,
                 }),
                 SpawnJobCollectOutcome.AlreadyCollected => Ok(new
                 {

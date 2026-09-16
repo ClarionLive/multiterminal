@@ -136,11 +136,11 @@ function clampDetail(s) {
     : flat;
 }
 
-async function apiCall(endpoint, method = "GET", body = null, timeoutMs = API_TIMEOUT_MS) {
+async function apiCall(endpoint, method = "GET", body = null, timeoutMs = API_TIMEOUT_MS, extraHeaders = null) {
   const url = `${API_BASE}${endpoint}`;
   const options = {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(extraHeaders || {}) },
   };
 
   if (body) {
@@ -1060,7 +1060,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "get_my_spawn_job",
-        description: "FOR A SPAWNED HELPER: collect the job your spawner gave you. Call it as your FIRST action when your startup context says you were spawned, then carry out what it returns. It identifies you by YOUR pane's MULTITERMINAL_DOC_ID, so it can only ever return your own job, and it takes no arguments for that reason.\n\nThe job is handed over AT MOST ONCE. The first call returns it; every later call says it was already collected and when. If you get 'already collected' with no memory of the job (e.g. after a context compaction), do NOT guess what it was: message your spawner and ask. 'No job' means you were spawned without one; wait for your spawner to message you.\n\nThis call is also MultiTerminal's receipt that the job reached you. A helper that never calls it is reported to its spawner as not delivered after 120s.",
+        description: "FOR A SPAWNED HELPER: collect the job your spawner gave you. Call it as your FIRST action when your startup context says you were spawned, then carry out what it returns. It identifies you by YOUR pane's MULTITERMINAL_DOC_ID and proves it with your pane's MULTITERMINAL_LAUNCH_NONCE, so it can only ever return your own job, and it takes no arguments for that reason.\n\nThe job is handed over ONCE, with one short grace period: a repeat call within 60s of the first returns it again, marked as a re-fetch (for a reply that was lost). After that, every call says it was already collected and when. If you get 'already collected' with no memory of the job (e.g. after a context compaction), do NOT guess what it was: message your spawner and ask. 'No job' means you were spawned without one; wait for your spawner to message you.\n\nThis call is also MultiTerminal's receipt that the job reached you. A helper that never calls it is reported to its spawner as not delivered after 120s.",
         inputSchema: {
           type: "object",
           properties: {},
@@ -3866,9 +3866,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        // POST: collecting changes state (the job is handed over once). Errors propagate to the
-        // dispatcher with the controller's own detail.
-        const r = await apiCall(`/api/spawn/job/${seg(String(docId).trim())}/collect`, "POST");
+        // The launch nonce proves to MT that this caller IS the pane's helper (pipeline Run 1): the
+        // collect endpoint refuses a docId without its own pane's nonce. Env only, same as the docId.
+        const launchNonce = process.env.MULTITERMINAL_LAUNCH_NONCE;
+        if (!launchNonce) {
+          return {
+            content: [{
+              type: "text",
+              text: "❌ MULTITERMINAL_LAUNCH_NONCE is not set in this session, so MultiTerminal cannot verify this pane owns its job. This tool only works inside a terminal MultiTerminal launched.",
+            }],
+            isError: true,
+          };
+        }
+
+        // POST: collecting changes state. Errors (including a 401 for a nonce that does not match the
+        // pane) propagate to the dispatcher with the controller's own detail.
+        const r = await apiCall(
+          `/api/spawn/job/${seg(String(docId).trim())}/collect`,
+          "POST",
+          null,
+          API_TIMEOUT_MS,
+          { "X-MultiTerminal-Launch-Nonce": launchNonce },
+        );
 
         if (r.status === "collected") {
           return {
@@ -3879,11 +3898,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
+        if (r.status === "refetched") {
+          return {
+            content: [{
+              type: "text",
+              text: `📋 YOUR JOB from ${r.spawnerName} (you are ${r.agentName}), fetched AGAIN: it was first collected at ${r.collectedUtc} UTC. If you already started it, do NOT start over; carry on from where you are. If you had not received it yet, carry it out now.\n\n${r.job}`,
+            }],
+          };
+        }
+
         if (r.status === "already_collected") {
           return {
             content: [{
               type: "text",
-              text: `⚠️ Your job was already collected at ${r.collectedUtc} UTC and is not handed over twice. If you are working on it, carry on. If you have no record of it (for example after a context compaction), do NOT guess: message ${r.spawnerName} and ask them to resend it.`,
+              text: `⚠️ Your job was already collected at ${r.collectedUtc} UTC and is not handed over again. If you are working on it, carry on. If you have no record of it (for example after a context compaction), do NOT guess: message ${r.spawnerName} and ask them to resend it.`,
             }],
           };
         }

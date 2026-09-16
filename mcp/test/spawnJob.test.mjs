@@ -61,8 +61,28 @@ test("the handler was actually extracted", () => {
 
 test("the handler POSTs the collect endpoint", () => {
   const h = code(handlerBlock());
-  assert.ok(/apiCall\(`\/api\/spawn\/job\/\$\{seg\([^`]*\)\}\/collect`, "POST"\)/.test(h),
+  assert.ok(/apiCall\(\s*`\/api\/spawn\/job\/\$\{seg\([^`]*\)\}\/collect`,\s*"POST"/.test(h),
     "handler must POST /api/spawn/job/{docId}/collect with the docId passed through seg()");
+});
+
+// Pipeline Run 1: the endpoint refuses a docId without its own pane's launch nonce. Without the header
+// every collect is a 401, so every spawned helper would fail to get its job while this file's other facts
+// stayed green. The nonce, like the docId, must come from the environment only.
+test("the handler sends the pane's launch nonce from the environment in the nonce header", () => {
+  const h = code(handlerBlock());
+  assert.ok(/const launchNonce = process\.env\.MULTITERMINAL_LAUNCH_NONCE;/.test(h),
+    "handler must read MULTITERMINAL_LAUNCH_NONCE from the environment");
+  assert.ok(/\{\s*"X-MultiTerminal-Launch-Nonce":\s*launchNonce\s*\}/.test(h),
+    "handler must pass the nonce to apiCall in the X-MultiTerminal-Launch-Nonce header");
+});
+
+test("apiCall actually sends caller-supplied headers", () => {
+  // The handler passing a header object proves nothing if apiCall drops it.
+  const start = src.indexOf("async function apiCall(");
+  assert.ok(start >= 0, "apiCall missing");
+  const head = src.slice(start, start + 400);
+  assert.ok(/extraHeaders/.test(head.split("\n")[0]), "apiCall must accept an extraHeaders parameter");
+  assert.ok(/headers:\s*\{[^}]*\.\.\.\(extraHeaders \|\| \{\}\)/.test(head), "apiCall must spread extraHeaders into the request headers");
 });
 
 test("the docId comes from the environment and never from arguments", () => {
@@ -72,9 +92,11 @@ test("the docId comes from the environment and never from arguments", () => {
   assert.ok(/properties:\s*\{\s*\}/.test(defBlock()), "the tool must declare no input properties");
 });
 
-test("the handler renders all three outcomes the endpoint can return", () => {
+test("the handler renders all four outcomes the endpoint can return", () => {
   const h = code(handlerBlock());
   assert.ok(h.includes('r.status === "collected"'), "must handle collected");
+  assert.ok(h.includes('r.status === "refetched"'), "must handle refetched, or a re-fetched job is reported as 'no job'");
+  assert.ok(/do NOT start over/.test(h), "refetched must tell a helper that already started not to redo the job");
   assert.ok(h.includes('r.status === "already_collected"'), "must handle already_collected");
   assert.ok(/No job is waiting/.test(h), "must render the no_job fallthrough");
   assert.ok(/do NOT guess/.test(h), "already_collected must tell the helper not to reconstruct a job it cannot remember");

@@ -30,8 +30,8 @@ namespace MultiTerminal.MCPServer.Services
 
         /// <summary>
         /// Spawned helpers' jobs, held until each helper collects its own (task 8b270b37). Lives here
-        /// because this service is the one singleton that MainForm (which stores a job) and both REST
-        /// hosts (which serve the collect endpoint) already share.
+        /// because this service is the singleton MainForm (which stores a job) and SpawnController (which
+        /// serves the collect and status routes) already share. The MultiRemote gateway has no job route.
         /// </summary>
         public SpawnJobStore Jobs { get; } = new SpawnJobStore();
 

@@ -131,7 +131,7 @@ namespace MultiTerminal.Tests
                     return Task.FromResult((true, "doc-9", (string)null, agentName + "-2"));
                 },
             };
-            var controller = new SpawnController(service, projectDatabase: null);
+            var controller = new SpawnController(service, projectDatabase: null, broker: null);
 
             var result = await controller.SpawnTerminal(new SpawnTerminalRequest { AgentName = "Helper", SpawnerName = "Alice" });
 
@@ -172,7 +172,7 @@ namespace MultiTerminal.Tests
 
             // ProjectDatabase is only consulted when a ProjectId is supplied; these requests
             // never supply one, so null is honest rather than a stub.
-            return (new SpawnController(service, projectDatabase: null), captured);
+            return (new SpawnController(service, projectDatabase: null, broker: null), captured);
         }
     }
 }

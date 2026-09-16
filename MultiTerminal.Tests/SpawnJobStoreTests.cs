@@ -1,4 +1,6 @@
 using System;
+using System.Data.SQLite;
+using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -20,27 +22,71 @@ namespace MultiTerminal.Tests
     /// censuses. The wiring inside <c>MainForm</c>, which a test cannot instantiate, is pinned separately
     /// in <see cref="SpawnJobWiringTests"/>.</para>
     /// </summary>
-    public sealed class SpawnJobStoreTests
+    public sealed class SpawnJobStoreTests : IDisposable
     {
         private const string DocId = "ab12cd34";
         private const string Job = "Read the nonce file.\nThen write the result file.";
+        private const string Nonce = "NONCE-LV1X2";
+
+        private readonly string _testDbPath;
+        private readonly string _testMsgDbPath;
+
+        /// <summary>
+        /// The controller facts construct a real <see cref="MessageBroker"/> to resolve launch nonces, and a
+        /// broker opens both of MT's databases. Same isolation idiom as <c>LaunchNonceLookupTests</c>: two
+        /// databases, two variables (task 2ddfc32f).
+        /// </summary>
+        public SpawnJobStoreTests()
+        {
+            _testDbPath = Path.Combine(Path.GetTempPath(), $"multiterminal_spawnjob_{Guid.NewGuid():N}.db");
+            Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_DB", _testDbPath);
+            _testMsgDbPath = Path.Combine(Path.GetTempPath(), $"multiterminal_spawnjob_msg_{Guid.NewGuid():N}.db");
+            Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_MSGDB", _testMsgDbPath);
+        }
+
+        public void Dispose()
+        {
+            SQLiteConnection.ClearAllPools();
+            foreach (var p in new[]
+            {
+                _testDbPath, _testDbPath + "-wal", _testDbPath + "-shm",
+                _testMsgDbPath, _testMsgDbPath + "-wal", _testMsgDbPath + "-shm",
+            })
+            {
+                // Best-effort, as in LaunchNonceLookupTests: a leftover temp file must not fail a test.
+                try
+                {
+                    if (File.Exists(p)) File.Delete(p);
+                }
+                catch (IOException)
+                {
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
+            }
+
+            Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_DB", null);
+            Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_MSGDB", null);
+        }
 
         [Fact]
-        public void A_job_is_handed_over_once_and_a_repeat_says_when()
+        public void A_job_is_collected_once_and_a_repeat_after_the_window_says_when()
         {
             var clock = new DateTime(2026, 9, 16, 18, 0, 0, DateTimeKind.Utc);
             var store = new SpawnJobStore(() => clock);
             Assert.True(store.TryAdd(DocId, "Lv1x2", "Alice", Job));
 
             clock = clock.AddSeconds(21);
-            Assert.Equal(SpawnJobCollectOutcome.Collected, store.TryCollect(DocId, out var first));
-            Assert.Equal(Job, first.Job);
+            Assert.Equal(SpawnJobCollectOutcome.Collected, store.TryCollect(DocId, out var first, out string job));
+            Assert.Equal(Job, job);
             Assert.Equal("Lv1x2", first.AgentName);
             Assert.Equal("Alice", first.SpawnerName);
             Assert.Equal(clock, first.CollectedUtc);
 
-            clock = clock.AddSeconds(30);
-            Assert.Equal(SpawnJobCollectOutcome.AlreadyCollected, store.TryCollect(DocId, out var second));
+            clock = clock.Add(SpawnJobStore.RefetchWindow).AddSeconds(1);
+            Assert.Equal(SpawnJobCollectOutcome.AlreadyCollected, store.TryCollect(DocId, out var second, out string none));
+            Assert.Null(none);
 
             // The repeat reports the FIRST collection's time, not its own, so a helper told "already
             // collected" learns when that happened.
@@ -48,9 +94,87 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// Pipeline Run 1 (Codex adversary HIGH): a collect whose REPLY is lost must not lose the job. Inside
+        /// the window the job comes back as <c>Refetched</c>, and it is NOT a second receipt: the log would
+        /// otherwise claim two deliveries. The window's edge is asserted from both sides, so a window of zero
+        /// or of forever both go red.
+        /// </summary>
+        [Fact]
+        public void A_repeat_inside_the_window_gets_the_job_again_without_a_second_receipt()
+        {
+            var clock = new DateTime(2026, 9, 16, 18, 0, 0, DateTimeKind.Utc);
+            var store = new SpawnJobStore(() => clock);
+            int receipts = 0;
+            store.Collected += (_, _) => receipts++;
+            store.TryAdd(DocId, "Lv1x2", "Alice", Job);
+
+            Assert.Equal(SpawnJobCollectOutcome.Collected, store.TryCollect(DocId, out _, out _));
+
+            clock = clock.AddSeconds(2);
+            Assert.Equal(SpawnJobCollectOutcome.Refetched, store.TryCollect(DocId, out _, out string again));
+            Assert.Equal(Job, again);
+
+            clock = clock.Add(SpawnJobStore.RefetchWindow).AddSeconds(-2);
+            Assert.Equal(SpawnJobCollectOutcome.Refetched, store.TryCollect(DocId, out _, out _));
+
+            clock = clock.AddSeconds(1);
+            Assert.Equal(SpawnJobCollectOutcome.AlreadyCollected, store.TryCollect(DocId, out _, out _));
+
+            Assert.Equal(1, receipts);
+        }
+
+        /// <summary>
+        /// The text of a job nobody can be handed any more is released LAZILY, by the next TryAdd (asserted
+        /// here) or an AlreadyCollected TryCollect, so a long session does not keep every job ever spawned
+        /// (code review, Run 1). It does not pin release on a deadline: there is none. The length survives
+        /// for the receipt log.
+        /// </summary>
+        [Fact]
+        public void The_job_text_is_released_once_the_window_closes()
+        {
+            var clock = new DateTime(2026, 9, 16, 18, 0, 0, DateTimeKind.Utc);
+            var store = new SpawnJobStore(() => clock);
+            store.TryAdd(DocId, "Lv1x2", "Alice", Job);
+            store.TryCollect(DocId, out var entry, out _);
+            Assert.Equal(Job, entry.Job);
+
+            clock = clock.Add(SpawnJobStore.RefetchWindow).AddSeconds(1);
+
+            // Before any releasing call, the expired text is still held: the release is lazy, by design.
+            Assert.Equal(Job, entry.Job);
+
+            // TryAdd is one of the two calls that release expired text; adding another pane's job is the ordinary case.
+            store.TryAdd("ef56ab78", "Lv1x3", "Alice", "another job");
+            Assert.Null(entry.Job);
+            Assert.Equal(Job.Length, entry.JobLength);
+        }
+
+        /// <summary>
+        /// A throwing receipt subscriber must not turn a collect into an error: by the time it runs, the job
+        /// is already marked collected, so a propagated exception would leave the caller without a job the
+        /// store considers delivered, with nothing left to retry (code review, Run 1). The failure is
+        /// counted, so it is not silent, and later subscribers still run.
+        /// </summary>
+        [Fact]
+        public void A_throwing_receipt_subscriber_does_not_lose_the_job()
+        {
+            var store = new SpawnJobStore();
+            bool laterSubscriberRan = false;
+            store.Collected += (_, _) => throw new InvalidOperationException("log sink down");
+            store.Collected += (_, _) => laterSubscriberRan = true;
+            store.TryAdd(DocId, "Lv1x2", "Alice", Job);
+
+            Assert.Equal(SpawnJobCollectOutcome.Collected, store.TryCollect(DocId, out _, out string job));
+            Assert.Equal(Job, job);
+            Assert.True(laterSubscriberRan);
+            Assert.Equal(1, store.ReceiptSubscriberFailures);
+        }
+
+        /// <summary>
         /// Many simultaneous collects: exactly one wins. Asserted on the count of <c>Collected</c> results
         /// AND the event count, because the event is what MT logs as the receipt, and two receipts for one
-        /// job would claim two deliveries.
+        /// job would claim two deliveries. The losers land inside the re-fetch window, so they are
+        /// <c>Refetched</c>.
         /// </summary>
         [Fact]
         public async Task Concurrent_collects_produce_exactly_one_winner_and_one_receipt()
@@ -67,11 +191,11 @@ namespace MultiTerminal.Tests
                 var outcomes = await Task.WhenAll(Enumerable.Range(0, racers).Select(racer => Task.Run(() =>
                 {
                     gate.SignalAndWait();
-                    return store.TryCollect(DocId, out _);
+                    return store.TryCollect(DocId, out _, out _);
                 })));
 
                 Assert.Equal(1, outcomes.Count(o => o == SpawnJobCollectOutcome.Collected));
-                Assert.Equal(racers - 1, outcomes.Count(o => o == SpawnJobCollectOutcome.AlreadyCollected));
+                Assert.Equal(racers - 1, outcomes.Count(o => o == SpawnJobCollectOutcome.Refetched));
                 Assert.Equal(1, receipts);
             }
         }
@@ -85,7 +209,7 @@ namespace MultiTerminal.Tests
             var store = new SpawnJobStore();
             store.TryAdd(DocId, "Lv1x2", "Alice", Job);
 
-            Assert.Equal(SpawnJobCollectOutcome.NotFound, store.TryCollect(docId, out var entry));
+            Assert.Equal(SpawnJobCollectOutcome.NotFound, store.TryCollect(docId, out var entry, out _));
             Assert.Null(entry);
         }
 
@@ -96,7 +220,7 @@ namespace MultiTerminal.Tests
             Assert.True(store.TryAdd(DocId, "Lv1x2", "Alice", Job));
             Assert.False(store.TryAdd(DocId, "Lv1x2", "Bob", "a different job"));
 
-            store.TryCollect(DocId, out var entry);
+            store.TryCollect(DocId, out var entry, out _);
             Assert.Equal(Job, entry.Job);
             Assert.Equal("Alice", entry.SpawnerName);
         }
@@ -129,7 +253,7 @@ namespace MultiTerminal.Tests
             Assert.True(store.TryClaimGiveUpReport(DocId));
             Assert.False(store.TryClaimGiveUpReport(DocId));
 
-            Assert.Equal(SpawnJobCollectOutcome.Collected, store.TryCollect(DocId, out var entry));
+            Assert.Equal(SpawnJobCollectOutcome.Collected, store.TryCollect(DocId, out var entry, out _));
             Assert.True(entry.GiveUpReported);
         }
 
@@ -138,7 +262,7 @@ namespace MultiTerminal.Tests
         {
             var store = new SpawnJobStore();
             store.TryAdd(DocId, "Lv1x2", "Alice", Job);
-            store.TryCollect(DocId, out var entry);
+            store.TryCollect(DocId, out var entry, out _);
 
             Assert.False(store.TryClaimGiveUpReport(DocId));
             Assert.False(entry.GiveUpReported);
@@ -168,10 +292,10 @@ namespace MultiTerminal.Tests
             var store = new SpawnJobStore();
             store.TryAdd(stored, "Lv1x2", "Alice", Job);
 
-            Assert.Equal(SpawnJobCollectOutcome.NotFound, store.TryCollect(asked, out _));
+            Assert.Equal(SpawnJobCollectOutcome.NotFound, store.TryCollect(asked, out _, out _));
             Assert.Null(store.Get(asked));
             Assert.False(store.TryClaimGiveUpReport(asked));
-            Assert.Equal(SpawnJobCollectOutcome.Collected, store.TryCollect(stored, out _));
+            Assert.Equal(SpawnJobCollectOutcome.Collected, store.TryCollect(stored, out _, out _));
         }
 
         /// <summary>
@@ -181,8 +305,10 @@ namespace MultiTerminal.Tests
         [Fact]
         public void The_status_route_reports_without_returning_or_consuming_the_job()
         {
+            using var broker = new MessageBroker();
+            broker.RegisterTerminal("Lv1x2", docId: DocId, nonce: Nonce);
             var service = new SpawnService();
-            var controller = new SpawnController(service, projectDatabase: null);
+            var controller = new SpawnController(service, projectDatabase: null, broker);
 
             Assert.Equal("no_job", StatusOf(controller.GetJobStatus(DocId)));
 
@@ -194,26 +320,80 @@ namespace MultiTerminal.Tests
 
             // Asking twice changed nothing: the job is still there to collect.
             Assert.Equal("pending", StatusOf(controller.GetJobStatus(DocId)));
-            Assert.Equal("collected", StatusOf(controller.CollectJob(DocId)));
+            Assert.Equal("collected", StatusOf(controller.CollectJob(DocId, Nonce)));
             Assert.Equal("collected", StatusOf(controller.GetJobStatus(DocId)));
         }
 
+        /// <summary>
+        /// The pane's own helper collects, and an immediate repeat (a retry after a lost reply) gets the job
+        /// again as <c>refetched</c>. The after-the-window answer is pinned on the store, which has a clock.
+        /// </summary>
         [Fact]
-        public void The_collect_route_returns_the_job_once_then_reports_it_collected()
+        public void The_collect_route_returns_the_job_then_a_prompt_repeat_is_a_refetch()
         {
+            using var broker = new MessageBroker();
+            broker.RegisterTerminal("Lv1x2", docId: DocId, nonce: Nonce);
+            broker.RegisterTerminal("Lv0", docId: "00000000", nonce: "NONCE-LV0");
             var service = new SpawnService();
-            var controller = new SpawnController(service, projectDatabase: null);
+            var controller = new SpawnController(service, projectDatabase: null, broker);
             service.Jobs.TryAdd(DocId, "Lv1x2", "Alice", Job);
 
-            var first = controller.CollectJob(DocId);
+            var first = controller.CollectJob(DocId, Nonce);
             Assert.Equal("collected", StatusOf(first));
             Assert.Contains("Read the nonce file.\\nThen write", Json(first), StringComparison.Ordinal);
 
-            var second = controller.CollectJob(DocId);
-            Assert.Equal("already_collected", StatusOf(second));
-            Assert.DoesNotContain("Read the nonce file", Json(second), StringComparison.Ordinal);
+            var second = controller.CollectJob(DocId, Nonce);
+            Assert.Equal("refetched", StatusOf(second));
+            Assert.Contains("Read the nonce file.\\nThen write", Json(second), StringComparison.Ordinal);
+            Assert.Contains("\"collectedUtc\"", Json(second), StringComparison.Ordinal);
 
-            Assert.Equal("no_job", StatusOf(controller.CollectJob("00000000")));
+            Assert.Equal("no_job", StatusOf(controller.CollectJob("00000000", "NONCE-LV0")));
+        }
+
+        /// <summary>
+        /// ⚠️ Pipeline Run 1 (Codex security HIGH A01, adversary MEDIUM): a docId alone must not collect.
+        /// Each refused caller is a wrong answer a plausible check would give. No nonce and a wrong nonce
+        /// catch a missing check. <b>Another live pane's valid nonce</b> is the discriminator: a check that
+        /// asks only "is this SOME terminal's nonce" accepts it, and only comparing that terminal's docId to
+        /// the route refuses it. After every refusal the job must still be pending and collectable by its
+        /// owner, because a refusal that consumed the job would still fake the receipt.
+        /// </summary>
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("NONCE-WRONG")]
+        [InlineData("NONCE-LV1X3")]
+        public void A_caller_without_the_panes_own_nonce_is_refused_and_consumes_nothing(string presented)
+        {
+            using var broker = new MessageBroker();
+            broker.RegisterTerminal("Lv1x2", docId: DocId, nonce: Nonce);
+            broker.RegisterTerminal("Lv1x3", docId: "ef56ab78", nonce: "NONCE-LV1X3");
+            var service = new SpawnService();
+            var controller = new SpawnController(service, projectDatabase: null, broker);
+            service.Jobs.TryAdd(DocId, "Lv1x2", "Alice", Job);
+
+            var refused = Assert.IsType<ObjectResult>(controller.CollectJob(DocId, presented));
+            Assert.Equal(401, refused.StatusCode);
+            Assert.DoesNotContain("Read the nonce file", JsonSerializer.Serialize(refused.Value), StringComparison.Ordinal);
+
+            Assert.False(service.Jobs.Get(DocId).IsCollected);
+            Assert.Equal("collected", StatusOf(controller.CollectJob(DocId, Nonce)));
+        }
+
+        /// <summary>
+        /// With no broker to resolve a nonce, collection fails closed rather than falling back to trusting
+        /// the docId.
+        /// </summary>
+        [Fact]
+        public void Without_a_broker_every_collect_is_refused()
+        {
+            var service = new SpawnService();
+            var controller = new SpawnController(service, projectDatabase: null, broker: null);
+            service.Jobs.TryAdd(DocId, "Lv1x2", "Alice", Job);
+
+            var refused = Assert.IsType<ObjectResult>(controller.CollectJob(DocId, Nonce));
+            Assert.Equal(401, refused.StatusCode);
+            Assert.False(service.Jobs.Get(DocId).IsCollected);
         }
 
         private static string Json(IActionResult result)

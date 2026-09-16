@@ -154,8 +154,17 @@ namespace MultiTerminal.Tests
 
             // The next job may start ONLY from the previous one's completion. A drainTypeQueue call that
             // exists solely in enqueueTypeInput would let a second message run concurrently again.
+            // The BODY only, found by brace matching, with // comment lines dropped. The earlier version
+            // sliced 1200 chars from the signature, so it matched the signature's own "drainTypeQueue()"
+            // and could never fail, and the real calls sit past 1200 chars behind long comments (code
+            // review, pipeline Run 1).
             int drain = src.IndexOf("function drainTypeQueue", StringComparison.Ordinal);
-            string drainBody = src[drain..Math.Min(src.Length, drain + 1200)];
+            int drainOpen = src.IndexOf('{', drain);
+            Assert.True(drainOpen > drain, "drainTypeQueue has no body.");
+            string drainBody = string.Join(
+                "\n",
+                BraceBody(src, drainOpen).Split('\n').Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+            Assert.True(drainBody.Length > 300, $"Extracted only {drainBody.Length} chars of drainTypeQueue's body.");
             Assert.Contains("drainTypeQueue()", drainBody, StringComparison.Ordinal);
         }
 
@@ -173,6 +182,12 @@ namespace MultiTerminal.Tests
             int open = src.IndexOf('{', start);
             Assert.True(open >= 0, "No opening brace after QueueInitialPromptDelivery's signature.");
 
+            return BraceBody(src, open);
+        }
+
+        /// <summary>The text from the brace at <paramref name="open"/> to its matching close, inclusive.</summary>
+        private static string BraceBody(string src, int open)
+        {
             int depth = 0;
             for (int i = open; i < src.Length; i++)
             {
@@ -184,7 +199,7 @@ namespace MultiTerminal.Tests
                 }
             }
 
-            Assert.Fail("Braces never balanced for QueueInitialPromptDelivery.");
+            Assert.Fail($"Braces never balanced from offset {open}.");
             return string.Empty;
         }
 

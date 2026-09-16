@@ -121,7 +121,8 @@ test("spawn_helper's result text promises the same failure delivery the descript
 test("spawn_helper's description states the initialPrompt delivery contract", () => {
   const d = defBlock();
   assert.ok(d.includes("ONE prompt"), "must say the prompt arrives as one prompt");
-  // Task 8b270b37: the job goes over the channel, not typed, so line breaks now SURVIVE. The old
+  // Task 8b270b37: the helper collects the job (get_my_spawn_job), so nothing is typed and line breaks
+  // now SURVIVE. The old
   // assertion required the description to warn they were collapsed, which is now false.
   assert.ok(/line breaks are kept/i.test(d), "must say line breaks are kept");
   assert.ok(!/line breaks become spaces|line breaks are collapsed/i.test(d), "must not claim line breaks are collapsed");

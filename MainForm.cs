@@ -2158,7 +2158,7 @@ namespace MultiTerminal
                 return;
             }
 
-            _debugLogService?.Info("MainForm", $"Initial prompt for {entry.AgentName} was collected by the helper {seconds:F1}s after the spawn ({entry.Job.Length} chars).");
+            _debugLogService?.Info("MainForm", $"Initial prompt for {entry.AgentName} was collected by the helper {seconds:F1}s after the spawn ({entry.JobLength} chars).");
         }
 
         /// <summary>
