@@ -234,6 +234,12 @@ button.tkt:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px
    Costs no height at all under the CSS-only treatments and under "off" — the quiet
    options are quiet in layout too. */
 .stage { height: 18px; margin: -1px 0 -2px; }
+
+/* The walker needs more headroom than a pulse or a stream. At 18px the ground sits at
+   15px, so even the plain walker's head was clipped by 1.8px, and a rider, a canopy or
+   a bounce lost up to 11px off the top. 26px puts the ground at 21 and fits every
+   costume in the wardrobe (task 84de66e7). Only the walker pays for it. */
+body[data-ambient="walker"] .stage { height: 26px; }
 .stage canvas { display: block; width: 100%; height: 100%; }
 
 /* ---- AMBIENT: the two CSS-only treatments ---- */
@@ -1048,9 +1054,15 @@ function fitCanvas(cv) {
     var dpr = Math.min(window.devicePixelRatio || 1, 2);
     var w = Math.max(1, Math.round(r.width));
     var h = Math.max(1, Math.round(r.height));
-    if (cv.width !== w * dpr || cv.height !== h * dpr) {
-        cv.width = w * dpr;
-        cv.height = h * dpr;
+    /* Round BEFORE comparing. cv.width is an integer, and w * dpr is fractional at
+       125%/150% scaling (237 * 1.25 = 296.25), so an unrounded comparison is always
+       unequal and every canvas is reallocated and cleared on every frame. It is
+       correct at 100% and 200%, which is why casual testing never shows it
+       (task 5350a75e, item 1). */
+    var pw = Math.round(w * dpr), ph = Math.round(h * dpr);
+    if (cv.width !== pw || cv.height !== ph) {
+        cv.width = pw;
+        cv.height = ph;
     }
     var g = cv.getContext("2d");
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -1115,6 +1127,391 @@ function drawStream(st, s, g, w, h, dt) {
        fades out rather than blinking empty. */
 }
 
+/* ---- WALKER WARDROBE — begin (task 84de66e7) ------------------------------------
+   While his agent is Working, the walker wears a different costume on each crossing.
+
+   The rule: COSTUME may change, MOTION may not. The ambient channel stays quiet because
+   of its motion signature (horizontal, steady, crossing and exiting), not because he
+   walks. So every costume still crosses at the same speed. Nothing stationary belongs
+   here (dancing and jump rope were rehoused to Idle in the design study, and the Owner
+   kept Idle as sitting).
+
+   Drawings come from the design study (artifact c50e7874), which the Owner reviewed
+   costume by costume. Four rules came out of it and every drawing below obeys them:
+   face +x (travel direction), rotate clockwise so a flip carries him forward, give a
+   motion a prop that explains it, and bend the limbs, because a straight limb beside a
+   straight prop reads as more prop.
+
+   Every costume must fit the walker's 26px stage (ground at 21): the study drew on a
+   34px stage, and at the real height most of them lost their heads. The umbrella,
+   penny-farthing, box stack, pogo and jump are trimmed here for exactly that reason.
+   scripts/test/attention-walker.test.mjs measures every costume's extent over a full
+   motion cycle and fails if one is clipped.
+
+   Each drawing takes (g, x, ground, t, sc) with the FEET on `ground`, centred on x.
+   `sc` is the study's inspection scale; the panel always passes 1. */
+
+function wrLimbs(g, x, hip, ground, sw, sc) {
+    g.moveTo(x, hip); g.lineTo(x - 3 * sw * sc, ground);
+    g.moveTo(x, hip); g.lineTo(x + 3 * sw * sc, ground);
+}
+
+function wrHead(g, x, y, sc) {
+    g.beginPath(); g.arc(x, y, 2.3 * sc, 0, 6.283); g.fill();
+}
+
+function wrWheel(g, cx, cy, r) {
+    g.beginPath(); g.arc(cx, cy, r, 0, 6.283); g.stroke();
+}
+
+var WARDROBE = {
+    /* The plain walk, exactly as it was before the wardrobe existed. */
+    walk: function (g, x, ground, t, sc) {
+        var hip = ground - 7 * sc, hd = hip - 7.5 * sc, sw = Math.sin(t * 0.5);
+        wrHead(g, x, hd, sc);
+        g.beginPath();
+        g.moveTo(x, hd + 2.4 * sc); g.lineTo(x, hip);
+        g.moveTo(x, hip); g.lineTo(x + sw * 5 * sc, ground);
+        g.moveTo(x, hip); g.lineTo(x - sw * 5 * sc, ground);
+        g.moveTo(x, hd + 4 * sc); g.lineTo(x - sw * 4.5 * sc, hip - 1 * sc);
+        g.moveTo(x, hd + 4 * sc); g.lineTo(x + sw * 4.5 * sc, hip - 1 * sc);
+        g.stroke();
+    },
+
+    penny: function (g, x, ground, t, sc) {
+        /* The BIG wheel leads. A penny-farthing ridden backwards is just an odd bicycle.
+           Big wheel 5.8 rather than the study's 6.6, so the rider's head fits the stage. */
+        var R = 5.8 * sc, r = 2.1 * sc;
+        var bx = x + 2 * sc, by = ground - R;
+        var sx = x - 8 * sc, sy = ground - r;
+        wrWheel(g, bx, by, R);
+        wrWheel(g, sx, sy, r);
+
+        var hipX = bx - R * 0.42, hip = by - R * 0.98;
+        var hd = hip - 6 * sc;
+        var barX = bx + R * 0.52, barY = by - R * 0.78;
+
+        g.beginPath();
+        g.moveTo(sx, sy); g.lineTo(hipX, hip);
+        g.moveTo(hipX, hip); g.lineTo(barX, barY);
+        g.moveTo(barX - 1.4 * sc, barY - 0.6 * sc); g.lineTo(barX + 1.4 * sc, barY + 0.4 * sc);
+        g.moveTo(hipX, hd + 2.4 * sc); g.lineTo(hipX, hip);
+
+        var p = t * 0.9;                                  // direct drive: feet on the hub
+        g.moveTo(hipX, hip); g.lineTo(bx + Math.cos(p) * R * 0.42, by + Math.sin(p) * R * 0.42);
+        g.moveTo(hipX, hip); g.lineTo(bx - Math.cos(p) * R * 0.42, by - Math.sin(p) * R * 0.42);
+        g.moveTo(hipX, hd + 3.4 * sc); g.lineTo(barX, barY);
+        g.stroke();
+        wrHead(g, hipX, hd, sc);
+    },
+
+    bike: function (g, x, ground, t, sc) {
+        var r = 3.4 * sc;
+        wrWheel(g, x - 5 * sc, ground - r, r);
+        wrWheel(g, x + 5 * sc, ground - r, r);
+        var hip = ground - r - 4.4 * sc, hd = hip - 7 * sc;
+        g.beginPath();
+        g.moveTo(x - 5 * sc, ground - r); g.lineTo(x, hip); g.lineTo(x + 5 * sc, ground - r);
+        g.moveTo(x, hip); g.lineTo(x + 4 * sc, hip - 2.4 * sc);
+        g.moveTo(x, hd + 2.4 * sc); g.lineTo(x, hip);
+        var p = t * 0.85, cx = x - 0.5 * sc, cy = ground - r + 0.5 * sc;
+        g.moveTo(x, hip); g.lineTo(cx + Math.cos(p) * 2.6 * sc, cy + Math.sin(p) * 2.6 * sc);
+        g.moveTo(x, hip); g.lineTo(cx - Math.cos(p) * 2.6 * sc, cy - Math.sin(p) * 2.6 * sc);
+        g.moveTo(x, hd + 3.6 * sc); g.lineTo(x + 4 * sc, hip - 2.4 * sc);
+        g.stroke();
+        wrHead(g, x, hd, sc);
+    },
+
+    uni: function (g, x, ground, t, sc) {
+        var r = 3.6 * sc;
+        wrWheel(g, x, ground - r, r);
+        var hip = ground - r - 5 * sc, hd = hip - 7 * sc;
+        g.beginPath();
+        g.moveTo(x, hip); g.lineTo(x, ground - r);
+        g.moveTo(x, hd + 2.4 * sc); g.lineTo(x, hip);
+        var p = t * 0.85;
+        g.moveTo(x, hip); g.lineTo(x + Math.cos(p) * 2.4 * sc, ground - r + Math.sin(p) * 2.4 * sc);
+        g.moveTo(x, hip); g.lineTo(x - Math.cos(p) * 2.4 * sc, ground - r - Math.sin(p) * 2.4 * sc);
+        var aw = Math.sin(t * 0.7) * 1.6 * sc;
+        g.moveTo(x, hd + 3.6 * sc); g.lineTo(x + 5 * sc, hd + 1 * sc + aw);
+        g.moveTo(x, hd + 3.6 * sc); g.lineTo(x - 5 * sc, hd + 1 * sc - aw);
+        g.stroke();
+        wrHead(g, x, hd, sc);
+    },
+
+    tandem: function (g, x, ground, t, sc) {
+        var r = 3.2 * sc;
+        wrWheel(g, x - 7 * sc, ground - r, r);
+        wrWheel(g, x + 7 * sc, ground - r, r);
+        var hip = ground - r - 4.2 * sc;
+        g.beginPath();
+        g.moveTo(x - 7 * sc, ground - r); g.lineTo(x + 7 * sc, ground - r);
+        g.moveTo(x - 7 * sc, ground - r); g.lineTo(x - 3 * sc, hip);
+        g.moveTo(x + 7 * sc, ground - r); g.lineTo(x + 4 * sc, hip - 2 * sc);
+        g.moveTo(x - 3 * sc, hip); g.lineTo(x + 4 * sc, hip);
+        var p = t * 0.85;
+        [-3, 3].forEach(function (o, k) {
+            var px = x + o * sc, hd = hip - 7 * sc;
+            g.moveTo(px, hd + 2.4 * sc); g.lineTo(px, hip);
+            var ph = p + k * 2.1;
+            g.moveTo(px, hip); g.lineTo(px + Math.cos(ph) * 2.2 * sc, ground - r + Math.sin(ph) * 2.2 * sc);
+            g.moveTo(px, hd + 3.6 * sc); g.lineTo(px + 3.4 * sc, hip - 2 * sc);
+        });
+        g.stroke();
+        wrHead(g, x - 3 * sc, hip - 7 * sc, sc);
+        wrHead(g, x + 3 * sc, hip - 7 * sc, sc);
+    },
+
+    roadster: function (g, x, ground, t, sc) {
+        /* A convertible. The cockpit CUTOUT with a head above it is what makes it a car;
+           a closed outline reads as a brick. The driver sits tall, slightly too big for
+           it: a grown man in a kid's pedal car. */
+        var r = 2.6 * sc, belt = ground - 5.2 * sc;
+        wrWheel(g, x - 5.6 * sc, ground - r, r);
+        wrWheel(g, x + 5.6 * sc, ground - r, r);
+
+        g.beginPath();
+        g.moveTo(x - 9.4 * sc, ground - 2.6 * sc);   // tail, low
+        g.lineTo(x - 8.6 * sc, belt);                 // up over the boat tail
+        g.lineTo(x - 3.2 * sc, belt - 0.4 * sc);      // rear deck
+        g.lineTo(x - 2.6 * sc, ground - 3.6 * sc);    // down INTO the cockpit
+        g.lineTo(x + 0.4 * sc, ground - 3.6 * sc);    // cockpit floor
+        g.lineTo(x + 1.4 * sc, ground - 7 * sc);      // raked windscreen
+        g.lineTo(x + 2.8 * sc, belt - 0.6 * sc);      // scuttle
+        g.lineTo(x + 8.4 * sc, belt - 0.2 * sc);      // long bonnet
+        g.lineTo(x + 9.6 * sc, ground - 2.8 * sc);    // nose
+        g.stroke();
+
+        var dx = x - 1.4 * sc;
+        g.beginPath();
+        g.moveTo(dx, ground - 3.8 * sc); g.lineTo(dx, ground - 9.4 * sc);
+        g.moveTo(dx, ground - 8.4 * sc); g.lineTo(x + 1.6 * sc, ground - 6.8 * sc);
+        g.moveTo(dx, ground - 8.4 * sc); g.lineTo(x + 0.8 * sc, ground - 7.6 * sc);
+        g.moveTo(x + 1.2 * sc, ground - 5.8 * sc); g.lineTo(x + 2 * sc, ground - 7.6 * sc);
+        g.stroke();
+        wrHead(g, dx, ground - 11.6 * sc, sc);
+    },
+
+    board: function (g, x, ground, t, sc) {
+        var r = 1.3 * sc, deck = ground - r * 2;
+        wrWheel(g, x - 3.6 * sc, ground - r, r);
+        wrWheel(g, x + 3.6 * sc, ground - r, r);
+        g.beginPath();
+        g.moveTo(x - 5.4 * sc, deck); g.lineTo(x + 5.4 * sc, deck);
+        var lean = 1.6 * sc;
+        var hip = deck - 6.5 * sc, hd = hip - 7 * sc;
+        g.moveTo(x + lean, hd + 2.4 * sc); g.lineTo(x, hip);
+        g.moveTo(x, hip); g.lineTo(x - 3 * sc, deck);
+        g.moveTo(x, hip); g.lineTo(x + 3.4 * sc, deck);
+        var aw = Math.sin(t * 0.6) * 1.4 * sc;
+        g.moveTo(x + lean, hd + 4 * sc); g.lineTo(x + 5.5 * sc, hd + 2 * sc + aw);
+        g.moveTo(x + lean, hd + 4 * sc); g.lineTo(x - 4.5 * sc, hd + 3 * sc - aw);
+        g.stroke();
+        wrHead(g, x + lean, hd, sc);
+    },
+
+    scooter: function (g, x, ground, t, sc) {
+        var r = 1.7 * sc, deck = ground - r * 2;
+        wrWheel(g, x - 4 * sc, ground - r, r);
+        wrWheel(g, x + 4.4 * sc, ground - r, r);
+        var hip = deck - 7 * sc, hd = hip - 7 * sc;
+        g.beginPath();
+        g.moveTo(x - 5.2 * sc, deck); g.lineTo(x + 4.4 * sc, deck);
+        g.moveTo(x + 4.4 * sc, deck); g.lineTo(x + 4.4 * sc, hip - 1.5 * sc);
+        g.moveTo(x, hd + 2.4 * sc); g.lineTo(x, hip);
+        var kick = Math.sin(t * 0.5) * 2.4 * sc;
+        g.moveTo(x, hip); g.lineTo(x - 1 * sc, deck);
+        g.moveTo(x, hip); g.lineTo(x - 4 * sc - kick, ground - 0.5 * sc);
+        g.moveTo(x, hd + 3.6 * sc); g.lineTo(x + 4.4 * sc, hip - 1.5 * sc);
+        g.stroke();
+        wrHead(g, x, hd, sc);
+    },
+
+    barrow: function (g, x, ground, t, sc) {
+        var r = 2 * sc;
+        wrWheel(g, x + 6 * sc, ground - r, r);
+        var hip = ground - 7 * sc, hd = hip - 6.6 * sc, sw = Math.sin(t * 0.5);
+        g.beginPath();
+        g.moveTo(x + 6 * sc, ground - r); g.lineTo(x + 1 * sc, ground - 6 * sc);
+        g.lineTo(x + 8.5 * sc, ground - 6 * sc);
+        g.moveTo(x + 1 * sc, ground - 6 * sc); g.lineTo(x - 1 * sc, hip - 1 * sc);
+        g.moveTo(x + 1.4 * sc, hd + 2.4 * sc); g.lineTo(x, hip);
+        wrLimbs(g, x, hip, ground, sw, sc);
+        g.moveTo(x + 1.4 * sc, hd + 4 * sc); g.lineTo(x - 1 * sc, hip - 1 * sc);
+        g.stroke();
+        wrHead(g, x + 1.4 * sc, hd, sc);
+    },
+
+    brolly: function (g, x, ground, t, sc) {
+        /* The study's canopy stood 11px above the stage. This one is smaller, lower and
+           held slightly forward, so its dome still clears his head by about 2px where it
+           passes over it. */
+        var hip = ground - 7 * sc, hd = hip - 7.5 * sc, sw = Math.sin(t * 0.5);
+        var cx = x + 3 * sc, cy = hd - 1.4 * sc;
+        wrHead(g, x, hd, sc);
+        g.beginPath();
+        g.moveTo(x, hd + 2.4 * sc); g.lineTo(x, hip);
+        wrLimbs(g, x, hip, ground, sw, sc);
+        g.moveTo(x, hd + 4 * sc); g.lineTo(x - 3.4 * sc * -sw, hip - 1 * sc);
+        g.moveTo(x, hd + 4 * sc); g.lineTo(cx, hd + 1.6 * sc);   // arm up to the handle
+        g.moveTo(cx, hd + 1.6 * sc); g.lineTo(cx, cy);           // shaft
+        g.stroke();
+        g.beginPath();
+        g.arc(cx, cy, 4.2 * sc, Math.PI, 0);
+        g.stroke();
+    },
+
+    boxes: function (g, x, ground, t, sc) {
+        /* CARRIED on extended arms, never balanced on his head, or he reads as a man
+           wearing a chimney. Slightly flatter boxes than the study, to fit the stage. */
+        var wob = Math.sin(t * 0.55) * 0.8 * sc;
+        var hip = ground - 7 * sc, hd = hip - 7.5 * sc, sw = Math.sin(t * 0.5);
+        var shoulder = hd + 4 * sc;
+        var handX = x + 5 * sc, handY = hd + 2.6 * sc;
+
+        wrHead(g, x, hd, sc);
+        g.beginPath();
+        g.moveTo(x, hd + 2.4 * sc); g.lineTo(x, hip);
+        wrLimbs(g, x, hip, ground, sw, sc);
+        g.moveTo(x, shoulder); g.lineTo(handX, handY);
+        g.moveTo(x, shoulder + 1.2 * sc); g.lineTo(handX, handY + 1.2 * sc);
+        g.stroke();
+
+        g.beginPath();
+        var by = handY;
+        for (var i = 0; i < 3; i++) {
+            var bw = (5 - i * 0.6) * sc, bh = 2.5 * sc;
+            var bx = handX + 0.4 * sc + wob * (i + 1) * 0.6;
+            g.moveTo(bx - bw / 2, by); g.lineTo(bx + bw / 2, by);
+            g.lineTo(bx + bw / 2, by - bh); g.lineTo(bx - bw / 2, by - bh); g.closePath();
+            by -= bh + 0.3 * sc;
+        }
+        g.stroke();
+    },
+
+    dog: function (g, x, ground, t, sc) {
+        var hip = ground - 7 * sc, hd = hip - 7.5 * sc, sw = Math.sin(t * 0.5);
+        wrHead(g, x, hd, sc);
+        g.beginPath();
+        g.moveTo(x, hd + 2.4 * sc); g.lineTo(x, hip);
+        wrLimbs(g, x, hip, ground, sw, sc);
+        g.moveTo(x, hd + 4 * sc); g.lineTo(x - 3.4 * sc * -sw, hip - 1 * sc);
+        g.moveTo(x, hd + 4 * sc); g.lineTo(x + 6.5 * sc, ground - 4.6 * sc);   // arm + lead
+        var dx = x + 8 * sc, dy = ground - 3.4 * sc, dsw = Math.sin(t * 0.62);
+        g.moveTo(dx - 2.6 * sc, dy); g.lineTo(dx + 2.2 * sc, dy);
+        g.moveTo(dx - 2.2 * sc, dy); g.lineTo(dx - 2.6 * sc - dsw * sc, ground);
+        g.moveTo(dx - 1.4 * sc, dy); g.lineTo(dx - 1 * sc + dsw * sc, ground);
+        g.moveTo(dx + 1.6 * sc, dy); g.lineTo(dx + 1.2 * sc - dsw * sc, ground);
+        g.moveTo(dx + 2.2 * sc, dy); g.lineTo(dx + 2.6 * sc + dsw * sc, ground);
+        g.moveTo(dx + 2.2 * sc, dy); g.lineTo(dx + 3.4 * sc, dy - 1.6 * sc);
+        g.moveTo(dx - 2.6 * sc, dy); g.lineTo(dx - 3.8 * sc, dy - 1.8 * sc);
+        g.stroke();
+        wrHead(g, dx + 3.6 * sc, dy - 2.2 * sc, sc * 0.62);
+    },
+
+    pogo: function (g, x, ground, t, sc) {
+        /* He stands BEHIND the pole with every limb bent; straight limbs merged with the
+           pole into "a stick". Bounce 1.8px, not the study's 3.2: it fits the stage, and
+           a smaller vertical motion spends less of the alarm's contrast. */
+        var ph = t * 0.5;
+        var b = Math.abs(Math.sin(ph)) * 1.8 * sc;
+        var gr = ground - b;
+        var peg = gr - 3.2 * sc;
+        var hip = gr - 9 * sc;
+        var top = hip - 1.2 * sc;
+        var hd = hip - 7 * sc;
+        var bx = x - 3.4 * sc;
+        var kneeY = (hip + peg) / 2;
+        var shY = hd + 4 * sc;
+
+        g.beginPath();
+        g.moveTo(x, gr); g.lineTo(x, top);                          // pole
+        g.moveTo(x - 2.4 * sc, top); g.lineTo(x + 2.4 * sc, top);   // bars
+        g.moveTo(x - 2.6 * sc, peg); g.lineTo(x + 2.6 * sc, peg);   // pegs
+        g.moveTo(x - 1.4 * sc, gr); g.lineTo(x + 1.4 * sc, gr);     // spring foot
+        g.moveTo(bx, hip); g.lineTo(bx - 1.8 * sc, kneeY); g.lineTo(x - 1.6 * sc, peg);
+        g.moveTo(bx, hip); g.lineTo(bx - 0.2 * sc, kneeY + 0.5 * sc); g.lineTo(x + 1.8 * sc, peg);
+        g.moveTo(bx, hd + 2.4 * sc); g.lineTo(bx, hip);
+        g.moveTo(bx, shY); g.lineTo(bx - 2.4 * sc, shY + 2.6 * sc); g.lineTo(x - 1.6 * sc, top);
+        g.moveTo(bx, shY); g.lineTo(bx - 1.2 * sc, shY + 3 * sc); g.lineTo(x + 1.4 * sc, top);
+        g.stroke();
+        wrHead(g, bx, hd, sc);
+    },
+
+    jump: function (g, x, ground, t, sc) {
+        /* Hop height 3.2px, not the study's 5, to fit the stage. */
+        var ph = (t * 0.5) % 6.283;
+        var b = Math.max(0, Math.sin(ph)) * 3.2 * sc;
+        var gr = ground - b, hip = gr - 7 * sc, hd = hip - 7.5 * sc;
+        var up = b > 0.4 * sc;
+        var tuck = up ? 1.6 * sc : 0;
+        wrHead(g, x, hd, sc);
+        g.beginPath();
+        g.moveTo(x, hd + 2.4 * sc); g.lineTo(x, hip);
+        g.moveTo(x, hip); g.lineTo(x - 2.8 * sc, gr - tuck);
+        g.moveTo(x, hip); g.lineTo(x + 2.8 * sc, gr - tuck);
+        g.moveTo(x, hd + 4 * sc); g.lineTo(x - 3.4 * sc, hd + (up ? -1 : 5) * sc);
+        g.moveTo(x, hd + 4 * sc); g.lineTo(x + 3.4 * sc, hd + (up ? -1 : 5) * sc);
+        g.stroke();
+    },
+
+    flip: function (g, x, ground, t, sc) {
+        /* FORWARD rotation: canvas angles run clockwise, so +ph tumbles him the way he is
+           travelling. A backflip fought the motion and read as being dragged. He flips for
+           half the cycle and walks the other half. */
+        var ph = (t * 0.42) % 12.566;
+        if (ph >= 6.283) { WARDROBE.walk(g, x, ground, t, sc); return; }
+        var lift = Math.sin(ph / 2) * 6 * sc;
+        var cy = ground - 7 * sc - lift;
+        g.save();
+        g.translate(x, cy);
+        g.rotate(ph);
+        g.beginPath();
+        g.moveTo(0, -2.6 * sc); g.lineTo(0, 3.4 * sc);
+        g.moveTo(0, 3.4 * sc); g.lineTo(-2.4 * sc, 6.4 * sc);
+        g.moveTo(0, 3.4 * sc); g.lineTo(2.4 * sc, 6.4 * sc);
+        g.moveTo(0, -1 * sc); g.lineTo(-3 * sc, 1.4 * sc);
+        g.moveTo(0, -1 * sc); g.lineTo(3 * sc, 1.4 * sc);
+        g.stroke();
+        g.beginPath(); g.arc(0, -5 * sc, 2.3 * sc, 0, 6.283); g.fill();
+        g.restore();
+    }
+};
+
+/* How often each costume comes up, relative to the rest (default 3). The vertical group
+   (pogo, jump, flip) adds bounce or rotation, which spends some of the alarm's contrast,
+   so they come up a third as often. The Owner chose to ship them; this only sets the rate. */
+var WARDROBE_WEIGHT = { pogo: 1, jump: 1, flip: 1 };
+
+/* A weighted random costume, never the same as `prev`, so consecutive crossings always
+   look different. */
+function pickCostume(prev) {
+    var ids = Object.keys(WARDROBE).filter(function (id) { return id !== prev; });
+    var total = 0;
+    ids.forEach(function (id) { total += WARDROBE_WEIGHT[id] || 3; });
+    var roll = Math.random() * total;
+    for (var i = 0; i < ids.length; i++) {
+        roll -= WARDROBE_WEIGHT[ids[i]] || 3;
+        if (roll < 0) return ids[i];
+    }
+    return ids[ids.length - 1];
+}
+
+/* The costume for this crossing. It lives in the per-session anim state, because render()
+   rebuilds every card on each data push, and is re-picked only when the crossing INDEX
+   changes. The index is COUNTED from the walk distance, never detected from x wrapping
+   back to the left: a counter cannot misfire at a boundary. */
+function costumeFor(st, t, w) {
+    var crossing = Math.floor(t / Math.max(20, w - 20));
+    if (st.crossing !== crossing || !WARDROBE[st.costume]) {
+        st.costume = pickCostume(st.costume);
+        st.crossing = crossing;
+    }
+    return st.costume;
+}
+
+/* ---- WALKER WARDROBE — end ------------------------------------------------------ */
+
 function drawWalker(st, s, g, w, h, dt) {
     var ground = Math.round(h * 0.82);
     var live = s.state === "Working";
@@ -1132,6 +1529,12 @@ function drawWalker(st, s, g, w, h, dt) {
     g.fillStyle = g.strokeStyle;
     g.lineWidth = 1.3;
     g.lineCap = "round";
+    g.lineJoin = "round";
+
+    if (live) {
+        WARDROBE[costumeFor(st, t, w)](g, x, ground, t, 1);
+        return;
+    }
 
     g.beginPath(); g.arc(x, headY, 2.3, 0, 6.283); g.fill();
     g.beginPath(); g.moveTo(x, headY + 2.4); g.lineTo(x, hipY); g.stroke();
@@ -1148,12 +1551,6 @@ function drawWalker(st, s, g, w, h, dt) {
         g.moveTo(x, hipY); g.lineTo(x + 2.5, ground);
         g.moveTo(x, headY + 4); g.lineTo(x + 5, headY - 3 + wv * 3);
         g.moveTo(x, headY + 4); g.lineTo(x - 5, headY - 2 - wv * 3);
-    } else if (live) {
-        var sw = Math.sin(t * 0.5);
-        g.moveTo(x, hipY); g.lineTo(x + sw * 5, ground);
-        g.moveTo(x, hipY); g.lineTo(x - sw * 5, ground);
-        g.moveTo(x, headY + 4); g.lineTo(x - sw * 4.5, hipY - 1);
-        g.moveTo(x, headY + 4); g.lineTo(x + sw * 4.5, hipY - 1);
     } else {                                        // standing, nothing observed
         g.moveTo(x, hipY); g.lineTo(x - 2.5, ground);
         g.moveTo(x, hipY); g.lineTo(x + 2.5, ground);
