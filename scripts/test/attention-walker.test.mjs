@@ -39,8 +39,9 @@ function wardrobeSource() {
   return src;
 }
 
-// A named top-level function, by brace matching from its declaration. The bodies extracted here
-// contain no braces inside strings or comments, which the length/shape assertions would catch.
+// A named top-level function, by brace matching from its declaration. Brace matching is fooled by a
+// brace inside a string or comment, which would cut the body short. Compiling the result catches
+// that: a truncated function body is a syntax error, not a shorter function.
 function functionSource(name) {
   const at = HTML.indexOf(`function ${name}(`);
   assert.ok(at > 0, `function ${name} not found`);
@@ -50,6 +51,7 @@ function functionSource(name) {
     else if (HTML[i] === '}' && --depth === 0) {
       const src = HTML.slice(at, i + 1);
       assert.ok(src.length > 200, `extracted ${name} is suspiciously short (${src.length} chars)`);
+      assert.doesNotThrow(() => new vm.Script(src), `extracted ${name} does not compile; brace matching cut it wrong`);
       return src;
     }
   }
@@ -111,26 +113,34 @@ test('the wardrobe holds the costumes the Owner chose, and no stationary ones', 
   ]);
 });
 
-test('every costume stays inside the walker stage over a full motion cycle', () => {
+test('every costume stays inside the card on all four sides, at both ends of the crossing', () => {
   const h = walkerStageHeight();
-  const ground = Math.round(h * 0.82);   // drawWalker's ground line
-  const { WARDROBE } = load();
+  const w = 240;
+  // The panel's own geometry, not copies of its formulas, so moving the ground line or the margin
+  // in the panel is measured here rather than silently diverging.
+  const { WARDROBE, walkerGround, walkerSpan, WALKER_MARGIN } = load();
+  const ground = walkerGround(h);
+  // x runs over [WALKER_MARGIN, WALKER_MARGIN + span), so these are its two extremes.
+  const ends = [WALKER_MARGIN, WALKER_MARGIN + walkerSpan(w)];
   const clipped = [];
   for (const id of Object.keys(WARDROBE)) {
-    const g = recordingContext();
-    // t advances ~0.042 per ms; 0..300 covers several full cycles of every phase in the wardrobe.
-    for (let t = 0; t < 300; t += 0.05) WARDROBE[id](g, 120, ground, t, 1);
-    assert.ok(g.box.calls > 0, `${id} drew nothing`);
-    if (g.box.minY < 0 || g.box.maxY > h) {
-      clipped.push(`${id}: y ${g.box.minY.toFixed(2)}..${g.box.maxY.toFixed(2)} on a ${h}px stage`);
+    for (const x of ends) {
+      const g = recordingContext();
+      // t advances ~0.042 per ms; 0..300 covers several full cycles of every phase in the wardrobe.
+      for (let t = 0; t < 300; t += 0.05) WARDROBE[id](g, x, ground, t, 1);
+      assert.ok(g.box.calls > 0, `${id} drew nothing`);
+      const b = g.box;
+      if (b.minY < 0 || b.maxY > h || b.minX < 0 || b.maxX > w) {
+        clipped.push(`${id} at x=${x}: x ${b.minX.toFixed(2)}..${b.maxX.toFixed(2)} of ${w}, y ${b.minY.toFixed(2)}..${b.maxY.toFixed(2)} of ${h}`);
+      }
     }
   }
-  assert.deepEqual(clipped, [], 'costumes cut off by the stage edge');
+  assert.deepEqual(clipped, [], 'costumes cut off by an edge of the card');
 });
 
 test('the costume holds for a whole crossing and changes only when the crossing does', () => {
-  const { costumeFor } = load();
-  const w = 240, span = w - 20;
+  const { costumeFor, walkerSpan } = load();
+  const w = 240, span = walkerSpan(w);
   const st = {};
   const byCrossing = new Map();
   // Frame-sized steps of t, as drawWalker advances it (dt ~16ms * 0.042).
@@ -145,9 +155,31 @@ test('the costume holds for a whole crossing and changes only when the crossing 
   assert.equal(byCrossing.size, 40, 'expected 40 crossings');
 });
 
+test('resizing the card mid-crossing does not change the costume', () => {
+  // The crossing index is walk distance / span, and the walk distance grows for as long as the
+  // agent works. Late in a session a 1px width change moves the index by about half a crossing,
+  // so an implementation that re-picks on any index change strobes while the splitter is dragged.
+  // Start 10 minutes in (t ≈ 25,200) and move the width EVERY frame, never letting a real crossing
+  // boundary fall inside the window at the starting width.
+  const { costumeFor, walkerSpan } = load();
+  const st = {};
+  const span = walkerSpan(240);
+  const t0 = (Math.floor(25200 / span) + 0.05) * span;   // just after a boundary at w=240
+  costumeFor(st, t0, 240);
+  const first = st.costume;
+  let changes = 0, prev = first;
+  for (let f = 1; f <= 120; f++) {
+    const w = 240 + (f % 2 === 0 ? 0 : 1) + Math.round(Math.sin(f / 7) * 3);   // jittering drag
+    const c = costumeFor(st, t0 + f * 0.67, w);
+    if (c !== prev) { changes++; prev = c; }
+  }
+  // 120 frames * 0.67 = ~80 units of walk, well under one span (212), so no crossing is due.
+  assert.equal(changes, 0, `costume changed ${changes} times during a resize within one crossing`);
+});
+
 test('consecutive crossings never wear the same costume', () => {
-  const { costumeFor } = load();
-  const w = 240, span = w - 20;
+  const { costumeFor, walkerSpan } = load();
+  const w = 240, span = walkerSpan(w);
   const st = {};
   let prev = null;
   for (let c = 0; c < 500; c++) {

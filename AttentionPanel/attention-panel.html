@@ -1145,8 +1145,11 @@ function drawStream(st, s, g, w, h, dt) {
    Every costume must fit the walker's 26px stage (ground at 21): the study drew on a
    34px stage, and at the real height most of them lost their heads. The umbrella,
    penny-farthing, box stack, pogo and jump are trimmed here for exactly that reason.
+   Sideways, the widest costume (the dog, ahead on its lead) reaches WALKER_MARGIN px from
+   his centre, so the crossing range keeps that far from both card edges.
    scripts/test/attention-walker.test.mjs measures every costume's extent over a full
-   motion cycle and fails if one is clipped.
+   motion cycle, top and bottom and at both ends of the crossing, and fails if one is
+   clipped on any side.
 
    Each drawing takes (g, x, ground, t, sc) with the FEET on `ground`, centred on x.
    `sc` is the study's inspection scale; the panel always passes 1. */
@@ -1497,23 +1500,45 @@ function pickCostume(prev) {
     return ids[ids.length - 1];
 }
 
+/* How far the widest costume reaches from the walker's centre, stroke included (the dog's
+   head is 13.7px ahead of him). The crossing stays this far from both card edges. */
+var WALKER_MARGIN = 14;
+
+/* The distance of one crossing, shared by drawWalker's x and costumeFor so the costume
+   changes exactly when he re-enters from the left. */
+function walkerSpan(w) {
+    return Math.max(20, w - 2 * WALKER_MARGIN);
+}
+
+function walkerGround(h) {
+    return Math.round(h * 0.82);
+}
+
 /* The costume for this crossing. It lives in the per-session anim state, because render()
    rebuilds every card on each data push, and is re-picked only when the crossing INDEX
    changes. The index is COUNTED from the walk distance, never detected from x wrapping
-   back to the left: a counter cannot misfire at a boundary. */
+   back to the left: a counter cannot misfire at a boundary.
+
+   The index is walk distance divided by span, so it also moves when the card WIDTH
+   changes, and the walk distance grows for as long as the agent works: after ten minutes
+   a 1px resize shifts it by about half a crossing. Re-picking on that would strobe the
+   costume while the dock splitter is dragged. So a width change only re-bases the index
+   and keeps the costume; a new costume needs a new crossing at an unchanged width. */
 function costumeFor(st, t, w) {
-    var crossing = Math.floor(t / Math.max(20, w - 20));
-    if (st.crossing !== crossing || !WARDROBE[st.costume]) {
+    var span = walkerSpan(w);
+    var crossing = Math.floor(t / span);
+    if (!WARDROBE[st.costume] || (st.span === span && st.crossing !== crossing)) {
         st.costume = pickCostume(st.costume);
-        st.crossing = crossing;
     }
+    st.span = span;
+    st.crossing = crossing;
     return st.costume;
 }
 
 /* ---- WALKER WARDROBE — end ------------------------------------------------------ */
 
 function drawWalker(st, s, g, w, h, dt) {
-    var ground = Math.round(h * 0.82);
+    var ground = walkerGround(h);
     var live = s.state === "Working";
     var waving = isBlocking(s) && alarm === "hand" && !isAcked(s);
 
@@ -1521,7 +1546,7 @@ function drawWalker(st, s, g, w, h, dt) {
     else if (waving) { st.walk += dt * 0.010; }
 
     var t = st.walk;
-    var x = live ? (10 + (t % Math.max(20, w - 20))) : Math.round(w * 0.5);
+    var x = live ? (WALKER_MARGIN + (t % walkerSpan(w))) : Math.round(w * 0.5);
     var hipY = ground - 7;
     var headY = hipY - 7.5;
 
