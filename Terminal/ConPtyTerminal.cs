@@ -286,6 +286,25 @@ namespace MultiTerminal.Terminal
         }
 
         /// <summary>
+        /// Builds the <c>MULTITERMINAL_PROJECT_PM</c> assignment for a launch (task 760827ad): <c>'true'</c>
+        /// when the terminal has a project and no spawner, otherwise the <c>$null</c> clear form so a stale
+        /// value is never inherited. The session-start hook reads it to give the Owner's terminal the
+        /// project-manager role. It is deliberately NOT <c>MULTITERMINAL_TEAM_LEAD</c>: that flag follows
+        /// <c>isTeamLead</c>, which also picks the terminal's name and permanently sets the profile's team-lead
+        /// flag, and is off for a project with no team lead configured — which the Owner ruled is still a PM.
+        /// It uses the same <c>string.IsNullOrEmpty</c> tests as the <c>MULTITERMINAL_PROJECT_ID</c> and
+        /// <c>MULTITERMINAL_SPAWNER</c> branches in <see cref="Start"/>; change them together, or a
+        /// whitespace-only value would be a project for one variable and not the other.
+        /// </summary>
+        internal static string BuildProjectPmEnvAssignment(string projectId, string spawnerName) =>
+            !string.IsNullOrEmpty(projectId) && string.IsNullOrEmpty(spawnerName)
+                ? ProjectPmSetAssignment
+                : ProjectPmClearAssignment;
+
+        internal const string ProjectPmSetAssignment = "$env:MULTITERMINAL_PROJECT_PM = 'true'; ";
+        internal const string ProjectPmClearAssignment = "$env:MULTITERMINAL_PROJECT_PM = $null; ";
+
+        /// <summary>
         /// Redacts the <c>MULTITERMINAL_LAUNCH_NONCE</c> assignment from a launch command line before it
         /// is written to <see cref="DebugLogService"/> (task fd3437e6). The launch nonce is a live secret;
         /// debug-log output is readable by agents via the <c>debug_logs</c> MCP tool, so logging the raw
@@ -438,6 +457,12 @@ namespace MultiTerminal.Terminal
                 envSetup += "$env:MULTITERMINAL_TEAM_LEAD = $null; ";
                 DebugLogService?.Trace("ConPtyTerminal", "Clearing inherited MULTITERMINAL_TEAM_LEAD");
             }
+
+            string projectPmAssignment = BuildProjectPmEnvAssignment(projectId, spawnerName);
+            envSetup += projectPmAssignment;
+            DebugLogService?.Trace("ConPtyTerminal", projectPmAssignment == ProjectPmSetAssignment
+                ? "Setting MULTITERMINAL_PROJECT_PM = 'true'"
+                : "Clearing inherited MULTITERMINAL_PROJECT_PM");
 
             if (!string.IsNullOrEmpty(gatewayProfile))
             {
