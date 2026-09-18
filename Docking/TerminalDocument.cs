@@ -303,9 +303,13 @@ namespace MultiTerminal.Docking
         // "Per launch", not "once": StartTerminal reassigns it on every relaunch into this pane, which is
         // what makes "Launch as…" correctly DROP the suffix in step with the env var it also stops setting.
         //
-        // The only rebuild path is the CustomTitle setter (UpdateTabTitle has exactly one caller). The
-        // statusline poll does NOT rebuild the title — an earlier version of this comment claimed it did,
-        // and that false claim is precisely what made the scope bug below invisible to readers.
+        // Two paths rebuild the title: the CustomTitle setter, and the statusline poll (which repaints
+        // because _projectName has just moved under it). The poll one is the newer of the two.
+        //
+        // Both earlier versions of this comment were false, in opposite directions, and each hid a bug for
+        // exactly as long as it stood: the first claimed the poll rebuilt the title when nothing did, which
+        // is why the stale-role fault read as already-handled; the second said the CustomTitle setter was
+        // the only caller, written in the same commit that added the poll call 3,000 lines below.
         private MultiTerminal.Terminal.TerminalRole _terminalRole = MultiTerminal.Terminal.TerminalRole.None;
 
         // The project this terminal was LAUNCHED on, kept so the role can be withdrawn when the agent
@@ -321,11 +325,21 @@ namespace MultiTerminal.Docking
         // the agent cd's anywhere. This one is written by StartTerminal and by nothing else.
         private string _launchProjectId;
 
-        // The project the agent is in NOW, as the statusline poll last resolved it. Seeded from the launch
-        // id, then UPGRADE-ONLY like its neighbours: a null resolution means "unregistered folder", not
-        // "no project", so it is never downgraded. Compared against _launchProjectId by TerminalRoles.ForDisplay
-        // to decide whether the tab may still show "(PM)".
+        // The project the agent is in NOW, as the statusline poll last resolved it, and whether that
+        // resolution actually RAN. Compared against _launchProjectId by TerminalRoles.ForDisplay to decide
+        // whether the tab may still show "(PM)".
+        //
+        // These two travel together and are meaningless apart: a null id with _currentProjectKnown means
+        // "positively outside every registered project" (withdraw the badge), and the same null WITHOUT it
+        // means "the lookup could not run" (leave the badge alone). Collapsing those is what produced
+        // "Alice - Scratch (PM)" — see the ForDisplay doc.
+        //
+        // Deliberately NOT _hudDashboardProjectId, which is upgrade-only for a different reason: it keeps a
+        // HUD pane scoped rather than unscoping it into a global feed (task e8c6b52f), so it must never be
+        // downgraded, whereas this pair must faithfully record a departure. They coincide today; they answer
+        // different questions and would diverge the moment either rule changed.
         private string _currentProjectId;
+        private bool _currentProjectKnown;
 
         // For session restore: working directory to use when starting terminal
         private string _pendingWorkingDirectory;
@@ -473,7 +487,7 @@ namespace MultiTerminal.Docking
                 // ForDisplay, not _terminalRole: the role is launch-scoped but _projectName is not, so the
                 // badge is withdrawn while the agent is somewhere other than the project it manages.
                 var displayedRole = MultiTerminal.Terminal.TerminalRoles.ForDisplay(
-                    _terminalRole, _launchProjectId, _currentProjectId);
+                    _terminalRole, _launchProjectId, _currentProjectId, _currentProjectKnown);
                 var title = ComposeTabTitle(_customTitle, _projectName, displayedRole);
                 _debugLogService?.Trace("TerminalDocument", $"#PROJ# [TerminalDocument.UpdateTabTitle] Instance={InstanceId} DocId='{_docId}' setting Text/TabText='{title}' (customTitle='{_customTitle}' projectName='{_projectName}')");
                 Text = title;
@@ -1253,6 +1267,7 @@ namespace MultiTerminal.Docking
             _terminalRole = MultiTerminal.Terminal.TerminalRoles.Resolve(projectId, spawnerName);
             _launchProjectId = projectId;
             _currentProjectId = projectId;
+            _currentProjectKnown = true;   // the launch id IS the authoritative answer for where we start
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"terminalRole: '{_terminalRole}' launchProjectId: '{projectId}'");
 
             // A pane is reusable: OnTerminalProcessExited and the close-session path both return it to the
@@ -3396,6 +3411,11 @@ namespace MultiTerminal.Docking
                         {
                             string resolvedProjectId = null;
                             string resolvedProjectName = null;
+                            // Did the lookup RUN, as opposed to find nothing? Only a run that completed over a
+                            // non-empty registry can turn a null match into "the agent is outside every
+                            // registered project"; see the TerminalRoles.ForDisplay doc for why the difference
+                            // is load-bearing rather than pedantic.
+                            bool projectResolutionRan = false;
                             try
                             {
                                 // Containment match (deepest registered root that contains the
@@ -3403,15 +3423,28 @@ namespace MultiTerminal.Docking
                                 // a worktree under .claude\worktrees\, which never exact-matches
                                 // a registered root — the old exact match resolved null here and
                                 // unscoped the HUD panels to a cross-project view (task e8c6b52f).
-                                var match = Services.ProjectPathResolver.ResolveByContainment(
-                                    _messageBroker?.ProjectService?.GetAllRegisteredProjects(), folderForUi);
-                                if (match != null)
+                                var registered = _messageBroker?.ProjectService?.GetAllRegisteredProjects();
+
+                                // An empty/absent registry is "could not answer", not "matched nothing" —
+                                // every folder looks unregistered before the project list has loaded.
+                                if (registered != null && registered.Count > 0)
                                 {
-                                    resolvedProjectId = match.Id;
-                                    resolvedProjectName = match.Name;
+                                    projectResolutionRan = true;
+
+                                    var match = Services.ProjectPathResolver.ResolveByContainment(registered, folderForUi);
+                                    if (match != null)
+                                    {
+                                        resolvedProjectId = match.Id;
+                                        resolvedProjectName = match.Name;
+                                    }
                                 }
                             }
-                            catch { /* non-critical — fall back to deriving name from path */ }
+                            catch
+                            {
+                                // non-critical — fall back to deriving name from path. The throw also means we
+                                // never learned where the agent is, so the role must not be re-judged on it.
+                                projectResolutionRan = false;
+                            }
 
                             if (string.IsNullOrEmpty(resolvedProjectName))
                             {
@@ -3464,9 +3497,26 @@ namespace MultiTerminal.Docking
                             // re-registration and THEN silently recomposed the old role with the new project
                             // name. UPGRADE-ONLY like its neighbours above: a null resolution is an
                             // unregistered folder, not a departure from the launch project.
-                            _currentProjectId = resolvedProjectId ?? _currentProjectId;
-                            UpdateTabTitle();
-                            UpdateStatusBar();
+                            if (projectResolutionRan)
+                            {
+                                _currentProjectId = resolvedProjectId;
+                                _currentProjectKnown = true;
+                            }
+
+                            // Not on a pane that has gone back to the start screen: ShowStartScreen sets the
+                            // tab to "Home" but does NOT stop this timer, so an action queued before the
+                            // process exited can still be delivered afterwards — and would repaint a dead
+                            // pane's tab with the name and role of the session that just ended.
+                            if (!_isStartScreenVisible)
+                            {
+                                // UpdateTabTitle also refreshes the status bar, which is why the explicit
+                                // UpdateStatusBar() that used to sit here is gone rather than moved.
+                                UpdateTabTitle();
+                            }
+                            else
+                            {
+                                UpdateStatusBar();
+                            }
                         }
                     }));
 

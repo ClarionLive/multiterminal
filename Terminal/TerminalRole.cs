@@ -86,20 +86,37 @@ namespace MultiTerminal.Terminal
         /// ABOUT the named project. <see cref="TerminalRole.Helper"/> is a fact about who spawned this
         /// terminal, which stays true wherever the agent walks, so it is returned unchanged.</para>
         ///
-        /// <para>Withdrawal requires POSITIVE evidence: an empty <paramref name="currentProjectId"/> means
-        /// "folder not resolved to a registered project", NOT "no project", and keeps the role. That is the
-        /// same UPGRADE-ONLY rule every other consumer of that resolution follows (task e8c6b52f) — and it
-        /// matters here because the poll only re-runs when the folder CHANGES, so a badge dropped on a
-        /// transient null would stay dropped. Being derived rather than destructive also makes it
-        /// symmetric: walk back into the launch project and the badge returns.</para>
+        /// <para><paramref name="currentProjectKnown"/> is the distinction that makes this correct, and an
+        /// earlier version of this method got it wrong by collapsing two different situations into one null:</para>
+        /// <list type="bullet">
+        /// <item>The lookup could not run — broker not ready, registry empty, the resolver threw. We do not
+        /// know where the agent is, so we change nothing and KEEP the badge. Guessing "departed" here would
+        /// stick: the poll only re-runs when the folder CHANGES, so a badge dropped on a transient failure
+        /// stays dropped until the agent happens to move again.</item>
+        /// <item>The lookup ran fine and matched nothing — the agent is positively outside every registered
+        /// project. That IS a departure from the launch project, so the badge goes. Treating this as "unknown"
+        /// is what produced <c>"Alice - Scratch (PM)"</c>: the project NAME beside the role is downgraded to
+        /// the folder's leaf name whether or not a project resolved, so keeping the role there re-created the
+        /// exact two-values-moving-at-different-rates fault this method exists to remove (pipeline Run 2,
+        /// debugger + cross-model adversary, again independently).</item>
+        /// </list>
+        ///
+        /// <para>Derived, not destructive: the caller's launch role is never overwritten, so walking back into
+        /// the launch project restores the badge.</para>
         /// </summary>
-        internal static TerminalRole ForDisplay(TerminalRole launchRole, string launchProjectId, string currentProjectId)
+        internal static TerminalRole ForDisplay(
+            TerminalRole launchRole, string launchProjectId, string currentProjectId, bool currentProjectKnown)
         {
             if (launchRole != TerminalRole.ProjectManager)
                 return launchRole;
 
-            if (string.IsNullOrEmpty(currentProjectId))
+            // Could not tell where the agent is — leave the label as it was.
+            if (!currentProjectKnown)
                 return launchRole;
+
+            // Resolved, and the agent is in no registered project at all.
+            if (string.IsNullOrEmpty(currentProjectId))
+                return TerminalRole.None;
 
             return string.Equals(currentProjectId, launchProjectId, System.StringComparison.Ordinal)
                 ? launchRole

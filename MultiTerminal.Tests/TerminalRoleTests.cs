@@ -145,59 +145,83 @@ namespace MultiTerminal.Tests
         // so a frozen role beside a moving project name eventually reads "Alice - OtherProject (PM)".
         // ---------------------------------------------------------------------------------------------
 
+        // Every fact below asserts the COMPOSED TAB TEXT, not only the enum. That is not belt-and-braces:
+        // the pipeline's Run 2 defect was live underneath a green enum-only assertion here, because the lie
+        // ("Alice - Scratch (PM)") exists only in the composition — the role and the project name are each
+        // defensible alone and wrong together. A fact about this rule that never composes cannot see it.
+
         [Fact]
         public void A_PM_who_walks_into_another_project_stops_being_labelled_its_PM()
         {
             // The defect, stated as the thing that must not happen: PM of SomeProject, agent now in
             // OtherProject. MULTITERMINAL_PROJECT_PM still says true — it is fixed in the child env at
             // launch — so the tab is the ONLY thing that can stop over-claiming here.
-            Assert.Equal(
-                TerminalRole.None,
-                TerminalRoles.ForDisplay(TerminalRole.ProjectManager, SomeProject, OtherProject));
+            var shown = TerminalRoles.ForDisplay(TerminalRole.ProjectManager, SomeProject, OtherProject, true);
 
-            Assert.Equal(
-                "Alice - OtherProject",
-                TerminalDocument.ComposeTabTitle("Alice", "OtherProject",
-                    TerminalRoles.ForDisplay(TerminalRole.ProjectManager, SomeProject, OtherProject)));
+            Assert.Equal(TerminalRole.None, shown);
+            Assert.Equal("Alice - OtherProject", TerminalDocument.ComposeTabTitle("Alice", "OtherProject", shown));
         }
 
         [Fact]
         public void A_PM_still_in_its_own_project_keeps_the_badge()
         {
-            // Including the worktree case, which is the normal state of an active-task terminal: the poll
-            // resolves a worktree under .claude\worktrees\ to its containing registered project, so the
-            // current id EQUALS the launch id and nothing is withdrawn. Getting this wrong would strip
-            // "(PM)" from most real PM terminals.
-            Assert.Equal(
-                TerminalRole.ProjectManager,
-                TerminalRoles.ForDisplay(TerminalRole.ProjectManager, SomeProject, SomeProject));
+            // This is the ordinary state of a PM terminal, including one sitting in a worktree: the poll
+            // resolves a worktree under .claude\worktrees\ back to its containing registered project, so the
+            // current id EQUALS the launch id. That containment behaviour is pinned in ProjectPathResolverTests,
+            // NOT here — this fact only asserts what equal ids produce. Getting it wrong would strip "(PM)"
+            // from most real PM terminals.
+            var shown = TerminalRoles.ForDisplay(TerminalRole.ProjectManager, SomeProject, SomeProject, true);
+
+            Assert.Equal(TerminalRole.ProjectManager, shown);
+            Assert.Equal("Alice - MultiTerminal (PM)", TerminalDocument.ComposeTabTitle("Alice", "MultiTerminal", shown));
         }
 
         [Theory]
         [InlineData(null)]
         [InlineData("")]
-        public void An_unresolved_folder_is_not_evidence_of_leaving(string unresolved)
+        public void A_folder_in_no_registered_project_is_a_departure(string noMatch)
         {
-            // House rule, shared with every other consumer of this resolution (task e8c6b52f): a null
-            // means "folder not matched to a registered project", NOT "no project". Withdrawal needs
-            // POSITIVE evidence. This is load-bearing rather than tidy: the poll only re-runs when the
-            // folder CHANGES, so a badge dropped on a transient null would stay dropped until the agent
-            // happened to cd somewhere else.
+            // The lookup RAN and matched nothing, so the agent is positively outside every registered
+            // project — including the one it manages. Withdraw.
+            //
+            // This is the fact that was wrong. Its previous form asserted the opposite ("an unresolved folder
+            // is not evidence of leaving") and was GREEN while the tab read "Alice - Scratch (PM)", because it
+            // checked only the enum and never composed the title. The composed assertion below is the part
+            // that would have caught it: _projectName is downgraded to the folder's leaf name whether or not a
+            // project resolved, so the role is the only half left that can tell the truth.
+            var shown = TerminalRoles.ForDisplay(TerminalRole.ProjectManager, SomeProject, noMatch, true);
+
+            Assert.Equal(TerminalRole.None, shown);
+            Assert.Equal("Alice - Scratch", TerminalDocument.ComposeTabTitle("Alice", "Scratch", shown));
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData(OtherProject)]
+        public void A_lookup_that_could_not_run_changes_nothing(string whatever)
+        {
+            // The other half of the distinction: currentProjectKnown false means the registry was empty or
+            // absent, or the resolver threw — we never learned where the agent is. Guessing "departed" here
+            // would STICK, because the poll only re-runs when the folder CHANGES, so a badge dropped on a
+            // transient failure stays dropped until the agent happens to move again. The id argument is
+            // ignored entirely, which is why even OtherProject must keep the badge.
             Assert.Equal(
                 TerminalRole.ProjectManager,
-                TerminalRoles.ForDisplay(TerminalRole.ProjectManager, SomeProject, unresolved));
+                TerminalRoles.ForDisplay(TerminalRole.ProjectManager, SomeProject, whatever, false));
         }
 
         [Fact]
         public void Walking_back_into_the_project_restores_the_badge()
         {
             // ForDisplay is derived, never destructive — _terminalRole still holds what the launch granted.
-            // A one-way "set the role to None on departure" would look identical in the test above and
-            // leave the tab permanently unlabelled for the rest of the session.
+            // A one-way "set the role to None on departure" would look identical in the departure facts above
+            // and leave the tab permanently unlabelled for the rest of the session.
             var launched = TerminalRoles.Resolve(SomeProject, null);
 
-            Assert.Equal(TerminalRole.None, TerminalRoles.ForDisplay(launched, SomeProject, OtherProject));
-            Assert.Equal(TerminalRole.ProjectManager, TerminalRoles.ForDisplay(launched, SomeProject, SomeProject));
+            Assert.Equal(TerminalRole.None, TerminalRoles.ForDisplay(launched, SomeProject, OtherProject, true));
+            Assert.Equal(TerminalRole.None, TerminalRoles.ForDisplay(launched, SomeProject, null, true));
+            Assert.Equal(TerminalRole.ProjectManager, TerminalRoles.ForDisplay(launched, SomeProject, SomeProject, true));
         }
 
         [Fact]
@@ -206,13 +230,16 @@ namespace MultiTerminal.Tests
             // Only PM is project-scoped, because only PM is a claim ABOUT the named project. "(Helper)"
             // says who spawned this terminal, which stays true in any folder. Scoping it too would strip
             // the label from every helper that cd's anywhere, for no gain in honesty.
-            Assert.Equal(
-                TerminalRole.Helper,
-                TerminalRoles.ForDisplay(TerminalRole.Helper, SomeProject, OtherProject));
+            var helper = TerminalRoles.ForDisplay(TerminalRole.Helper, SomeProject, OtherProject, true);
 
+            Assert.Equal(TerminalRole.Helper, helper);
+            Assert.Equal("Nadia - OtherProject (Helper)",
+                TerminalDocument.ComposeTabTitle("Nadia", "OtherProject", helper));
+
+            // And a terminal granted nothing is never granted something by moving.
             Assert.Equal(
                 TerminalRole.None,
-                TerminalRoles.ForDisplay(TerminalRole.None, SomeProject, OtherProject));
+                TerminalRoles.ForDisplay(TerminalRole.None, SomeProject, OtherProject, true));
         }
     }
 }
