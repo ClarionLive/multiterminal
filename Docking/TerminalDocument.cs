@@ -304,12 +304,10 @@ namespace MultiTerminal.Docking
         // what makes "Launch as…" correctly DROP the suffix in step with the env var it also stops setting.
         //
         // Two paths rebuild the title: the CustomTitle setter, and the statusline poll (which repaints
-        // because _projectName has just moved under it). The poll one is the newer of the two.
+        // because _projectName has just moved under it).
         //
-        // Both earlier versions of this comment were false, in opposite directions, and each hid a bug for
-        // exactly as long as it stood: the first claimed the poll rebuilt the title when nothing did, which
-        // is why the stale-role fault read as already-handled; the second said the CustomTitle setter was
-        // the only caller, written in the same commit that added the poll call 3,000 lines below.
+        // Worth stating once: two earlier versions of this comment were false in opposite directions, and
+        // each hid a bug for as long as it stood. Check this sentence against the callers before trusting it.
         private MultiTerminal.Terminal.TerminalRole _terminalRole = MultiTerminal.Terminal.TerminalRole.None;
 
         // The project this terminal was LAUNCHED on, kept so the role can be withdrawn when the agent
@@ -320,9 +318,8 @@ namespace MultiTerminal.Docking
         // moving project name is how a tab ends up reading "Alice - OtherProject (PM)" for a role that
         // was granted somewhere else entirely.
         //
-        // NOT _hudDashboardProjectId: that field is deliberately UPGRADE-ONLY (it absorbs each resolved
-        // id to keep the dashboard scoped, per task e8c6b52f), so it stops being the launch id the moment
-        // the agent cd's anywhere. This one is written by StartTerminal and by nothing else.
+        // Written by StartTerminal and by nothing else — which is exactly what _hudDashboardProjectId is
+        // not, so that field could never have served here. See the note on the pair below.
         private string _launchProjectId;
 
         // The project the agent is in NOW, as the statusline poll last resolved it, and whether that
@@ -334,10 +331,11 @@ namespace MultiTerminal.Docking
         // means "the lookup could not run" (leave the badge alone). Collapsing those is what produced
         // "Alice - Scratch (PM)" — see the ForDisplay doc.
         //
-        // Deliberately NOT _hudDashboardProjectId, which is upgrade-only for a different reason: it keeps a
-        // HUD pane scoped rather than unscoping it into a global feed (task e8c6b52f), so it must never be
-        // downgraded, whereas this pair must faithfully record a departure. They coincide today; they answer
-        // different questions and would diverge the moment either rule changed.
+        // Deliberately NOT _hudDashboardProjectId. That field is UPGRADE-ONLY because a HUD pane must never
+        // be unscoped into a global all-projects feed by an unresolved folder (task e8c6b52f); this pair must
+        // do the opposite and record a departure faithfully, or the badge outlives the project it belongs to.
+        // The two rules have already diverged: on the first poll that resolves no match, _hudDashboardProjectId
+        // keeps its previous id and _currentProjectId goes null.
         private string _currentProjectId;
         private bool _currentProjectKnown;
 
@@ -3491,12 +3489,15 @@ namespace MultiTerminal.Docking
                             }
                             _hudDispatchedFolder = folderForUi;
                             // The tab's project name just moved (above), so the role beside it has to be
-                            // re-judged and REPAINTED — task ad7f6721, pipeline Run 1. Two things were wrong
-                            // before: nothing here rebuilt the title at all (UpdateTabTitle's only caller is
-                            // the CustomTitle setter), so the tab sat stale until the next broker
-                            // re-registration and THEN silently recomposed the old role with the new project
-                            // name. UPGRADE-ONLY like its neighbours above: a null resolution is an
-                            // unregistered folder, not a departure from the launch project.
+                            // re-judged and REPAINTED — task ad7f6721. Nothing here used to rebuild the title
+                            // at all, so the tab sat stale until the next broker re-registration and THEN
+                            // silently recomposed the old role with the new project name.
+                            //
+                            // NOT upgrade-only, unlike the HUD scopes above, and that difference is the point:
+                            // they must never downgrade because an unresolved folder would unscope a pane into
+                            // a global feed (e8c6b52f), whereas this pair has to record a departure faithfully
+                            // or the badge outlives the project it belongs to. A no-match under a registry we
+                            // could actually read IS a departure; only a lookup that never ran leaves it alone.
                             if (projectResolutionRan)
                             {
                                 _currentProjectId = resolvedProjectId;
@@ -3515,6 +3516,11 @@ namespace MultiTerminal.Docking
                             }
                             else
                             {
+                                // Start screen: keep only the status-bar refresh this block always did. It is
+                                // hidden here, so this is inertia rather than need — kept because removing a
+                                // pre-existing call is not this ticket's business. The UpdateTaskHudTerminalName
+                                // that the other branch reaches is deliberately not replicated: it only pushes
+                                // _customTitle, which this action never changes.
                                 UpdateStatusBar();
                             }
                         }
