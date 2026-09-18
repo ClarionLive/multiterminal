@@ -294,6 +294,14 @@ namespace MultiTerminal.Docking
         // Project name for display in tab title (e.g., "Alice - MultiTerminal")
         private string _projectName;
 
+        // What this terminal is to its project, for the tab title only (task ad7f6721):
+        // "Alice - MultiTerminal (PM)", "Nadia - CA Debugger (Helper)". Decided ONCE from the launch
+        // arguments in StartTerminal via the shared TerminalRoles resolver — the same call that decides
+        // the MULTITERMINAL_PROJECT_PM launch variable — and then held, so every later title rebuild
+        // (the late terminal name, a manual rename, a project-name refresh from the statusline poll)
+        // reprints the role instead of re-deriving it from whatever UI state happens to be current.
+        private MultiTerminal.Terminal.TerminalRole _terminalRole = MultiTerminal.Terminal.TerminalRole.None;
+
         // For session restore: working directory to use when starting terminal
         private string _pendingWorkingDirectory;
 
@@ -414,13 +422,30 @@ namespace MultiTerminal.Docking
         private string StatusLineIdentity =>
             !string.IsNullOrEmpty(_originalAgentName) ? _originalAgentName : _customTitle;
 
+        /// <summary>
+        /// The tab's displayed text: <c>Name - Project (Role)</c>, dropping each part that is absent, so a
+        /// terminal with no project and no role still reads exactly as its name (task ad7f6721).
+        ///
+        /// <para>DISPLAY ONLY. It must never feed <see cref="CustomTitle"/> or <c>_originalAgentName</c>:
+        /// those are the identity <c>MainForm</c> matches terminals by and the statusline reads files by
+        /// (ab50355f). The role suffix takes the same display-only path the project name already took.</para>
+        ///
+        /// <para>Pure and static so the composition is testable without a WinForms document.</para>
+        /// </summary>
+        internal static string ComposeTabTitle(string agentName, string projectName, MultiTerminal.Terminal.TerminalRole role)
+        {
+            var title = !string.IsNullOrEmpty(projectName)
+                ? $"{agentName} - {projectName}"
+                : agentName;
+
+            return title + MultiTerminal.Terminal.TerminalRoles.TabSuffix(role);
+        }
+
         private void UpdateTabTitle()
         {
             if (!string.IsNullOrEmpty(_customTitle))
             {
-                var title = !string.IsNullOrEmpty(_projectName)
-                    ? $"{_customTitle} - {_projectName}"
-                    : _customTitle;
+                var title = ComposeTabTitle(_customTitle, _projectName, _terminalRole);
                 _debugLogService?.Trace("TerminalDocument", $"#PROJ# [TerminalDocument.UpdateTabTitle] Instance={InstanceId} DocId='{_docId}' setting Text/TabText='{title}' (customTitle='{_customTitle}' projectName='{_projectName}')");
                 Text = title;
                 TabText = title;
@@ -1193,6 +1218,11 @@ namespace MultiTerminal.Docking
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"projectId: '{projectId ?? "null"}'");
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"isTeamLead: '{isTeamLead}'");
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"_docId: '{_docId}'");
+
+            // The tab's role label, from the SAME resolver that decides MULTITERMINAL_PROJECT_PM for this
+            // launch (task ad7f6721) — so a tab can never advertise a role the session-start hook withheld.
+            _terminalRole = MultiTerminal.Terminal.TerminalRoles.Resolve(projectId, spawnerName);
+            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"terminalRole: '{_terminalRole}'");
 
             // Hide start screen before launching the shell
             HideStartScreen();

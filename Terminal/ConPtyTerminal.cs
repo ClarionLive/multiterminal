@@ -295,9 +295,13 @@ namespace MultiTerminal.Terminal
         /// It uses the same <c>string.IsNullOrEmpty</c> tests as the <c>MULTITERMINAL_PROJECT_ID</c> and
         /// <c>MULTITERMINAL_SPAWNER</c> branches in <see cref="Start"/>; change them together, or a
         /// whitespace-only value would be a project for one variable and not the other.
+        ///
+        /// <para>The decision itself lives in <see cref="TerminalRoles"/> (task ad7f6721), because the tab
+        /// title labels the same role. One resolver, two renderings — a private copy here would let the
+        /// tab say PM for a terminal this method never gave the role to.</para>
         /// </summary>
         internal static string BuildProjectPmEnvAssignment(string projectId, string spawnerName) =>
-            !string.IsNullOrEmpty(projectId) && string.IsNullOrEmpty(spawnerName)
+            TerminalRoles.IsProjectManager(projectId, spawnerName)
                 ? ProjectPmSetAssignment
                 : ProjectPmClearAssignment;
 
