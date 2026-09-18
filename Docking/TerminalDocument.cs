@@ -295,12 +295,37 @@ namespace MultiTerminal.Docking
         private string _projectName;
 
         // What this terminal is to its project, for the tab title only (task ad7f6721):
-        // "Alice - MultiTerminal (PM)", "Nadia - CA Debugger (Helper)". Decided ONCE from the launch
-        // arguments in StartTerminal via the shared TerminalRoles resolver — the same call that decides
-        // the MULTITERMINAL_PROJECT_PM launch variable — and then held, so every later title rebuild
-        // (the late terminal name, a manual rename, a project-name refresh from the statusline poll)
+        // "Alice - MultiTerminal (PM)", "Nadia - CA Debugger (Helper)". Decided PER LAUNCH from the
+        // launch arguments in StartTerminal via the shared TerminalRoles resolver — the same call that
+        // decides the MULTITERMINAL_PROJECT_PM launch variable — and then held, so a later title rebuild
         // reprints the role instead of re-deriving it from whatever UI state happens to be current.
+        //
+        // "Per launch", not "once": StartTerminal reassigns it on every relaunch into this pane, which is
+        // what makes "Launch as…" correctly DROP the suffix in step with the env var it also stops setting.
+        //
+        // The only rebuild path is the CustomTitle setter (UpdateTabTitle has exactly one caller). The
+        // statusline poll does NOT rebuild the title — an earlier version of this comment claimed it did,
+        // and that false claim is precisely what made the scope bug below invisible to readers.
         private MultiTerminal.Terminal.TerminalRole _terminalRole = MultiTerminal.Terminal.TerminalRole.None;
+
+        // The project this terminal was LAUNCHED on, kept so the role can be withdrawn when the agent
+        // walks away from it (task ad7f6721, pipeline Run 1 — found independently by the debugger and
+        // the cross-model adversary). The role is launch-scoped: MULTITERMINAL_PROJECT_PM is fixed in the
+        // child process env at launch and no path rewrites it. _projectName is NOT launch-scoped — the
+        // statusline poll re-resolves it from the agent's current folder. Composing a frozen role with a
+        // moving project name is how a tab ends up reading "Alice - OtherProject (PM)" for a role that
+        // was granted somewhere else entirely.
+        //
+        // NOT _hudDashboardProjectId: that field is deliberately UPGRADE-ONLY (it absorbs each resolved
+        // id to keep the dashboard scoped, per task e8c6b52f), so it stops being the launch id the moment
+        // the agent cd's anywhere. This one is written by StartTerminal and by nothing else.
+        private string _launchProjectId;
+
+        // The project the agent is in NOW, as the statusline poll last resolved it. Seeded from the launch
+        // id, then UPGRADE-ONLY like its neighbours: a null resolution means "unregistered folder", not
+        // "no project", so it is never downgraded. Compared against _launchProjectId by TerminalRoles.ForDisplay
+        // to decide whether the tab may still show "(PM)".
+        private string _currentProjectId;
 
         // For session restore: working directory to use when starting terminal
         private string _pendingWorkingDirectory;
@@ -445,7 +470,11 @@ namespace MultiTerminal.Docking
         {
             if (!string.IsNullOrEmpty(_customTitle))
             {
-                var title = ComposeTabTitle(_customTitle, _projectName, _terminalRole);
+                // ForDisplay, not _terminalRole: the role is launch-scoped but _projectName is not, so the
+                // badge is withdrawn while the agent is somewhere other than the project it manages.
+                var displayedRole = MultiTerminal.Terminal.TerminalRoles.ForDisplay(
+                    _terminalRole, _launchProjectId, _currentProjectId);
+                var title = ComposeTabTitle(_customTitle, _projectName, displayedRole);
                 _debugLogService?.Trace("TerminalDocument", $"#PROJ# [TerminalDocument.UpdateTabTitle] Instance={InstanceId} DocId='{_docId}' setting Text/TabText='{title}' (customTitle='{_customTitle}' projectName='{_projectName}')");
                 Text = title;
                 TabText = title;
@@ -1222,7 +1251,18 @@ namespace MultiTerminal.Docking
             // The tab's role label, from the SAME resolver that decides MULTITERMINAL_PROJECT_PM for this
             // launch (task ad7f6721) — so a tab can never advertise a role the session-start hook withheld.
             _terminalRole = MultiTerminal.Terminal.TerminalRoles.Resolve(projectId, spawnerName);
-            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"terminalRole: '{_terminalRole}'");
+            _launchProjectId = projectId;
+            _currentProjectId = projectId;
+            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"terminalRole: '{_terminalRole}' launchProjectId: '{projectId}'");
+
+            // A pane is reusable: OnTerminalProcessExited and the close-session path both return it to the
+            // start screen, so THIS launch may be the second or third in the same document. The role above
+            // is reassigned unconditionally; _projectName must be too, or the two halves of the tab title
+            // come from different launches. Without this, a relaunch whose project lookup returns null
+            // (the NULL / BROKER DB ID MISMATCH cases logged just below) ALSO skips the folder-name
+            // fallback — its guard is IsNullOrEmpty(_projectName), which the previous project's name
+            // satisfies — and the tab reads "Alice - PreviousProject (PM)" for a session on this one.
+            _projectName = null;
 
             // Hide start screen before launching the shell
             HideStartScreen();
@@ -3417,6 +3457,15 @@ namespace MultiTerminal.Docking
                                 _hudSessions?.SetProject(canonNotesKey);
                             }
                             _hudDispatchedFolder = folderForUi;
+                            // The tab's project name just moved (above), so the role beside it has to be
+                            // re-judged and REPAINTED — task ad7f6721, pipeline Run 1. Two things were wrong
+                            // before: nothing here rebuilt the title at all (UpdateTabTitle's only caller is
+                            // the CustomTitle setter), so the tab sat stale until the next broker
+                            // re-registration and THEN silently recomposed the old role with the new project
+                            // name. UPGRADE-ONLY like its neighbours above: a null resolution is an
+                            // unregistered folder, not a departure from the launch project.
+                            _currentProjectId = resolvedProjectId ?? _currentProjectId;
+                            UpdateTabTitle();
                             UpdateStatusBar();
                         }
                     }));

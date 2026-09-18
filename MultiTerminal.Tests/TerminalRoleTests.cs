@@ -16,7 +16,15 @@ namespace MultiTerminal.Tests
     public class TerminalRoleTests
     {
         private const string SomeProject = "5d7853b8-c695-4684-8f32-dfad644b0669";
-        private const string PmSet = "$env:MULTITERMINAL_PROJECT_PM = 'true'; ";
+        private const string OtherProject = "9f2a1c44-0b73-4e55-8a10-6cc2d9e41b7f";
+
+        // The production const, not a retyped copy of it. Here the string is a DECODER — it answers
+        // "did the launch set PM?" — and is not itself under test (ConPtyTerminalProjectPmTests pins the
+        // literal per case). Retyping it means a harmless change to the const's spacing or casing makes
+        // envSaysPm false for every pair, and the agreement fact below goes red accusing the code of drift
+        // when nothing drifted: the manufactured-failure direction .claude/rules/verification-discipline.md
+        // warns about, in the one test whose whole job is to be believed.
+        private const string PmSet = ConPtyTerminal.ProjectPmSetAssignment;
 
         [Theory]
         [InlineData(null)]
@@ -125,6 +133,86 @@ namespace MultiTerminal.Tests
                         $"launch variable says PM={envSaysPm} but the tab says PM={tabSaysPm}.");
                 }
             }
+        }
+
+        // ---------------------------------------------------------------------------------------------
+        // ForDisplay — withdrawing the badge when the agent walks away from the project it manages.
+        //
+        // Found by the pipeline (Run 1) AFTER the facts above were green, by the debugger and the
+        // cross-model adversary independently. The facts above pin that ONE rule decides the role; they
+        // cannot see this, because the tab is composed from TWO values and only the role was launch-scoped.
+        // _projectName keeps moving — the statusline poll re-resolves it from the agent's current folder —
+        // so a frozen role beside a moving project name eventually reads "Alice - OtherProject (PM)".
+        // ---------------------------------------------------------------------------------------------
+
+        [Fact]
+        public void A_PM_who_walks_into_another_project_stops_being_labelled_its_PM()
+        {
+            // The defect, stated as the thing that must not happen: PM of SomeProject, agent now in
+            // OtherProject. MULTITERMINAL_PROJECT_PM still says true — it is fixed in the child env at
+            // launch — so the tab is the ONLY thing that can stop over-claiming here.
+            Assert.Equal(
+                TerminalRole.None,
+                TerminalRoles.ForDisplay(TerminalRole.ProjectManager, SomeProject, OtherProject));
+
+            Assert.Equal(
+                "Alice - OtherProject",
+                TerminalDocument.ComposeTabTitle("Alice", "OtherProject",
+                    TerminalRoles.ForDisplay(TerminalRole.ProjectManager, SomeProject, OtherProject)));
+        }
+
+        [Fact]
+        public void A_PM_still_in_its_own_project_keeps_the_badge()
+        {
+            // Including the worktree case, which is the normal state of an active-task terminal: the poll
+            // resolves a worktree under .claude\worktrees\ to its containing registered project, so the
+            // current id EQUALS the launch id and nothing is withdrawn. Getting this wrong would strip
+            // "(PM)" from most real PM terminals.
+            Assert.Equal(
+                TerminalRole.ProjectManager,
+                TerminalRoles.ForDisplay(TerminalRole.ProjectManager, SomeProject, SomeProject));
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        public void An_unresolved_folder_is_not_evidence_of_leaving(string unresolved)
+        {
+            // House rule, shared with every other consumer of this resolution (task e8c6b52f): a null
+            // means "folder not matched to a registered project", NOT "no project". Withdrawal needs
+            // POSITIVE evidence. This is load-bearing rather than tidy: the poll only re-runs when the
+            // folder CHANGES, so a badge dropped on a transient null would stay dropped until the agent
+            // happened to cd somewhere else.
+            Assert.Equal(
+                TerminalRole.ProjectManager,
+                TerminalRoles.ForDisplay(TerminalRole.ProjectManager, SomeProject, unresolved));
+        }
+
+        [Fact]
+        public void Walking_back_into_the_project_restores_the_badge()
+        {
+            // ForDisplay is derived, never destructive — _terminalRole still holds what the launch granted.
+            // A one-way "set the role to None on departure" would look identical in the test above and
+            // leave the tab permanently unlabelled for the rest of the session.
+            var launched = TerminalRoles.Resolve(SomeProject, null);
+
+            Assert.Equal(TerminalRole.None, TerminalRoles.ForDisplay(launched, SomeProject, OtherProject));
+            Assert.Equal(TerminalRole.ProjectManager, TerminalRoles.ForDisplay(launched, SomeProject, SomeProject));
+        }
+
+        [Fact]
+        public void A_helper_keeps_its_label_wherever_it_goes()
+        {
+            // Only PM is project-scoped, because only PM is a claim ABOUT the named project. "(Helper)"
+            // says who spawned this terminal, which stays true in any folder. Scoping it too would strip
+            // the label from every helper that cd's anywhere, for no gain in honesty.
+            Assert.Equal(
+                TerminalRole.Helper,
+                TerminalRoles.ForDisplay(TerminalRole.Helper, SomeProject, OtherProject));
+
+            Assert.Equal(
+                TerminalRole.None,
+                TerminalRoles.ForDisplay(TerminalRole.None, SomeProject, OtherProject));
         }
     }
 }

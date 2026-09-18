@@ -69,5 +69,41 @@ namespace MultiTerminal.Terminal
         /// </summary>
         internal static bool IsProjectManager(string projectId, string spawnerName) =>
             Resolve(projectId, spawnerName) == TerminalRole.ProjectManager;
+
+        /// <summary>
+        /// The role a tab may actually SHOW, given the project it is currently naming.
+        ///
+        /// <para><see cref="Resolve"/> answers "what was this terminal granted at launch", and that answer
+        /// never changes — <c>MULTITERMINAL_PROJECT_PM</c> is fixed in the child process env at launch and
+        /// nothing rewrites it. But the project NAME beside the role does change: the statusline poll
+        /// re-resolves it from the agent's current folder. Composing a launch-scoped role with a
+        /// current-workspace project name is how a tab comes to read <c>"Alice - OtherProject (PM)"</c> for
+        /// authority granted somewhere else entirely — the very "tab claims a role the hook withheld"
+        /// failure this class exists to prevent, reached from the other side (task ad7f6721, pipeline Run 1;
+        /// found independently by the debugger and the cross-model adversary gates).</para>
+        ///
+        /// <para>Only <see cref="TerminalRole.ProjectManager"/> is project-scoped, because only it is a claim
+        /// ABOUT the named project. <see cref="TerminalRole.Helper"/> is a fact about who spawned this
+        /// terminal, which stays true wherever the agent walks, so it is returned unchanged.</para>
+        ///
+        /// <para>Withdrawal requires POSITIVE evidence: an empty <paramref name="currentProjectId"/> means
+        /// "folder not resolved to a registered project", NOT "no project", and keeps the role. That is the
+        /// same UPGRADE-ONLY rule every other consumer of that resolution follows (task e8c6b52f) — and it
+        /// matters here because the poll only re-runs when the folder CHANGES, so a badge dropped on a
+        /// transient null would stay dropped. Being derived rather than destructive also makes it
+        /// symmetric: walk back into the launch project and the badge returns.</para>
+        /// </summary>
+        internal static TerminalRole ForDisplay(TerminalRole launchRole, string launchProjectId, string currentProjectId)
+        {
+            if (launchRole != TerminalRole.ProjectManager)
+                return launchRole;
+
+            if (string.IsNullOrEmpty(currentProjectId))
+                return launchRole;
+
+            return string.Equals(currentProjectId, launchProjectId, System.StringComparison.Ordinal)
+                ? launchRole
+                : TerminalRole.None;
+        }
     }
 }
