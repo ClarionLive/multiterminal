@@ -309,6 +309,68 @@ namespace MultiTerminal.Terminal
         internal const string ProjectPmClearAssignment = "$env:MULTITERMINAL_PROJECT_PM = $null; ";
 
         /// <summary>
+        /// The longest session name Claude Code accepts. A name at this cap was once rejected by
+        /// <c>SendMessage</c> even when copied straight out of <c>ListAgents</c> (CLI 2.1.234).
+        /// </summary>
+        internal const int MaxSessionNameLength = 200;
+
+        /// <summary>
+        /// Adds <c>-n '&lt;terminalName&gt;'</c> to a Claude Code launch so the agent's MT name IS the address
+        /// other sessions message it by (task 0ff1b520). Returns <paramref name="autoRunCommand"/> unchanged
+        /// when the name cannot be used verbatim, or when the command is not a Claude launch.
+        ///
+        /// <para>WHY HERE, AND NOT IN <c>LaunchCommandBuilder</c>. The name does not exist when the command is
+        /// built: <c>MainForm.OnStartScreenJustClaude</c> calls <c>BuildClaudeCommand(null)</c> BEFORE
+        /// <c>IdentityPickerDialog</c> runs, and consumes the returned working directory as that picker's
+        /// fallback folder, so the call cannot simply move later. <see cref="StartProcess"/> is the one place
+        /// that holds BOTH the command and the chosen name, and every launch path funnels through it —
+        /// including the hand-rolled sites <c>ChannelFlagContractTests</c> exists to police, which is the
+        /// point: a site that forgets a flag cannot forget this one.</para>
+        ///
+        /// <para>NEVER EMIT A NAME THAT DIFFERS FROM <c>MULTITERMINAL_NAME</c>. Truncating an over-long name,
+        /// or rewriting an unusable one, would make a terminal answer to an address its board identity does not
+        /// use — the same two-values-drifting-apart fault <see cref="TerminalRoles"/> was extracted to prevent,
+        /// reached from the other side. So an unusable name skips the flag entirely and is logged: an
+        /// unaddressable terminal is a visible gap, while a silently renamed one routes real messages to the
+        /// wrong place. A leading <c>/</c> is refused for the same reason — such names were unaddressable and
+        /// displayed as "(untitled)" before CLI 2.1.239, so the name would not be the address even though we
+        /// asked for it.</para>
+        /// </summary>
+        /// <param name="autoRunCommand">The launch command, e.g. <c>claude --mcp-config … ; exit</c>.</param>
+        /// <param name="terminalName">The agent's MT name, exactly as <c>MULTITERMINAL_NAME</c> receives it.</param>
+        internal static string ApplySessionName(string autoRunCommand, string terminalName)
+        {
+            if (string.IsNullOrEmpty(autoRunCommand) || string.IsNullOrEmpty(terminalName))
+                return autoRunCommand;
+
+            if (!IsClaudeLaunch(autoRunCommand))
+                return autoRunCommand;
+
+            // Refuse rather than repair — see the drift note above.
+            if (terminalName.Length > MaxSessionNameLength || terminalName.StartsWith('/'))
+                return autoRunCommand;
+
+            string safeName = terminalName.Replace("'", "''");
+            int claudeTokenEnd = autoRunCommand.IndexOf("claude", StringComparison.Ordinal) + "claude".Length;
+            return autoRunCommand.Insert(claudeTokenEnd, $" -n '{safeName}'");
+        }
+
+        /// <summary>
+        /// True when the command's FIRST token is exactly <c>claude</c>. Deliberately not a
+        /// <c>Contains("claude")</c>: the Codex launch resolves paths that can contain the word, and a
+        /// substring match would splice a Claude-only flag into a Codex command line.
+        /// </summary>
+        private static bool IsClaudeLaunch(string autoRunCommand)
+        {
+            string trimmed = autoRunCommand.TrimStart();
+            if (!trimmed.StartsWith("claude", StringComparison.Ordinal))
+                return false;
+
+            // "claude" alone, or followed by a separator — never "claudette".
+            return trimmed.Length == "claude".Length || !char.IsLetterOrDigit(trimmed["claude".Length]);
+        }
+
+        /// <summary>
         /// Redacts the <c>MULTITERMINAL_LAUNCH_NONCE</c> assignment from a launch command line before it
         /// is written to <see cref="DebugLogService"/> (task fd3437e6). The launch nonce is a live secret;
         /// debug-log output is readable by agents via the <c>debug_logs</c> MCP tool, so logging the raw
@@ -560,7 +622,24 @@ namespace MultiTerminal.Terminal
             string autoRun = "";
             if (!string.IsNullOrEmpty(autoRunCommand))
             {
-                autoRun = $"; {autoRunCommand}";
+                // Name the Claude session after the agent, so the MT name IS the address peers use
+                // (task 0ff1b520). Applied here because this is the only place holding both the
+                // command and the chosen name — see ApplySessionName for why not LaunchCommandBuilder.
+                string namedCommand = ApplySessionName(autoRunCommand, terminalName);
+                if (!string.Equals(namedCommand, autoRunCommand, StringComparison.Ordinal))
+                {
+                    DebugLogService?.Trace("ConPtyTerminal", $"Naming Claude session -n '{terminalName}'");
+                }
+                else if (!string.IsNullOrEmpty(terminalName) && IsClaudeLaunch(autoRunCommand))
+                {
+                    // Refused rather than repaired: the name would not have survived verbatim, and an
+                    // address that differs from MULTITERMINAL_NAME is worse than none.
+                    DebugLogService?.Trace(
+                        "ConPtyTerminal",
+                        $"NOT naming Claude session - terminalName unusable verbatim (length {terminalName.Length}, leading slash {terminalName.StartsWith('/')})");
+                }
+
+                autoRun = $"; {namedCommand}";
             }
             else
             {
