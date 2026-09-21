@@ -144,6 +144,11 @@ namespace MultiTerminal.API
                 builder.Services.AddSingleton(_poolCoordinator);
                 builder.Services.AddSingleton(_spawnService);
                 builder.Services.AddSingleton<TerminalStreamService>();
+
+                // Ticket 0ff1b520 item 3. Singleton because it IS the storage: the credentials live
+                // in this object and nowhere else — no table, no file. A scoped registration would
+                // quietly hand each request an empty store and every lookup would miss.
+                builder.Services.AddSingleton<MessagingCredentialStore>();
                 // SessionDatabase removed — sessions now stored in multiterminal.db via SessionLineageService
                 builder.Services.AddSingleton<PlanDatabase>();
                 builder.Services.AddSingleton<TaskDatabase>();

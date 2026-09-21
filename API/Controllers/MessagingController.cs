@@ -13,10 +13,12 @@ namespace MultiTerminal.API.Controllers
     public class MessagingController : ControllerBase
     {
         private readonly MessageBroker _broker;
+        private readonly MessagingCredentialStore _credentials;
 
-        public MessagingController(MessageBroker broker)
+        public MessagingController(MessageBroker broker, MessagingCredentialStore credentials)
         {
             _broker = broker;
+            _credentials = credentials;
         }
 
         /// <summary>
@@ -141,8 +143,56 @@ namespace MultiTerminal.API.Controllers
             if (string.IsNullOrEmpty(request?.Name))
                 return Problem(detail: "Name is required", statusCode: 400);
 
+            // Ticket 0ff1b520 item 3: a session's ingress credential dies with the session. Clearing
+            // rides THIS path rather than getting its own endpoint, because this is the call the
+            // SessionEnd hook already makes and has made for a long time — a second lifecycle that
+            // something must remember to call is a lifecycle that will eventually not be called.
+            // Ticket 0ff1b520 item 3: a session's ingress credential dies with the session. Clearing
+            // rides THIS path rather than getting its own endpoint, because this is the call the
+            // SessionEnd hook already makes and has made for a long time — a second lifecycle that
+            // something must remember to call is a lifecycle that will eventually not be called.
+            //
+            // Targeted, never ClearAll: demonstrated 2026-09-21 by swapping in ClearAll and watching
+            // ONLY MessagingCredentialStoreTests.Disconnecting_one_terminal_leaves_the_others_alone
+            // go red. A blanket clear passes the obvious test and cuts every other terminal's ingress
+            // each time any one session ends.
+            _credentials.Clear(request.Name);
+
             _broker.DisconnectTerminalByName(request.Name);
             return Ok(new { name = request.Name });
+        }
+
+        /// <summary>
+        /// Records a terminal's Claude Code cross-session messaging ingress, posted by the
+        /// SessionStart hook (ticket 0ff1b520, item 3).
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The body carries a CREDENTIAL. It is held in memory only and never persisted — see
+        /// <see cref="MessagingCredentialStore"/> for why persisting it would be strictly worse than
+        /// useless. The response deliberately echoes nothing back but the name and a boolean: a
+        /// handler that returns what it just stored is the easiest way for a secret to end up in a
+        /// client log nobody was thinking about.
+        /// </para>
+        /// <para>
+        /// Validation is intentionally minimal here because the hook already refuses malformed values
+        /// at the source, where the environment is visible. This end checks only that the fields are
+        /// present, so that a future non-hook caller cannot store blanks.
+        /// </para>
+        /// </remarks>
+        [HttpPost("credentials")]
+        public IActionResult StoreMessagingCredentials([FromBody] StoreMessagingCredentialsRequest request)
+        {
+            if (string.IsNullOrWhiteSpace(request?.Name))
+                return Problem(detail: "Name is required", statusCode: 400);
+            if (string.IsNullOrWhiteSpace(request.Socket) || string.IsNullOrWhiteSpace(request.Token))
+                return Problem(detail: "Socket and token are required", statusCode: 400);
+
+            bool stored = _credentials.Store(request.Name, request.SessionId, request.Socket, request.Token);
+            if (!stored)
+                return Problem(detail: "Credentials could not be stored", statusCode: 400);
+
+            return Ok(new { name = request.Name, stored = true });
         }
 
         /// <summary>
@@ -250,6 +300,21 @@ namespace MultiTerminal.API.Controllers
     public class DisconnectTerminalRequest
     {
         public string Name { get; set; }
+    }
+
+    /// <summary>
+    /// Body of <c>POST /api/messaging/credentials</c> (ticket 0ff1b520, item 3).
+    /// <see cref="Token"/> is a credential — do not log this object, and do not echo it back.
+    /// </summary>
+    public class StoreMessagingCredentialsRequest
+    {
+        public string Name { get; set; }
+
+        public string SessionId { get; set; }
+
+        public string Socket { get; set; }
+
+        public string Token { get; set; }
     }
 
     public class UploadMessageImagesRequest
