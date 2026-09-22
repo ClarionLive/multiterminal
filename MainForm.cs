@@ -4927,11 +4927,18 @@ namespace MultiTerminal
             if (doc != null && doc.IsRendererReady)
             {
                 // Wait for Claude Code to finish showing its banner and prompt before injecting.
-                // Detection fires when "Claude Code" appears in output, but the input prompt
+                // Detection fires on the version-anchored banner (ClaudeStartupDetector), but the input prompt
                 // may not be ready yet. Wait 1.5s for the prompt to appear.
                 await Task.Delay(1500);
                 _debugLogService?.Trace("MainForm", "Post-detection delay complete, injecting 'initializing...' via TypeInput");
                 doc.TypeInput("initializing...", "cr", 20);
+            }
+            else
+            {
+                // Previously a silent skip: the pane then sits on its banner exactly as it does when
+                // the banner is never detected, and the log could not tell the two apart (task 00cdd389).
+                _debugLogService?.Warning("MainForm",
+                    $"Claude Code detected but 'initializing...' NOT injected: {(doc == null ? "sender is not a TerminalDocument" : "renderer not ready")}");
             }
         }
 
@@ -5321,7 +5328,7 @@ namespace MultiTerminal
 
             // Auto-initialization is handled by OnClaudeCodeDetected when Claude Code's output is detected.
             // This ensures injection happens AFTER Claude Code is ready, not just after WebView2 loads.
-            // The _claudeCodeDetectedThisSession flag is reset in TerminalControl.DoStart() so the event fires for restarted terminals.
+            // TerminalControl.DoStart() resets its ClaudeStartupDetector so the event fires for restarted terminals.
             _debugLogService?.Trace("MainForm.OnLaunchAsIdentityRequested", $"Terminal restarted for {terminalName}, waiting for Claude Code detection to auto-inject");
         }
 

@@ -67,35 +67,6 @@ namespace MultiTerminal.Controls
         }
 
         /// <summary>
-        /// Normalizes raw terminal output for robust phrase matching: strips ANSI escapes,
-        /// folds every non-alphanumeric character (box-drawing borders, punctuation, newlines
-        /// from TUI wrapping) to a single space, lowercases, and collapses runs of spaces.
-        /// This lets a plain substring match survive the colored, box-wrapped rendering of the
-        /// dev-channel warning, which previously broke literal Contains() checks.
-        /// </summary>
-        private static string NormalizeForMatch(string s)
-        {
-            if (string.IsNullOrEmpty(s)) return string.Empty;
-            string noAnsi = AnsiEscapeRegex.Replace(s, string.Empty);
-            var sb = new StringBuilder(noAnsi.Length);
-            foreach (char c in noAnsi)
-            {
-                sb.Append(char.IsLetterOrDigit(c) ? char.ToLowerInvariant(c) : ' ');
-            }
-            return Regex.Replace(sb.ToString(), " +", " ");
-        }
-
-        /// <summary>
-        /// Escapes control bytes so a raw buffer can be written to a single trace line.
-        /// Used for the one-time dev-channel ground-truth dump.
-        /// </summary>
-        private static string EscapeForLog(string s)
-        {
-            if (string.IsNullOrEmpty(s)) return string.Empty;
-            return s.Replace("\x1B", "\\x1b").Replace("\r", "\\r").Replace("\n", "\\n").Replace("\t", "\\t");
-        }
-
-        /// <summary>
         /// Event fired when the terminal process exits.
         /// </summary>
         public event EventHandler ProcessExited;
@@ -249,11 +220,9 @@ namespace MultiTerminal.Controls
 
         private void DoStart(string workingDirectory, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string launchNonce = null)
         {
-            // Reset Claude Code detection so the event fires again for this new session
-            _claudeCodeDetectedThisSession = false;
-            _devChannelWarningHandled = false;
-            _rawBufferDumped = false;
-            _outputBuffer.Clear();
+            // Reset Claude Code detection so the event fires again for this new session. Only a pane
+            // whose launch command starts Claude is armed now; a plain shell arms when `claude` is typed.
+            _startupDetector.Reset(ClaudeStartupDetector.IsClaudeLaunchLine(autoRunCommand));
 
             // Use size from renderer. Trust xterm.js as the source of truth — the post-fit
             // `ready` message has already populated VisibleCols/VisibleRows by the time
@@ -617,17 +586,7 @@ namespace MultiTerminal.Controls
         /// </summary>
         public event EventHandler ClaudeCodeDetected;
 
-        private bool _claudeCodeDetectedThisSession = false;
-        private bool _devChannelWarningHandled = false;
-        private bool _rawBufferDumped = false;
-        private StringBuilder _outputBuffer = new StringBuilder();
-
-        // Matches ANSI/VT escape sequences (CSI, OSC, and single-char escapes) so detection
-        // works against the visible text, not the styled byte stream. Claude Code draws the
-        // dev-channel warning as a colored TUI box, so the raw buffer is full of escapes that
-        // split phrases like "Loading development channels" across non-printing bytes.
-        private static readonly Regex AnsiEscapeRegex =
-            new Regex(@"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))", RegexOptions.Compiled);
+        private readonly ClaudeStartupDetector _startupDetector = new ClaudeStartupDetector();
 
         // Slash command interception: buffer user input to detect commands like /clear
         private readonly StringBuilder _inputLineBuffer = new StringBuilder();
@@ -671,6 +630,9 @@ namespace MultiTerminal.Controls
                     {
                         string line = _inputLineBuffer.ToString().Trim();
                         _inputLineBuffer.Clear();
+
+                        string disarmLog = _startupDetector.NotifyLineSubmitted(line);
+                        if (disarmLog != null) LogTrace(disarmLog);
 
                         if (line.Equals("/clear", StringComparison.OrdinalIgnoreCase))
                         {
@@ -867,55 +829,32 @@ namespace MultiTerminal.Controls
             _renderer?.WriteToTerminal(data);
 
             // Startup detection (Claude Code banner + dev-channel warning) scans the
-            // ACCUMULATED output buffer, NOT the current chunk. ConPTY delivers output in
-            // ~16ms batches (ConPtyTerminal.FlushOutputQueue), so the warning — drawn across a
-            // multi-line TUI box — routinely straddles two chunks. Matching a single chunk misses
-            // it intermittently; matching the buffer does not. The buffer is also NORMALIZED
-            // (ANSI escapes stripped, box-drawing/punctuation folded to spaces) before matching,
-            // because Claude Code 2.1.x renders the warning as a colored box and the literal
-            // bytes split phrases across escapes — the previous raw Contains() never matched, so
-            // detection silently never fired. The dev-channel check runs BEFORE the Claude Code
-            // check so the latter's buffer-clear can't wipe the warning text within one call.
-            if (!_claudeCodeDetectedThisSession || !_devChannelWarningHandled)
+            // ACCUMULATED output buffer, NOT the current chunk: ConPTY delivers output in ~16ms
+            // batches (ConPtyTerminal.FlushOutputQueue), so a multi-line TUI box routinely
+            // straddles two chunks. Matching rules, buffer bounds and when detection stops all
+            // live in ClaudeStartupDetector (task 00cdd389).
+            if (_startupDetector.IsWatching)
             {
                 try
                 {
-                    _outputBuffer.Append(System.Text.Encoding.UTF8.GetString(data));
+                    StartupScan scan = _startupDetector.Append(System.Text.Encoding.UTF8.GetString(data));
 
-                    // Keep buffer from growing too large
-                    if (_outputBuffer.Length > 2000)
+                    if (scan.DevChannelDumpRaw != null)
                     {
-                        _outputBuffer.Remove(0, _outputBuffer.Length - 1000);
+                        LogTrace("Dev-channel RAW buffer (escaped, redacted): " + scan.DevChannelDumpRaw);
                     }
 
-                    string buffer = _outputBuffer.ToString();
-                    string normalized = NormalizeForMatch(buffer);
-
-                    // One-time ground-truth dump: the first time "development" appears in the
-                    // normalized stream, log the raw (escaped) and normalized buffer so the exact
-                    // warning wording can be recovered from the trace if the anchors below still
-                    // miss on a future Claude Code version — no more guessing at the prompt text.
-                    if (!_rawBufferDumped && normalized.Contains("development"))
+                    if (scan.DisarmLog != null)
                     {
-                        _rawBufferDumped = true;
-                        LogTrace("Dev-channel RAW buffer (escaped): " + EscapeForLog(buffer));
-                        LogTrace("Dev-channel NORMALIZED buffer: " + normalized);
+                        LogTrace(scan.DisarmLog);
                     }
 
                     // Auto-accept the dev-channel warning dialog. The menu's option 1 is
                     // "I am using this for local development"; the user confirmed pressing the
                     // digit '1' selects-and-proceeds reliably (a bare Enter was dropped
-                    // intermittently before Claude's raw-mode prompt was ready). Anchors are
-                    // matched against the NORMALIZED buffer and ordered most- to least-specific;
-                    // the older "loading development channels" / "enter to confirm" strings are
-                    // kept as fallbacks.
-                    if (!_devChannelWarningHandled &&
-                        (normalized.Contains("for local development") ||
-                         normalized.Contains("loading development channels") ||
-                         normalized.Contains("development channels") ||
-                         normalized.Contains("enter to confirm")))
+                    // intermittently before Claude's raw-mode prompt was ready).
+                    if (scan.DevChannelWarning)
                     {
-                        _devChannelWarningHandled = true;
                         LogTrace("Dev-channel warning detected in normalized output buffer — auto-accepting by sending '1'");
                         System.Threading.Tasks.Task.Run(async () =>
                         {
@@ -935,14 +874,9 @@ namespace MultiTerminal.Controls
                         });
                     }
 
-                    // Detect Claude Code startup (only once per session to avoid spam)
-                    if (!_claudeCodeDetectedThisSession &&
-                        (buffer.Contains("Claude Code") ||
-                         buffer.Contains("claude-code") ||
-                         (buffer.Contains("╭─") && buffer.Contains("Tips"))))
+                    if (scan.BannerAnchor != null)
                     {
-                        _claudeCodeDetectedThisSession = true;
-                        _outputBuffer.Clear();
+                        LogTrace("Claude Code banner detected (" + scan.BannerAnchor + ")");
                         ClaudeCodeDetected?.Invoke(this, EventArgs.Empty);
                     }
                 }
