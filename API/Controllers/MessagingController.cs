@@ -147,10 +147,6 @@ namespace MultiTerminal.API.Controllers
             // rides THIS path rather than getting its own endpoint, because this is the call the
             // SessionEnd hook already makes and has made for a long time — a second lifecycle that
             // something must remember to call is a lifecycle that will eventually not be called.
-            // Ticket 0ff1b520 item 3: a session's ingress credential dies with the session. Clearing
-            // rides THIS path rather than getting its own endpoint, because this is the call the
-            // SessionEnd hook already makes and has made for a long time — a second lifecycle that
-            // something must remember to call is a lifecycle that will eventually not be called.
             //
             // Targeted, never ClearAll: demonstrated 2026-09-21 by swapping in ClearAll and watching
             // ONLY MessagingCredentialStoreTests.Disconnecting_one_terminal_leaves_the_others_alone
