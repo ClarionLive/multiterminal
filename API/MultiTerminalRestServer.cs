@@ -145,10 +145,12 @@ namespace MultiTerminal.API
                 builder.Services.AddSingleton(_spawnService);
                 builder.Services.AddSingleton<TerminalStreamService>();
 
-                // Ticket 0ff1b520 item 3. Singleton because it IS the storage: the credentials live
-                // in this object and nowhere else — no table, no file. A scoped registration would
-                // quietly hand each request an empty store and every lookup would miss.
-                builder.Services.AddSingleton<MessagingCredentialStore>();
+                // Ticket 0ff1b520 items 3-4. Register the BROKER'S INSTANCE, never the type: the
+                // credentials live in that object and nowhere else — no table, no file — and
+                // MainForm's delivery callback reads the same one. Letting the container construct
+                // its own would give the controller an empty store whose misses look exactly like
+                // "no credentials yet", which is the normal state and therefore invisible.
+                builder.Services.AddSingleton(_broker.MessagingCredentials);
                 // SessionDatabase removed — sessions now stored in multiterminal.db via SessionLineageService
                 builder.Services.AddSingleton<PlanDatabase>();
                 builder.Services.AddSingleton<TaskDatabase>();
