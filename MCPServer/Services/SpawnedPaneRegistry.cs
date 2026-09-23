@@ -28,8 +28,17 @@ namespace MultiTerminal.MCPServer.Services
         // Keyed by the helper's DocId, which MT mints per pane: exact by decision, not by default.
         private readonly Dictionary<string, Entry> _byHelperDocId = new(StringComparer.Ordinal);
 
-        /// <summary>One spawned helper pane and the proof of the pane that spawned it.</summary>
-        public readonly record struct Entry(string HelperDocId, string HelperName, string SpawnerDocId, string SpawnerNonce);
+        /// <summary>
+        /// One spawned helper pane and the proof of the pane that spawned it. <c>ToString</c> leaves out
+        /// <see cref="SpawnerNonce"/>: the generated one prints every field, and the nonce is a secret, so
+        /// logging an entry would otherwise write it to the agent-readable debug log (pipeline Run 2).
+        /// </summary>
+        public readonly record struct Entry(string HelperDocId, string HelperName, string SpawnerDocId, string SpawnerNonce)
+        {
+            /// <inheritdoc/>
+            public override string ToString()
+                => $"Entry {{ HelperDocId = {HelperDocId}, HelperName = {HelperName}, SpawnerDocId = {SpawnerDocId} }}";
+        }
 
         /// <summary>Number of helper panes currently recorded.</summary>
         public int Count

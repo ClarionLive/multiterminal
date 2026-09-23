@@ -138,6 +138,15 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void An_entry_never_prints_the_spawners_nonce()
+        {
+            var entry = new SpawnedPaneRegistry.Entry(HelperDocId, "Bob", PmDocId, PmNonce);
+
+            Assert.DoesNotContain(PmNonce, entry.ToString(), StringComparison.Ordinal);
+            Assert.Contains(HelperDocId, entry.ToString(), StringComparison.Ordinal);
+        }
+
+        [Fact]
         public void A_spawner_that_leaves_takes_its_entries_with_it()
         {
             var reg = new SpawnedPaneRegistry();
