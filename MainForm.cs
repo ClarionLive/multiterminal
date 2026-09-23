@@ -7845,9 +7845,9 @@ namespace MultiTerminal
             }
             try
             {
-                // Regenerate both global and project-level MCP configs.
-                // Global config goes to ~/.claude/.mcp.json (available in all sessions).
-                // Project config goes to {sourcePath}/.mcp.json (project-specific servers).
+                // Syncs the project's gateway profile and REMOVES any stale {sourcePath}/.mcp.json
+                // (backed up to .mcp.json.bak). It writes no MCP config: core servers reach every
+                // terminal through %APPDATA%\multiterminal\.mcp.json via --mcp-config (CentralMcpConfig).
                 _mcpConfigService.EnsureMcpConfigsForProject(args.ProjectId, args.SourcePath);
                 _projectPanel?.NotifyMcpJsonWriteResult(true);
             }

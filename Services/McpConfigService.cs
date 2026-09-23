@@ -58,9 +58,10 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Writes .mcp.json (multiterminal + mcp-gateway) to the project's source path.
-        /// Creates a .mcp.json.bak backup of any existing file.
-        /// When GatewayService is available, syncs the project's gateway profile first.
+        /// Despite the name, writes no .mcp.json. Syncs the project's gateway profile (when the gateway
+        /// is installed), then REMOVES any stale .mcp.json at the project's source path, backing it up
+        /// to .mcp.json.bak. Core servers come from the launch-time --mcp-config file instead
+        /// (<see cref="CentralMcpConfig"/>). Returns the path the removed file had.
         /// </summary>
         public string WriteMcpJsonToProject(string projectId, string sourcePath = null, string projectName = null)
         {
