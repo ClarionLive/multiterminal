@@ -1952,7 +1952,8 @@ namespace MultiTerminal
         /// ✕ and its "Close" menu item do, so OnDockContentRemoved runs the same teardown: unregister,
         /// drop from the doc map, kill the process tree. Searches <c>Contents</c>, not <c>Documents</c>,
         /// because Documents leaves out a floated terminal and a floated helper must still be closable.
-        /// Returns whether a pane with that DocId was open.
+        /// Returns whether a pane with that DocId was open; throws if it was open but is not out of the
+        /// dock and disposed afterwards, so close_helper never reports a close that did not happen.
         /// </summary>
         private async Task<bool> OnSpawnedPaneCloseRequested(string docId)
         {
@@ -1969,6 +1970,17 @@ namespace MultiTerminal
                     found = true;
                     _debugLogService?.Info("MainForm", $"close_helper: closing pane docId={docId} name='{doc.CustomTitle}' (task 7f389704)");
                     doc.Close();
+
+                    // Pipeline Run 1 (Codex adversary): do not report "closed" on the strength of Close()
+                    // alone. OnDockContentRemoved only QUEUES the Dispose that kills the process tree, so
+                    // do it here, synchronously; Dispose is idempotent and the queued one re-checks
+                    // IsDisposed. Then require the teardown to be visible: out of the dock and disposed.
+                    // Anything else throws, which the controller reports as a 500, not a success.
+                    if (!doc.IsDisposed)
+                        doc.Dispose();
+
+                    if (doc.DockPanel != null || !doc.IsDisposed)
+                        throw new InvalidOperationException($"Pane {docId} did not close (still docked: {doc.DockPanel != null}, disposed: {doc.IsDisposed}).");
                 }));
             });
             return found;
@@ -5335,8 +5347,10 @@ namespace MultiTerminal
                 _mcpServer.Broker.UnregisterTerminal(doc.DocId);
             }
 
-            // A closed helper can never be matched by close_helper again, whoever closed it (task 7f389704).
+            // A closed helper can never be matched by close_helper again, whoever closed it; and a closed
+            // SPAWNER keeps no power over the helpers it spawned (task 7f389704, pipeline Run 1).
             _mcpServer?.SpawnService?.Panes.Forget(doc.DocId);
+            _mcpServer?.SpawnService?.Panes.ForgetSpawner(doc.DocId);
 
             // Drop it from the terminal -> doc map.
             lock (_terminalDocMapLock)

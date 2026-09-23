@@ -3521,6 +3521,33 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// The connected row for the PANE this launch nonce belongs to: like
+        /// <see cref="GetConnectedTerminalByLaunchNonce"/>, but only rows that carry a DocId.
+        ///
+        /// <para><b>Why a second method (task 7f389704, pipeline debugger).</b> Everything in a pane shares
+        /// its environment, so a subagent or a re-registration under another name presents the pane's
+        /// DocId AND nonce. The broker rejects the DocId claim and mints a fresh row with DocId cleared,
+        /// but that row still records the nonce it was shown. Two connected rows then share one nonce,
+        /// and the unfiltered lookup's FirstOrDefault over a ConcurrentDictionary returns either. For a
+        /// caller that needs the pane (spawn attribution, close_helper, job collection) the DocId-less
+        /// row is the wrong answer, and it failed those callers closed at random.</para>
+        ///
+        /// <para>Not folded into the original method: its other caller, the GitHub token mint, uses the
+        /// row for attribution too, and changing which row it attributes to is outside this ticket.</para>
+        /// </summary>
+        public TerminalInfo GetConnectedPaneByLaunchNonce(string nonce)
+        {
+            if (string.IsNullOrEmpty(nonce)) return null;
+
+            return _terminals.Values.FirstOrDefault(t =>
+                t != null
+                && t.IsConnected
+                && !string.IsNullOrEmpty(t.DocId)
+                && !string.IsNullOrEmpty(t.LaunchNonce)
+                && string.Equals(t.LaunchNonce, nonce, StringComparison.Ordinal));
+        }
+
+        /// <summary>
         /// Get all registered terminals that are reachable: connected, not a temporary subagent,
         /// with an online profile, and whose owner process is not PROVABLY dead. The Dead-only rule
         /// (and why Unknown must stay listed) is explained inline below.

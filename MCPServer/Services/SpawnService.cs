@@ -67,7 +67,8 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                return (false, $"Close failed: {ex.Message}");
+                // MainForm closes inside Control.Invoke, which wraps what the close threw.
+                return (false, $"Close failed: {(ex.InnerException ?? ex).Message}");
             }
         }
 

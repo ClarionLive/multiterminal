@@ -70,12 +70,12 @@ namespace MultiTerminal.Tests
         // ---- registry ----------------------------------------------------------------------------
 
         [Fact]
-        public void A_recorded_helper_is_found_by_its_spawner_with_the_brokers_name_comparison()
+        public void A_recorded_helper_is_found_by_its_spawner_case_insensitively()
         {
             var reg = new SpawnedPaneRegistry();
-            reg.Record(HelperDocId, "Bob", PmDocId);
+            reg.Record(HelperDocId, "Bob", PmDocId, PmNonce);
 
-            var found = Assert.Single(reg.FindForSpawner(PmDocId, "bob"));
+            var found = Assert.Single(reg.FindForSpawner(PmDocId, PmNonce, "bob"));
             Assert.Equal(HelperDocId, found.HelperDocId);
             Assert.Equal("Bob", found.HelperName);
         }
@@ -84,9 +84,9 @@ namespace MultiTerminal.Tests
         public void Another_pane_cannot_see_a_helper_it_did_not_spawn()
         {
             var reg = new SpawnedPaneRegistry();
-            reg.Record(HelperDocId, "Bob", PmDocId);
+            reg.Record(HelperDocId, "Bob", PmDocId, PmNonce);
 
-            Assert.Empty(reg.FindForSpawner(OtherDocId, "Bob"));
+            Assert.Empty(reg.FindForSpawner(OtherDocId, OtherNonce, "Bob"));
         }
 
         /// <summary>
@@ -97,9 +97,9 @@ namespace MultiTerminal.Tests
         public void The_lookup_does_not_trim()
         {
             var reg = new SpawnedPaneRegistry();
-            reg.Record(HelperDocId, "Bob", PmDocId);
+            reg.Record(HelperDocId, "Bob", PmDocId, PmNonce);
 
-            Assert.Empty(reg.FindForSpawner(PmDocId, " Bob"));
+            Assert.Empty(reg.FindForSpawner(PmDocId, PmNonce, " Bob"));
         }
 
         [Theory]
@@ -108,7 +108,7 @@ namespace MultiTerminal.Tests
         public void An_unproven_spawner_records_nothing(string? spawnerDocId)
         {
             var reg = new SpawnedPaneRegistry();
-            reg.Record(HelperDocId, "Bob", spawnerDocId);
+            reg.Record(HelperDocId, "Bob", spawnerDocId, PmNonce);
 
             Assert.Equal(0, reg.Count);
         }
@@ -117,11 +117,36 @@ namespace MultiTerminal.Tests
         public void A_forgotten_pane_can_never_be_matched_again()
         {
             var reg = new SpawnedPaneRegistry();
-            reg.Record(HelperDocId, "Bob", PmDocId);
+            reg.Record(HelperDocId, "Bob", PmDocId, PmNonce);
 
             Assert.True(reg.Forget(HelperDocId));
             Assert.False(reg.Forget(HelperDocId));
-            Assert.Empty(reg.FindForSpawner(PmDocId, "Bob"));
+            Assert.Empty(reg.FindForSpawner(PmDocId, PmNonce, "Bob"));
+        }
+
+        /// <summary>
+        /// The spawner's DocId is not enough on its own: the entry answers only to the nonce the spawner
+        /// proved itself with.
+        /// </summary>
+        [Fact]
+        public void The_spawners_DocId_with_another_nonce_finds_nothing()
+        {
+            var reg = new SpawnedPaneRegistry();
+            reg.Record(HelperDocId, "Bob", PmDocId, PmNonce);
+
+            Assert.Empty(reg.FindForSpawner(PmDocId, "NONCE-ATTACKER", "Bob"));
+        }
+
+        [Fact]
+        public void A_spawner_that_leaves_takes_its_entries_with_it()
+        {
+            var reg = new SpawnedPaneRegistry();
+            reg.Record(HelperDocId, "Bob", PmDocId, PmNonce);
+            reg.Record("other-helper", "Dan", OtherDocId, OtherNonce);
+
+            Assert.Equal(1, reg.ForgetSpawner(PmDocId));
+            Assert.Empty(reg.FindForSpawner(PmDocId, PmNonce, "Bob"));
+            Assert.Single(reg.FindForSpawner(OtherDocId, OtherNonce, "Dan"));
         }
 
         // ---- controller --------------------------------------------------------------------------
@@ -226,12 +251,74 @@ namespace MultiTerminal.Tests
             Assert.Equal(0, h.Service.Panes.Count);
         }
 
+        /// <summary>
+        /// Pipeline debugger (MEDIUM). Something else in the PM's pane, such as a subagent, shares its env
+        /// and registers under another name presenting the pane's DocId and nonce. The broker rejects the
+        /// DocId claim and keeps a row with no DocId but the SAME nonce. With the pane's own row also
+        /// disconnected, that row is the only one holding the nonce: the old lookup returned it, and
+        /// callers took its missing DocId as "no proven pane". This is the DETERMINISTIC form. With both
+        /// rows connected, the old lookup was wrong only when dictionary order happened to put the
+        /// DocId-less row first, so that case alone could pass by luck.
+        /// </summary>
+        [Fact]
+        public void A_row_without_a_DocId_is_never_the_pane_a_nonce_resolves_to()
+        {
+            using var broker = new MessageBroker();
+            broker.RegisterTerminal("Alice", docId: PmDocId, nonce: PmNonce);
+            broker.RegisterTerminal("Agent Explore", docId: PmDocId, nonce: PmNonce);
+
+            // Precondition: the fixture really produced the DocId-less row sharing the pane's nonce.
+            // Without this the facts below would pass vacuously if the broker ever stopped doing so.
+            broker.UnregisterTerminal(PmDocId);
+            var onlyRow = broker.GetConnectedTerminalByLaunchNonce(PmNonce);
+            Assert.NotNull(onlyRow);
+            Assert.True(string.IsNullOrEmpty(onlyRow!.DocId), "fixture did not produce a DocId-less row holding the nonce");
+
+            Assert.Null(broker.GetConnectedPaneByLaunchNonce(PmNonce));
+        }
+
+        /// <summary>
+        /// The positive half: with the pane's row and the DocId-less row both connected, the pane lookup
+        /// returns the pane, so the PM can close its helper. NOT a discriminator on its own (see above).
+        /// </summary>
+        [Fact]
+        public async Task A_subagent_row_in_the_pms_pane_does_not_stop_the_close()
+        {
+            using var h = new Harness();
+            h.Broker.RegisterTerminal("Agent Explore", docId: PmDocId, nonce: PmNonce);
+
+            var ok = Assert.IsType<OkObjectResult>(await h.Spawn("Bob", spawnerName: "Alice", nonce: PmNonce));
+            Assert.Equal(true, Prop(ok.Value, "closableBySpawner"));
+            Assert.IsType<OkObjectResult>(await h.Close("Bob", PmNonce));
+            Assert.Equal(new[] { HelperDocId }, h.Closed);
+        }
+
+        /// <summary>
+        /// Pipeline Run 1, Codex security HIGH. The spawner's pane is gone and something registers a
+        /// fresh connected row holding its OLD DocId (DocIds are visible in listings) with a nonce of
+        /// its own. Keyed on DocId alone, the close route accepted that row as the spawner and killed a
+        /// helper it did not spawn. The precondition proves the broker really hands the attacker the
+        /// old DocId; without it this fact would pass vacuously if the broker ever refused.
+        /// </summary>
+        [Fact]
+        public async Task A_new_row_holding_a_gone_spawners_DocId_cannot_close_its_helper()
+        {
+            using var h = new Harness();
+            await h.Spawn("Bob", spawnerName: "Alice", nonce: PmNonce);
+            h.Broker.UnregisterTerminal(PmDocId);
+            h.Broker.RegisterTerminal("Mallory", docId: PmDocId, nonce: "NONCE-ATTACKER");
+            Assert.Equal(PmDocId, h.Broker.GetConnectedPaneByLaunchNonce("NONCE-ATTACKER")?.DocId);
+
+            Assert.Equal(404, Assert.IsType<ObjectResult>(await h.Close("Bob", "NONCE-ATTACKER")).StatusCode);
+            Assert.Empty(h.Closed);
+        }
+
         [Fact]
         public async Task Two_helpers_matching_one_name_close_neither()
         {
             using var h = new Harness();
-            h.Service.Panes.Record("doc-1", "Bob", PmDocId);
-            h.Service.Panes.Record("doc-2", "BOB", PmDocId);
+            h.Service.Panes.Record("doc-1", "Bob", PmDocId, PmNonce);
+            h.Service.Panes.Record("doc-2", "BOB", PmDocId, PmNonce);
 
             Assert.Equal(409, Assert.IsType<ObjectResult>(await h.Close("bob", PmNonce)).StatusCode);
             Assert.Empty(h.Closed);

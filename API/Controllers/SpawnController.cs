@@ -144,12 +144,11 @@ namespace MultiTerminal.API.Controllers
             // caller's launch nonce, never from spawnerName, which is whatever the caller typed. No nonce
             // (the phone app, an older MCP server) or one that resolves to no connected pane records
             // nothing, and only the Owner can close this helper.
-            var provenSpawner = _broker?.GetConnectedTerminalByLaunchNonce(launchNonce);
-            bool closableBySpawner = !string.IsNullOrEmpty(provenSpawner?.DocId) && !string.IsNullOrEmpty(docId);
-            if (closableBySpawner)
-            {
-                _spawnService.Panes.Record(docId, terminalName, provenSpawner.DocId);
-            }
+            //
+            // Recorded after the pane exists. If the Owner closes it in the moment between, Forget runs
+            // first and an orphan entry remains; the close endpoint's "pane already gone" branch drops it.
+            var provenSpawner = _broker?.GetConnectedPaneByLaunchNonce(launchNonce);
+            bool closableBySpawner = _spawnService.Panes.Record(docId, terminalName, provenSpawner?.DocId, provenSpawner == null ? null : launchNonce);
 
             // What "success" means here (pipeline Run 1, cross-model adversary): the PANE exists and
             // MT has pre-registered the identity. The helper itself has NOT booted — claude has not
@@ -223,7 +222,7 @@ namespace MultiTerminal.API.Controllers
         [HttpPost("job/{docId}/collect")]
         public IActionResult CollectJob(string docId, [FromHeader(Name = LaunchNonceHeader)] string launchNonce)
         {
-            var caller = _broker?.GetConnectedTerminalByLaunchNonce(launchNonce);
+            var caller = _broker?.GetConnectedPaneByLaunchNonce(launchNonce);
             if (caller == null || string.IsNullOrEmpty(docId) || !string.Equals(caller.DocId, docId, StringComparison.Ordinal))
             {
                 // Identical for no nonce, a wrong nonce, and another pane's nonce: the difference only helps
@@ -283,7 +282,7 @@ namespace MultiTerminal.API.Controllers
             [FromBody] CloseSpawnedTerminalRequest request,
             [FromHeader(Name = LaunchNonceHeader)] string launchNonce = null)
         {
-            var caller = _broker?.GetConnectedTerminalByLaunchNonce(launchNonce);
+            var caller = _broker?.GetConnectedPaneByLaunchNonce(launchNonce);
             if (caller == null || string.IsNullOrEmpty(caller.DocId))
             {
                 return StatusCode(401, new
@@ -298,7 +297,7 @@ namespace MultiTerminal.API.Controllers
             if (string.IsNullOrEmpty(name))
                 return Problem(detail: "terminalName is required", statusCode: 400);
 
-            var matches = _spawnService.Panes.FindForSpawner(caller.DocId, name);
+            var matches = _spawnService.Panes.FindForSpawner(caller.DocId, launchNonce, name);
             if (matches.Count == 0)
             {
                 return Problem(
