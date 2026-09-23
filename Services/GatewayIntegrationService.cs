@@ -59,7 +59,7 @@ namespace MultiTerminal.Services
         /// doesn't exist, gateway features degrade gracefully via
         /// <see cref="IsGatewayInstalled"/> (issue #5).
         /// </summary>
-        private static readonly string GatewayProjectPath =
+        internal static readonly string GatewayProjectPath =
             Environment.GetEnvironmentVariable("MT_MCP_GATEWAY_PATH") is string p && !string.IsNullOrWhiteSpace(p)
                 ? p
                 : @"H:\DevLaptop\ClarionPowerShell\McpGateway";
@@ -80,7 +80,22 @@ namespace MultiTerminal.Services
                 Path.Combine(ProductionDataGuard.ProductionRoot, "gateway", "gateway.db"),
                 envVarName: null,
                 caller: nameof(GatewayIntegrationService));
-            _gatewayExePath = Path.Combine(GatewayProjectPath, "bin", "Release", "net8.0", "McpGateway.exe");
+            _gatewayExePath = ResolveGatewayExePath();
+        }
+
+        /// <summary>
+        /// Resolves McpGateway.exe. Installed machines have it next to the app
+        /// ({app}\mcp-gateway\McpGateway.exe, per MultiTerminal.iss); dev boxes have the
+        /// Release build under <see cref="GatewayProjectPath"/>. Null when neither exists.
+        /// </summary>
+        internal static string ResolveGatewayExePath()
+        {
+            string installed = Path.Combine(AppContext.BaseDirectory, "mcp-gateway", "McpGateway.exe");
+            if (File.Exists(installed))
+                return installed;
+
+            string devBuild = Path.Combine(GatewayProjectPath, "bin", "Release", "net8.0", "McpGateway.exe");
+            return File.Exists(devBuild) ? devBuild : null;
         }
 
         /// <summary>
@@ -225,95 +240,28 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Ensures the centralized MCP config file exists at %APPDATA%\multiterminal\.mcp.json
-        /// with both mcp-gateway and multiterminal servers configured.
-        /// Claude Code loads this file via --mcp-config flag (set by LaunchCommandBuilder).
-        /// This replaces the old approach of registering servers at user scope via `claude mcp add`.
+        /// Ensures %APPDATA%\multiterminal\.mcp.json exists and works, so every launch can pass it via
+        /// --mcp-config (LaunchCommandBuilder). Heals a missing or broken file and never rewrites a
+        /// healthy one; see <see cref="CentralMcpConfig"/> for why (task cb4883b6, GitHub #8).
+        /// Called once at startup; <see cref="LaunchCommandBuilder.GetMcpConfigPath"/> heals again at
+        /// launch if the file has gone missing since.
         /// </summary>
         public void EnsureGatewayRegistered()
         {
+            // Runs inside the MainForm constructor with no handler above it, so nothing here may
+            // throw: a config problem must degrade to "launch without --mcp-config", never to "the app
+            // does not open". The body this replaced had the same catch-all; dropping it is how a
+            // duplicate-key file became a startup crash (pipeline Run 1).
             try
             {
-                string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-                string mcpConfigPath = Path.Combine(appData, "multiterminal", ".mcp.json");
-                string mcpIndexJs = Path.Combine(appData, "multiterminal", "mcp", "index.js");
-
-                // Build the mcpServers object
-                var servers = new System.Text.StringBuilder();
-                servers.AppendLine("{");
-                servers.AppendLine("  \"mcpServers\": {");
-
-                bool hasServer = false;
-
-                // 1. mcp-gateway (dotnet run --project)
-                if (Directory.Exists(GatewayProjectPath))
-                {
-                    string escapedPath = GatewayProjectPath.Replace("\\", "\\\\");
-                    servers.AppendLine("    \"mcp-gateway\": {");
-                    servers.AppendLine("      \"type\": \"stdio\",");
-                    servers.AppendLine("      \"command\": \"dotnet\",");
-                    servers.AppendLine($"      \"args\": [\"run\", \"--project\", \"{escapedPath}\"]");
-                    servers.Append("    }");
-                    hasServer = true;
-                    _log("Gateway", "Added mcp-gateway to .mcp.json");
-                }
-                else
-                {
-                    _log("Gateway", $"Gateway project not found at {GatewayProjectPath}, skipping");
-                }
-
-                // 2. multiterminal MCP server (node index.js)
-                if (File.Exists(mcpIndexJs))
-                {
-                    if (hasServer) servers.AppendLine(",");
-                    string escapedJs = mcpIndexJs.Replace("\\", "\\\\");
-                    servers.AppendLine("    \"multiterminal\": {");
-                    servers.AppendLine("      \"type\": \"stdio\",");
-                    servers.AppendLine("      \"command\": \"node\",");
-                    servers.AppendLine($"      \"args\": [\"{escapedJs}\"]");
-                    servers.Append("    }");
-                    _log("Gateway", "Added multiterminal to .mcp.json");
-                }
-                else
-                {
-                    _log("Gateway", $"MultiTerminal MCP not found at {mcpIndexJs}, skipping");
-                }
-
-                servers.AppendLine();
-                servers.AppendLine("  }");
-                servers.Append("}");
-
-                // Write the file
-                File.WriteAllText(mcpConfigPath, servers.ToString(), System.Text.Encoding.UTF8);
-                _log("Gateway", $"Wrote MCP config to {mcpConfigPath}");
-
-                // Clean up: remove mcpServers from ~/.claude.json if present
-                CleanUserScopeMcpServers();
+                var outcome = CentralMcpConfig.EnsureDefault(msg => _log("Gateway", msg));
+                _log("Gateway", $"Central MCP config: {outcome}");
             }
+#pragma warning disable CA1031 // Deliberate catch-all: this is the last line before an unhandled constructor exception.
             catch (Exception ex)
+#pragma warning restore CA1031
             {
-                _log("Gateway", $"EnsureGatewayRegistered failed: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// Removes user-scope MCP server registrations from ~/.claude.json that we now manage
-        /// via the centralized .mcp.json file. Uses `claude mcp remove` for clean removal.
-        /// </summary>
-        private void CleanUserScopeMcpServers()
-        {
-            try
-            {
-                foreach (var serverName in new[] { "mcp-gateway", "multiterminal" })
-                {
-                    var (exitCode, _, _) = RunClaudeCommand($"mcp remove {serverName} --scope user");
-                    if (exitCode == 0)
-                        _log("Gateway", $"Removed {serverName} from user scope (migrated to .mcp.json)");
-                }
-            }
-            catch (Exception ex)
-            {
-                _log("Gateway", $"CleanUserScopeMcpServers warning: {ex.Message}");
+                _log("Gateway", $"Central MCP config check failed, launches will omit --mcp-config: {ex.Message}");
             }
         }
 
@@ -472,40 +420,6 @@ namespace MultiTerminal.Services
                 _connection = null;
                 return null;
             }
-        }
-
-        /// <summary>
-        /// Runs a `claude` CLI command silently (mirrors McpConfigService.RunClaudeCommand).
-        /// </summary>
-        private (int ExitCode, string Stdout, string Stderr) RunClaudeCommand(string arguments)
-        {
-            var psi = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = "cmd.exe",
-                Arguments = $"/c claude {arguments}",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            _log("Gateway", $"Running: claude {arguments}");
-
-            using var process = System.Diagnostics.Process.Start(psi);
-            if (process == null)
-                return (-1, "", "Failed to start cmd.exe process");
-
-            string stdout = process.StandardOutput.ReadToEnd();
-            string stderr = process.StandardError.ReadToEnd();
-            bool exited = process.WaitForExit(15000);
-
-            if (!exited)
-            {
-                try { process.Kill(); } catch { }
-                return (-2, stdout, "Process timed out after 15 seconds");
-            }
-
-            return (process.ExitCode, stdout, stderr);
         }
 
         public void Dispose()

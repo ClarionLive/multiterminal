@@ -532,20 +532,29 @@ namespace MultiTerminal.Services
         /// </summary>
         public static string GetMtPluginPath()
         {
-            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            string pluginDir = Path.Combine(userProfile, ".claude", "plugins", "marketplaces",
-                "multiterminal-marketplace", "plugins", "multiterminal");
+            string pluginDir = ExpectedMtPluginPath;
             return Directory.Exists(pluginDir) ? pluginDir : null;
         }
 
         /// <summary>
-        /// Returns the path to the centralized MCP config file if it exists.
+        /// Where the plugin must be for <see cref="GetMtPluginPath"/> to find it, whether or not it is
+        /// there. <see cref="ClaudeIntegrationCheck"/> names this path in its startup warning.
+        /// </summary>
+        internal static string ExpectedMtPluginPath =>
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "plugins",
+                "marketplaces", "multiterminal-marketplace", "plugins", "multiterminal");
+
+        /// <summary>
+        /// Returns the path to the centralized MCP config file, recreating it first if it has gone
+        /// missing since startup. Null only when it cannot be created — and then every launch runs
+        /// without the core MCP servers, which is the silent failure GitHub #8 reported.
         /// Location: %APPDATA%\multiterminal\.mcp.json
         /// </summary>
         public static string GetMcpConfigPath()
         {
-            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            string mcpConfig = Path.Combine(appData, "multiterminal", ".mcp.json");
+            string mcpConfig = CentralMcpConfig.DefaultPath;
+            if (!File.Exists(mcpConfig))
+                CentralMcpConfig.EnsureDefault(log: null);
             return File.Exists(mcpConfig) ? mcpConfig : null;
         }
 

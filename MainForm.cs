@@ -205,7 +205,52 @@ namespace MultiTerminal
                 RestoreSession();
                 StartWorktreeJanitor();
                 StartIdleRemoteModeWatcher();
+                // Posted, not called: a modal dialog here would hold the rest of this handler's work.
+                BeginInvoke(new Action(WarnIfClaudeIntegrationMissing));
             };
+        }
+
+        /// <summary>
+        /// Task cb4883b6: warns ONCE, visibly, when new terminals would start without MultiTerminal's
+        /// agent tools — MCP server or plugin missing from THIS account's profile (the elevated-install
+        /// trap), or no node on PATH. Every one of these used to be silent: the terminal opened and the
+        /// agent just had no tools. "Don't show again" is keyed to the exact problem set, so a deliberate
+        /// custom install is not nagged but a new, different problem still surfaces.
+        /// </summary>
+        private void WarnIfClaudeIntegrationMissing()
+        {
+            try
+            {
+                string indexJs = Services.CentralMcpConfig.DefaultMcpIndexJs;
+                string pluginDir = LaunchCommandBuilder.ExpectedMtPluginPath;
+                var problems = Services.ClaudeIntegrationCheck.Find(
+                    indexJs, pluginDir,
+                    Environment.GetEnvironmentVariable("PATH"), Environment.GetEnvironmentVariable("PATHEXT"),
+                    File.Exists, Directory.Exists);
+
+                if (problems.Count > 0)
+                    _debugLogService?.Warning("MainForm", $"Claude integration incomplete: {Services.ClaudeIntegrationCheck.Fingerprint(problems)}");
+
+                string suppressed = _settings?.Get(Services.ClaudeIntegrationCheck.SuppressedFingerprintKey);
+                if (!Services.ClaudeIntegrationCheck.ShouldWarn(problems, suppressed))
+                    return;
+
+                var answer = MessageBox.Show(
+                    this,
+                    Services.ClaudeIntegrationCheck.BuildMessage(problems, indexJs, pluginDir),
+                    "MultiTerminal: agent tools unavailable",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning);
+
+                if (answer == DialogResult.No)
+                    _settings?.Set(Services.ClaudeIntegrationCheck.SuppressedFingerprintKey, Services.ClaudeIntegrationCheck.Fingerprint(problems));
+            }
+#pragma warning disable CA1031 // A diagnostic must never take the app down.
+            catch (Exception ex)
+#pragma warning restore CA1031
+            {
+                _debugLogService?.Warning("MainForm", $"Claude integration check failed: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -505,6 +550,12 @@ namespace MultiTerminal
             _gatewayService = new Services.GatewayIntegrationService(
                 (source, msg) => _debugLogService?.Info(source, msg));
             _mcpConfigService.GatewayService = _gatewayService;
+
+            // Heal %APPDATA%\multiterminal\.mcp.json if it is missing or broken (a working one is left
+            // alone), so LaunchCommandBuilder can pass it per-launch via --mcp-config. The installer never
+            // writes this file — its opt-in global step writes ~/.claude.json instead — so without this,
+            // terminals on installed machines got no core MCP servers (GitHub #8).
+            _gatewayService.EnsureGatewayRegistered();
             _projectPanel.SetGatewayService(_gatewayService);
             _projectPanel.SetDebugLogService(_debugLogService); // route ProjectPanel + its renderer's diagnostics to the unified sink (4c86f18d)
 
@@ -5314,12 +5365,11 @@ namespace MultiTerminal
             // env var stays empty — bypassing the wiring fix from AddNewTerminal.
             workingDirectory = ResolveSpawnDir(terminalName, workingDirectory, out string taskWorktreePath);
 
-            // Just launch claude - let the user choose to resume or start fresh
-            // Using plain "claude" lets Claude prompt about resuming recent sessions
-            // TODO: Make --dangerously-skip-permissions configurable in settings
-            string pluginDir = LaunchCommandBuilder.GetMtPluginPath();
-            string pluginFlag = pluginDir != null ? $" --plugin-dir '{pluginDir.Replace("'", "''")}'" : "";
-            string autoRunCommand = $"claude --dangerously-skip-permissions{pluginFlag}";
+            // Built by LaunchCommandBuilder like every other launch (task cb4883b6). The hand-rolled
+            // command this replaced passed --plugin-dir only: no --mcp-config (so no core MCP servers,
+            // even on a working machine), no channel flag (task 5999a182), no forced statusline.
+            // No --resume, so Claude still offers to resume a recent session.
+            string autoRunCommand = LaunchCommandBuilder.BuildClaudeCommand(null, workingDirectory).AutoRunCommand;
 
             // Stop current terminal and restart with new identity
             doc.Terminal.Stop();
@@ -7841,9 +7891,9 @@ namespace MultiTerminal
             }
             try
             {
-                // Regenerate both global and project-level MCP configs.
-                // Global config goes to ~/.claude/.mcp.json (available in all sessions).
-                // Project config goes to {sourcePath}/.mcp.json (project-specific servers).
+                // Syncs the project's gateway profile and REMOVES any stale {sourcePath}/.mcp.json
+                // (backed up to .mcp.json.bak). It writes no MCP config: core servers reach every
+                // terminal through %APPDATA%\multiterminal\.mcp.json via --mcp-config (CentralMcpConfig).
                 _mcpConfigService.EnsureMcpConfigsForProject(args.ProjectId, args.SourcePath);
                 _projectPanel?.NotifyMcpJsonWriteResult(true);
             }

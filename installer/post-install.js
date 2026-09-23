@@ -5,8 +5,9 @@
  * 1. Setting CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS env in ~/.claude/settings.json
  * 2. OPT-IN (--global-reg=yes, GH#2): registering MCP servers in ~/.claude.json so
  *    Claude Code sessions started OUTSIDE MultiTerminal see them. MT-spawned terminals
- *    never need this — the app regenerates %APPDATA%\multiterminal\.mcp.json at startup
- *    (GatewayIntegrationService.EnsureMcpConfig) and passes it per-launch via --mcp-config
+ *    never need this — the app creates %APPDATA%\multiterminal\.mcp.json at startup if it is
+ *    missing or broken, leaving a working one alone (CentralMcpConfig, via
+ *    GatewayIntegrationService.EnsureGatewayRegistered), and passes it per-launch via --mcp-config
  *    (LaunchCommandBuilder), along with the plugin via --plugin-dir.
  * 3. Writing gateway-defaults.json for optional MCP servers (gateway auto-seeds on startup)
  * 4. Patching runtimeconfig.json for framework-dependent mode (if .NET 8 detected)
@@ -138,7 +139,8 @@ function registerMcpServers() {
     console.log(`Registered MCP servers in: ${claudeJsonPath}`);
 
     // NOTE: do NOT delete %APPDATA%\multiterminal\.mcp.json here. It is not legacy —
-    // the app regenerates it at startup and MT-spawned terminals load it via --mcp-config.
+    // the app creates or repairs it at startup (never rewriting a working one) and MT-spawned
+    // terminals load it via --mcp-config.
 }
 
 // ============================================================
