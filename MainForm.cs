@@ -205,7 +205,50 @@ namespace MultiTerminal
                 RestoreSession();
                 StartWorktreeJanitor();
                 StartIdleRemoteModeWatcher();
+                // Posted, not called: a modal dialog here would hold the rest of this handler's work.
+                BeginInvoke(new Action(WarnIfClaudeIntegrationMissing));
             };
+        }
+
+        /// <summary>
+        /// Task cb4883b6: warns ONCE, visibly, when new terminals would start without MultiTerminal's
+        /// agent tools — MCP server or plugin missing from THIS account's profile (the elevated-install
+        /// trap), or no node on PATH. Every one of these used to be silent: the terminal opened and the
+        /// agent just had no tools. "Don't show again" is keyed to the exact problem set, so a deliberate
+        /// custom install is not nagged but a new, different problem still surfaces.
+        /// </summary>
+        private void WarnIfClaudeIntegrationMissing()
+        {
+            try
+            {
+                string indexJs = Services.CentralMcpConfig.DefaultMcpIndexJs;
+                string pluginDir = LaunchCommandBuilder.ExpectedMtPluginPath;
+                var problems = Services.ClaudeIntegrationCheck.Find(
+                    indexJs, pluginDir, Environment.GetEnvironmentVariable("PATH"), File.Exists, Directory.Exists);
+
+                if (problems.Count > 0)
+                    _debugLogService?.Warning("MainForm", $"Claude integration incomplete: {Services.ClaudeIntegrationCheck.Fingerprint(problems)}");
+
+                string suppressed = _settings?.Get(Services.ClaudeIntegrationCheck.SuppressedFingerprintKey);
+                if (!Services.ClaudeIntegrationCheck.ShouldWarn(problems, suppressed))
+                    return;
+
+                var answer = MessageBox.Show(
+                    this,
+                    Services.ClaudeIntegrationCheck.BuildMessage(problems, indexJs, pluginDir),
+                    "MultiTerminal: agent tools unavailable",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning);
+
+                if (answer == DialogResult.No)
+                    _settings?.Set(Services.ClaudeIntegrationCheck.SuppressedFingerprintKey, Services.ClaudeIntegrationCheck.Fingerprint(problems));
+            }
+#pragma warning disable CA1031 // A diagnostic must never take the app down.
+            catch (Exception ex)
+#pragma warning restore CA1031
+            {
+                _debugLogService?.Warning("MainForm", $"Claude integration check failed: {ex.Message}");
+            }
         }
 
         /// <summary>

@@ -532,11 +532,17 @@ namespace MultiTerminal.Services
         /// </summary>
         public static string GetMtPluginPath()
         {
-            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            string pluginDir = Path.Combine(userProfile, ".claude", "plugins", "marketplaces",
-                "multiterminal-marketplace", "plugins", "multiterminal");
+            string pluginDir = ExpectedMtPluginPath;
             return Directory.Exists(pluginDir) ? pluginDir : null;
         }
+
+        /// <summary>
+        /// Where the plugin must be for <see cref="GetMtPluginPath"/> to find it, whether or not it is
+        /// there. <see cref="ClaudeIntegrationCheck"/> names this path in its startup warning.
+        /// </summary>
+        internal static string ExpectedMtPluginPath =>
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "plugins",
+                "marketplaces", "multiterminal-marketplace", "plugins", "multiterminal");
 
         /// <summary>
         /// Returns the path to the centralized MCP config file, recreating it first if it has gone

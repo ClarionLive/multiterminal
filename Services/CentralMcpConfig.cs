@@ -157,7 +157,10 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Heals the file at <paramref name="configPath"/> if it needs it. Never throws.
+        /// Heals the file at <paramref name="configPath"/> if it needs it. Does not throw for any file
+        /// CONTENT (<see cref="WhyUnhealthy"/> turns every parse failure into a reason) and catches the
+        /// I/O and access errors a read or write can raise. It does not catch everything: the startup
+        /// caller wraps it in a catch-all; the launch-path caller reaches it only when the file is absent.
         /// </summary>
         internal static Outcome Ensure(
             string configPath,
@@ -203,10 +206,13 @@ namespace MultiTerminal.Services
             return Ensure(DefaultPath, ResolveDefaultSources(), p => File.Exists(p) || Directory.Exists(p), log);
         }
 
+        /// <summary>Where the multiterminal MCP server must be for it to be generated, whether or not it is there.</summary>
+        internal static string DefaultMcpIndexJs =>
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "multiterminal", "mcp", "index.js");
+
         internal static Sources ResolveDefaultSources()
         {
-            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            string indexJs = Path.Combine(appData, "multiterminal", "mcp", "index.js");
+            string indexJs = DefaultMcpIndexJs;
             string projectDir = GatewayIntegrationService.GatewayProjectPath;
 
             return new Sources(
