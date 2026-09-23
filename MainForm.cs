@@ -976,6 +976,7 @@ namespace MultiTerminal
                 _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 18: Setting OnSpawnRequested");
                 _mcpServer.SpawnService.OnSpawnRequested = OnSpawnRequested;
                 _mcpServer.SpawnService.OnSpawnAgentRequested = OnSpawnAgentRequested;
+                _mcpServer.SpawnService.OnCloseRequested = OnSpawnedPaneCloseRequested;
                 _mcpServer.SpawnService.Jobs.Collected += OnSpawnJobCollected;
 
                 // Gloss backfill writer (task a455e295). The broker decides WHETHER to run one and
@@ -1948,6 +1949,34 @@ namespace MultiTerminal
         /// <summary>
         /// Callback for spawning new teammate terminals via MCP tool.
         /// </summary>
+        /// <summary>
+        /// Closes the terminal pane with this DocId for close_helper (task 7f389704), on the UI thread.
+        /// Authorization happened in SpawnController; this only closes. <c>Close()</c> is what the tab's
+        /// ✕ and its "Close" menu item do, so OnDockContentRemoved runs the same teardown: unregister,
+        /// drop from the doc map, kill the process tree. Searches <c>Contents</c>, not <c>Documents</c>,
+        /// because Documents leaves out a floated terminal and a floated helper must still be closable.
+        /// Returns whether a pane with that DocId was open.
+        /// </summary>
+        private async Task<bool> OnSpawnedPaneCloseRequested(string docId)
+        {
+            bool found = false;
+            await Task.Run(() =>
+            {
+                Invoke(new Action(() =>
+                {
+                    var doc = _dockPanel.Contents.OfType<TerminalDocument>()
+                        .FirstOrDefault(d => string.Equals(d.DocId, docId, StringComparison.Ordinal));
+                    if (doc == null || doc.IsDisposed)
+                        return;
+
+                    found = true;
+                    _debugLogService?.Info("MainForm", $"close_helper: closing pane docId={docId} name='{doc.CustomTitle}' (task 7f389704)");
+                    doc.Close();
+                }));
+            });
+            return found;
+        }
+
         private async Task<(bool success, string docId, string error, string terminalName)> OnSpawnRequested(
             string agentName,
             string agentType,
@@ -5305,6 +5334,9 @@ namespace MultiTerminal
             {
                 _mcpServer.Broker.UnregisterTerminal(doc.DocId);
             }
+
+            // A closed helper can never be matched by close_helper again, whoever closed it (task 7f389704).
+            _mcpServer?.SpawnService?.Panes.Forget(doc.DocId);
 
             // Drop it from the terminal -> doc map.
             lock (_terminalDocMapLock)

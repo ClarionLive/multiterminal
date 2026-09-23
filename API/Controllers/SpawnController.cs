@@ -65,7 +65,9 @@ namespace MultiTerminal.API.Controllers
         /// Used by ClaudeRemote to launch terminals from the phone app.
         /// </summary>
         [HttpPost("terminal")]
-        public async Task<IActionResult> SpawnTerminal([FromBody] SpawnTerminalRequest request)
+        public async Task<IActionResult> SpawnTerminal(
+            [FromBody] SpawnTerminalRequest request,
+            [FromHeader(Name = LaunchNonceHeader)] string launchNonce = null)
         {
             if (string.IsNullOrWhiteSpace(request.AgentName))
                 return Problem(detail: "agentName is required", statusCode: 400);
@@ -138,6 +140,17 @@ namespace MultiTerminal.API.Controllers
             if (!success)
                 return Problem(detail: error, statusCode: 400);
 
+            // Remember which PANE asked, for close_helper (task 7f389704). The spawner is taken from the
+            // caller's launch nonce, never from spawnerName, which is whatever the caller typed. No nonce
+            // (the phone app, an older MCP server) or one that resolves to no connected pane records
+            // nothing, and only the Owner can close this helper.
+            var provenSpawner = _broker?.GetConnectedTerminalByLaunchNonce(launchNonce);
+            bool closableBySpawner = !string.IsNullOrEmpty(provenSpawner?.DocId) && !string.IsNullOrEmpty(docId);
+            if (closableBySpawner)
+            {
+                _spawnService.Panes.Record(docId, terminalName, provenSpawner.DocId);
+            }
+
             // What "success" means here (pipeline Run 1, cross-model adversary): the PANE exists and
             // MT has pre-registered the identity. The helper itself has NOT booted — claude has not
             // started, the plugin's SessionStart hook has not run, and there is no channel port yet.
@@ -163,6 +176,7 @@ namespace MultiTerminal.API.Controllers
                 // nothing was holding.
                 requestedName = agentName,
                 docId,
+                closableBySpawner,
                 ready = false,
                 readiness = "pane created; the helper boots and the plugin's SessionStart hook registers it in ~10-30s — it is messageable once list_terminals shows it with a channel port",
             });
@@ -253,6 +267,66 @@ namespace MultiTerminal.API.Controllers
             };
         }
 
+        /// <summary>
+        /// Close a helper pane the CALLER spawned (task 7f389704): the pane closes exactly as clicking its
+        /// tab's ✕ does, which kills its process tree.
+        /// <para>Authorized by pane, not by name. The caller proves its pane with its launch nonce, and the
+        /// helper must be one that SpawnTerminal recorded for that same pane. There is no Owner override
+        /// here: the Owner closes panes in the UI.</para>
+        /// <para>401 when the nonce does not resolve to a connected pane. 404 when this pane spawned no
+        /// open helper by that name: the same answer whether the name is someone else's helper, a pane
+        /// spawned before MultiTerminal last started, or nothing at all, so a caller cannot probe for
+        /// panes it does not own. 409 if the name matches more than one of the caller's helpers.</para>
+        /// </summary>
+        [HttpPost("terminal/close")]
+        public async Task<IActionResult> CloseSpawnedTerminal(
+            [FromBody] CloseSpawnedTerminalRequest request,
+            [FromHeader(Name = LaunchNonceHeader)] string launchNonce = null)
+        {
+            var caller = _broker?.GetConnectedTerminalByLaunchNonce(launchNonce);
+            if (caller == null || string.IsNullOrEmpty(caller.DocId))
+            {
+                return StatusCode(401, new
+                {
+                    error = "This request did not present the launch nonce of a connected MultiTerminal pane. "
+                          + "Only the pane that spawned a helper can close it.",
+                });
+            }
+
+            // Canonicalise at the boundary, as SpawnTerminal does; the registry lookup itself is exact.
+            string name = request?.TerminalName?.Trim();
+            if (string.IsNullOrEmpty(name))
+                return Problem(detail: "terminalName is required", statusCode: 400);
+
+            var matches = _spawnService.Panes.FindForSpawner(caller.DocId, name);
+            if (matches.Count == 0)
+            {
+                return Problem(
+                    detail: $"This pane has no open helper named '{name}' that it spawned. Only the pane that spawned a helper can close it; "
+                          + "helpers spawned before MultiTerminal last started, or by the phone app, can only be closed by the Owner.",
+                    statusCode: 404);
+            }
+
+            if (matches.Count > 1)
+            {
+                return Problem(detail: $"'{name}' matches {matches.Count} helpers this pane spawned; nothing was closed.", statusCode: 409);
+            }
+
+            var target = matches[0];
+            var (closed, error) = await _spawnService.CloseSpawnedPaneAsync(target.HelperDocId);
+            if (error != null)
+                return Problem(detail: error, statusCode: 500);
+
+            if (!closed)
+            {
+                // The pane is gone already (closed some other way without its entry being dropped).
+                _spawnService.Panes.Forget(target.HelperDocId);
+                return Problem(detail: $"Helper '{target.HelperName}' is no longer open; nothing was closed.", statusCode: 404);
+            }
+
+            return Ok(new { closed = true, terminalName = target.HelperName, docId = target.HelperDocId });
+        }
+
         /// <summary>Upper bound on <see cref="SpawnTerminalRequest.InitialPrompt"/>, in characters.</summary>
         internal const int MaxInitialPromptChars = 16_000;
     }
@@ -275,6 +349,12 @@ namespace MultiTerminal.API.Controllers
         /// within 120s is reported to the spawner as <c>spawn_failed</c>.
         /// </summary>
         public string InitialPrompt { get; set; }
+    }
+
+    public class CloseSpawnedTerminalRequest
+    {
+        /// <summary>The helper's registered name, as spawn_helper returned it (terminalName).</summary>
+        public string TerminalName { get; set; }
     }
 
     public class SpawnAgentProcessRequest
