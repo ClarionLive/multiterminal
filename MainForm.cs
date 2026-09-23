@@ -3687,9 +3687,11 @@ namespace MultiTerminal
                     case TerminalPlacement.Kind.TabInto:
                         doc.Show(placement.Target, null);
                         break;
-                    default:
+                    case TerminalPlacement.Kind.FirstDocument:
                         doc.Show(_dockPanel, DockState.Document);
                         break;
+                    default:
+                        throw new InvalidOperationException($"Unhandled terminal placement '{placement.Kind}'.");
                 }
             }
             _debugLogService?.Trace("AddNewTerminal", "Terminal shown in DockPanel");

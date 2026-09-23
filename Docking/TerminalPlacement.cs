@@ -36,10 +36,13 @@ namespace MultiTerminal.Docking
 
         /// <summary>One pane that holds at least one terminal, as the caller sees it.</summary>
         /// <param name="Pane">The pane itself; compared by reference.</param>
-        /// <param name="IsDocked">True for a pane in the main document area; false for a floating
-        /// window or a tool-window edge. Only docked panes are grid slots, split sources or tab
-        /// targets. A floating window used to count as a grid pane, so later terminals went in as tabs
-        /// inside the tiny window.</param>
+        /// <param name="IsDocked">True for a pane in the main document area; false otherwise. Only
+        /// docked panes are grid slots, split sources or tab targets. <b>Defensive, not a fix:</b>
+        /// MainForm builds its list from <c>DockPanel.Documents</c>, which yields only Document-state
+        /// contents, so a floated terminal never reaches it and this is true for every pane in
+        /// production today (debugger gate, task 7f91349f, verified against the decompiled library).
+        /// The old code never counted a float either. The flag keeps "never place into a float" a
+        /// property of this class rather than of the caller's choice of collection.</param>
         /// <param name="TerminalCount">Visible terminals in the pane. Not all contents: counting the
         /// Tasks panel or a hidden document made a pane look full before it held MaxTabsPerGrid
         /// terminals.</param>
@@ -56,8 +59,8 @@ namespace MultiTerminal.Docking
         /// <param name="panes">Every pane that currently holds a terminal, docked or not, in dock
         /// order. The last docked one is the split source when the active pane cannot be used.</param>
         /// <param name="activePane">The active terminal's pane, or null. Used as the split source only
-        /// when it is one of the docked panes; splitting from a floating pane put the new terminal
-        /// inside the floating window.</param>
+        /// when it is one of the docked panes (defensive, as for <c>IsDocked</c>: MainForm takes it from
+        /// <c>ActiveDocument</c>, which is never a floated terminal).</param>
         /// <param name="maxGrids">MaxGridPanes: how many docked panes to split into before tabbing.</param>
         public static Decision<TPane> Decide<TPane>(
             IReadOnlyList<PaneInfo<TPane>> panes, TPane? activePane, int maxGrids)

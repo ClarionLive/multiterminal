@@ -9,7 +9,9 @@ namespace MultiTerminal.Tests
     /// <summary>
     /// <see cref="TerminalPlacement"/> (task 7f91349f): where a new terminal goes. Before this, a
     /// terminal was floated once every pane was full, and helpers spawned in bursts opened as tiny
-    /// separate windows the Owner had to re-dock. Panes here are plain named objects; no DockPanel.
+    /// separate windows the Owner had to re-dock. The fact that pins that fix is the first one; the
+    /// four marked DEFENSIVE pin the helper's own contract for inputs MainForm does not produce today.
+    /// Panes here are plain named objects; no DockPanel.
     /// </summary>
     public class TerminalPlacementTests
     {
@@ -43,12 +45,14 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
-        /// A floating window is not a grid slot. With one docked pane and one float under MaxGridPanes=2,
-        /// the old code counted two grid panes and tabbed into whichever had fewer contents, which was
-        /// the float. The float must not be counted, so there is still a free slot to split into.
+        /// DEFENSIVE PIN, not a regression test. In the running app a floated terminal never reaches
+        /// Decide (MainForm reads DockPanel.Documents, which yields only Document-state contents), so
+        /// this situation does not arise today and did not arise under the old code either. It pins
+        /// the helper's own contract: a non-docked pane is not a grid slot, so with one docked pane
+        /// under MaxGridPanes=2 there is still a free slot to split into.
         /// </summary>
         [Fact]
-        public void A_floating_pane_is_not_counted_as_a_grid_slot_or_used_as_a_tab_target()
+        public void A_floating_pane_is_not_counted_as_a_grid_slot()
         {
             var main = new Pane("main");
             var tiny = new Pane("tiny float");
@@ -60,8 +64,8 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
-        /// When the grid is full and a float holds fewer terminals than any docked pane, the float is
-        /// still never chosen as the tab target.
+        /// DEFENSIVE PIN (see the fact above): when the grid is full and a non-docked pane holds fewer
+        /// terminals than any docked pane, it is still never chosen as the tab target.
         /// </summary>
         [Fact]
         public void With_the_grid_full_an_emptier_float_is_still_not_chosen()
@@ -77,8 +81,9 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
-        /// The active terminal is in a floating window: splitting from it put the new terminal inside
-        /// that window. The split source must be a docked pane, the last one.
+        /// DEFENSIVE PIN: MainForm takes the active pane from ActiveDocument, which is never a floated
+        /// terminal, so this does not arise today. If a non-docked active pane is ever passed, the split
+        /// source is still a docked pane, the last one.
         /// </summary>
         [Fact]
         public void A_floating_active_pane_is_not_used_as_the_split_source()
@@ -107,8 +112,8 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
-        /// Only floating terminals exist: there is nothing docked to split or tab into, so the terminal
-        /// becomes a plain document. It is not added to the float.
+        /// DEFENSIVE PIN: given only non-docked panes, there is nothing docked to split or tab into, so
+        /// the terminal becomes a plain document rather than joining one of them.
         /// </summary>
         [Fact]
         public void With_only_floating_terminals_the_new_one_is_a_plain_document()
@@ -160,6 +165,7 @@ namespace MultiTerminal.Tests
 
             var d = TerminalPlacement.Decide(new List<TerminalPlacement.PaneInfo<Pane>> { Docked(twoTerminals, 2), Docked(withTasksPanel, 1) }, null, maxGrids: 2);
 
+            Assert.Equal(Kind.TabInto, d.Kind);
             Assert.Same(withTasksPanel, d.Target);
         }
     }
