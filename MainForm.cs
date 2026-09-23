@@ -506,9 +506,10 @@ namespace MultiTerminal
                 (source, msg) => _debugLogService?.Info(source, msg));
             _mcpConfigService.GatewayService = _gatewayService;
 
-            // Regenerate %APPDATA%\multiterminal\.mcp.json so LaunchCommandBuilder can pass it
-            // per-launch via --mcp-config. Without this, terminals on installed machines get
-            // no core MCP servers (the installer only writes it for the opt-in global path).
+            // Heal %APPDATA%\multiterminal\.mcp.json if it is missing or broken (a working one is left
+            // alone), so LaunchCommandBuilder can pass it per-launch via --mcp-config. The installer never
+            // writes this file — its opt-in global step writes ~/.claude.json instead — so without this,
+            // terminals on installed machines got no core MCP servers (GitHub #8).
             _gatewayService.EnsureGatewayRegistered();
             _projectPanel.SetGatewayService(_gatewayService);
             _projectPanel.SetDebugLogService(_debugLogService); // route ProjectPanel + its renderer's diagnostics to the unified sink (4c86f18d)
