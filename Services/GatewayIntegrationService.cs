@@ -59,7 +59,7 @@ namespace MultiTerminal.Services
         /// doesn't exist, gateway features degrade gracefully via
         /// <see cref="IsGatewayInstalled"/> (issue #5).
         /// </summary>
-        private static readonly string GatewayProjectPath =
+        internal static readonly string GatewayProjectPath =
             Environment.GetEnvironmentVariable("MT_MCP_GATEWAY_PATH") is string p && !string.IsNullOrWhiteSpace(p)
                 ? p
                 : @"H:\DevLaptop\ClarionPowerShell\McpGateway";
@@ -88,7 +88,7 @@ namespace MultiTerminal.Services
         /// ({app}\mcp-gateway\McpGateway.exe, per MultiTerminal.iss); dev boxes have the
         /// Release build under <see cref="GatewayProjectPath"/>. Null when neither exists.
         /// </summary>
-        private static string ResolveGatewayExePath()
+        internal static string ResolveGatewayExePath()
         {
             string installed = Path.Combine(AppContext.BaseDirectory, "mcp-gateway", "McpGateway.exe");
             if (File.Exists(installed))
@@ -240,88 +240,16 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Ensures the centralized MCP config file exists at %APPDATA%\multiterminal\.mcp.json
-        /// with both mcp-gateway and multiterminal servers configured.
-        /// Claude Code loads this file via --mcp-config flag (set by LaunchCommandBuilder).
-        /// This replaces the old approach of registering servers at user scope via `claude mcp add`.
+        /// Ensures %APPDATA%\multiterminal\.mcp.json exists and works, so every launch can pass it via
+        /// --mcp-config (LaunchCommandBuilder). Heals a missing or broken file and never rewrites a
+        /// healthy one; see <see cref="CentralMcpConfig"/> for why (task cb4883b6, GitHub #8).
+        /// Called once at startup; <see cref="LaunchCommandBuilder.GetMcpConfigPath"/> heals again at
+        /// launch if the file has gone missing since.
         /// </summary>
         public void EnsureGatewayRegistered()
         {
-            try
-            {
-                string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-                string mcpConfigPath = Path.Combine(appData, "multiterminal", ".mcp.json");
-                string mcpIndexJs = Path.Combine(appData, "multiterminal", "mcp", "index.js");
-
-                // Build the mcpServers object
-                var servers = new System.Text.StringBuilder();
-                servers.AppendLine("{");
-                servers.AppendLine("  \"mcpServers\": {");
-
-                bool hasServer = false;
-
-                // 1. mcp-gateway — prefer the built exe (installed {app}\mcp-gateway or dev
-                //    Release build); fall back to `dotnet run` for dev boxes without a build.
-                string gatewayExe = ResolveGatewayExePath();
-                if (gatewayExe != null)
-                {
-                    string escapedExe = gatewayExe.Replace("\\", "\\\\");
-                    servers.AppendLine("    \"mcp-gateway\": {");
-                    servers.AppendLine("      \"type\": \"stdio\",");
-                    servers.AppendLine($"      \"command\": \"{escapedExe}\",");
-                    servers.AppendLine("      \"args\": []");
-                    servers.Append("    }");
-                    hasServer = true;
-                    _log("Gateway", $"Added mcp-gateway ({gatewayExe}) to .mcp.json");
-                }
-                else if (Directory.Exists(GatewayProjectPath))
-                {
-                    string escapedPath = GatewayProjectPath.Replace("\\", "\\\\");
-                    servers.AppendLine("    \"mcp-gateway\": {");
-                    servers.AppendLine("      \"type\": \"stdio\",");
-                    servers.AppendLine("      \"command\": \"dotnet\",");
-                    servers.AppendLine($"      \"args\": [\"run\", \"--project\", \"{escapedPath}\"]");
-                    servers.Append("    }");
-                    hasServer = true;
-                    _log("Gateway", "Added mcp-gateway (dotnet run) to .mcp.json");
-                }
-                else
-                {
-                    _log("Gateway", $"Gateway not found (no installed exe, no project at {GatewayProjectPath}), skipping");
-                }
-
-                // 2. multiterminal MCP server (node index.js)
-                if (File.Exists(mcpIndexJs))
-                {
-                    if (hasServer) servers.AppendLine(",");
-                    string escapedJs = mcpIndexJs.Replace("\\", "\\\\");
-                    servers.AppendLine("    \"multiterminal\": {");
-                    servers.AppendLine("      \"type\": \"stdio\",");
-                    servers.AppendLine("      \"command\": \"node\",");
-                    servers.AppendLine($"      \"args\": [\"{escapedJs}\"]");
-                    servers.Append("    }");
-                    _log("Gateway", "Added multiterminal to .mcp.json");
-                }
-                else
-                {
-                    _log("Gateway", $"MultiTerminal MCP not found at {mcpIndexJs}, skipping");
-                }
-
-                servers.AppendLine();
-                servers.AppendLine("  }");
-                servers.Append("}");
-
-                // Write the file
-                File.WriteAllText(mcpConfigPath, servers.ToString(), System.Text.Encoding.UTF8);
-                _log("Gateway", $"Wrote MCP config to {mcpConfigPath}");
-
-                // Do NOT touch ~/.claude.json here: global registration is an installer
-                // opt-in (GH#2) and stripping it at startup would override that choice.
-            }
-            catch (Exception ex)
-            {
-                _log("Gateway", $"EnsureGatewayRegistered failed: {ex.Message}");
-            }
+            var outcome = CentralMcpConfig.EnsureDefault(msg => _log("Gateway", msg));
+            _log("Gateway", $"Central MCP config: {outcome}");
         }
 
         /// <summary>
