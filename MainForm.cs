@@ -1947,9 +1947,6 @@ namespace MultiTerminal
         }
 
         /// <summary>
-        /// Callback for spawning new teammate terminals via MCP tool.
-        /// </summary>
-        /// <summary>
         /// Closes the terminal pane with this DocId for close_helper (task 7f389704), on the UI thread.
         /// Authorization happened in SpawnController; this only closes. <c>Close()</c> is what the tab's
         /// ✕ and its "Close" menu item do, so OnDockContentRemoved runs the same teardown: unregister,
@@ -1977,6 +1974,9 @@ namespace MultiTerminal
             return found;
         }
 
+        /// <summary>
+        /// Callback for spawning new teammate terminals via MCP tool.
+        /// </summary>
         private async Task<(bool success, string docId, string error, string terminalName)> OnSpawnRequested(
             string agentName,
             string agentType,
