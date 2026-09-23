@@ -15,9 +15,10 @@ namespace MultiTerminal.Docking
     /// five terminals, and the Owner re-docked each one by hand. Once the grid slots are used up, the
     /// terminal now joins the emptiest docked pane however full it is (Owner decision).</para>
     ///
-    /// <para><b>That makes <c>MaxTabsPerGrid</c> irrelevant to placement,</b> which is why it is not a
-    /// parameter. The old rule was "the emptiest pane under the limit, else float"; the emptiest pane
-    /// is under the limit whenever any pane is, so the limit only ever chose the moment to float.</para>
+    /// <para><b>That made the old <c>MaxTabsPerGrid</c> setting meaningless, so it was removed</b>
+    /// (Owner decision; a value left in settings.txt is ignored). The old rule was "the emptiest pane
+    /// under the limit, else float"; the emptiest pane is under the limit whenever any pane is, so the
+    /// limit only ever chose the moment to float.</para>
     /// </summary>
     public static class TerminalPlacement
     {

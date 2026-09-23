@@ -72,7 +72,6 @@ namespace MultiTerminal.Dialogs
         public float TasksPanelFontSize => GetSelectedFontSize(TasksPanelFontCombo);
         public float ActivityPanelFontSize => GetSelectedFontSize(ActivityPanelFontCombo);
         public int MaxGridPanes => MaxGridsCombo.SelectedIndex + 1;
-        public int MaxTabsPerGrid => MaxTabsCombo.SelectedIndex + 1;
 
         public string AgentPanelLayout =>
             SplitBelowRadio.IsChecked == true ? "SplitBelow" :
@@ -123,10 +122,6 @@ namespace MultiTerminal.Dialogs
             for (int i = 1; i <= 9; i++)
                 MaxGridsCombo.Items.Add(i.ToString());
 
-            // Max Tabs per Grid: 1-10
-            for (int i = 1; i <= 10; i++)
-                MaxTabsCombo.Items.Add(i.ToString());
-
             // Pipeline provider combos
             foreach (string provider in PipelineProviders)
             {
@@ -158,9 +153,6 @@ namespace MultiTerminal.Dialogs
             // Terminal placement
             int maxGrids = _settings.GetMaxGridPanes();
             MaxGridsCombo.SelectedIndex = Math.Max(0, Math.Min(8, maxGrids - 1));
-
-            int maxTabs = _settings.GetMaxTabsPerGrid();
-            MaxTabsCombo.SelectedIndex = Math.Max(0, Math.Min(9, maxTabs - 1));
 
             // Agent panel layout radio
             string agentLayout = _settings.GetAgentPanelLayout();
@@ -228,7 +220,6 @@ namespace MultiTerminal.Dialogs
                 _settings.SetActivityFontSize(GetSelectedFontSize(ActivityPanelFontCombo));
 
                 _settings.SetMaxGridPanes(MaxGridsCombo.SelectedIndex + 1);
-                _settings.SetMaxTabsPerGrid(MaxTabsCombo.SelectedIndex + 1);
 
                 _settings.SetAgentPanelLayout(AgentPanelLayout);
                 _settings.SetAgentPanelCloseMode(AgentPanelCloseMode);
