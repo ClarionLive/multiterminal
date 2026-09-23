@@ -224,7 +224,9 @@ namespace MultiTerminal
                 string indexJs = Services.CentralMcpConfig.DefaultMcpIndexJs;
                 string pluginDir = LaunchCommandBuilder.ExpectedMtPluginPath;
                 var problems = Services.ClaudeIntegrationCheck.Find(
-                    indexJs, pluginDir, Environment.GetEnvironmentVariable("PATH"), File.Exists, Directory.Exists);
+                    indexJs, pluginDir,
+                    Environment.GetEnvironmentVariable("PATH"), Environment.GetEnvironmentVariable("PATHEXT"),
+                    File.Exists, Directory.Exists);
 
                 if (problems.Count > 0)
                     _debugLogService?.Warning("MainForm", $"Claude integration incomplete: {Services.ClaudeIntegrationCheck.Fingerprint(problems)}");

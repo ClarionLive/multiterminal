@@ -34,10 +34,16 @@ namespace MultiTerminal.Services
         /// <summary>The settings key holding the fingerprint of the problem set the Owner chose to stop seeing.</summary>
         internal const string SuppressedFingerprintKey = "claudeIntegrationWarning.suppressed";
 
+        /// <summary>
+        /// Used when PATHEXT is unset. Order matters only for which match is reported, not whether one is.
+        /// </summary>
+        private const string DefaultPathExt = ".COM;.EXE;.BAT;.CMD";
+
         internal static IReadOnlyList<Problem> Find(
             string expectedMcpIndexJs,
             string expectedPluginDir,
             string? pathVariable,
+            string? pathExtVariable,
             Func<string, bool> fileExists,
             Func<string, bool> directoryExists)
         {
@@ -46,9 +52,33 @@ namespace MultiTerminal.Services
                 problems.Add(Problem.McpServerMissing);
             if (!directoryExists(expectedPluginDir))
                 problems.Add(Problem.PluginMissing);
-            if (FindOnPath("node.exe", pathVariable, fileExists) == null)
+            if (FindCommandOnPath("node", pathVariable, pathExtVariable, fileExists) == null)
                 problems.Add(Problem.NodeMissing);
             return problems;
+        }
+
+        /// <summary>
+        /// Resolves a bare command the way Windows does: each PATH directory in order, each PATHEXT extension
+        /// in order. Checking node.exe alone (Run 2 adversary) raised a FALSE warning for version managers
+        /// that put a node.cmd shim on PATH — and a warning that is wrong on dev boxes teaches people to
+        /// click "don't show again", which is the one thing this check cannot survive.
+        /// </summary>
+        internal static string? FindCommandOnPath(string command, string? pathVariable, string? pathExtVariable, Func<string, bool> fileExists)
+        {
+            string[] extensions = (string.IsNullOrWhiteSpace(pathExtVariable) ? DefaultPathExt : pathExtVariable)
+                .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            foreach (string dir in PathDirectories(pathVariable))
+            {
+                foreach (string ext in extensions)
+                {
+                    string? candidate = TryCombine(dir, command + ext);
+                    if (candidate != null && fileExists(candidate))
+                        return candidate;
+                }
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -76,7 +106,8 @@ namespace MultiTerminal.Services
             if (problems.Contains(Problem.PluginMissing))
                 lines.Add($"• The MultiTerminal Claude Code plugin was not found at:\n   {expectedPluginDir}");
             if (problems.Contains(Problem.NodeMissing))
-                lines.Add("• Node.js was not found on PATH. The agent tools need Node.js 18 or later (https://nodejs.org).");
+                lines.Add("• Node.js was not found on MultiTerminal's PATH. The agent tools need Node.js 18 or later "
+                          + "(https://nodejs.org). If you installed it after starting MultiTerminal, restart MultiTerminal.");
 
             if (problems.Contains(Problem.McpServerMissing) || problems.Contains(Problem.PluginMissing))
             {
@@ -92,33 +123,29 @@ namespace MultiTerminal.Services
             return string.Join(Environment.NewLine, lines);
         }
 
-        /// <summary>First match of <paramref name="exe"/> in a PATH-style list, or null.</summary>
-        internal static string? FindOnPath(string exe, string? pathVariable, Func<string, bool> fileExists)
+        private static IEnumerable<string> PathDirectories(string? pathVariable)
         {
             if (string.IsNullOrWhiteSpace(pathVariable))
-                return null;
+                yield break;
 
             foreach (string raw in pathVariable.Split(Path.PathSeparator))
             {
                 string dir = raw.Trim().Trim('"');
-                if (dir.Length == 0)
-                    continue;
-
-                string candidate;
-                try
-                {
-                    candidate = Path.Combine(dir, exe);
-                }
-                catch (ArgumentException)
-                {
-                    continue; // A malformed PATH entry is skipped, as the shell would skip it.
-                }
-
-                if (fileExists(candidate))
-                    return candidate;
+                if (dir.Length > 0)
+                    yield return dir;
             }
+        }
 
-            return null;
+        private static string? TryCombine(string dir, string file)
+        {
+            try
+            {
+                return Path.Combine(dir, file);
+            }
+            catch (ArgumentException)
+            {
+                return null; // A malformed PATH entry is skipped, as the shell would skip it.
+            }
         }
     }
 }
