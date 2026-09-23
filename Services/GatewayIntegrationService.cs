@@ -248,8 +248,21 @@ namespace MultiTerminal.Services
         /// </summary>
         public void EnsureGatewayRegistered()
         {
-            var outcome = CentralMcpConfig.EnsureDefault(msg => _log("Gateway", msg));
-            _log("Gateway", $"Central MCP config: {outcome}");
+            // Runs inside the MainForm constructor with no handler above it, so nothing here may
+            // throw: a config problem must degrade to "launch without --mcp-config", never to "the app
+            // does not open". The body this replaced had the same catch-all; dropping it is how a
+            // duplicate-key file became a startup crash (pipeline Run 1).
+            try
+            {
+                var outcome = CentralMcpConfig.EnsureDefault(msg => _log("Gateway", msg));
+                _log("Gateway", $"Central MCP config: {outcome}");
+            }
+#pragma warning disable CA1031 // Deliberate catch-all: this is the last line before an unhandled constructor exception.
+            catch (Exception ex)
+#pragma warning restore CA1031
+            {
+                _log("Gateway", $"Central MCP config check failed, launches will omit --mcp-config: {ex.Message}");
+            }
         }
 
         /// <summary>

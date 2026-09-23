@@ -109,44 +109,51 @@ namespace MultiTerminal.Services
             if (existingJson == null)
                 return "missing";
 
-            JsonObject? servers;
+            // The whole inspection sits inside the try, not just the parse. JsonNode.Parse ACCEPTS a
+            // repeated key; the JsonObject then throws ArgumentException (not JsonException) on first
+            // access, which can be the root lookup or any per-server lookup below. Claude Code's
+            // JSON.parse accepts the same file, so it is a realistic hand edit — and before this, it
+            // escaped the MainForm constructor and stopped MultiTerminal opening (pipeline Run 1).
             try
             {
-                // Root checked as an object first: indexing a JsonArray by name throws, and not a JsonException.
-                servers = (JsonNode.Parse(existingJson) as JsonObject)?["mcpServers"] as JsonObject;
+                // Root checked as an object first: indexing a JsonArray by name throws.
+                var servers = (JsonNode.Parse(existingJson) as JsonObject)?["mcpServers"] as JsonObject;
+                if (servers == null)
+                    return "no mcpServers object";
+
+                bool canGenerateGateway = sources.GatewayExe != null || sources.GatewayProjectDir != null;
+                bool canGenerateMultiTerminal = sources.McpIndexJs != null;
+
+                foreach (var (name, canGenerate) in new[]
+                         {
+                             (GatewayServerName, canGenerateGateway),
+                             (MultiTerminalServerName, canGenerateMultiTerminal),
+                         })
+                {
+                    if (!servers.TryGetPropertyValue(name, out JsonNode? entry) || entry is not JsonObject entryObject)
+                    {
+                        if (canGenerate)
+                            return $"no '{name}' entry";
+                        continue;
+                    }
+
+                    foreach (string path in RootedPaths(entryObject))
+                    {
+                        if (!pathExists(path))
+                            return $"'{name}' points at a path that does not exist: {path}";
+                    }
+                }
+
+                return null;
             }
             catch (JsonException ex)
             {
                 return $"unparseable ({ex.Message})";
             }
-
-            if (servers == null)
-                return "no mcpServers object";
-
-            bool canGenerateGateway = sources.GatewayExe != null || sources.GatewayProjectDir != null;
-            bool canGenerateMultiTerminal = sources.McpIndexJs != null;
-
-            foreach (var (name, canGenerate) in new[]
-                     {
-                         (GatewayServerName, canGenerateGateway),
-                         (MultiTerminalServerName, canGenerateMultiTerminal),
-                     })
+            catch (ArgumentException ex)
             {
-                if (!servers.TryGetPropertyValue(name, out JsonNode? entry) || entry is not JsonObject entryObject)
-                {
-                    if (canGenerate)
-                        return $"no '{name}' entry";
-                    continue;
-                }
-
-                foreach (string path in RootedPaths(entryObject))
-                {
-                    if (!pathExists(path))
-                        return $"'{name}' points at a path that does not exist: {path}";
-                }
+                return $"unparseable, repeated key ({ex.Message})";
             }
-
-            return null;
         }
 
         /// <summary>

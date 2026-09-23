@@ -13,8 +13,11 @@ namespace MultiTerminal.Tests
     /// healed when missing or broken and NEVER rewritten when healthy.
     ///
     /// <para>The fact that separates this from the first version of the fix (msarson's 31fcc69, which
-    /// rewrote the file on every startup) is <see cref="A_working_file_naming_a_build_the_resolver_would_not_pick_is_left_alone"/>.
-    /// Under the rewrite-always version that file is replaced; here it must not be.</para>
+    /// rewrote the file on every startup) is <see cref="Ensure_leaves_a_healthy_file_byte_identical"/>:
+    /// making <c>Ensure</c> rewrite unconditionally turns exactly that fact red (run, not assumed).
+    /// <see cref="A_working_file_naming_a_build_the_resolver_would_not_pick_is_left_alone"/> does NOT
+    /// discriminate — it asks <c>WhyUnhealthy</c> only, which a rewrite-always <c>Ensure</c> never
+    /// consults. It pins the health RULE for the dev-box shape, not the write behaviour.</para>
     ///
     /// <para>Paths are fictional and existence is injected, except in the <see cref="CentralMcpConfig.Ensure"/>
     /// facts, which write to a temp directory. None of these touch the real <c>%APPDATA%</c>.</para>
@@ -100,6 +103,42 @@ namespace MultiTerminal.Tests
         public void An_unparseable_or_wrongly_shaped_file_needs_healing(string json)
         {
             Assert.NotNull(CentralMcpConfig.WhyUnhealthy(json, Both, Existing()));
+        }
+
+        /// <summary>
+        /// Pipeline Run 1 (debugger, reproduced on .NET 8): <c>JsonNode.Parse</c> accepts a repeated key,
+        /// and the resulting <c>JsonObject</c> throws <see cref="ArgumentException"/> — not a
+        /// <c>JsonException</c> — on first access. Claude Code's <c>JSON.parse</c> accepts the same file
+        /// (last key wins), so a hand edit that works there reached MultiTerminal's constructor as an
+        /// unhandled exception and stopped the app opening. Both depths are covered because they throw
+        /// from different accesses: the root lookup and the per-server lookup.
+        /// </summary>
+        [Theory]
+        [InlineData("""{ "mcpServers": { "multiterminal": {}, "multiterminal": {} } }""")]
+        [InlineData("""{ "mcpServers": {}, "mcpServers": {} }""")]
+        public void A_file_with_a_repeated_key_needs_healing_rather_than_throwing(string json)
+        {
+            string? reason = CentralMcpConfig.WhyUnhealthy(json, Both, Existing());
+
+            Assert.NotNull(reason);
+            Assert.StartsWith("unparseable", reason, StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// The end-to-end form of the fact above: the file is replaced by a healthy one, not left for
+        /// the next startup to trip over again.
+        /// </summary>
+        [Fact]
+        public void Ensure_heals_a_file_with_a_repeated_key()
+        {
+            Directory.CreateDirectory(_tempDir);
+            string path = Path.Combine(_tempDir, ".mcp.json");
+            File.WriteAllText(path, """{ "mcpServers": { "multiterminal": {}, "multiterminal": {} } }""");
+
+            var outcome = CentralMcpConfig.Ensure(path, Both, Existing(InstalledExe, IndexJs), log: null);
+
+            Assert.Equal(CentralMcpConfig.Outcome.Written, outcome);
+            Assert.Null(CentralMcpConfig.WhyUnhealthy(File.ReadAllText(path), Both, Existing(InstalledExe, IndexJs)));
         }
 
         /// <summary><c>node</c> and <c>dotnet</c> resolve through PATH, so only absolute paths are checked.</summary>
