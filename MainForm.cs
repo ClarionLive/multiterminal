@@ -5319,12 +5319,11 @@ namespace MultiTerminal
             // env var stays empty — bypassing the wiring fix from AddNewTerminal.
             workingDirectory = ResolveSpawnDir(terminalName, workingDirectory, out string taskWorktreePath);
 
-            // Just launch claude - let the user choose to resume or start fresh
-            // Using plain "claude" lets Claude prompt about resuming recent sessions
-            // TODO: Make --dangerously-skip-permissions configurable in settings
-            string pluginDir = LaunchCommandBuilder.GetMtPluginPath();
-            string pluginFlag = pluginDir != null ? $" --plugin-dir '{pluginDir.Replace("'", "''")}'" : "";
-            string autoRunCommand = $"claude --dangerously-skip-permissions{pluginFlag}";
+            // Built by LaunchCommandBuilder like every other launch (task cb4883b6). The hand-rolled
+            // command this replaced passed --plugin-dir only: no --mcp-config (so no core MCP servers,
+            // even on a working machine), no channel flag (task 5999a182), no forced statusline.
+            // No --resume, so Claude still offers to resume a recent session.
+            string autoRunCommand = LaunchCommandBuilder.BuildClaudeCommand(null, workingDirectory).AutoRunCommand;
 
             // Stop current terminal and restart with new identity
             doc.Terminal.Stop();
