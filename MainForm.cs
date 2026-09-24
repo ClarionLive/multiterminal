@@ -3656,59 +3656,42 @@ namespace MultiTerminal
 
             string terminalName = null;
 
-            // Smart terminal placement based on MaxGridPanes and MaxTabsPerGrid settings
+            // Terminal placement by MaxGridPanes; never floats (task 7f91349f, see TerminalPlacement).
             int maxGrids = _settings?.GetMaxGridPanes() ?? 4;
-            int maxTabs = _settings?.GetMaxTabsPerGrid() ?? 3;
             var activeDoc = _dockPanel.ActiveDocument as TerminalDocument;
 
-            _debugLogService?.Trace("AddNewTerminal", $"Showing terminal in DockPanel (maxGrids: {maxGrids}, maxTabs: {maxTabs}, forceTab: {forceTabMode})...");
+            _debugLogService?.Trace("AddNewTerminal", $"Showing terminal in DockPanel (maxGrids: {maxGrids}, forceTab: {forceTabMode})...");
             if (forceTabMode)
             {
                 doc.Show(_dockPanel, DockState.Document);
             }
             else
             {
-                // Get distinct panes containing terminal documents
-                var terminalDocs = _dockPanel.Documents.OfType<TerminalDocument>().ToList();
-                var panes = terminalDocs.Select(d => d.Pane).Where(p => p != null).Distinct().ToList();
-                int gridCount = panes.Count;
+                // Distinct panes holding a terminal, each with its visible-terminal count
+                var panes = _dockPanel.Documents.OfType<TerminalDocument>()
+                    .Select(d => d.Pane)
+                    .Where(p => p != null)
+                    .Distinct()
+                    .Select(p => new TerminalPlacement.PaneInfo<DockPane>(
+                        p,
+                        p.DockState == DockState.Document,
+                        p.Contents.OfType<TerminalDocument>().Count(t => !t.IsHidden)))
+                    .ToList();
 
-                if (gridCount == 0)
+                var placement = TerminalPlacement.Decide(panes, activeDoc?.Pane, maxGrids);
+                switch (placement.Kind)
                 {
-                    // First terminal — just show it
-                    doc.Show(_dockPanel, DockState.Document);
-                }
-                else if (gridCount < maxGrids)
-                {
-                    // Room for another grid pane — split from active pane
-                    var splitFrom = activeDoc?.Pane ?? panes[panes.Count - 1];
-                    doc.Show(splitFrom, DockAlignment.Right, 0.5);
-                }
-                else
-                {
-                    // All grid slots taken — find a pane with room for tabs
-                    DockPane bestPane = null;
-                    int fewestTabs = int.MaxValue;
-                    foreach (var pane in panes)
-                    {
-                        int tabCount = pane.Contents.Count;
-                        if (tabCount < maxTabs && tabCount < fewestTabs)
-                        {
-                            fewestTabs = tabCount;
-                            bestPane = pane;
-                        }
-                    }
-
-                    if (bestPane != null)
-                    {
-                        // Add as tab to the pane with fewest tabs
-                        doc.Show(bestPane, null);
-                    }
-                    else
-                    {
-                        // All panes full — undock as floating window
-                        doc.Show(_dockPanel, DockState.Float);
-                    }
+                    case TerminalPlacement.Kind.SplitFrom:
+                        doc.Show(placement.Target, DockAlignment.Right, 0.5);
+                        break;
+                    case TerminalPlacement.Kind.TabInto:
+                        doc.Show(placement.Target, null);
+                        break;
+                    case TerminalPlacement.Kind.FirstDocument:
+                        doc.Show(_dockPanel, DockState.Document);
+                        break;
+                    default:
+                        throw new InvalidOperationException($"Unhandled terminal placement '{placement.Kind}'.");
                 }
             }
             _debugLogService?.Trace("AddNewTerminal", "Terminal shown in DockPanel");

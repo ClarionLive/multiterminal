@@ -564,19 +564,12 @@
                         </Grid.ColumnDefinitions>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="32"/>
-                            <RowDefinition Height="32"/>
                         </Grid.RowDefinitions>
 
                         <TextBlock Grid.Row="0" Grid.Column="0" Text="Max Grids"
                                    Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
                                    VerticalAlignment="Center"/>
                         <ComboBox x:Name="MaxGridsCombo" Grid.Row="0" Grid.Column="1"
-                                  Style="{StaticResource DarkComboBox}" Height="26"/>
-
-                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Max Tabs per Grid"
-                                   Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
-                                   VerticalAlignment="Center"/>
-                        <ComboBox x:Name="MaxTabsCombo" Grid.Row="1" Grid.Column="1"
                                   Style="{StaticResource DarkComboBox}" Height="26"/>
                     </Grid>
                 </GroupBox>
