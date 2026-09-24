@@ -263,10 +263,16 @@ namespace MultiTerminal.MCPServer.Services
         internal static readonly TimeSpan ClosedPaneGrace = TimeSpan.FromSeconds(10);
 
         /// <summary>
-        /// How long a close mark is kept at all. Only bounds the table; the refusal itself is
-        /// decided by <see cref="ClosedPaneGrace"/> against the evidence time. Long enough that no
-        /// realistic watcher lag outlives it, so a lagged straggler still finds its mark.
+        /// How long a close mark is honoured at all; past this it is ignored and dropped the next
+        /// time that name is looked up. The refusal itself is decided by
+        /// <see cref="ClosedPaneGrace"/> against the evidence time. Long enough that no realistic
+        /// watcher lag outlives it, so a lagged straggler still finds its mark.
         /// </summary>
+        /// <remarks>
+        /// This does NOT shrink the table on its own: a name that is never seen again keeps its
+        /// entry (and its <see cref="_startTokens"/> entry) for the life of the process. That is
+        /// one short string per closed name, which is accepted rather than swept.
+        /// </remarks>
         internal static readonly TimeSpan ClosedPaneRetention = TimeSpan.FromMinutes(10);
 
         /// <summary>
