@@ -158,19 +158,19 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
-        /// The live failure of task 891488b3, end to end: the terminal is gone and its card evicted,
+        /// The live failure of task 891488b3, end to end: the pane is closed and its card evicted,
         /// THEN the watcher polls the TURN_END its Stop hook wrote in the pane's last instant. The
         /// watcher finds no card, falls back to the bare name, and before the fix that row minted a
         /// nameless card the rail showed as "(unnamed)" until MT restarted.
         /// </summary>
         [Fact]
-        public void A_turn_end_polled_after_the_terminal_is_gone_leaves_no_card()
+        public void A_turn_end_polled_after_the_pane_closed_leaves_no_card()
         {
             Assert.True(_watcher.Prime());
             Block();
             Row("TURN_END", "Turn ended", MainThread(string.Empty));
 
-            _attention.NoteTerminalGone(Agent);
+            _attention.NoteTerminalClosed(Agent);
             _watcher.Poll();
 
             Assert.Empty(_attention.Snapshot());

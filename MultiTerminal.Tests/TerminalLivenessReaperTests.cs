@@ -360,6 +360,25 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void Closing_one_of_two_same_name_tabs_does_not_suppress_the_others_attention_cards()
+        {
+            // The Attention half of the rule above (task 891488b3). UnregisterTerminal marks a closed
+            // pane's name so its late rows cannot bring its card back; with another live Diana, that
+            // mark would refuse the LIVE Diana's cards for the grace period instead.
+            using var broker = new MessageBroker();
+
+            RegisterWithDeadOwner(broker, "Diana", docId: "D1", nonce: "N1");   // not yet swept
+            broker.RegisterTerminal("Unassigned", docId: "D2", channelPort: 8806, nonce: "N2");
+            broker.RegisterTerminal("Diana", docId: "D2", channelPort: 8806, nonce: "N2", ownerPid: Environment.ProcessId);
+            Assert.Equal(2, broker.GetAllConnectedTerminals().Count(t => t.Name == "Diana"));   // precondition
+
+            broker.UnregisterTerminal("D1");
+
+            Assert.True(broker.AgentAttention.NoteTurnEnded("Diana", DateTime.UtcNow, isSubagent: false),
+                "Closing the dead Diana's tab marked the name closed while the other Diana is live.");
+        }
+
+        [Fact]
         public void A_name_held_only_by_a_corpse_is_not_live_but_one_held_by_an_unprobeable_owner_is()
         {
             // The other half of IsAgentNameHeldByLiveTerminal. Every fact above needs it to say "live"

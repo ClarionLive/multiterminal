@@ -3355,6 +3355,17 @@ namespace MultiTerminal.MCPServer.Services
                 if (!IsAgentNameHeldByLiveTerminal(terminal.Name))
                 {
                     _profileService.SetProfileOffline(terminal.Name);
+
+                    // This method is MultiTerminal tearing the terminal down (tab close, close_helper,
+                    // Dispose, process exit, Launch-as), so rows its session still has in flight are
+                    // late: stop them bringing its Attention card back (task 891488b3). Deliberately
+                    // not in DisconnectTerminalByName, which the SessionEnd hook also calls on /clear
+                    // while the pane and its agent carry on.
+                    if (!IsTemporaryAgent(terminal.Name)
+                        && !terminal.Name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
+                    {
+                        AgentAttention.NoteTerminalClosed(terminal.Name);
+                    }
                 }
             }
         }

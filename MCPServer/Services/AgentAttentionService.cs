@@ -249,17 +249,41 @@ namespace MultiTerminal.MCPServer.Services
             new Dictionary<string, AgentAttentionEntry>(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
-        /// Agent names whose terminal is gone and has not been started again (task 891488b3).
+        /// How long after a pane closes its agent's late rows are refused (task 891488b3).
         /// </summary>
         /// <remarks>
-        /// A dying terminal's last rows still arrive after <see cref="NoteTerminalGone"/>: observed
-        /// live, a helper's Stop hook wrote its TURN_END 172 ms after close_helper closed the pane.
-        /// The watcher polls, found no card for the name, and the row minted a new nameless one that
-        /// nothing would ever remove. <see cref="UpsertLocked"/> refuses to CREATE an entry for a
-        /// name in this set; <see cref="NoteTerminalStarted"/> is the only thing that takes a name
-        /// out. Same comparer as <see cref="_entries"/>, because the card keys it guards are names.
+        /// The straggler observed live landed 172 ms after the close; a pane's process tree is
+        /// killed with it, so nothing it wrote can arrive much later. The bound exists for the other
+        /// direction: the close path checks "no live terminal holds this name" and then marks, and
+        /// those two steps are not atomic with a same-name registration. A mark that lands after
+        /// that registration would otherwise suppress a LIVE terminal's cards until it happened to
+        /// register again. Bounded, the worst case is this many seconds, after which activity
+        /// recreates the card exactly as it did before this ticket.
         /// </remarks>
-        private readonly HashSet<string> _goneAgents = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        internal static readonly TimeSpan ClosedPaneGrace = TimeSpan.FromSeconds(10);
+
+        /// <summary>
+        /// Agent names whose PANE was closed, with when (task 891488b3).
+        /// </summary>
+        /// <remarks>
+        /// A closed pane's last rows still arrive after its card is evicted: observed live, a
+        /// helper's Stop hook wrote its TURN_END 172 ms after close_helper closed the pane. The
+        /// watcher polls, found no card for the name, and the row minted a new nameless one that
+        /// nothing would ever remove. <see cref="UpsertLocked"/> refuses to CREATE an entry for a
+        /// name marked here within <see cref="ClosedPaneGrace"/>.
+        /// <para>
+        /// Set ONLY by <see cref="NoteTerminalClosed"/> (the pane is gone), never by
+        /// <see cref="NoteTerminalGone"/> (the broker row disconnected). They differ: <c>/clear</c>
+        /// disconnects the row through the SessionEnd hook while the pane and its agent carry on,
+        /// and that agent's next notification (usually the session-start question) must still get
+        /// a card. <see cref="NoteTerminalStarted"/> takes a name out; so does expiry.
+        /// </para>
+        /// Same comparer as <see cref="_entries"/>, because the card keys it guards are names.
+        /// </remarks>
+        private readonly Dictionary<string, DateTime> _closedPanes = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Clock for <see cref="_closedPanes"/> expiry. A test seam; nothing else reads it.</summary>
+        internal Func<DateTime> UtcNow { get; set; } = () => DateTime.UtcNow;
 
         private readonly object _lock = new object();
 
@@ -676,11 +700,11 @@ namespace MultiTerminal.MCPServer.Services
                     // notification — a terminal that is /cleared and then simply gets back to work
                     // never blocks, so ApplyNotification is never reached. Superseding on this path
                     // too is what stops that terminal's predecessor lingering.
-                    // TryGetValue, not the indexer: the create is refused for a gone terminal's late
+                    // TryGetValue, not the indexer: the create is refused for a closed pane's late
                     // row (task 891488b3), and then there is no entry to read the name from.
-                    bool supersededOnCreate = SupersedeAgentLocked(
-                        NullIfBlank(agentName) ?? (_entries.TryGetValue(sessionKey, out var made) ? made.AgentName : null),
-                        sessionKey);
+                    string owner = NullIfBlank(agentName)
+                                   ?? (_entries.TryGetValue(sessionKey, out var made) ? made.AgentName : null);
+                    bool supersededOnCreate = SupersedeAgentLocked(owner, sessionKey);
 
                     return created || supersededOnCreate;
                 }
@@ -907,7 +931,7 @@ namespace MultiTerminal.MCPServer.Services
             lock (_lock)
             {
                 // A terminal carrying this name exists again, so its activity is live, not late.
-                _goneAgents.Remove(agentName);
+                _closedPanes.Remove(agentName);
 
                 foreach (var kvp in _entries)
                 {
@@ -949,11 +973,47 @@ namespace MultiTerminal.MCPServer.Services
 
             lock (_lock)
             {
-                // Marked even when there was no card to evict: a terminal that closed before its
-                // first observation can still have rows in flight.
-                _goneAgents.Add(agentName);
                 return EvictByAgentLocked(agentName, keepKey: null);
             }
+        }
+
+        /// <summary>
+        /// The PANE for <paramref name="agentName"/> was closed: drop its cards, and for
+        /// <see cref="ClosedPaneGrace"/> refuse to create new ones from rows it left in flight
+        /// (task 891488b3).
+        /// </summary>
+        /// <remarks>
+        /// Stronger than <see cref="NoteTerminalGone"/>, which only answers "the broker row
+        /// disconnected" and so also fires for a <c>/clear</c> in a pane that lives on. Only the
+        /// pane-removal path may call this, and only when no other live terminal holds the name.
+        /// It evicts as well as marking, so a card a late row created between the broker's own
+        /// eviction and this call is removed too.
+        /// </remarks>
+        /// <returns>True if anything was evicted.</returns>
+        public bool NoteTerminalClosed(string agentName)
+        {
+            if (string.IsNullOrWhiteSpace(agentName)) return false;
+
+            lock (_lock)
+            {
+                // Marked even when there was no card to evict: a terminal that closed before its
+                // first observation can still have rows in flight.
+                _closedPanes[agentName] = UtcNow();
+                return EvictByAgentLocked(agentName, keepKey: null);
+            }
+        }
+
+        /// <summary>
+        /// Whether <paramref name="name"/>'s pane closed within <see cref="ClosedPaneGrace"/>.
+        /// An expired mark is dropped here, so the table holds only recent closes.
+        /// </summary>
+        private bool IsRecentlyClosedLocked(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name) || !_closedPanes.TryGetValue(name, out var closedAt)) return false;
+            if (UtcNow() - closedAt < ClosedPaneGrace) return true;
+
+            _closedPanes.Remove(name);
+            return false;
         }
 
         /// <summary>
@@ -1031,13 +1091,12 @@ namespace MultiTerminal.MCPServer.Services
 
             mutate(entry);
 
-            // A late row for a terminal that is gone must not create its card again (task 891488b3).
+            // A late row from a closed pane must not create its card again (task 891488b3).
             // Checked AFTER mutate because that is where a notification learns the agent name: its
             // key is the session uuid, so the key alone cannot say whose it is. The one create point
             // for every path, so a new caller cannot forget it. Updating an existing card is not
             // affected, and nothing has been announced yet, so undoing the insert is invisible.
-            if (created && (_goneAgents.Contains(key)
-                            || (entry.AgentName != null && _goneAgents.Contains(entry.AgentName))))
+            if (created && (IsRecentlyClosedLocked(key) || IsRecentlyClosedLocked(entry.AgentName)))
             {
                 _entries.Remove(key);
                 return false;
