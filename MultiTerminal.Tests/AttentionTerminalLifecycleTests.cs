@@ -28,6 +28,9 @@ namespace MultiTerminal.Tests
     {
         private const string Agent = "Alice";
 
+        /// <summary>A pane close as the broker makes it: token read first, then the close.</summary>
+        private static bool Close(AgentAttentionService svc) => svc.NoteTerminalClosed(Agent, svc.GetStartToken(Agent));
+
         private static Dictionary<string, object> Notification(string sessionId, string rawType = "permission_prompt")
             => new Dictionary<string, object>
             {
@@ -285,7 +288,6 @@ namespace MultiTerminal.Tests
             Assert.Null(card.LastActivity);
         }
 
-
         /// <summary>
         /// The sequence observed live (task 891488b3): a helper's Stop hook wrote its TURN_END row
         /// 172 ms AFTER close_helper had closed its pane and the card had been evicted. The watcher
@@ -300,7 +302,7 @@ namespace MultiTerminal.Tests
             var closedAt = DateTime.UtcNow;
             svc.NoteTerminalStarted(Agent);
             svc.NoteObservedActivity(Agent, closedAt.AddSeconds(-4), isSubagent: false, toolUseId: null, agentName: Agent, activitySummary: "send_message");
-            svc.NoteTerminalClosed(Agent);
+            Close(svc);
             int announced = 0;
             svc.AttentionChanged += (s, e) => announced++;
 
@@ -324,7 +326,7 @@ namespace MultiTerminal.Tests
             var late = DateTime.UtcNow.AddMilliseconds(200);
             svc.NoteTerminalStarted(Agent);
             svc.ApplyNotification(Notification("sess-1"));
-            svc.NoteTerminalClosed(Agent);
+            Close(svc);
 
             Assert.False(svc.NoteActivityLineOnly(Agent, "Bash: git status", late));
             Assert.False(svc.NoteObservedActivity(Agent, late, isSubagent: false, toolUseId: null, agentName: Agent, activitySummary: "Edit: A.cs"));
@@ -344,7 +346,7 @@ namespace MultiTerminal.Tests
         {
             var svc = new AgentAttentionService();
             svc.NoteTerminalStarted(Agent);
-            svc.NoteTerminalClosed(Agent);
+            Close(svc);
 
             Assert.False(svc.NoteTurnEnded("ALICE", DateTime.UtcNow, isSubagent: false));
 
@@ -364,7 +366,7 @@ namespace MultiTerminal.Tests
             svc.NoteTurnEnded(Agent, DateTime.UtcNow, isSubagent: false);
             Assert.Single(svc.Snapshot());
 
-            Assert.True(svc.NoteTerminalClosed(Agent));
+            Assert.True(Close(svc));
 
             Assert.Empty(svc.Snapshot());
         }
@@ -389,26 +391,83 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
-        /// The close path checks "no live terminal holds this name" and then marks, and those are not
-        /// atomic with a same-name registration (pipeline run 1, adversary and debugger). A mark that
-        /// lands after that registration hits a LIVE terminal. Bounded by ClosedPaneGrace, it costs
-        /// that long and no more: afterwards the live terminal's activity creates its card again.
-        /// Uses the clock seam, because waiting ten real seconds in a test is not an option.
+        /// The close path checks "no live terminal holds this name" and then closes, and a same-name
+        /// registration can land between the two (pipeline runs 1 and 2, adversary). The close was
+        /// decided about the OLD terminal, so it must neither mark nor evict: the new terminal's
+        /// FIRST notification is one-shot, and a refused question would never be re-sent. The
+        /// notification here is exactly that one-shot question, not replayable activity.
         /// </summary>
         [Fact]
-        public void A_stale_close_mark_expires_so_a_live_terminal_recovers()
+        public void A_close_decided_before_a_same_name_start_touches_nothing()
+        {
+            var svc = new AgentAttentionService();
+            svc.NoteTerminalStarted(Agent);
+            long tokenReadByTheClosePath = svc.GetStartToken(Agent);
+
+            svc.NoteTerminalStarted(Agent);   // the same-name registration wins the race
+
+            Assert.False(svc.NoteTerminalClosed(Agent, tokenReadByTheClosePath));
+            Assert.Single(svc.Snapshot());   // the new terminal's card was not evicted
+            Assert.True(svc.ApplyNotification(Notification("sess-new", rawType: "ask_user_question")));
+            Assert.Equal(AttentionState.BlockedQuestion, Assert.Single(svc.Snapshot()).State);
+        }
+
+        /// <summary>
+        /// A row is judged by when its hook WROTE it, not by when the watcher gets to it (pipeline
+        /// run 2, code review + adversary). The watcher's poll interval is configurable up to 60 s, so
+        /// judging by processing time let the very straggler this ticket is about through again
+        /// whenever a poll ran late.
+        /// </summary>
+        [Fact]
+        public void A_straggler_processed_long_after_the_close_is_still_refused()
         {
             var now = DateTime.UtcNow;
             var svc = new AgentAttentionService { UtcNow = () => now };
             svc.NoteTerminalStarted(Agent);
-            svc.NoteTerminalClosed(Agent);
+            var closedAt = now;
+            Close(svc);
 
-            now += AgentAttentionService.ClosedPaneGrace - TimeSpan.FromMilliseconds(1);
-            Assert.False(svc.NoteTurnEnded(Agent, now, isSubagent: false));
+            now = closedAt + TimeSpan.FromSeconds(45);   // a slow poll, well past the grace
 
-            now += TimeSpan.FromMilliseconds(2);
-            Assert.True(svc.NoteTurnEnded(Agent, now, isSubagent: false));
+            Assert.False(svc.NoteTurnEnded(Agent, closedAt.AddMilliseconds(172), isSubagent: false));
+            Assert.Empty(svc.Snapshot());
+        }
+
+        /// <summary>
+        /// The other side of the evidence rule: a row stamped after the grace is not the closed
+        /// pane's output. Pinned at the boundary, one millisecond each way.
+        /// </summary>
+        [Fact]
+        public void Evidence_stamped_after_the_grace_creates_a_card()
+        {
+            var now = DateTime.UtcNow;
+            var svc = new AgentAttentionService { UtcNow = () => now };
+            svc.NoteTerminalStarted(Agent);
+            var closedAt = now;
+            Close(svc);
+
+            Assert.False(svc.NoteTurnEnded(Agent, closedAt + AgentAttentionService.ClosedPaneGrace - TimeSpan.FromMilliseconds(1), isSubagent: false));
+            Assert.True(svc.NoteTurnEnded(Agent, closedAt + AgentAttentionService.ClosedPaneGrace + TimeSpan.FromMilliseconds(1), isSubagent: false));
             Assert.Single(svc.Snapshot());
+        }
+
+        /// <summary>
+        /// A notification carries no timestamp of its own, so it is judged at the moment it arrives.
+        /// </summary>
+        [Fact]
+        public void A_notification_is_judged_by_when_it_arrives()
+        {
+            var now = DateTime.UtcNow;
+            var svc = new AgentAttentionService { UtcNow = () => now };
+            svc.NoteTerminalStarted(Agent);
+            var closedAt = now;
+            Close(svc);
+
+            now = closedAt + TimeSpan.FromSeconds(1);
+            Assert.False(svc.ApplyNotification(Notification("sess-1")));
+
+            now = closedAt + AgentAttentionService.ClosedPaneGrace + TimeSpan.FromSeconds(1);
+            Assert.True(svc.ApplyNotification(Notification("sess-1")));
         }
 
         /// <summary>
@@ -420,7 +479,7 @@ namespace MultiTerminal.Tests
         {
             var svc = new AgentAttentionService();
             svc.NoteTerminalStarted(Agent);
-            svc.NoteTerminalClosed(Agent);
+            Close(svc);
 
             Assert.True(svc.NoteTerminalStarted(Agent));
             Assert.True(svc.NoteObservedActivity(Agent, DateTime.UtcNow, isSubagent: false, toolUseId: null, agentName: Agent, activitySummary: "Bash: git status"));
@@ -437,7 +496,7 @@ namespace MultiTerminal.Tests
         {
             var svc = new AgentAttentionService();
             svc.NoteTerminalStarted(Agent);
-            svc.NoteTerminalClosed(Agent);
+            Close(svc);
 
             Assert.True(svc.NoteTurnEnded("Bob", DateTime.UtcNow, isSubagent: false));
 

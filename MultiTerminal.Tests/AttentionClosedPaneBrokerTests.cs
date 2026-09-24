@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Data.SQLite;
 using System.IO;
 using MultiTerminal.MCPServer.Services;
@@ -89,7 +90,7 @@ namespace MultiTerminal.Tests
 
             Assert.True(broker.DisconnectTerminalByName("Alice"));
 
-            Assert.True(broker.AgentAttention.ApplyNotification(new System.Collections.Generic.Dictionary<string, object>
+            Assert.True(broker.AgentAttention.ApplyNotification(new Dictionary<string, object>
             {
                 ["session_id"] = "sess-after-clear",
                 ["agent_name"] = "Alice",
@@ -97,6 +98,32 @@ namespace MultiTerminal.Tests
                 ["message"] = "What would you like to do?",
             }));
             Assert.Single(broker.AgentAttention.Snapshot());
+        }
+
+        /// <summary>
+        /// The race from pipeline runs 1 and 2 (adversary HIGH), made deterministic. UnregisterTerminal
+        /// raises TerminalDisconnected between reading the start token and closing, so a subscriber
+        /// here runs at exactly the moment a same-name terminal could start. The close must then be
+        /// void, and that terminal's one-shot question must get its card. This pins the broker's
+        /// ORDER (token read before the close decision): read the token any later and it goes red.
+        /// </summary>
+        [Fact]
+        public void A_same_name_start_during_the_close_voids_the_close()
+        {
+            using var broker = new MessageBroker();
+            broker.RegisterTerminal("Alice", docId: "DA", nonce: null);
+            broker.AgentAttention.NoteTerminalStarted("Alice");
+            broker.TerminalDisconnected += (_, t) => broker.AgentAttention.NoteTerminalStarted("Alice");
+
+            broker.UnregisterTerminal("DA");
+
+            Assert.True(broker.AgentAttention.ApplyNotification(new Dictionary<string, object>
+            {
+                ["session_id"] = "sess-relaunched",
+                ["agent_name"] = "Alice",
+                ["raw_type"] = "ask_user_question",
+                ["message"] = "What would you like to do?",
+            }));
         }
 
         // The two-live-rows guard (another live terminal holds the name, so no mark) is pinned in

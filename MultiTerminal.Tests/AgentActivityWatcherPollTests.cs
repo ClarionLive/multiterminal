@@ -170,7 +170,7 @@ namespace MultiTerminal.Tests
             Block();
             Row("TURN_END", "Turn ended", MainThread(string.Empty));
 
-            _attention.NoteTerminalClosed(Agent);
+            _attention.NoteTerminalClosed(Agent, _attention.GetStartToken(Agent));
             _watcher.Poll();
 
             Assert.Empty(_attention.Snapshot());
