@@ -248,6 +248,19 @@ namespace MultiTerminal.MCPServer.Services
         private readonly Dictionary<string, AgentAttentionEntry> _entries =
             new Dictionary<string, AgentAttentionEntry>(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>
+        /// Agent names whose terminal is gone and has not been started again (task 891488b3).
+        /// </summary>
+        /// <remarks>
+        /// A dying terminal's last rows still arrive after <see cref="NoteTerminalGone"/>: observed
+        /// live, a helper's Stop hook wrote its TURN_END 172 ms after close_helper closed the pane.
+        /// The watcher polls, found no card for the name, and the row minted a new nameless one that
+        /// nothing would ever remove. <see cref="UpsertLocked"/> refuses to CREATE an entry for a
+        /// name in this set; <see cref="NoteTerminalStarted"/> is the only thing that takes a name
+        /// out. Same comparer as <see cref="_entries"/>, because the card keys it guards are names.
+        /// </remarks>
+        private readonly HashSet<string> _goneAgents = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         private readonly object _lock = new object();
 
         /// <summary>Raised whenever a session's state changes. Never raised for a no-op.</summary>
@@ -663,8 +676,11 @@ namespace MultiTerminal.MCPServer.Services
                     // notification — a terminal that is /cleared and then simply gets back to work
                     // never blocks, so ApplyNotification is never reached. Superseding on this path
                     // too is what stops that terminal's predecessor lingering.
+                    // TryGetValue, not the indexer: the create is refused for a gone terminal's late
+                    // row (task 891488b3), and then there is no entry to read the name from.
                     bool supersededOnCreate = SupersedeAgentLocked(
-                        NullIfBlank(agentName) ?? _entries[sessionKey].AgentName, sessionKey);
+                        NullIfBlank(agentName) ?? (_entries.TryGetValue(sessionKey, out var made) ? made.AgentName : null),
+                        sessionKey);
 
                     return created || supersededOnCreate;
                 }
@@ -890,6 +906,9 @@ namespace MultiTerminal.MCPServer.Services
 
             lock (_lock)
             {
+                // A terminal carrying this name exists again, so its activity is live, not late.
+                _goneAgents.Remove(agentName);
+
                 foreach (var kvp in _entries)
                 {
                     // Already has a card under any key — a re-registration must not add a second,
@@ -930,6 +949,9 @@ namespace MultiTerminal.MCPServer.Services
 
             lock (_lock)
             {
+                // Marked even when there was no card to evict: a terminal that closed before its
+                // first observation can still have rows in flight.
+                _goneAgents.Add(agentName);
                 return EvictByAgentLocked(agentName, keepKey: null);
             }
         }
@@ -985,7 +1007,8 @@ namespace MultiTerminal.MCPServer.Services
         /// </param>
         private bool UpsertLocked(string key, Action<AgentAttentionEntry> mutate, bool startsNewBlock = false)
         {
-            if (!_entries.TryGetValue(key, out var entry))
+            bool created = !_entries.TryGetValue(key, out var entry);
+            if (created)
             {
                 entry = new AgentAttentionEntry
                 {
@@ -1007,6 +1030,18 @@ namespace MultiTerminal.MCPServer.Services
             var beforeActivity = entry.LastActivity;
 
             mutate(entry);
+
+            // A late row for a terminal that is gone must not create its card again (task 891488b3).
+            // Checked AFTER mutate because that is where a notification learns the agent name: its
+            // key is the session uuid, so the key alone cannot say whose it is. The one create point
+            // for every path, so a new caller cannot forget it. Updating an existing card is not
+            // affected, and nothing has been announced yet, so undoing the insert is invisible.
+            if (created && (_goneAgents.Contains(key)
+                            || (entry.AgentName != null && _goneAgents.Contains(entry.AgentName))))
+            {
+                _entries.Remove(key);
+                return false;
+            }
 
             // Block IDENTITY is a counter, deliberately NOT the clock below (task 42052f0c,
             // pipeline run 2). The panel needs to tell one blocked episode from the next so an

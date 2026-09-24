@@ -284,5 +284,119 @@ namespace MultiTerminal.Tests
             Assert.Equal(AttentionState.Unknown, card.State);
             Assert.Null(card.LastActivity);
         }
+
+        /// <summary>
+        /// The sequence observed live (task 891488b3): a helper's Stop hook wrote its TURN_END row
+        /// 172 ms AFTER close_helper had closed its pane and the card had been evicted. The watcher
+        /// found no card for the name, fell back to the bare name as the key, and NoteTurnEnded
+        /// minted a new entry with no AgentName, which the rail rendered as "(unnamed)" until MT
+        /// restarted. Nothing else would ever remove it, because the terminal-gone edge had already
+        /// fired.
+        /// </summary>
+        [Fact]
+        public void A_turn_end_that_lands_after_the_terminal_is_gone_does_not_bring_the_card_back()
+        {
+            var svc = new AgentAttentionService();
+            var closedAt = DateTime.UtcNow;
+            svc.NoteTerminalStarted(Agent);
+            svc.NoteObservedActivity(Agent, closedAt.AddSeconds(-4), isSubagent: false, toolUseId: null, agentName: Agent, activitySummary: "send_message");
+            svc.NoteTerminalGone(Agent);
+            int announced = 0;
+            svc.AttentionChanged += (s, e) => announced++;
+
+            Assert.False(svc.NoteTurnEnded(Agent, closedAt.AddMilliseconds(172), isSubagent: false));
+
+            Assert.Empty(svc.Snapshot());
+            Assert.Null(svc.GetByAgent(Agent));
+            Assert.Equal(0, announced);
+        }
+
+        /// <summary>
+        /// The same race on the other three ways a dying terminal can still reach the service: a
+        /// tool row's display line, a tool row's clear edge, and a notification (keyed by the real
+        /// session uuid, so it is refused by its agent name rather than its key).
+        /// </summary>
+        [Fact]
+        public void Nothing_that_arrives_late_for_a_gone_terminal_creates_a_card()
+        {
+            var svc = new AgentAttentionService();
+            var late = DateTime.UtcNow.AddMilliseconds(200);
+            svc.NoteTerminalStarted(Agent);
+            svc.ApplyNotification(Notification("sess-1"));
+            svc.NoteTerminalGone(Agent);
+
+            Assert.False(svc.NoteActivityLineOnly(Agent, "Bash: git status", late));
+            Assert.False(svc.NoteObservedActivity(Agent, late, isSubagent: false, toolUseId: null, agentName: Agent, activitySummary: "Edit: A.cs"));
+
+            // No agent name: the create branch then reads the name back from the entry it just made,
+            // which a refused create no longer leaves behind. Must not throw.
+            Assert.False(svc.NoteObservedActivity(Agent, late, isSubagent: false, toolUseId: null, agentName: null, activitySummary: "Edit: B.cs"));
+            Assert.False(svc.ApplyNotification(Notification("sess-1")));
+            Assert.False(svc.ApplyNotification(Notification("sess-2", rawType: "idle_prompt")));
+            Assert.False(svc.MarkOffline(Agent));
+
+            Assert.Empty(svc.Snapshot());
+        }
+
+        [Fact]
+        public void The_gone_mark_is_case_insensitive_like_the_card_keys()
+        {
+            var svc = new AgentAttentionService();
+            svc.NoteTerminalStarted(Agent);
+            svc.NoteTerminalGone(Agent);
+
+            Assert.False(svc.NoteTurnEnded("ALICE", DateTime.UtcNow, isSubagent: false));
+
+            Assert.Empty(svc.Snapshot());
+        }
+
+        /// <summary>
+        /// The mark must not outlive the NEXT terminal with that name: a relaunched Alice gets her
+        /// card back, and her activity lands on it. Without this the fix would silently turn every
+        /// reused name into an agent the rail can never show again.
+        /// </summary>
+        [Fact]
+        public void A_relaunched_terminal_with_the_same_name_is_tracked_again()
+        {
+            var svc = new AgentAttentionService();
+            svc.NoteTerminalStarted(Agent);
+            svc.NoteTerminalGone(Agent);
+
+            Assert.True(svc.NoteTerminalStarted(Agent));
+            Assert.True(svc.NoteObservedActivity(Agent, DateTime.UtcNow, isSubagent: false, toolUseId: null, agentName: Agent, activitySummary: "Bash: git status"));
+            Assert.True(svc.ApplyNotification(Notification("sess-2")));
+
+            var card = Assert.Single(svc.Snapshot());
+            Assert.Equal("sess-2", card.SessionId);
+            Assert.Equal(Agent, card.AgentName);
+            Assert.Equal(AttentionState.BlockedPermission, card.State);
+        }
+
+        [Fact]
+        public void One_agents_gone_mark_does_not_touch_another_agent()
+        {
+            var svc = new AgentAttentionService();
+            svc.NoteTerminalStarted(Agent);
+            svc.NoteTerminalGone(Agent);
+
+            Assert.True(svc.NoteTurnEnded("Bob", DateTime.UtcNow, isSubagent: false));
+
+            var card = Assert.Single(svc.Snapshot());
+            Assert.Equal("Bob", card.SessionId);
+        }
+
+        /// <summary>
+        /// Only a name MARKED gone is refused. An agent the service never saw start (the existing
+        /// facts above build cards that way) still gets a card from its first observation.
+        /// </summary>
+        [Fact]
+        public void An_agent_never_seen_starting_is_still_tracked_as_before()
+        {
+            var svc = new AgentAttentionService();
+
+            Assert.True(svc.NoteTurnEnded(Agent, DateTime.UtcNow, isSubagent: false));
+
+            Assert.Single(svc.Snapshot());
+        }
     }
 }
