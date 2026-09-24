@@ -248,6 +248,98 @@ namespace MultiTerminal.MCPServer.Services
         private readonly Dictionary<string, AgentAttentionEntry> _entries =
             new Dictionary<string, AgentAttentionEntry>(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>
+        /// Evidence stamped within this long after a pane closed is treated as the closed session's
+        /// own late output and cannot create a card (task 891488b3).
+        /// </summary>
+        /// <remarks>
+        /// Compared against the EVIDENCE time, not the time it is processed: an activity row carries
+        /// the moment its hook wrote it, so a row the watcher reads late (a long
+        /// <c>MULTITERMINAL_ATTENTION_POLL_MS</c>, a stalled poll, a backlog) is still recognised as
+        /// late (pipeline run 2, code review + adversary). The straggler observed live was written
+        /// 172 ms after the close; the pane's process tree is killed with it, so nothing it writes
+        /// can be stamped much later.
+        /// </remarks>
+        internal static readonly TimeSpan ClosedPaneGrace = TimeSpan.FromSeconds(10);
+
+        /// <summary>
+        /// How long a close mark is honoured at all; past this it is ignored and dropped the next
+        /// time that name is looked up. The refusal itself is decided by
+        /// <see cref="ClosedPaneGrace"/> against the evidence time. Long enough that no realistic
+        /// watcher lag outlives it, so a lagged straggler still finds its mark.
+        /// </summary>
+        /// <remarks>
+        /// This does NOT shrink the table on its own: a name that is never seen again keeps its
+        /// entry (and its <see cref="_startTokens"/> entry) for the life of the process. That is
+        /// one short string per closed name, which is accepted rather than swept.
+        /// </remarks>
+        internal static readonly TimeSpan ClosedPaneRetention = TimeSpan.FromMinutes(10);
+
+        /// <summary>
+        /// Agent names whose PANE was closed, with when (task 891488b3).
+        /// </summary>
+        /// <remarks>
+        /// A closed pane's last rows still arrive after its card is evicted: observed live, a
+        /// helper's Stop hook wrote its TURN_END 172 ms after close_helper closed the pane. The
+        /// watcher polls, found no card for the name, and the row minted a new nameless one that
+        /// nothing would ever remove. <see cref="UpsertLocked"/> refuses to CREATE an entry for a
+        /// name marked here from evidence stamped within <see cref="ClosedPaneGrace"/> of the close.
+        /// <para>
+        /// Set ONLY by <see cref="NoteTerminalClosed"/> (the pane is gone), never by
+        /// <see cref="NoteTerminalGone"/> (the broker row disconnected). They differ: <c>/clear</c>
+        /// disconnects the row through the SessionEnd hook while the pane and its agent carry on,
+        /// and that agent's next notification (usually the session-start question) must still get
+        /// a card. <see cref="NoteTerminalStarted"/> takes a name out; so does
+        /// <see cref="ClosedPaneRetention"/>.
+        /// </para>
+        /// Same comparer as <see cref="_entries"/>, because the card keys it guards are names.
+        /// </remarks>
+        private readonly Dictionary<string, DateTime> _closedPanes = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Per name, how many times <see cref="NoteTerminalStarted"/> has run (task 891488b3,
+        /// pipeline run 2, adversary HIGH).
+        /// </summary>
+        /// <remarks>
+        /// The close path decides "no live terminal holds this name" and then closes, and a same-name
+        /// registration can land between the two. A close mark written after that registration would
+        /// refuse the NEW terminal's cards, and a refused question or permission notification is
+        /// one-shot: nothing re-sends it, so its card would never appear. The caller reads this token
+        /// BEFORE its liveness check (<see cref="GetStartToken"/>) and hands it to
+        /// <see cref="NoteTerminalClosed"/>, which does nothing at all if a start has happened since.
+        /// Compared under <see cref="_lock"/>, so it is atomic with <see cref="NoteTerminalStarted"/>.
+        /// </remarks>
+        private readonly Dictionary<string, long> _startTokens = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Clock for close marks. A test seam; nothing else reads it.</summary>
+        internal Func<DateTime> UtcNow { get; set; } = () => DateTime.UtcNow;
+
+        /// <summary>
+        /// Whether a live terminal holds a name RIGHT NOW. Set by the broker to
+        /// <see cref="MessageBroker.IsAgentNameHeldByLiveTerminal"/>; null (unit tests with no broker)
+        /// means "no".
+        /// </summary>
+        /// <remarks>
+        /// The last word on every refusal (task 891488b3, pipeline run 3, adversary HIGH). A same-name
+        /// registration publishes its live row under the broker's lock and only afterwards raises the
+        /// event that reaches <see cref="NoteTerminalStarted"/>, so a close can still land in between
+        /// and mark a name a live terminal holds. Asking the broker at refusal time closes that for
+        /// good: a live row is exactly what this sees, whatever order the events arrived in. Called
+        /// under <see cref="_lock"/>. It reads a concurrent dictionary and one process start time per
+        /// connected row carrying the name, and may write a rate-limited debug-log warning for an
+        /// owner it cannot read; it takes no broker lock and never calls back into this service, so
+        /// there is no lock order to get wrong. Reached only when a create is about to be refused.
+        /// <para>
+        /// Its unlocked read of the closed row's <c>IsConnected</c> cannot be stale (pipeline run 4,
+        /// adversary MEDIUM, answered here rather than with a second lock). The probe only runs after
+        /// this thread has SEEN a close mark, which it reads under <see cref="_lock"/>. The closing
+        /// thread wrote <c>IsConnected = false</c> before calling <see cref="NoteTerminalClosed"/>,
+        /// which sets the mark under the same lock; a .NET lock's release and acquire are full
+        /// fences, so seeing the mark guarantees seeing the earlier write.
+        /// </para>
+        /// </remarks>
+        internal Func<string, bool> LiveNameProbe { get; set; }
+
         private readonly object _lock = new object();
 
         /// <summary>Raised whenever a session's state changes. Never raised for a no-op.</summary>
@@ -657,14 +749,17 @@ namespace MultiTerminal.MCPServer.Services
                         e.DetailIsQuestionText = false;
                         e.PendingToolUseId = null;
                         RecordActivityLine(e, activitySummary, observedAtUtc);
-                    });
+                    }, evidenceAtUtc: observedAtUtc);
 
                     // A rotated session can announce itself through activity rather than a
                     // notification — a terminal that is /cleared and then simply gets back to work
                     // never blocks, so ApplyNotification is never reached. Superseding on this path
                     // too is what stops that terminal's predecessor lingering.
-                    bool supersededOnCreate = SupersedeAgentLocked(
-                        NullIfBlank(agentName) ?? _entries[sessionKey].AgentName, sessionKey);
+                    // TryGetValue, not the indexer: the create is refused for a closed pane's late
+                    // row (task 891488b3), and then there is no entry to read the name from.
+                    string owner = NullIfBlank(agentName)
+                                   ?? (_entries.TryGetValue(sessionKey, out var made) ? made.AgentName : null);
+                    bool supersededOnCreate = SupersedeAgentLocked(owner, sessionKey);
 
                     return created || supersededOnCreate;
                 }
@@ -730,7 +825,7 @@ namespace MultiTerminal.MCPServer.Services
             if (string.IsNullOrWhiteSpace(sessionKey)) return false;
             if (string.IsNullOrWhiteSpace(activitySummary)) return false;
 
-            return Upsert(sessionKey, e => RecordActivityLine(e, activitySummary, observedAtUtc));
+            return Upsert(sessionKey, e => RecordActivityLine(e, activitySummary, observedAtUtc), observedAtUtc);
         }
 
         /// <summary>
@@ -784,7 +879,7 @@ namespace MultiTerminal.MCPServer.Services
                     e.DetailIsQuestionText = false;
                     e.PendingToolUseId = null;
                     RecordActivityLine(e, "Turn ended", observedAtUtc);
-                });
+                }, evidenceAtUtc: observedAtUtc);
             }
         }
 
@@ -890,6 +985,11 @@ namespace MultiTerminal.MCPServer.Services
 
             lock (_lock)
             {
+                // A terminal carrying this name exists again, so its activity is live, not late, and
+                // any close decided before now is about an older terminal (see _startTokens).
+                _closedPanes.Remove(agentName);
+                _startTokens[agentName] = _startTokens.TryGetValue(agentName, out var token) ? token + 1 : 1;
+
                 foreach (var kvp in _entries)
                 {
                     // Already has a card under any key — a re-registration must not add a second,
@@ -915,8 +1015,10 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
-        /// The terminal for <paramref name="agentName"/> is gone: drop every card it owned, under
-        /// whatever key (task edcdcdd5).
+        /// The broker row for <paramref name="agentName"/> disconnected: drop every card it owned,
+        /// under whatever key (task edcdcdd5). This also fires on <c>/clear</c>, in a pane that lives
+        /// on, so it only evicts; a pane that has really closed is
+        /// <see cref="NoteTerminalClosed"/>.
         /// </summary>
         /// <remarks>
         /// By agent name rather than session key because the caller — the broker's
@@ -932,6 +1034,85 @@ namespace MultiTerminal.MCPServer.Services
             {
                 return EvictByAgentLocked(agentName, keepKey: null);
             }
+        }
+
+        /// <summary>
+        /// The current start token for <paramref name="agentName"/>, to be read BEFORE deciding that
+        /// its pane is closed and passed to <see cref="NoteTerminalClosed"/>.
+        /// </summary>
+        public long GetStartToken(string agentName)
+        {
+            if (string.IsNullOrWhiteSpace(agentName)) return 0;
+
+            lock (_lock)
+            {
+                return _startTokens.TryGetValue(agentName, out var token) ? token : 0;
+            }
+        }
+
+        /// <summary>
+        /// The PANE for <paramref name="agentName"/> was closed: drop its cards, and refuse to create
+        /// new ones from evidence it left in flight (task 891488b3).
+        /// </summary>
+        /// <remarks>
+        /// Stronger than <see cref="NoteTerminalGone"/>, which only answers "the broker row
+        /// disconnected" and so also fires for a <c>/clear</c> in a pane that lives on. Only the
+        /// pane-removal path may call this, and only when no other live terminal holds the name.
+        /// It evicts as well as marking, so a card a late row created between the broker's own
+        /// eviction and this call is removed too.
+        /// <para>
+        /// Does NOTHING, neither mark nor evict, if a terminal with this name has started since the
+        /// caller read <paramref name="startToken"/>: the close is then about an older terminal, and
+        /// acting on it would suppress or evict the live one.
+        /// </para>
+        /// </remarks>
+        /// <param name="agentName">The closed pane's agent name.</param>
+        /// <param name="startToken"><see cref="GetStartToken"/>, read before the caller's liveness check.</param>
+        /// <returns>True if anything was evicted.</returns>
+        public bool NoteTerminalClosed(string agentName, long startToken)
+        {
+            if (string.IsNullOrWhiteSpace(agentName)) return false;
+
+            lock (_lock)
+            {
+                long current = _startTokens.TryGetValue(agentName, out var token) ? token : 0;
+                if (current != startToken) return false;
+
+                // Marked even when there was no card to evict: a terminal that closed before its
+                // first observation can still have rows in flight.
+                _closedPanes[agentName] = UtcNow();
+                return EvictByAgentLocked(agentName, keepKey: null);
+            }
+        }
+
+        /// <summary>
+        /// Whether evidence for <paramref name="name"/> is its closed pane's late output: the name was
+        /// closed, no live terminal holds it now, and the evidence was either STAMPED or is ARRIVING
+        /// within <see cref="ClosedPaneGrace"/> of the close. A mark past
+        /// <see cref="ClosedPaneRetention"/> is dropped here.
+        /// </summary>
+        /// <remarks>
+        /// Either time suffices (pipeline run 3, adversary MEDIUM). The stamp catches a row the watcher
+        /// reads late; arrival catches a stamp that is AHEAD of this clock (skew, a clock stepped back),
+        /// which would otherwise read as post-grace. Refusing on either is only safe because of the
+        /// live-holder check that follows it and has the last word: a live terminal is never
+        /// refused, however its rows are dated.
+        /// </remarks>
+        private bool IsClosedPaneEvidenceLocked(string name, DateTime evidenceAtUtc)
+        {
+            if (string.IsNullOrWhiteSpace(name) || !_closedPanes.TryGetValue(name, out var closedAt)) return false;
+
+            DateTime now = UtcNow();
+            if (now - closedAt >= ClosedPaneRetention)
+            {
+                _closedPanes.Remove(name);
+                return false;
+            }
+
+            DateTime graceEnds = closedAt + ClosedPaneGrace;
+            if (evidenceAtUtc >= graceEnds && now >= graceEnds) return false;
+
+            return !(LiveNameProbe?.Invoke(name) ?? false);
         }
 
         /// <summary>
@@ -971,11 +1152,11 @@ namespace MultiTerminal.MCPServer.Services
             }
         }
 
-        private bool Upsert(string key, Action<AgentAttentionEntry> mutate)
+        private bool Upsert(string key, Action<AgentAttentionEntry> mutate, DateTime? evidenceAtUtc = null)
         {
             lock (_lock)
             {
-                return UpsertLocked(key, mutate);
+                return UpsertLocked(key, mutate, evidenceAtUtc: evidenceAtUtc);
             }
         }
 
@@ -983,9 +1164,15 @@ namespace MultiTerminal.MCPServer.Services
         /// Forces the state clock to restart even when the state string did not change, because
         /// this mutation is known to be a NEW blocking episode (task 42052f0c, pipeline run 2).
         /// </param>
-        private bool UpsertLocked(string key, Action<AgentAttentionEntry> mutate, bool startsNewBlock = false)
+        /// <param name="evidenceAtUtc">
+        /// When the evidence behind this mutation happened, if it says (an activity row's timestamp).
+        /// Null, or an unparseable stamp, means "now": a notification is handled as it arrives. Used
+        /// only to recognise a closed pane's late output (task 891488b3).
+        /// </param>
+        private bool UpsertLocked(string key, Action<AgentAttentionEntry> mutate, bool startsNewBlock = false, DateTime? evidenceAtUtc = null)
         {
-            if (!_entries.TryGetValue(key, out var entry))
+            bool created = !_entries.TryGetValue(key, out var entry);
+            if (created)
             {
                 entry = new AgentAttentionEntry
                 {
@@ -1007,6 +1194,20 @@ namespace MultiTerminal.MCPServer.Services
             var beforeActivity = entry.LastActivity;
 
             mutate(entry);
+
+            // A late row from a closed pane must not create its card again (task 891488b3).
+            // Checked AFTER mutate because that is where a notification learns the agent name: its
+            // key is the session uuid, so the key alone cannot say whose it is. The one create point
+            // for every path, so a new caller cannot forget it. Updating an existing card is not
+            // affected, and nothing has been announced yet, so undoing the insert is invisible.
+            // "Unknown" is any stamp before 2000, not just MinValue: the watcher's ToUniversalTime
+            // shifts an unparseable MinValue by the local offset, so it no longer equals MinValue.
+            DateTime evidenceAt = evidenceAtUtc is DateTime at && at.Year >= 2000 ? at : UtcNow();
+            if (created && (IsClosedPaneEvidenceLocked(key, evidenceAt) || IsClosedPaneEvidenceLocked(entry.AgentName, evidenceAt)))
+            {
+                _entries.Remove(key);
+                return false;
+            }
 
             // Block IDENTITY is a counter, deliberately NOT the clock below (task 42052f0c,
             // pipeline run 2). The panel needs to tell one blocked episode from the next so an

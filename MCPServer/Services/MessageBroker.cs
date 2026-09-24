@@ -1578,6 +1578,10 @@ namespace MultiTerminal.MCPServer.Services
                 throw new InvalidOperationException($"Failed to create TaskDatabase: {ex.Message}", ex);
             }
 
+            // A closed pane's late rows are refused only while no LIVE terminal holds its name, asked
+            // at refusal time (task 891488b3). Only invoked post-construction, when rows arrive.
+            AgentAttention.LiveNameProbe = IsAgentNameHeldByLiveTerminal;
+
             // Route notable worktree events (e.g. a partial-prune strand,
             // task 248cc2ce) to the activity feed. The lambda captures `this`
             // but is only invoked post-construction (at prune time), so it is
@@ -3347,6 +3351,11 @@ namespace MultiTerminal.MCPServer.Services
             // marked her profile offline, which hides her from GetTerminals.
             if (terminal != null && wasConnected)
             {
+                // Read BEFORE the liveness check below, so a same-name terminal that starts between
+                // that check and the close mark voids the mark instead of being suppressed by it
+                // (task 891488b3; see AgentAttentionService._startTokens).
+                long attentionStartToken = AgentAttention.GetStartToken(terminal.Name);
+
                 RaiseSafe(TerminalDisconnected, terminal);
 
                 // Set profile offline through the write path: DB flag + coherent cache swap + broadcast,
@@ -3355,6 +3364,17 @@ namespace MultiTerminal.MCPServer.Services
                 if (!IsAgentNameHeldByLiveTerminal(terminal.Name))
                 {
                     _profileService.SetProfileOffline(terminal.Name);
+
+                    // This method is MultiTerminal tearing the terminal down (tab close, close_helper,
+                    // Dispose, process exit, Launch-as), so rows its session still has in flight are
+                    // late: stop them bringing its Attention card back (task 891488b3). Deliberately
+                    // not in DisconnectTerminalByName, which the SessionEnd hook also calls on /clear
+                    // while the pane and its agent carry on.
+                    if (!IsTemporaryAgent(terminal.Name)
+                        && !terminal.Name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
+                    {
+                        AgentAttention.NoteTerminalClosed(terminal.Name, attentionStartToken);
+                    }
                 }
             }
         }
@@ -3641,8 +3661,9 @@ namespace MultiTerminal.MCPServer.Services
         /// True when some connected row whose owner is not provably Dead carries
         /// <paramref name="name"/>. This is the ONE rule every name-keyed teardown effect checks
         /// first (task d1151661, pipeline Run 3).
-        /// <para>Rows are keyed by terminal id, but two teardown effects are keyed by NAME: marking the
-        /// profile offline, and the Attention rail's card eviction (<c>NoteTerminalGone(name)</c>). So a
+        /// <para>Rows are keyed by terminal id, but three teardown effects are keyed by NAME: marking the
+        /// profile offline, the Attention rail's card eviction (<c>NoteTerminalGone(name)</c>), and, on
+        /// a pane close, the Attention close mark (<c>NoteTerminalClosed</c>, task 891488b3). So a
         /// teardown of ONE row applied to the whole name signs out every same-name terminal. Freed names
         /// made that routine: the reaper releases a dead Diana's name, the Owner relaunches Diana
         /// elsewhere, then closes the old tab. Without this check, that close would hide the live
