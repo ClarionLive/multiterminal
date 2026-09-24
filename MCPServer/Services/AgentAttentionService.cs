@@ -325,8 +325,10 @@ namespace MultiTerminal.MCPServer.Services
         /// event that reaches <see cref="NoteTerminalStarted"/>, so a close can still land in between
         /// and mark a name a live terminal holds. Asking the broker at refusal time closes that for
         /// good: a live row is exactly what this sees, whatever order the events arrived in. Called
-        /// under <see cref="_lock"/>; it takes no lock of its own (it reads a concurrent dictionary and
-        /// one process start time), so there is no lock order to get wrong.
+        /// under <see cref="_lock"/>. It reads a concurrent dictionary and one process start time per
+        /// connected row carrying the name, and may write a rate-limited debug-log warning for an
+        /// owner it cannot read; it takes no broker lock and never calls back into this service, so
+        /// there is no lock order to get wrong. Reached only when a create is about to be refused.
         /// </remarks>
         internal Func<string, bool> LiveNameProbe { get; set; }
 
@@ -1085,7 +1087,8 @@ namespace MultiTerminal.MCPServer.Services
         /// Either time suffices (pipeline run 3, adversary MEDIUM). The stamp catches a row the watcher
         /// reads late; arrival catches a stamp that is AHEAD of this clock (skew, a clock stepped back),
         /// which would otherwise read as post-grace. Refusing on either is only safe because of the
-        /// live-holder check before it: a live terminal is never refused, however its rows are dated.
+        /// live-holder check that follows it and has the last word: a live terminal is never
+        /// refused, however its rows are dated.
         /// </remarks>
         private bool IsClosedPaneEvidenceLocked(string name, DateTime evidenceAtUtc)
         {
