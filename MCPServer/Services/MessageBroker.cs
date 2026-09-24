@@ -1578,6 +1578,10 @@ namespace MultiTerminal.MCPServer.Services
                 throw new InvalidOperationException($"Failed to create TaskDatabase: {ex.Message}", ex);
             }
 
+            // A closed pane's late rows are refused only while no LIVE terminal holds its name, asked
+            // at refusal time (task 891488b3). Only invoked post-construction, when rows arrive.
+            AgentAttention.LiveNameProbe = IsAgentNameHeldByLiveTerminal;
+
             // Route notable worktree events (e.g. a partial-prune strand,
             // task 248cc2ce) to the activity feed. The lambda captures `this`
             // but is only invoked post-construction (at prune time), so it is

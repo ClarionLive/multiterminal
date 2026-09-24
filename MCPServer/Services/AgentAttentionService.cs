@@ -314,6 +314,22 @@ namespace MultiTerminal.MCPServer.Services
         /// <summary>Clock for close marks. A test seam; nothing else reads it.</summary>
         internal Func<DateTime> UtcNow { get; set; } = () => DateTime.UtcNow;
 
+        /// <summary>
+        /// Whether a live terminal holds a name RIGHT NOW. Set by the broker to
+        /// <see cref="MessageBroker.IsAgentNameHeldByLiveTerminal"/>; null (unit tests with no broker)
+        /// means "no".
+        /// </summary>
+        /// <remarks>
+        /// The last word on every refusal (task 891488b3, pipeline run 3, adversary HIGH). A same-name
+        /// registration publishes its live row under the broker's lock and only afterwards raises the
+        /// event that reaches <see cref="NoteTerminalStarted"/>, so a close can still land in between
+        /// and mark a name a live terminal holds. Asking the broker at refusal time closes that for
+        /// good: a live row is exactly what this sees, whatever order the events arrived in. Called
+        /// under <see cref="_lock"/>; it takes no lock of its own (it reads a concurrent dictionary and
+        /// one process start time), so there is no lock order to get wrong.
+        /// </remarks>
+        internal Func<string, bool> LiveNameProbe { get; set; }
+
         private readonly object _lock = new object();
 
         /// <summary>Raised whenever a session's state changes. Never raised for a no-op.</summary>
@@ -1060,21 +1076,32 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
-        /// Whether evidence for <paramref name="name"/> stamped at <paramref name="evidenceAtUtc"/>
-        /// is its closed pane's late output: stamped within <see cref="ClosedPaneGrace"/> of the
-        /// close. A mark past <see cref="ClosedPaneRetention"/> is dropped here.
+        /// Whether evidence for <paramref name="name"/> is its closed pane's late output: the name was
+        /// closed, no live terminal holds it now, and the evidence was either STAMPED or is ARRIVING
+        /// within <see cref="ClosedPaneGrace"/> of the close. A mark past
+        /// <see cref="ClosedPaneRetention"/> is dropped here.
         /// </summary>
+        /// <remarks>
+        /// Either time suffices (pipeline run 3, adversary MEDIUM). The stamp catches a row the watcher
+        /// reads late; arrival catches a stamp that is AHEAD of this clock (skew, a clock stepped back),
+        /// which would otherwise read as post-grace. Refusing on either is only safe because of the
+        /// live-holder check before it: a live terminal is never refused, however its rows are dated.
+        /// </remarks>
         private bool IsClosedPaneEvidenceLocked(string name, DateTime evidenceAtUtc)
         {
             if (string.IsNullOrWhiteSpace(name) || !_closedPanes.TryGetValue(name, out var closedAt)) return false;
 
-            if (UtcNow() - closedAt >= ClosedPaneRetention)
+            DateTime now = UtcNow();
+            if (now - closedAt >= ClosedPaneRetention)
             {
                 _closedPanes.Remove(name);
                 return false;
             }
 
-            return evidenceAtUtc < closedAt + ClosedPaneGrace;
+            DateTime graceEnds = closedAt + ClosedPaneGrace;
+            if (evidenceAtUtc >= graceEnds && now >= graceEnds) return false;
+
+            return !(LiveNameProbe?.Invoke(name) ?? false);
         }
 
         /// <summary>

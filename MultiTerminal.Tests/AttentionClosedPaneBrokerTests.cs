@@ -126,6 +126,32 @@ namespace MultiTerminal.Tests
             }));
         }
 
+        /// <summary>
+        /// The window pipeline run 3's adversary found: a same-name registration's row is LIVE, but the
+        /// event that reaches NoteTerminalStarted has not run (here it never does: nothing in a bare
+        /// broker test subscribes to TerminalRegistered). The close mark is still set, so only the
+        /// refusal-time liveness check (the broker's LiveNameProbe wiring) can let the question through.
+        /// </summary>
+        [Fact]
+        public void A_same_name_row_live_before_its_start_event_is_not_refused()
+        {
+            using var broker = new MessageBroker();
+            broker.RegisterTerminal("Alice", docId: "DA", nonce: null);
+            broker.AgentAttention.NoteTerminalStarted("Alice");
+            broker.UnregisterTerminal("DA");
+
+            broker.RegisterTerminal("Alice", docId: "DB", nonce: null);
+            Assert.True(broker.IsAgentNameHeldByLiveTerminal("Alice"), "precondition: the relaunch must be live");
+
+            Assert.True(broker.AgentAttention.ApplyNotification(new Dictionary<string, object>
+            {
+                ["session_id"] = "sess-relaunched",
+                ["agent_name"] = "Alice",
+                ["raw_type"] = "ask_user_question",
+                ["message"] = "What would you like to do?",
+            }));
+        }
+
         // The two-live-rows guard (another live terminal holds the name, so no mark) is pinned in
         // TerminalLivenessReaperTests, beside the profile fact it mirrors: that file owns the setup
         // that produces two connected rows with one name.

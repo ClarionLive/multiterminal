@@ -434,21 +434,60 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
-        /// The other side of the evidence rule: a row stamped after the grace is not the closed
-        /// pane's output. Pinned at the boundary, one millisecond each way.
+        /// The other side of the rule: once BOTH the stamp and the arrival are past the grace, the row
+        /// is not the closed pane's output. Pinned at the boundary, one millisecond each way on the
+        /// stamp, with arrival already past.
         /// </summary>
         [Fact]
-        public void Evidence_stamped_after_the_grace_creates_a_card()
+        public void Evidence_stamped_and_arriving_after_the_grace_creates_a_card()
         {
             var now = DateTime.UtcNow;
             var svc = new AgentAttentionService { UtcNow = () => now };
             svc.NoteTerminalStarted(Agent);
             var closedAt = now;
             Close(svc);
+            now = closedAt + AgentAttentionService.ClosedPaneGrace + TimeSpan.FromSeconds(1);
 
             Assert.False(svc.NoteTurnEnded(Agent, closedAt + AgentAttentionService.ClosedPaneGrace - TimeSpan.FromMilliseconds(1), isSubagent: false));
             Assert.True(svc.NoteTurnEnded(Agent, closedAt + AgentAttentionService.ClosedPaneGrace + TimeSpan.FromMilliseconds(1), isSubagent: false));
             Assert.Single(svc.Snapshot());
+        }
+
+        /// <summary>
+        /// A stamp AHEAD of this clock (skew, or the clock stepped back) would read as post-grace by
+        /// its stamp alone (pipeline run 3, adversary MEDIUM). Its arrival is inside the grace, and
+        /// either time is enough to refuse.
+        /// </summary>
+        [Fact]
+        public void A_future_stamped_straggler_is_refused_by_its_arrival()
+        {
+            var now = DateTime.UtcNow;
+            var svc = new AgentAttentionService { UtcNow = () => now };
+            svc.NoteTerminalStarted(Agent);
+            var closedAt = now;
+            Close(svc);
+            now = closedAt + TimeSpan.FromSeconds(1);
+
+            Assert.False(svc.NoteTurnEnded(Agent, closedAt + TimeSpan.FromHours(1), isSubagent: false));
+            Assert.Empty(svc.Snapshot());
+        }
+
+        /// <summary>
+        /// Whatever the marks and times say, a name a live terminal holds RIGHT NOW is never refused
+        /// (pipeline run 3, adversary HIGH): the refusal asks the broker at the moment it would act.
+        /// The notification is the one-shot kind whose loss the whole rail exists to prevent.
+        /// </summary>
+        [Fact]
+        public void A_name_a_live_terminal_holds_is_never_refused()
+        {
+            var svc = new AgentAttentionService();
+            svc.NoteTerminalStarted(Agent);
+            Close(svc);
+
+            svc.LiveNameProbe = name => string.Equals(name, Agent, StringComparison.OrdinalIgnoreCase);
+
+            Assert.True(svc.ApplyNotification(Notification("sess-live", rawType: "ask_user_question")));
+            Assert.Equal(AttentionState.BlockedQuestion, Assert.Single(svc.Snapshot()).State);
         }
 
         /// <summary>
