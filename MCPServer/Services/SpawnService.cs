@@ -36,6 +36,43 @@ namespace MultiTerminal.MCPServer.Services
         public SpawnJobStore Jobs { get; } = new SpawnJobStore();
 
         /// <summary>
+        /// Which proven pane spawned which helper pane (task 7f389704): SpawnController records into it
+        /// and authorizes close_helper against it; MainForm forgets a pane when it leaves the dock.
+        /// </summary>
+        public SpawnedPaneRegistry Panes { get; } = new SpawnedPaneRegistry();
+
+        /// <summary>
+        /// Callback that closes a terminal pane by DocId, set by MainForm (task 7f389704). It closes the
+        /// pane exactly as clicking its tab's ✕ does, which kills the pane's process tree. Returns
+        /// whether a pane with that DocId was open. Authorization is the caller's job, not this one's.
+        /// </summary>
+        public Func<string, Task<bool>> OnCloseRequested { get; set; }
+
+        /// <summary>
+        /// Closes the helper pane <paramref name="helperDocId"/>. The caller must already have checked
+        /// that the requester spawned it. Returns (closed, error): error is set when MainForm has not
+        /// registered the callback or the close threw; closed is false with no error when no pane with
+        /// that DocId was open.
+        /// </summary>
+        public async Task<(bool closed, string error)> CloseSpawnedPaneAsync(string helperDocId)
+        {
+            if (OnCloseRequested == null)
+            {
+                return (false, "Close callback not registered. MainForm not initialized.");
+            }
+
+            try
+            {
+                return (await OnCloseRequested(helperDocId), null);
+            }
+            catch (Exception ex)
+            {
+                // MainForm closes inside Control.Invoke, which wraps what the close threw.
+                return (false, $"Close failed: {(ex.InnerException ?? ex).Message}");
+            }
+        }
+
+        /// <summary>
         /// Request to spawn a new teammate terminal (ConPTY mode).
         /// </summary>
         public async Task<(bool success, string docId, string error, string terminalName)> SpawnTeammateAsync(

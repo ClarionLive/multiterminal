@@ -1067,6 +1067,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: "close_helper",
+        description: "Close the pane of a HELPER YOU SPAWNED with spawn_helper, when its work is done. The pane closes exactly as if the Owner clicked its tab's X: the helper's process is ended immediately, with no chance to finish or save, so first make sure it has reported back and committed anything it was asked to keep.\n\nOnly the pane that spawned a helper can close it. MultiTerminal checks this by your pane's MULTITERMINAL_LAUNCH_NONCE, not by any name you pass, so you cannot close another agent's helper, a terminal the Owner opened, or yourself. Helpers spawned before MultiTerminal last restarted, or spawned from the phone app, cannot be closed this way; ask the Owner. The answer for a helper you did not spawn is the same as for one that does not exist.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            terminalName: {
+              type: "string",
+              description: "The helper's name as spawn_helper returned it (terminalName), e.g. \"Bob\" or \"Bob-2\".",
+            },
+          },
+          required: ["terminalName"],
+        },
+      },
+      {
         name: "check_my_context",
         description: "Check YOUR terminal's live context-window fill (plus rate-limit quota and token usage). Returns contextPct 0–100 — the signal for whether it's a good time to wrap up and clear. At/above the nudge threshold (default 70%, env MULTITERMINAL_CONTEXT_THRESHOLD) you should finish your current step, write continuation notes (update_task_continuation), then call clear_my_context at a clean boundary. Reads the same statusline stats the HUD status bar shows.",
         inputSchema: {
@@ -3818,6 +3832,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Errors propagate: apiCall attaches the controller's own Problem detail (duplicate name,
         // unknown project, bootstrap failure) to the thrown message, and the dispatcher renders it.
+        // The launch nonce proves WHICH PANE is spawning (task 7f389704). MT records that pane as the
+        // helper's spawner, and only that pane can later close it with close_helper. spawnerName above
+        // is only what the helper is told; it is never used to authorize anything.
+        const spawnerNonce = process.env.MULTITERMINAL_LAUNCH_NONCE;
         const spawned = await apiCall("/api/spawn/terminal", "POST", {
           // Trimmed for the same reason spawnerName is, one line down: the broker never trims a name,
           // so " Alice" and "Alice" would be two terminals with one apparent identity. Normalising at
@@ -3828,7 +3846,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           projectId: args.projectId || null,
           initialPrompt: args.initialPrompt || null,
           spawnerName: String(args.spawnerName).trim(),
-        });
+        }, API_TIMEOUT_MS, spawnerNonce ? { "X-MultiTerminal-Launch-Nonce": spawnerNonce } : null);
 
         // What the API's success means: the PANE exists and its identity is registered. The helper
         // has not booted. Say so — a plausible "spawned!" for a terminal that never comes alive is
@@ -3844,6 +3862,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ? `Its job (${String(args.initialPrompt).length} chars) is held until the helper collects it as its first action — expect that within seconds of it booting, NOT minutes. If it has not collected the job within 120s, a spawn_failed message lands in your inbox (get_inbox), and in the Owner's inbox if your spawnerName is not a live terminal.\n`
           : `No initialPrompt given — it will boot and sit idle until told what to do.\n`;
         text += `${spawned.readiness || "It is messageable once list_terminals shows it with a channel port (~10-30s)"}; then send_message to "${spawned.terminalName}".`;
+        text += spawned.closableBySpawner
+          ? `\nWhen its work is done, close its pane with close_helper("${spawned.terminalName}").`
+          : `\nMultiTerminal could not confirm which pane spawned it, so close_helper cannot close it; the Owner closes it.`;
         return { content: [{ type: "text", text }] };
       }
 
@@ -3921,6 +3942,42 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             type: "text",
             text: "No job is waiting for this pane: you were spawned without one. Wait for your spawner to message you.",
           }],
+        };
+      }
+
+      case "close_helper": {
+        // Task 7f389704. Authorization is by PANE: the nonce comes only from this process's environment,
+        // which MT set when it launched the pane, and the server only finds helpers recorded for the pane
+        // that nonce proves. terminalName merely picks which of the caller's own helpers to close.
+        if (!args.terminalName || !String(args.terminalName).trim()) {
+          return {
+            content: [{ type: "text", text: "❌ terminalName is required: the helper's name as spawn_helper returned it." }],
+            isError: true,
+          };
+        }
+
+        const closerNonce = process.env.MULTITERMINAL_LAUNCH_NONCE;
+        if (!closerNonce) {
+          return {
+            content: [{
+              type: "text",
+              text: "❌ MULTITERMINAL_LAUNCH_NONCE is not set in this session, so MultiTerminal cannot tell which pane is asking. close_helper only works inside a terminal MultiTerminal launched.",
+            }],
+            isError: true,
+          };
+        }
+
+        // Errors propagate with the controller's own detail: 401 (pane not proven), 404 (no open helper
+        // by that name that this pane spawned), 409 (ambiguous name).
+        const r = await apiCall(
+          "/api/spawn/terminal/close",
+          "POST",
+          { terminalName: String(args.terminalName).trim() },
+          API_TIMEOUT_MS,
+          { "X-MultiTerminal-Launch-Nonce": closerNonce },
+        );
+        return {
+          content: [{ type: "text", text: `🗙 Closed helper "${r.terminalName}" (docId ${r.docId}). Its pane is gone and its process has ended.` }],
         };
       }
 
