@@ -329,6 +329,14 @@ namespace MultiTerminal.MCPServer.Services
         /// connected row carrying the name, and may write a rate-limited debug-log warning for an
         /// owner it cannot read; it takes no broker lock and never calls back into this service, so
         /// there is no lock order to get wrong. Reached only when a create is about to be refused.
+        /// <para>
+        /// Its unlocked read of the closed row's <c>IsConnected</c> cannot be stale (pipeline run 4,
+        /// adversary MEDIUM, answered here rather than with a second lock). The probe only runs after
+        /// this thread has SEEN a close mark, which it reads under <see cref="_lock"/>. The closing
+        /// thread wrote <c>IsConnected = false</c> before calling <see cref="NoteTerminalClosed"/>,
+        /// which sets the mark under the same lock; a .NET lock's release and acquire are full
+        /// fences, so seeing the mark guarantees seeing the earlier write.
+        /// </para>
         /// </remarks>
         internal Func<string, bool> LiveNameProbe { get; set; }
 
