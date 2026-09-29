@@ -102,7 +102,7 @@ test("the token never reaches a log line or a return value, on any path", async 
   results.push(await mod.postClaimedCredentials("Robin", goodEnv, "s", recordingFetch({ ok: false }).impl));
   results.push(await mod.postClaimedCredentials("Robin", goodEnv, "s", recordingFetch({ throws: true }).impl));
   mod.claim("Robin");
-  results.push(await mod.releaseClaimedName("test", { ppid: 1, waitMs: 0, isAlive: () => false, fetchImpl: recordingFetch().impl }));
+  results.push(await mod.releaseClaimedName("test", { launchedName: "", ppid: 1, waitMs: 0, isAlive: () => false, fetchImpl: recordingFetch().impl }));
   // Non-vacuous: the release path did log something, so the scan below is looking at real output.
   assert.ok(logged.length > 0, "expected the release path to log");
   for (const line of [...logged, ...results.map(String)]) {
@@ -113,7 +113,7 @@ test("the token never reaches a log line or a return value, on any path", async 
 test("release: a server that claimed nothing releases nothing", async () => {
   const { mod } = load();
   const f = recordingFetch();
-  assert.equal(await mod.releaseClaimedName("stdin closed", { ppid: 1, waitMs: 0, isAlive: () => false, fetchImpl: f.impl }), "nothing-claimed");
+  assert.equal(await mod.releaseClaimedName("stdin closed", { launchedName: "", ppid: 1, waitMs: 0, isAlive: () => false, fetchImpl: f.impl }), "nothing-claimed");
   assert.equal(f.calls.length, 0);
 });
 
@@ -121,7 +121,7 @@ test("release: NOT while the parent session is alive (an MCP-server restart must
   const { mod } = load();
   mod.claim("Robin");
   const f = recordingFetch();
-  const status = await mod.releaseClaimedName("stdin closed", { ppid: 4242, waitMs: 0, isAlive: () => true, fetchImpl: f.impl });
+  const status = await mod.releaseClaimedName("stdin closed", { launchedName: "", ppid: 4242, waitMs: 0, isAlive: () => true, fetchImpl: f.impl });
   assert.equal(status, "parent-alive");
   assert.equal(f.calls.length, 0, "a disconnect was posted while the session was still running");
 });
@@ -130,11 +130,30 @@ test("release: once the parent has exited, disconnects exactly the claimed name,
   const { mod } = load();
   mod.claim("Robin");
   const f = recordingFetch();
-  assert.equal(await mod.releaseClaimedName("stdin closed", { ppid: 4242, waitMs: 0, isAlive: () => false, fetchImpl: f.impl }), "released");
-  assert.equal(await mod.releaseClaimedName("SIGTERM", { ppid: 4242, waitMs: 0, isAlive: () => false, fetchImpl: f.impl }), "already-releasing");
+  assert.equal(await mod.releaseClaimedName("stdin closed", { launchedName: "", ppid: 4242, waitMs: 0, isAlive: () => false, fetchImpl: f.impl }), "released");
+  assert.equal(await mod.releaseClaimedName("SIGTERM", { launchedName: "", ppid: 4242, waitMs: 0, isAlive: () => false, fetchImpl: f.impl }), "already-releasing");
   assert.equal(f.calls.length, 1);
   assert.equal(f.calls[0].url, "http://mt.test/api/messaging/disconnect");
   assert.deepEqual(f.calls[0].body, { name: "Robin" });
+});
+
+test("release: a session MT launched under the same name is left to its SessionEnd hook (no late double release)", async () => {
+  const { mod } = load();
+  mod.claim("Robin");
+  const f = recordingFetch();
+  // Different case on purpose: the broker keys names case-insensitively, so this IS the same name.
+  const status = await mod.releaseClaimedName("stdin closed", { launchedName: "ROBIN", ppid: 4242, waitMs: 0, isAlive: () => false, fetchImpl: f.impl });
+  assert.equal(status, "hook-releases");
+  assert.equal(f.calls.length, 0, "released a launched session's name that its SessionEnd hook already releases");
+});
+
+test("release: a launched session that claimed a DIFFERENT name still releases the claimed one", async () => {
+  const { mod } = load();
+  mod.claim("Robin");
+  const f = recordingFetch();
+  const status = await mod.releaseClaimedName("stdin closed", { launchedName: "Alice", ppid: 4242, waitMs: 0, isAlive: () => false, fetchImpl: f.impl });
+  assert.equal(status, "released");
+  assert.deepEqual(f.calls.map((c) => c.body), [{ name: "Robin" }]);
 });
 
 test("release: waits for a parent that is still shutting down", async () => {

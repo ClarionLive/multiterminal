@@ -5923,6 +5923,12 @@ async function releaseClaimedName(reason, deps = {}) {
   releasingClaimedName = true;
   const name = deps.name !== undefined ? deps.name : claimedTerminalName;
   if (!name) return "nothing-claimed";
+  // A session MT launched under this same name is released by its SessionEnd hook. A second release
+  // from here is not just redundant: it is the LATE one (it waits for the parent to exit), so if MT
+  // relaunches a terminal under the same name in that window, it would drop the NEW session's row
+  // and credentials. Case-insensitive to match how the broker keys names (OrdinalIgnoreCase).
+  const launchedName = deps.launchedName !== undefined ? deps.launchedName : process.env.MULTITERMINAL_NAME;
+  if (launchedName && launchedName.toUpperCase() === name.toUpperCase()) return "hook-releases";
   const parentGone = await parentExitedWithin(
     deps.ppid !== undefined ? deps.ppid : process.ppid,
     deps.waitMs !== undefined ? deps.waitMs : PARENT_EXIT_WAIT_MS,

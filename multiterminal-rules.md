@@ -51,7 +51,7 @@ There are two transports and they are not interchangeable. Pick by **who needs t
 ### Anything the Owner should see — MultiTerminal messaging
 
 - `mcp__multiterminal__send_message` persists to the board, feeds the Chat panel, and reaches John's phone. Native `SendMessage` does **none** of those things — it is a direct session-to-session delivery and leaves no MT-side record.
-- **When a message arrives from ClaudeRemote (MultiRemote), reply with `mcp__multiterminal__send_message`** so it reaches John's phone. (This replaces `mcp__multiterminal-channel__reply`, which is being retired — both tools POST to the same `/api/messaging/send` endpoint, and `send_message` additionally delivers a copy to ClaudeRemote for the phone's Messages tab.)
+- **When a message arrives from ClaudeRemote (MultiRemote), reply with `mcp__multiterminal__send_message`** so it reaches John's phone. `send_message` also delivers a copy to ClaudeRemote for the phone's Messages tab. A native `SendMessage` reply would reach neither.
 - When you see `[cm]` as user input, immediately check your messages via `get_messages`.
 - Checklist transition notes appear as inbox notifications — keep to 1-2 sentences, no markdown.
 
