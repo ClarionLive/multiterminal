@@ -1947,7 +1947,7 @@ namespace MultiTerminal
                     "Run the /daily-intel skill to process the digest pipeline. Do NOT call get_daily_digest directly — you MUST use /daily-intel. " +
                     "Then let the Owner know you're online and ready.";
 
-                bool delivered = await DeliverViaChannel(channelPort, "System", bootstrapMessage, "normal", recipientName: registeredName);
+                bool delivered = await DeliverToSessionAsync(registeredName, channelPort, "System", bootstrapMessage);
                 if (delivered)
                     _debugLogService?.Info("MainForm", "Oracle bootstrap message delivered");
                 else
@@ -2695,11 +2695,12 @@ namespace MultiTerminal
 
             try
             {
+                // Gate on ANY route, not on ChannelPort: native ingress comes first (0ff1b520 item 9).
                 var terminal = _mcpServer?.Broker?.GetTerminal(e.AgentName);
-                if (terminal == null || terminal.ChannelPort == null)
+                if (terminal == null || !HasSessionRoute(terminal.Name, terminal.ChannelPort))
                 {
                     _debugLogService.Trace("MainForm",
-                        $"TaskActiveChanged for '{e.AgentName}' but agent has no live channel port — skipping push (agent will pick up the new task on next spawn).");
+                        $"TaskActiveChanged for '{e.AgentName}' but agent has no native ingress or channel port — skipping push (agent will pick up the new task on next spawn).");
                     return;
                 }
 
@@ -2713,15 +2714,15 @@ namespace MultiTerminal
                     newWorktree = e.NewWorktreePath,
                 });
 
-                int port = terminal.ChannelPort.Value;
+                int? port = terminal.ChannelPort;
                 string termName = terminal.Name;
                 _ = Task.Run(async () =>
                 {
-                    bool ok = await DeliverViaChannel(port, "MultiTerminal", payload, "normal", recipientName: termName).ConfigureAwait(false);
+                    bool ok = await DeliverToSessionAsync(termName, port, "MultiTerminal", payload).ConfigureAwait(false);
                     if (!ok)
                     {
                         _debugLogService.Warning("MainForm",
-                            $"task_active_changed push failed for '{e.AgentName}' on channel port {port}.");
+                            $"task_active_changed push failed for '{e.AgentName}' (native and channel port {port?.ToString() ?? "none"}).");
                     }
                 });
             }
@@ -2790,17 +2791,21 @@ namespace MultiTerminal
                 var deliveries = new List<Task>();
                 foreach (var t in terminals)
                 {
-                    if (t?.ChannelPort == null) continue;
-                    int port = t.ChannelPort.Value;
+                    // Skip only a terminal with NO route at all — the pre-item-9 rule was "no channel
+                    // port", which after item 7 would skip everyone. Must stay a skip, not a failure:
+                    // a failure sets AllDelivered=false and defers every prune whose audience holds a
+                    // route-less row (e.g. an "Agent *" subagent), which is most of them.
+                    if (t == null || !HasSessionRoute(t.Name, t.ChannelPort)) continue;
+                    int? port = t.ChannelPort;
                     string termName = t.Name;
                     deliveries.Add(Task.Run(async () =>
                     {
-                        bool ok = await DeliverViaChannel(port, "MultiTerminal", payload, "normal", recipientName: termName).ConfigureAwait(false);
+                        bool ok = await DeliverToSessionAsync(termName, port, "MultiTerminal", payload).ConfigureAwait(false);
                         if (!ok)
                         {
                             System.Threading.Interlocked.Increment(ref failureCount);
                             _debugLogService.Warning("MainForm",
-                                $"worktree_pruning push failed for '{termName}' on channel port {port}.");
+                                $"worktree_pruning push failed for '{termName}' (native and channel port {port?.ToString() ?? "none"}).");
                         }
                     }));
                 }
@@ -2838,6 +2843,51 @@ namespace MultiTerminal
                 _debugLogService.Warning("MainForm",
                     $"OnBrokerWorktreePruning threw for worktree '{e?.WorktreePath}': {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Delivers an MT-originated message (a system event envelope or an Oracle prompt) to one
+        /// session: native injection first, the channel only as fallback (ticket 0ff1b520, item 9).
+        /// </summary>
+        /// <remarks>
+        /// <para>This is the non-chat twin of the native-then-channel block in the chat delivery
+        /// path. Before item 9 these senders called <see cref="DeliverViaChannel"/> directly, and
+        /// each one returned early when the terminal had no channel port — so retiring the channel
+        /// (item 7) would have silently ended task_active_changed, worktree_pruning and the Oracle
+        /// prompts while every chat message kept arriving.</para>
+        /// <para>The caller therefore must NOT gate on <c>ChannelPort</c>: a terminal with native
+        /// ingress and no channel is exactly the post-item-7 shape. <paramref name="channelPort"/>
+        /// is null when there is no channel to fall back to.</para>
+        /// </remarks>
+        private async Task<bool> DeliverToSessionAsync(string recipientName, int? channelPort, string sender, string message)
+        {
+            if (_sessionInjector != null && !string.IsNullOrEmpty(recipientName))
+            {
+                try
+                {
+                    if (await _sessionInjector.TryInjectAsync(recipientName, sender, message).ConfigureAwait(false))
+                        return true;
+                }
+                catch (Exception ex)
+                {
+                    // Belt and braces — TryInjectAsync already contains its own failures.
+                    _debugLogService.Warning("MainForm", $"Native delivery threw for '{recipientName}': {ex.Message}. Falling back to channel.");
+                }
+            }
+
+            if (channelPort == null) return false;
+            return await DeliverViaChannel(channelPort.Value, sender, message, "normal", recipientName: recipientName).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// True when <see cref="DeliverToSessionAsync"/> has something to try for this terminal:
+        /// recorded native ingress or a channel port. Says nothing about whether delivery will succeed.
+        /// </summary>
+        private bool HasSessionRoute(string terminalName, int? channelPort)
+        {
+            if (channelPort != null) return true;
+            if (_sessionInjector == null || string.IsNullOrEmpty(terminalName)) return false;
+            return _mcpServer?.Broker?.MessagingCredentials.Has(terminalName) == true;
         }
 
         /// <summary>
@@ -7103,16 +7153,16 @@ namespace MultiTerminal
         private async void OnOracleDigestTimerTick(object sender, EventArgs e)
         {
             var oracleTerminal = _mcpServer?.Broker?.GetTerminal(OracleService.OracleName);
-            if (oracleTerminal == null || !oracleTerminal.ChannelPort.HasValue)
+            if (oracleTerminal == null || !HasSessionRoute(oracleTerminal.Name, oracleTerminal.ChannelPort))
             {
-                _debugLogService?.Warning("MainForm", "Oracle digest timer: Oracle not connected or no channel port");
+                _debugLogService?.Warning("MainForm", "Oracle digest timer: Oracle not connected, or has no native ingress or channel port");
                 return;
             }
 
             try
             {
                 string digestMessage = "Scheduled digest check: run the /daily-intel skill to process the digest pipeline. Do NOT call get_daily_digest directly — you MUST use /daily-intel.";
-                bool delivered = await DeliverViaChannel(oracleTerminal.ChannelPort.Value, "System", digestMessage, "normal", recipientName: oracleTerminal.Name);
+                bool delivered = await DeliverToSessionAsync(oracleTerminal.Name, oracleTerminal.ChannelPort, "System", digestMessage);
                 _debugLogService?.Info("MainForm", $"Oracle scheduled digest {(delivered ? "delivered" : "failed")}");
             }
             catch (Exception ex)
