@@ -145,6 +145,11 @@ namespace MultiTerminal
         // Message deduplication cache - tracks recently delivered message IDs to prevent duplicates
         private readonly Dictionary<string, DateTime> _deliveredMessageCache = new Dictionary<string, DateTime>();
         private readonly object _deduplicationLock = new object();
+
+        // Ticket 0ff1b520 item 4. Native delivery into a live Claude Code session, tried ahead of the
+        // channel in OnMcpMessageDelivery. Interface-typed on purpose: everything that knows what the
+        // unpublished wire protocol looks like lives behind this one seam, in NamedPipeSessionInjector.
+        private MultiTerminal.MCPServer.Services.ISessionMessageInjector _sessionInjector;
         private const int DeduplicationCacheMinutes = 5; // Keep delivered message IDs for 5 minutes
 
         // For session restore with XML layout
@@ -944,6 +949,14 @@ namespace MultiTerminal
                 _mcpServer.Broker.TerminalDisconnected += OnMcpTerminalDisconnectedForAttention;
                 _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 16: Setting OnMessageDelivery");
                 _mcpServer.Broker.OnMessageDelivery = OnMcpMessageDelivery;
+
+                // Ticket 0ff1b520 item 4. Shares the broker's credential store — the same instance the
+                // REST layer writes when a terminal's SessionStart hook posts its ingress. Constructed
+                // unconditionally: it is inert until credentials exist, and the env off switch is
+                // checked per call so it can be disabled without a rebuild.
+                _sessionInjector = new MultiTerminal.MCPServer.Services.NamedPipeSessionInjector(
+                    _mcpServer.Broker.MessagingCredentials,
+                    msg => _debugLogService?.Trace("NativeInject", msg));
 
                 // Browser tab support - route tab requests to correct terminal
                 _mcpServer.Broker.BrowserTabRequested += OnBrowserTabRequested;
@@ -2517,7 +2530,42 @@ namespace MultiTerminal
             // ORACLE: Always-on — Oracle's channel delivery is handled by the normal path below.
             // No special spawn logic needed since Oracle starts with MultiTerminal.
 
-            // PRIMARY: Channel delivery — POST to recipient's Claude Code Channel HTTP port.
+            // NATIVE (ticket 0ff1b520, item 4): write straight into the recipient's Claude Code
+            // session over its own messaging pipe, ahead of the channel.
+            //
+            // INERT UNTIL ITS INPUTS EXIST. It returns false immediately unless the SessionStart hook
+            // has posted that terminal's ingress credentials, so on any build where the hook half is
+            // not deployed this costs one dictionary miss and every message takes the channel exactly
+            // as before. That is deliberate: this rides an UNPUBLISHED protocol on the delivery path,
+            // so it has to degrade to the existing transport rather than replace it. The channel stays
+            // as the fallback until the native path has survived several CLI upgrades — it is not
+            // retired here (that is item 7, and only once every consumer is gone).
+            //
+            // Failure is always "fall through", never "throw": the injector swallows everything,
+            // including unexpected exception types, because an unpublished protocol must not be able
+            // to take down message delivery for the whole app.
+            if (_sessionInjector != null)
+            {
+                try
+                {
+                    if (await _sessionInjector.TryInjectAsync(recipientName, sender, message))
+                    {
+                        _debugLogService.Info("MainForm", $"Native delivery SUCCESS for message {messageId} to {recipientName}");
+                        lock (_deduplicationLock)
+                        {
+                            _deliveredMessageCache[messageId] = DateTime.Now;
+                        }
+                        return true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Belt and braces — TryInjectAsync already contains its own failures.
+                    _debugLogService.Warning("MainForm", $"Native delivery threw for message {messageId}: {ex.Message}. Falling back to channel.");
+                }
+            }
+
+            // FALLBACK: Channel delivery — POST to recipient's Claude Code Channel HTTP port.
             // This pushes a <channel> event directly into the Claude Code session (instant, no polling).
             if (recipientTerminal?.ChannelPort != null)
             {

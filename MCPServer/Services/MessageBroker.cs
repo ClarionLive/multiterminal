@@ -310,6 +310,20 @@ namespace MultiTerminal.MCPServer.Services
         public Func<string, string, string, string, Task<bool>> OnMessageDelivery { get; set; }
 
         /// <summary>
+        /// Terminals' Claude Code cross-session messaging ingress (ticket 0ff1b520, items 3 and 4).
+        /// </summary>
+        /// <remarks>
+        /// Owned here because two unrelated consumers need the SAME instance and the broker is the
+        /// object they already share: the REST layer WRITES it (the SessionStart hook posts a
+        /// terminal's credentials to <c>MessagingController</c>) while <c>MainForm</c>'s delivery
+        /// callback READS it. Registering the type with the REST container instead would hand the
+        /// controller its own empty store, and every native delivery would silently miss — a failure
+        /// that looks exactly like "no credentials yet", which is the normal state.
+        /// Contents are in memory only and never persisted; see <see cref="MessagingCredentialStore"/>.
+        /// </remarks>
+        public MessagingCredentialStore MessagingCredentials { get; } = new MessagingCredentialStore();
+
+        /// <summary>
         /// Activity service for auto-updating terminal activity on task operations.
         /// Set via DI after broker is created.
         /// </summary>

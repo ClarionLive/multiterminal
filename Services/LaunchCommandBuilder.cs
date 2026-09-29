@@ -358,6 +358,60 @@ namespace MultiTerminal.Services
                     .Select(s => $" --setting-sources {s.Trim()}"));
 
         /// <summary>
+        /// The value MT asks its terminals to use for Claude Code's <c>crossSessionInbound</c>
+        /// setting (ticket 0ff1b520, item 2). See <see cref="ApplyCrossSessionInbound"/>.
+        /// </summary>
+        public const string CrossSessionInboundValue = "accept";
+
+        /// <summary>
+        /// Sets <c>crossSessionInbound</c> in MT's emitted launch settings — but ONLY when nothing
+        /// already specifies one (ticket 0ff1b520, item 2).
+        /// </summary>
+        /// <remarks>
+        /// <para><b>Why set it at all.</b> Left unset, Claude Code decides per message from the two
+        /// sessions' permission modes: a session that bypasses prompts HOLDS an inbound message
+        /// unless the sender attests the same class. Every MT terminal launches with bypass today,
+        /// so they match and messages auto-deliver — but that is an accident of uniform
+        /// configuration, not a guarantee. <c>AgentProcess.SpawnAsync</c> already takes a
+        /// <c>permissionMode</c> parameter that no caller overrides, and
+        /// <c>SettingsService.GetClaudeCommands</c> offers non-bypass presets behind a
+        /// <c>GetDefaultClaudeCommand()</c> with no callers. The moment either is wired up, traffic
+        /// between a prompting terminal and a bypass terminal is held in ONE direction, silently,
+        /// and the symptom reads as "nobody messaged me" — the worst shape a messaging bug can take.
+        /// </para>
+        /// <para><b>Why only when absent — and this is the load-bearing half.</b> The caller DROPS
+        /// Claude Code's LOCAL source and re-supplies that file's keys here, at <c>--settings</c>
+        /// precedence. So if a project's <c>settings.local.json</c> deliberately set
+        /// <c>crossSessionInbound</c> to <c>"hold"</c>, overwriting it with <c>"accept"</c> would not
+        /// be MT expressing a preference — it would be MT LAUNDERING a repository's tightening
+        /// through a higher precedence level than the repository could reach. The CLI is explicit
+        /// that a repo may only tighten and that a user's own "accept" cannot override a repo
+        /// tightening; re-supplying its keys must not become a way around that. Same fail-closed
+        /// instinct as <c>CanDropLocal</c>: never remove a safety choice while carrying it forward.
+        /// </para>
+        /// <para><b>What this does NOT guarantee.</b> "accept" here is best-effort. Managed settings
+        /// outrank it outright, and a repository's own tightening still wins — so a message can
+        /// still be held despite this. The setting removes the silent-hold case MT actually causes
+        /// (its own uniform-bypass assumption); it does not make delivery certain.</para>
+        /// <para><b>Naming debt, recorded rather than fixed here:</b> this key rides in the file
+        /// <see cref="BuildForcedStatuslineFlag"/> writes, whose name now understates what it emits.
+        /// Renaming is mechanical but touches OracleService and the launch tests, so it is left to
+        /// its own change rather than widened into this one.</para>
+        /// </remarks>
+        public static void ApplyCrossSessionInbound(System.Text.Json.Nodes.JsonObject settings)
+        {
+            if (settings == null) return;
+
+            // The laundering guard. Demonstrated 2026-09-21: removing this line reddens
+            // LaunchSettingsMergeTests.A_projects_own_hold_survives_into_the_emitted_settings along
+            // with the never-overwritten facts — i.e. a project's deliberate "hold" would be carried
+            // across the precedence boundary and dropped on the way.
+            if (settings.ContainsKey("crossSessionInbound")) return;
+
+            settings["crossSessionInbound"] = CrossSessionInboundValue;
+        }
+
+        /// <summary>
         /// Builds the <c>--settings &lt;file&gt;</c> flag that points Claude Code at
         /// MultiTerminal's bundled <c>scripts/statusline.js</c> as the <c>statusLine</c>
         /// command, so MT's script writes <c>mt-statusline-{name}-{docId}.json</c> (task 72444250).
@@ -481,6 +535,7 @@ namespace MultiTerminal.Services
                 }
                 merged ??= new System.Text.Json.Nodes.JsonObject();
                 merged["statusLine"] = statusLineNode;
+                ApplyCrossSessionInbound(merged);
                 string json = merged.ToJsonString();
 
                 // Per-user-private dir, not the shared temp root.
