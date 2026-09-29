@@ -3389,12 +3389,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // someone else's pid.
         if (process.ppid) regPayload.ownerPid = process.ppid;
         const result = await apiCall("/api/messaging/register", "POST", regPayload);
+        // Item 13: the name is ours now, so this session's native ingress goes with it and the name
+        // is released when the session ends. After a successful register only: a refused claim
+        // must not deliver someone else's messages here.
+        claimedTerminalName = args.name;
+        const credStatus = await postClaimedCredentials(args.name, process.env, process.env.CLAUDE_CODE_SESSION_ID);
+        const nativeInfo = {
+          sent: "native delivery ready",
+          unavailable: "no native credentials in this session; messages reach the inbox only",
+          refused: "the broker refused this session's native credentials; messages reach the inbox only",
+          failed: "could not reach the broker with native credentials; messages reach the inbox only",
+        }[credStatus];
         const channelInfo = `\nChannel Port: (managed by channel server)`;
         return {
           content: [
             {
               type: "text",
-              text: `✅ Terminal registered!\n\nName: ${args.name}\nTerminal ID: ${result.terminalId}${channelInfo}\n\nSave this terminal ID - you'll need it to send messages.`,
+              text: `✅ Terminal registered!\n\nName: ${args.name}\nTerminal ID: ${result.terminalId}${channelInfo}\nMessaging: ${nativeInfo}\n\nSave this terminal ID - you'll need it to send messages.`,
             },
           ],
         };
@@ -5821,9 +5832,141 @@ function assertToolDefHandlerConsistency() {
   }
 }
 
+// ── Claimed-identity duties (ticket 0ff1b520 item 13) ─────────────────────────────────────────────
+// A session MT did not launch has no MULTITERMINAL_NAME, so the SessionStart hook skips it entirely:
+// no native credentials reach the broker, and the SessionEnd hook later skips its release too. Such
+// a session only joins MT when an agent calls register_terminal ("adoption"). The retired channel
+// server used to cover both gaps; this server now does, because it runs inside every session and
+// inherits that session's environment. Observed 2026-09-29 (item 11): a stdio MCP server sees
+// CLAUDE_CODE_MESSAGING_SOCKET/TOKEN, and its parent process is claude.
+
+// Set only after THIS process's register_terminal succeeded. A server that claimed nothing releases
+// nothing.
+let claimedTerminalName = null;
+let releasingClaimedName = false;
+
+const CLAIM_POST_TIMEOUT_MS = 3000;
+const RELEASE_TIMEOUT_MS = 1500;
+const PARENT_EXIT_WAIT_MS = 1500;
+
+/**
+ * The session's native ingress credentials, or null. Mirrors messagingCredentials() in the plugin's
+ * session-status-hook.js: refuse a value that doesn't look like what the CLI emits, never repair it.
+ * THE TOKEN IS A CREDENTIAL. Nothing in this block logs either value, including on failure.
+ */
+function messagingCredentialsFromEnv(env) {
+  try {
+    if (!env || typeof env !== "object") return null;
+    const socket = env.CLAUDE_CODE_MESSAGING_SOCKET;
+    const token = env.CLAUDE_CODE_MESSAGING_TOKEN;
+    if (typeof socket !== "string" || typeof token !== "string" || !socket || !token) return null;
+    if (!/^\\\\\.\\pipe\\LOCAL\\cc-msg-[0-9a-f]{16,}$/i.test(socket)) return null;
+    if (!/^[\x21-\x7e]{16,256}$/.test(token)) return null;
+    return { socket, token };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Hands this session's credentials to the broker under the name it just claimed. Returns a status
+ * word for the tool's reply; never throws, never includes the token in anything it returns.
+ * Deliberately NOT apiCall: that funnel's error path quotes server responses into messages, and this
+ * body must never be anywhere near a message.
+ */
+async function postClaimedCredentials(name, env, sessionId, fetchImpl = fetch) {
+  const creds = messagingCredentialsFromEnv(env);
+  if (!creds) return "unavailable";
+  try {
+    const res = await fetchImpl(API_BASE + "/api/messaging/credentials", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, sessionId: sessionId || "", socket: creds.socket, token: creds.token }),
+      signal: AbortSignal.timeout(CLAIM_POST_TIMEOUT_MS),
+    });
+    return res && res.ok ? "sent" : "refused";
+  } catch {
+    return "failed";
+  }
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    // EPERM means it exists but belongs to someone else, so it is alive.
+    return e && e.code === "EPERM";
+  }
+}
+
+async function parentExitedWithin(pid, waitMs, isAlive = isProcessAlive) {
+  if (!pid) return false;
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    if (!isAlive(pid)) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+/**
+ * Best-effort release of the claimed name when this session ends (the /quit case of task d1151661).
+ *
+ * ONLY once the parent claude process is gone. stdin also closes when the MCP server alone is
+ * restarted (/mcp reconnect) inside a session that stays alive; releasing then would drop a live
+ * terminal's roster row and credentials. Skipping is always safe: the liveness reaper removes a
+ * dead owner's row anyway (the registration carries ownerPid). This call only makes that prompt.
+ */
+async function releaseClaimedName(reason, deps = {}) {
+  if (releasingClaimedName) return "already-releasing";
+  releasingClaimedName = true;
+  const name = deps.name !== undefined ? deps.name : claimedTerminalName;
+  if (!name) return "nothing-claimed";
+  const parentGone = await parentExitedWithin(
+    deps.ppid !== undefined ? deps.ppid : process.ppid,
+    deps.waitMs !== undefined ? deps.waitMs : PARENT_EXIT_WAIT_MS,
+    deps.isAlive || isProcessAlive,
+  );
+  if (!parentGone) {
+    console.error(`[identity] ${reason}: parent session still running, so "${name}" was NOT released (MCP server restart?)`);
+    return "parent-alive";
+  }
+  try {
+    await (deps.fetchImpl || fetch)(API_BASE + "/api/messaging/disconnect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+      signal: AbortSignal.timeout(RELEASE_TIMEOUT_MS),
+    });
+    console.error(`[identity] released "${name}" (${reason})`);
+    return "released";
+  } catch {
+    // MT is gone or slow. The reaper covers it.
+    return "failed";
+  }
+}
+// ── end claimed-identity duties ──
+
+function installClaimedIdentityShutdown() {
+  // On Windows there are no real signals for a stdio child; the parent closing stdin is the shutdown
+  // that actually happens. StdioServerTransport listens for 'data'/'error', never 'end', so this
+  // doesn't compete with it. Registering SIGINT/SIGTERM listeners suppresses Node's default exit,
+  // hence the explicit exit. Exit 0, because non-zero reads as a failed MCP server.
+  process.stdin.on("end", () => {
+    releaseClaimedName("stdin closed").finally(() => process.exit(0));
+  });
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.on(signal, () => {
+      releaseClaimedName(signal).finally(() => process.exit(0));
+    });
+  }
+}
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  installClaimedIdentityShutdown();
   assertToolDefHandlerConsistency();
   console.error("MultiTerminal MCP server running on stdio");
   console.error(
