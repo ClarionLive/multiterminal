@@ -324,6 +324,21 @@ namespace MultiTerminal.MCPServer.Services
         public MessagingCredentialStore MessagingCredentials { get; } = new MessagingCredentialStore();
 
         /// <summary>
+        /// Raised after a terminal's native messaging ingress is stored (ticket 0ff1b520, item 15). The
+        /// argument is the terminal NAME and nothing else: a <c>string</c> cannot carry the socket or the
+        /// token, so no subscriber can log a credential it was never handed.
+        /// </summary>
+        /// <remarks>
+        /// Exists so MainForm's Oracle bootstrap has a trigger that does not depend on the channel
+        /// server reporting a port, which stops happening once the channel is retired.
+        /// </remarks>
+        public event EventHandler<string> MessagingCredentialsStored;
+
+        /// <summary>Raises <see cref="MessagingCredentialsStored"/>. Called by <c>POST /api/messaging/credentials</c> after a successful store.</summary>
+        public void NotifyMessagingCredentialsStored(string terminalName)
+            => RaiseSafe(MessagingCredentialsStored, terminalName);
+
+        /// <summary>
         /// Activity service for auto-updating terminal activity on task operations.
         /// Set via DI after broker is created.
         /// </summary>
@@ -3316,6 +3331,7 @@ namespace MultiTerminal.MCPServer.Services
             // writes SQLite. Holding a process-wide lock across either is a deadlock.
             TerminalInfo terminal;
             bool wasConnected = false;
+            MessagingCredential credentialAtTeardown = null;
 
             lock (_registrationLock)
             {
@@ -3354,6 +3370,7 @@ namespace MultiTerminal.MCPServer.Services
                     // terminal that comes back gets a port from its own channel server's next report,
                     // which is the only source that can prove the port is live.
                     terminal.ChannelPort = null;
+                    credentialAtTeardown = SnapshotMessagingCredential(terminal.Name);
                 }
             }
 
@@ -3378,6 +3395,7 @@ namespace MultiTerminal.MCPServer.Services
                 if (!IsAgentNameHeldByLiveTerminal(terminal.Name))
                 {
                     _profileService.SetProfileOffline(terminal.Name);
+                    ClearTornDownMessagingCredential(terminal.Name, credentialAtTeardown);
 
                     // This method is MultiTerminal tearing the terminal down (tab close, close_helper,
                     // Dispose, process exit, Launch-as), so rows its session still has in flight are
@@ -3424,9 +3442,11 @@ namespace MultiTerminal.MCPServer.Services
             // Side effects stay OUTSIDE the lock (RaiseSafe marshals to the UI thread; SetProfileOffline
             // writes SQLite) — the same decide/apply split as DecideRegistration.
             TerminalInfo terminal;
+            MessagingCredential credentialAtTeardown;
 
             lock (_registrationLock)
             {
+                credentialAtTeardown = SnapshotMessagingCredential(name);
                 terminal = _terminals.Values.FirstOrDefault(t =>
                     t.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && t.IsConnected);
 
@@ -3449,6 +3469,7 @@ namespace MultiTerminal.MCPServer.Services
             if (!IsAgentNameHeldByLiveTerminal(name))
             {
                 SetProfileOffline(name);
+                ClearTornDownMessagingCredential(name, credentialAtTeardown);
             }
 
             DebugLogService?.Info("MessageBroker", $"DisconnectTerminalByName: {name} (terminal found: {terminal != null})");
@@ -3779,6 +3800,7 @@ namespace MultiTerminal.MCPServer.Services
         {
             TerminalInfo terminal = candidate.Terminal;
             if (terminal == null) return false;
+            MessagingCredential credentialAtTeardown;
 
             lock (_registrationLock)
             {
@@ -3791,6 +3813,7 @@ namespace MultiTerminal.MCPServer.Services
 
                 terminal.IsConnected = false;
                 terminal.ChannelPort = null;
+                credentialAtTeardown = SnapshotMessagingCredential(terminal.Name);
             }
 
             // A registration can revive the row in the gap since release. Firing a disconnect for a
@@ -3805,10 +3828,42 @@ namespace MultiTerminal.MCPServer.Services
             // of this row: if it was revived after the check above, it is live and must count
             // (security Run 3 LOW 1).
             bool nameStillLive = IsAgentNameHeldByLiveTerminal(terminal.Name);
-            if (!nameStillLive) _profileService.SetProfileOffline(terminal.Name);
+            if (!nameStillLive)
+            {
+                _profileService.SetProfileOffline(terminal.Name);
+                ClearTornDownMessagingCredential(terminal.Name, credentialAtTeardown);
+            }
 
             DebugLogService?.Info("MessageBroker", $"Reaped '{terminal.Name}': owner pid {candidate.OwnerPid} is dead, so it is disconnected and TerminalDisconnected was raised (profile offline: {!nameStillLive}). task d1151661");
             return true;
+        }
+
+        /// <summary>
+        /// The credential held for <paramref name="name"/> at the moment a teardown decides to act.
+        /// Called under <c>_registrationLock</c>, beside the <c>IsConnected = false</c> write.
+        /// </summary>
+        private MessagingCredential SnapshotMessagingCredential(string name)
+            => MessagingCredentials.TryGet(name, out MessagingCredential credential) ? credential : null;
+
+        /// <summary>
+        /// Drops a torn-down terminal's native messaging ingress (ticket 0ff1b520, item 14). Before this,
+        /// only <c>POST /api/messaging/disconnect</c> cleared it, so a crashed, reaped or closed terminal
+        /// left a live token for a dead pipe in memory until MT restarted, and <c>HasSessionRoute</c>
+        /// went on reporting a route that could not deliver.
+        /// <para>Callers invoke this inside the same <c>!IsAgentNameHeldByLiveTerminal</c> guard as the
+        /// offline write, because the store is keyed by NAME exactly like the profile: if another live
+        /// row carries the name, the credential is that session's.</para>
+        /// <para>⚠️ Compare-and-clear, not <see cref="MessagingCredentialStore.Clear"/>. The snapshot is
+        /// taken under the lock when the teardown decides; this runs after it, with the event raise and
+        /// the SQLite write in between. A same-name session whose SessionStart hook stores its ingress
+        /// in that gap replaces the entry, so the clear misses it rather than cutting the new session
+        /// off. NOT covered, because name is the only key: a new session that stores BEFORE the
+        /// teardown decides and has not registered a live row yet. Telling those apart needs the Claude
+        /// session id on the terminal row, which nothing records today.</para>
+        /// </summary>
+        private void ClearTornDownMessagingCredential(string name, MessagingCredential snapshot)
+        {
+            if (snapshot != null) MessagingCredentials.ClearIfCurrent(name, snapshot);
         }
 
         /// <summary>
@@ -7748,6 +7803,8 @@ namespace MultiTerminal.MCPServer.Services
             if (_isDisposed) return;
             if (disposing)
             {
+                // The only ClearAll caller: a disposed broker's terminals are gone (ticket 0ff1b520, item 14).
+                MessagingCredentials.ClearAll();
                 _taskDb?.Dispose();
                 _projectDb?.Dispose();
                 _messageQueueDb?.Dispose();

@@ -942,6 +942,7 @@ namespace MultiTerminal
                 // Push notification support - map terminal IDs to documents
                 _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 15: Wiring TerminalRegistered event");
                 _mcpServer.Broker.TerminalRegistered += OnMcpTerminalRegistered;
+                _mcpServer.Broker.MessagingCredentialsStored += OnMessagingCredentialsStored;
 
                 // A closed terminal takes its attention card with it (task edcdcdd5). Before this,
                 // Remove/MarkOffline had no caller at all, so the rail kept cards for terminals that
@@ -1918,25 +1919,42 @@ namespace MultiTerminal
 
             // ORACLE BOOTSTRAP: When Oracle registers its channel, send it the digest processing message.
             // Only send once per app session to avoid duplicate digest tasks on crash restarts.
-            if (!_oracleBootstrapped && string.Equals(e.Name, OracleService.OracleName, StringComparison.OrdinalIgnoreCase) && e.ChannelPort > 0)
+            // The port check comes FIRST so a portless registration never consumes the claim.
+            // (Ticket 0ff1b520: item 16 removes this trigger; OnMessagingCredentialsStored is its successor.)
+            if (e.ChannelPort > 0 && _oracleBootstrap.TryClaim(e.Name))
             {
-                _oracleBootstrapped = true;
-                _ = SendOracleBootstrapAsync(e.ChannelPort.Value, e.Name);
+                _ = SendOracleBootstrapAsync(e.ChannelPort, e.Name);
             }
+        }
+
+        /// <summary>
+        /// Oracle bootstrap on native messaging credentials arriving (ticket 0ff1b520, item 15) — the
+        /// trigger that survives the channel's retirement, since nothing reports a channel port after it.
+        /// Raised on the REST thread that handled <c>POST /api/messaging/credentials</c>, like the
+        /// registration trigger above; the bootstrap is fire-and-forget and touches no UI.
+        /// </summary>
+        private void OnMessagingCredentialsStored(object sender, string terminalName)
+        {
+            if (!_oracleBootstrap.TryClaim(terminalName)) return;
+
+            // Native first, and the channel as fallback if Oracle's row already has a port, the same
+            // shape as every other MT-originated delivery (DeliverToSessionAsync).
+            int? channelPort = _mcpServer?.Broker?.GetTerminal(terminalName)?.ChannelPort;
+            _ = SendOracleBootstrapAsync(channelPort, terminalName);
         }
 
         /// <summary>
         /// Send Oracle its bootstrap message after channel registration.
         /// Oracle processes the daily digest and creates suggestion tasks.
         /// </summary>
-        /// <param name="channelPort">Oracle's registered Claude Code Channel port.</param>
+        /// <param name="channelPort">Oracle's Claude Code Channel port, or null when there is no channel to fall back to.</param>
         /// <param name="registeredName">
         /// The name Oracle actually registered under. The caller's gate matches it against
         /// <see cref="OracleService.OracleName"/> case-INsensitively, so passing the canonical
         /// constant here would put a `to` on the wire that a future case-sensitive channel-server
         /// identity check would reject for a terminal registered as e.g. "oracle" (pipeline Run 2).
         /// </param>
-        private async Task SendOracleBootstrapAsync(int channelPort, string registeredName)
+        private async Task SendOracleBootstrapAsync(int? channelPort, string registeredName)
         {
             try
             {
@@ -1949,12 +1967,19 @@ namespace MultiTerminal
 
                 bool delivered = await DeliverToSessionAsync(registeredName, channelPort, "System", bootstrapMessage);
                 if (delivered)
+                {
                     _debugLogService?.Info("MainForm", "Oracle bootstrap message delivered");
+                }
                 else
+                {
+                    // Undelivered, so let the other trigger try (see OracleBootstrapGate).
+                    _oracleBootstrap.Release();
                     _debugLogService?.Warning("MainForm", "Oracle bootstrap message delivery failed");
+                }
             }
             catch (Exception ex)
             {
+                _oracleBootstrap.Release();
                 _debugLogService?.Error("MainForm", $"Oracle bootstrap failed: {ex.Message}");
             }
         }
@@ -7082,7 +7107,7 @@ namespace MultiTerminal
         /// auto-restarts on crash, only shuts down when MT closes. Her dock/float position is
         /// persisted across sessions. Clicking Oracle in the dashboard header activates her.
         /// </summary>
-        private bool _oracleBootstrapped; // Guard: only send digest bootstrap once per app session
+        private readonly OracleBootstrapGate _oracleBootstrap = new OracleBootstrapGate(); // Only send digest bootstrap once per app session
         private System.Windows.Forms.Timer _oracleDigestTimer; // Recurring digest trigger
 
         private void InitializeOracle()

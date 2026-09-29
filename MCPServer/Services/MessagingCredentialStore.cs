@@ -116,6 +116,24 @@ namespace MultiTerminal.MCPServer.Services
             return _credentials.TryRemove(terminalName, out _);
         }
 
+        /// <summary>
+        /// Drops a terminal's ingress only if it is still exactly <paramref name="expected"/> — the entry
+        /// a teardown snapshotted when it decided to act (ticket 0ff1b520, item 14).
+        /// </summary>
+        /// <remarks>
+        /// A broker teardown decides under its lock and clears afterwards, and the SessionStart hook of a
+        /// NEW session under the same name can store its credential in between. A plain
+        /// <see cref="Clear"/> would then delete the live session's ingress for a dead one. Comparing by
+        /// reference is exact: <see cref="Store"/> always creates a new instance, so any store after the
+        /// snapshot makes this a no-op.
+        /// </remarks>
+        /// <returns>true when the snapshotted entry was removed.</returns>
+        public bool ClearIfCurrent(string terminalName, MessagingCredential expected)
+        {
+            if (string.IsNullOrWhiteSpace(terminalName) || expected == null) return false;
+            return _credentials.TryRemove(new System.Collections.Generic.KeyValuePair<string, MessagingCredential>(terminalName, expected));
+        }
+
         /// <summary>Drops everything. Used when the messaging subsystem is torn down.</summary>
         public void ClearAll() => _credentials.Clear();
     }

@@ -188,6 +188,9 @@ namespace MultiTerminal.API.Controllers
             if (!stored)
                 return Problem(detail: "Credentials could not be stored", statusCode: 400);
 
+            // Item 15: the name only, never the body. See MessageBroker.MessagingCredentialsStored.
+            _broker.NotifyMessagingCredentialsStored(request.Name);
+
             return Ok(new { name = request.Name, stored = true });
         }
 
