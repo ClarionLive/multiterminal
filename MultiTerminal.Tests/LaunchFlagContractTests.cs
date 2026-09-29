@@ -95,8 +95,9 @@ namespace MultiTerminal.Tests
         {
             // Behavioural, through the public builder that docked and spawned terminals both use.
             // Rule 2 holds on every machine. It DISCRIMINATES only where the plugin checkout exists
-            // with a server directory, which is when the removed code emitted the flag; that is the
-            // case on a dev machine, and the census below covers CI.
+            // with a server directory, which is when the removed code emitted the flag. Once the
+            // plugin ships without server/ (ticket 0ff1b520 item 17) that is nowhere, so the census
+            // below is the only guard that can go red; this fact stays as the end-to-end statement.
             string dir = Path.Combine(Path.GetTempPath(), "mt-launch-flags-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(dir);
             try

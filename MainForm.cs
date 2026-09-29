@@ -1939,9 +1939,8 @@ namespace MultiTerminal
         /// </summary>
         /// <param name="registeredName">
         /// The name Oracle actually registered under. The caller's gate matches it against
-        /// <see cref="OracleService.OracleName"/> case-INsensitively, so passing the canonical
-        /// constant here would put a `to` on the wire that a future case-sensitive channel-server
-        /// identity check would reject for a terminal registered as e.g. "oracle" (pipeline Run 2).
+        /// <see cref="OracleService.OracleName"/> case-INsensitively, so this, not the canonical
+        /// constant, is the name to address: it is the exact key the credentials were stored under.
         /// </param>
         private async Task SendOracleBootstrapAsync(string registeredName)
         {

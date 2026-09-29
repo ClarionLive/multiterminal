@@ -1,10 +1,12 @@
 // Claimed-identity duties of the MCP server (ticket 0ff1b520 item 13)
 //
 // A session MT did not launch joins MT only through register_terminal. The retired channel server
-// used to give such a session its native delivery and its release on /quit; this server now does.
-// These tests run the REAL block sliced out of mcp/index.js (house pattern, see pushRatio.test.mjs:
-// importing index.js would start the whole server), with fetch, console and the process probe
-// injected.
+// used to give such a session its native delivery; this server now does, by posting the session's
+// messaging credentials under the claimed name. Release on /quit is NOT done here: a stdio server
+// cannot see its parent exit while the parent waits on it (pipeline run 2), so the broker's liveness
+// reaper releases a dead owner's row. These tests run the REAL block sliced out of mcp/index.js
+// (house pattern, see pushRatio.test.mjs: importing index.js would start the whole server), with
+// fetch and console injected.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -34,7 +36,7 @@ const BLOCK = extractBlock(src);
 const SENTINEL_TOKEN = "SENTINEL-TOKEN-7f3a9c2e41b8d05a";
 const GOOD_SOCKET = "\\\\.\\pipe\\LOCAL\\cc-msg-0123456789abcdef0123456789abcdef";
 
-// Fresh module state per test: the block keeps claimedTerminalName / releasingClaimedName.
+// Fresh module state per test: the block keeps claimedTerminalName.
 function load() {
   const logged = [];
   const fakeConsole = {
@@ -45,10 +47,7 @@ function load() {
   const fn = new Function(
     "API_BASE", "console",
     `${BLOCK}
-     return {
-       messagingCredentialsFromEnv, postClaimedCredentials, releaseClaimedName, parentExitedWithin,
-       claim: (n) => { claimedTerminalName = n; },
-     };`,
+     return { messagingCredentialsFromEnv, postClaimedCredentials, releasePreviousClaim };`,
   );
   return { mod: fn("http://mt.test", fakeConsole), logged };
 }
@@ -56,7 +55,7 @@ function load() {
 function recordingFetch({ ok = true, throws = false } = {}) {
   const calls = [];
   const impl = async (url, opts) => {
-    calls.push({ url, body: opts && opts.body ? JSON.parse(opts.body) : null, raw: opts && opts.body });
+    calls.push({ url, body: opts && opts.body ? JSON.parse(opts.body) : null });
     if (throws) throw new Error("connect ECONNREFUSED");
     return { ok, status: ok ? 200 : 400 };
   };
@@ -97,94 +96,89 @@ test("post: no credentials means no request at all; broker refusal and outage ar
 
 test("the token never reaches a log line or a return value, on any path", async () => {
   const { mod, logged } = load();
-  const results = [];
-  results.push(await mod.postClaimedCredentials("Robin", goodEnv, "s", recordingFetch().impl));
-  results.push(await mod.postClaimedCredentials("Robin", goodEnv, "s", recordingFetch({ ok: false }).impl));
-  results.push(await mod.postClaimedCredentials("Robin", goodEnv, "s", recordingFetch({ throws: true }).impl));
-  mod.claim("Robin");
-  results.push(await mod.releaseClaimedName("test", { launchedName: "", ppid: 1, waitMs: 0, isAlive: () => false, fetchImpl: recordingFetch().impl }));
-  // Non-vacuous: the release path did log something, so the scan below is looking at real output.
-  assert.ok(logged.length > 0, "expected the release path to log");
-  for (const line of [...logged, ...results.map(String)]) {
-    assert.ok(!line.includes(SENTINEL_TOKEN), `token leaked into: ${line}`);
+  const origError = console.error;
+  const captured = [];
+  // Belt and braces: also catch anything written to the REAL console, not only the injected one.
+  console.error = (...a) => captured.push(a.join(" "));
+  try {
+    const results = [];
+    results.push(await mod.postClaimedCredentials("Robin", goodEnv, "s", recordingFetch().impl));
+    results.push(await mod.postClaimedCredentials("Robin", goodEnv, "s", recordingFetch({ ok: false }).impl));
+    results.push(await mod.postClaimedCredentials("Robin", goodEnv, "s", recordingFetch({ throws: true }).impl));
+    for (const line of [...logged, ...captured, ...results.map(String)]) {
+      assert.ok(!line.includes(SENTINEL_TOKEN), `token leaked into: ${line}`);
+    }
+  } finally {
+    console.error = origError;
   }
 });
 
-test("release: a server that claimed nothing releases nothing", async () => {
+test("re-claim: claiming a NEW name releases the name held before, so it stops routing here", async () => {
   const { mod } = load();
   const f = recordingFetch();
-  assert.equal(await mod.releaseClaimedName("stdin closed", { launchedName: "", ppid: 1, waitMs: 0, isAlive: () => false, fetchImpl: f.impl }), "nothing-claimed");
+  assert.equal(await mod.releasePreviousClaim("Bravo", { held: "Alpha", fetchImpl: f.impl }), "released");
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].url, "http://mt.test/api/messaging/disconnect");
+  assert.deepEqual(f.calls[0].body, { name: "Alpha" });
+});
+
+test("re-claim: the same name (any case) or nothing held releases nothing", async () => {
+  const { mod } = load();
+  const f = recordingFetch();
+  // Different case on purpose: the broker keys names case-insensitively, so this IS the same name.
+  assert.equal(await mod.releasePreviousClaim("alpha", { held: "ALPHA", fetchImpl: f.impl }), "nothing-to-release");
+  assert.equal(await mod.releasePreviousClaim("Alpha", { held: null, fetchImpl: f.impl }), "nothing-to-release");
   assert.equal(f.calls.length, 0);
 });
 
-test("release: NOT while the parent session is alive (an MCP-server restart must not drop a live terminal)", async () => {
+test("re-claim: an unreachable broker is reported, not thrown", async () => {
   const { mod } = load();
-  mod.claim("Robin");
-  const f = recordingFetch();
-  const status = await mod.releaseClaimedName("stdin closed", { launchedName: "", ppid: 4242, waitMs: 0, isAlive: () => true, fetchImpl: f.impl });
-  assert.equal(status, "parent-alive");
-  assert.equal(f.calls.length, 0, "a disconnect was posted while the session was still running");
+  assert.equal(await mod.releasePreviousClaim("Bravo", { held: "Alpha", fetchImpl: recordingFetch({ throws: true }).impl }), "failed");
+  assert.equal(await mod.releasePreviousClaim("Bravo", { held: "Alpha", fetchImpl: recordingFetch({ ok: false }).impl }), "refused");
 });
 
-test("release: once the parent has exited, disconnects exactly the claimed name, exactly once", async () => {
-  const { mod } = load();
-  mod.claim("Robin");
-  const f = recordingFetch();
-  assert.equal(await mod.releaseClaimedName("stdin closed", { launchedName: "", ppid: 4242, waitMs: 0, isAlive: () => false, fetchImpl: f.impl }), "released");
-  assert.equal(await mod.releaseClaimedName("SIGTERM", { launchedName: "", ppid: 4242, waitMs: 0, isAlive: () => false, fetchImpl: f.impl }), "already-releasing");
-  assert.equal(f.calls.length, 1);
-  assert.equal(f.calls[0].url, "http://mt.test/api/messaging/disconnect");
-  assert.deepEqual(f.calls[0].body, { name: "Robin" });
-});
-
-test("release: a session MT launched under the same name is left to its SessionEnd hook (no late double release)", async () => {
-  const { mod } = load();
-  mod.claim("Robin");
-  const f = recordingFetch();
-  // Different case on purpose: the broker keys names case-insensitively, so this IS the same name.
-  const status = await mod.releaseClaimedName("stdin closed", { launchedName: "ROBIN", ppid: 4242, waitMs: 0, isAlive: () => false, fetchImpl: f.impl });
-  assert.equal(status, "hook-releases");
-  assert.equal(f.calls.length, 0, "released a launched session's name that its SessionEnd hook already releases");
-});
-
-test("release: a launched session that claimed a DIFFERENT name still releases the claimed one", async () => {
-  const { mod } = load();
-  mod.claim("Robin");
-  const f = recordingFetch();
-  const status = await mod.releaseClaimedName("stdin closed", { launchedName: "Alice", ppid: 4242, waitMs: 0, isAlive: () => false, fetchImpl: f.impl });
-  assert.equal(status, "released");
-  assert.deepEqual(f.calls.map((c) => c.body), [{ name: "Robin" }]);
-});
-
-test("release: waits for a parent that is still shutting down", async () => {
-  const { mod } = load();
-  let probes = 0;
-  // Alive for the first two probes, then gone: a normal /quit where claude closes stdin before exiting.
-  const exited = await mod.parentExitedWithin(4242, 1000, () => ++probes <= 2);
-  assert.equal(exited, true);
-  assert.ok(probes >= 3);
-});
-
-// Wiring. These read code with // comments stripped, so a comment naming a call cannot satisfy them.
-function stripLineComments(s) {
-  return s.split("\n").map((l) => l.replace(/^\s*\/\/.*$/, "")).join("\n");
+// Wiring. These read CODE: whole-line // comments are stripped. index.js is CRLF. An earlier version
+// split on "\n" and matched /^\s*\/\/.*$/: every line kept a trailing \r, which `.` cannot match
+// before `$`, so nothing was ever stripped. This version splits on \r?\n and tests only the prefix,
+// so it doesn't depend on either. The next test pins that against the file's real line endings.
+function codeOnly(s) {
+  return s.split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l)).join("\n");
 }
 
-test("wiring: register_terminal claims the name only AFTER the broker accepted the registration", () => {
+function registerTerminalCode() {
   const i = src.indexOf('case "register_terminal": {');
   assert.ok(i >= 0, "register_terminal case not found");
-  const body = stripLineComments(src.slice(i, src.indexOf("case \"get_messages\"", i)));
-  assert.ok(body.length > 500, "register_terminal body suspiciously short");
+  const j = src.indexOf('case "get_messages"', i);
+  assert.ok(j > i, "end of register_terminal case not found");
+  const body = codeOnly(src.slice(i, j));
+  assert.ok(body.length > 500, `register_terminal body suspiciously short (${body.length})`);
+  return body;
+}
+
+test("wiring: register_terminal releases the old claim and posts credentials only AFTER the broker accepted the new one", () => {
+  const body = registerTerminalCode();
   const reg = body.indexOf('apiCall("/api/messaging/register"');
+  const release = body.indexOf("releasePreviousClaim(args.name)");
   const claim = body.indexOf("claimedTerminalName = args.name");
   const post = body.indexOf("postClaimedCredentials(args.name");
-  assert.ok(reg >= 0 && claim >= 0 && post >= 0, "register / claim / credential post not all present");
-  assert.ok(reg < claim && claim < post, "the claim or the credential post happens before the registration succeeded");
+  assert.ok(reg >= 0 && release >= 0 && claim >= 0 && post >= 0, "register / release / claim / post not all present in code");
+  assert.ok(reg < release, "the old claim is released before the new registration succeeded");
+  assert.ok(release < claim, "the held name is overwritten before it is released");
+  assert.ok(claim < post, "credentials are posted before the claim is recorded");
 });
 
-test("wiring: main() installs the shutdown release", () => {
-  const i = src.indexOf("async function main()");
-  assert.ok(i >= 0, "main() not found");
-  const body = stripLineComments(src.slice(i, src.indexOf("\n}\n", i)));
-  assert.ok(body.includes("installClaimedIdentityShutdown()"), "main() does not install the shutdown release");
+test("the helper strips comments on this file's real line endings", () => {
+  // Guards the guard: if codeOnly stopped stripping (e.g. a "\n" split on a CRLF file), a comment
+  // naming a call would satisfy the wiring test above.
+  const eol = src.includes("\r\n") ? "\r\n" : "\n";
+  const sample = ["  // releasePreviousClaim(args.name)", "  realCode();"].join(eol);
+  assert.ok(!codeOnly(sample).includes("releasePreviousClaim"), "codeOnly left a comment line in place");
+  assert.ok(codeOnly(sample).includes("realCode()"), "codeOnly dropped real code");
+});
+
+test("no release-on-exit handler: a stdio server cannot see its parent exit while the parent waits on it", () => {
+  const code = codeOnly(src);
+  assert.ok(code.length > 100000, "index.js code suspiciously short");
+  assert.ok(!/process\.stdin\.on\(\s*["']end["']/.test(code), "a stdin 'end' handler is back; see the block comment for why it cannot release");
+  assert.ok(!/process\.on\(\s*["']SIG(INT|TERM)["']/.test(code), "a signal handler is back; on Windows it never runs, and it suppresses Node's default exit");
 });
