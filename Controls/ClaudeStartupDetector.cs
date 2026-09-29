@@ -6,14 +6,13 @@ using System.Text.RegularExpressions;
 namespace MultiTerminal.Controls
 {
     /// <summary>
-    /// Watches a terminal's output for Claude Code's startup: the dev-channel warning dialog and the
-    /// banner. Owns the accumulated buffer and the one-shot flags that used to live inline in
+    /// Watches a terminal's output for Claude Code's startup banner. Owns the accumulated buffer and the one-shot flags that used to live inline in
     /// <see cref="TerminalControl"/>, so the matching rules can be tested without a UI (task 00cdd389).
     /// </summary>
     /// <remarks>
     /// <para>
     /// <b>Why the banner is matched on normalized text.</b> Claude Code's renderer writes spaces as
-    /// cursor-forward escapes. The raw dump of the dev-channel dialog logged on 2026-09-22 reads
+    /// cursor-forward escapes. A raw dump of a startup dialog logged on 2026-09-22 reads
     /// <c>WARNING:\x1b[1CLoading\x1b[1Cdevelopment</c>, so a banner drawn the same way arrives as
     /// <c>Claude\x1b[1CCode</c> and a raw <c>Contains("Claude Code")</c> never sees it. That is how the
     /// first terminal after launch sat on its banner with no "initializing..." typed.
@@ -28,6 +27,13 @@ namespace MultiTerminal.Controls
     /// command that launches it, and treating it as one reopened the live-session trigger (pipeline
     /// run 1). What arms detection is how the pane was LAUNCHED: a Claude launch command arms it at
     /// start, and a plain shell arms it once, when the Owner types the launch line.
+    /// </para>
+    /// <para>
+    /// <b>The banner is the only thing it triggers.</b> It used to also auto-accept the
+    /// development-channel warning by typing "1", matched partly on the generic phrase "enter to
+    /// confirm". MT stopped launching with that flag (ticket 0ff1b520, item 16), so the dialog cannot
+    /// appear, and the generic match could only ever have answered some OTHER startup prompt. Both
+    /// went, rather than leaving a keystroke armed for a dialog that no longer exists.
     /// </para>
     /// <para>
     /// <b>What reaches the debug log.</b> That log is readable by agents, and pane output can hold
@@ -49,8 +55,9 @@ namespace MultiTerminal.Controls
         internal const int TrimToChars = 4000;
 
         /// <summary>
-        /// Shortest submitted line that disarms detection. One character is excluded because the
-        /// dev-channel dialog is answered with a bare "1", which is not the session starting.
+        /// Shortest submitted line that disarms detection. One character is excluded because a startup
+        /// menu (the folder-trust prompt, for one) can be answered with a single key, which is not the
+        /// session starting.
         /// </summary>
         internal const int MinSubmittedLineLength = 2;
 
@@ -76,8 +83,7 @@ namespace MultiTerminal.Controls
             new Regex(@"claude ?code ?v ?\d", RegexOptions.Compiled);
 
         // API keys, bearer tokens, hex credentials: long unbroken runs. '-' is deliberately NOT in the
-        // class, so hyphenated flags such as --dangerously-load-development-channels survive, and the
-        // dev-channel dump still shows the wording it exists to recover.
+        // class, so hyphenated flags such as --dangerously-skip-permissions survive in the excerpts.
         private static readonly Regex TokenLikeRegex =
             new Regex(@"[A-Za-z0-9_+/=]{20,}", RegexOptions.Compiled);
 
@@ -102,7 +108,6 @@ namespace MultiTerminal.Controls
         private readonly Func<DateTime> _utcNow;
         private readonly StringBuilder _buffer = new StringBuilder();
         private DateTime _startedUtc;
-        private bool _devChannelDumped;
 
         /// <param name="launchesClaude">
         /// True when the pane's launch command starts Claude Code. False for a plain shell, which stays
@@ -117,8 +122,6 @@ namespace MultiTerminal.Controls
 
         public bool BannerDetected { get; private set; }
 
-        public bool DevChannelWarningHandled { get; private set; }
-
         /// <summary>
         /// Not scanning output. True both after detection stopped and for a plain shell that has not
         /// been armed yet (<see cref="AwaitingShellLaunch"/> tells the two apart).
@@ -128,7 +131,7 @@ namespace MultiTerminal.Controls
         /// <summary>A plain-shell pane that has not yet seen a Claude launch line typed.</summary>
         public bool AwaitingShellLaunch { get; private set; }
 
-        public bool IsWatching => !Disarmed && (!BannerDetected || !DevChannelWarningHandled);
+        public bool IsWatching => !Disarmed && !BannerDetected;
 
         /// <summary>Starts over for a new process in the same pane.</summary>
         public void Reset(bool launchesClaude)
@@ -142,9 +145,7 @@ namespace MultiTerminal.Controls
         {
             _buffer.Clear();
             BannerDetected = false;
-            DevChannelWarningHandled = false;
             Disarmed = false;
-            _devChannelDumped = false;
             _startedUtc = _utcNow();
         }
 
@@ -166,36 +167,13 @@ namespace MultiTerminal.Controls
             string buffer = _buffer.ToString();
             string normalized = NormalizeForMatch(buffer);
 
-            // Ground-truth dump the first time "development" appears, so the exact warning wording
-            // can be recovered if the anchors below miss on a future Claude Code version.
-            if (!_devChannelDumped && normalized.Contains("development"))
+            string anchor = MatchBanner(buffer, normalized);
+            if (anchor != null)
             {
-                _devChannelDumped = true;
-                scan.DevChannelDumpRaw = RedactForLog(buffer);
-            }
-
-            // The dev-channel check runs BEFORE the banner check so the latter's buffer clear
-            // can't wipe the warning text within one call.
-            if (!DevChannelWarningHandled &&
-                (normalized.Contains("for local development") ||
-                 normalized.Contains("loading development channels") ||
-                 normalized.Contains("development channels") ||
-                 normalized.Contains("enter to confirm")))
-            {
-                DevChannelWarningHandled = true;
-                scan.DevChannelWarning = true;
-            }
-
-            if (!BannerDetected)
-            {
-                string anchor = MatchBanner(buffer, normalized);
-                if (anchor != null)
-                {
-                    BannerDetected = true;
-                    scan.BannerAnchor = anchor;
-                    _buffer.Clear();
-                    return scan;
-                }
+                BannerDetected = true;
+                scan.BannerAnchor = anchor;
+                _buffer.Clear();
+                return scan;
             }
 
             // Trim only after scanning: trimming first let one large chunk push the banner out
@@ -386,8 +364,8 @@ namespace MultiTerminal.Controls
         /// <summary>
         /// Redacts the visible text between escape sequences and copies the escapes through untouched.
         /// Secrets live in the text, never in escape parameters. Redacting across the boundary glued a
-        /// cursor move's "3H" onto "--dangerously-load-development-channels", and that digit made the
-        /// flag look like a structured token.
+        /// cursor move's "3H" onto a hyphenated CLI flag, and that digit made the flag look like a
+        /// structured token.
         /// Known gap: a secret rendered with an escape between every few characters splits into segments
         /// that are each under the thresholds. That is judged unrealistic here, because detection only
         /// runs from a Claude launch until the first prompt, so the output is Claude Code's own startup.
@@ -477,13 +455,8 @@ namespace MultiTerminal.Controls
     /// <summary>What one chunk of output completed. Every member is empty when nothing happened.</summary>
     internal sealed class StartupScan
     {
-        public bool DevChannelWarning { get; set; }
-
         /// <summary>Non-null when this chunk completed the banner; names the rule that matched.</summary>
         public string BannerAnchor { get; set; }
-
-        /// <summary>Non-null the first time "development" appears: the buffer, escaped and redacted.</summary>
-        public string DevChannelDumpRaw { get; set; }
 
         /// <summary>Non-null when detection disarmed without ever seeing the banner.</summary>
         public string DisarmLog { get; set; }

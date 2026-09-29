@@ -231,17 +231,17 @@ namespace MultiTerminal.Tests
             Assert.False(gate.IsClaimed, "A non-Oracle name must not consume the claim.");
 
             Assert.True(gate.TryClaim("oracle"));   // case-insensitive, like every Oracle check in MT
-            Assert.False(gate.TryClaim("Oracle"));  // the second trigger for the same startup
+            Assert.False(gate.TryClaim("Oracle"));  // a second credential post in the same app session
 
             gate.Release();                          // the first delivery did not arrive
             Assert.True(gate.TryClaim("Oracle"));
         }
 
         [Fact]
-        public void Two_triggers_racing_claim_the_bootstrap_exactly_once()
+        public void Concurrent_claims_take_the_bootstrap_exactly_once()
         {
-            // Both triggers arrive on REST thread-pool threads, and for one Oracle startup both
-            // normally fire. Many rounds, each releasing all racers at once.
+            // Claims arrive on REST thread-pool threads, and credential posts can overlap (a /clear
+            // or restart while a bootstrap is in flight). Many rounds, each releasing all racers at once.
             // PROBABILISTIC, measured not assumed: with the claim swapped for a plain check-then-set,
             // this went red in 2 of 3 runs and passed once; with a SpinWait widening the window
             // between the check and the set, it went red every run. So it catches a regression

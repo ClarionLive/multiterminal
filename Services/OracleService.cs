@@ -258,7 +258,8 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Build the Claude CLI autorun command for Oracle's ConPTY terminal.
-        /// No --plugin-dir: Oracle uses its own system prompt, not the MT project plugin.
+        /// Loads the MT plugin with --plugin-dir like every other MT terminal (its hooks are what post
+        /// Oracle's native messaging credentials), alongside Oracle's own system prompt.
         /// </summary>
         public string BuildAutoRunCommand()
         {
@@ -279,11 +280,6 @@ namespace MultiTerminal.Services
             {
                 string safePluginDir = pluginDir.Replace("'", "''");
                 cmd += $" --plugin-dir '{safePluginDir}'";
-                if (Directory.Exists(Path.Combine(pluginDir, "server")))
-                {
-                    string pName = Path.GetFileName(pluginDir);
-                    cmd += $" --dangerously-load-development-channels plugin:{pName}@inline";
-                }
             }
             cmd += " --dangerously-skip-permissions";
             cmd += " --disallowedTools Edit,Write,Read,Glob,Grep,Bash,NotebookEdit,PowerShell";

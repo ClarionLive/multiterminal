@@ -1344,7 +1344,7 @@ namespace MultiTerminal.Tests
         /// titled tab that no message can reach, with nothing logged.</para>
         ///
         /// <para>This is a source census rather than a behavioural test, matching the repo's standing
-        /// answer to a contract no compiler checks (see <c>ChannelFlagContractTests</c>). It is the
+        /// answer to a contract no compiler checks (see <c>LaunchFlagContractTests</c>). It is the
         /// shape that fits: the defect is "a call site forgot to look at a return value", which has no
         /// runtime signature short of driving WinForms.</para>
         ///

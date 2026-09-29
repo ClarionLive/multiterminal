@@ -469,7 +469,6 @@
       <div class="flow-label">3. Claude launched with the standard MT flags</div>
       <div class="flow-detail"><code>--plugin-dir '{mt plugin}'</code> &mdash; hooks, skills, agents, CLAUDE.md<br>
       <code>--mcp-config '{%APPDATA%\multiterminal\.mcp.json}'</code> &mdash; MCP servers<br>
-      <code>--dangerously-load-development-channels plugin:multiterminal@inline</code> &mdash; the messaging channel<br>
       <code>--settings</code> / <code>--setting-sources user --setting-sources project</code> &mdash; MT's forced statusline (see <code>BuildForcedStatuslineFlag</code>)</div>
     </div>
     <div class="flow-arrow">&darr;</div>
@@ -486,7 +485,7 @@
       <tr><td><code>API/Controllers/SpawnController.cs</code></td><td><code>POST /api/spawn/terminal</code>; <code>SpawnTerminalRequest</code> (agentName, workingDir, projectId, spawnerName, initialPrompt)</td></tr>
       <tr><td><code>MainForm.cs</code> &mdash; <code>OnSpawnRequested</code>, <code>QueueInitialPromptDelivery</code></td><td>Routes through the builder; delivers the prompt on the first question notification (120s fallback)</td></tr>
       <tr><td><code>Services/LaunchCommandBuilder.cs</code></td><td>The one place launch flags are built, for docked and spawned terminals alike</td></tr>
-      <tr><td><code>MultiTerminal.Tests/ChannelFlagContractTests.cs</code></td><td>Method-granular census: every launch method must emit both flags or be a declared (file, method, ticket) defect</td></tr>
+      <tr><td><code>MultiTerminal.Tests/LaunchFlagContractTests.cs</code></td><td>Method-granular census: every launch method must load the plugin and none may authorize a development channel, or it is a declared (file, method, ticket) defect</td></tr>
     </tbody>
   </table>
 

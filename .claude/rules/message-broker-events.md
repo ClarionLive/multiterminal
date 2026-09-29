@@ -10,7 +10,7 @@ paths:
 Subscribe in MainForm or panels for UI updates:
 
 - `MessageSent`, `TerminalRegistered`, `TerminalDisconnected`
-- `MessagingCredentialsStored` — `EventHandler<string>`, the terminal NAME only, raised by `POST /api/messaging/credentials` after a successful store (ticket 0ff1b520 item 15). A `string` arg is deliberate: it cannot carry the socket or token, so no subscriber can log a credential. MainForm subscribes to fire the Oracle bootstrap through `OracleBootstrapGate` (once per app session, shared with the channel-port trigger in `OnMcpTerminalRegistered`).
+- `MessagingCredentialsStored` — `EventHandler<string>`, the terminal NAME only, raised by `POST /api/messaging/credentials` after a successful store (ticket 0ff1b520 item 15). A `string` arg is deliberate: it cannot carry the socket or token, so no subscriber can log a credential. MainForm subscribes to fire the Oracle bootstrap through `OracleBootstrapGate` (once per app session; the only Oracle bootstrap trigger since item 16 removed the channel-port one).
 - `TasksUpdated`, `TaskClaimed`
 - `ActivityRecorded`, `InboxUpdated`, `PlanUpdated`
 - `ProjectsUpdated`, `ProfilesUpdated`

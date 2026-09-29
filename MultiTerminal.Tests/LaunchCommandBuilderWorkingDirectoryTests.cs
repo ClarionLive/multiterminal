@@ -21,8 +21,8 @@ namespace MultiTerminal.Tests
     /// file pins that the builder honours it.</para>
     ///
     /// <para>WHAT IS DELIBERATELY NOT ASSERTED. Flag <em>contents</em> — the plugin path, the
-    /// channel flag, the statusline merge — probe the real filesystem and would pass or fail on
-    /// whether the machine has a plugin checkout. <c>ChannelFlagContractTests</c> explains why
+    /// statusline merge — probe the real filesystem and would pass or fail on
+    /// whether the machine has a plugin checkout. <c>LaunchFlagContractTests</c> explains why
     /// those are pinned at source level instead. The Codex builder is not exercised here either:
     /// it refreshes <c>~/.codex/config.toml</c> and probes the broker as side effects of being
     /// called, which is not something a unit test should do to the developer's machine.</para>

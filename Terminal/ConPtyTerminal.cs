@@ -324,7 +324,7 @@ namespace MultiTerminal.Terminal
         /// <c>IdentityPickerDialog</c> runs, and consumes the returned working directory as that picker's
         /// fallback folder, so the call cannot simply move later. <see cref="StartProcess"/> is the one place
         /// that holds BOTH the command and the chosen name, and every launch path funnels through it —
-        /// including the hand-rolled sites <c>ChannelFlagContractTests</c> exists to police, which is the
+        /// including the hand-rolled sites <c>LaunchFlagContractTests</c> exists to police, which is the
         /// point: a site that forgets a flag cannot forget this one.</para>
         ///
         /// <para>NEVER EMIT A NAME THAT DIFFERS FROM <c>MULTITERMINAL_NAME</c>. Truncating an over-long name,

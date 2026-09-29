@@ -8,16 +8,14 @@ namespace MultiTerminal.Services
     /// (ticket 0ff1b520, item 15).
     /// </summary>
     /// <remarks>
-    /// <para>Two triggers now lead here: the channel server's port report (the original one, until
-    /// item 16 removes it) and native messaging credentials arriving. Both are raised on REST
-    /// thread-pool threads, and for one Oracle startup both normally fire, so the old
-    /// <c>if (!flag) { flag = true; ... }</c> check-then-set could let each thread pass the check
-    /// and send the bootstrap twice — which is two digest runs and duplicate suggestion tasks. The
-    /// claim is a single atomic exchange.</para>
-    /// <para>A failed delivery <see cref="Release"/>s the claim, so the other trigger can still
-    /// deliver. That keeps "at most one bootstrap delivered" rather than "at most one attempted",
-    /// which matters while the two routes differ: native injection has an off switch, and the
-    /// channel has no port until the channel server reports one.</para>
+    /// <para>The trigger is native messaging credentials arriving, raised on a REST thread-pool
+    /// thread. Item 15 briefly ran it alongside the channel server's port report, and two triggers
+    /// on two threads made the old <c>if (!flag) { flag = true; ... }</c> check-then-set able to send
+    /// the bootstrap twice — two digest runs and duplicate suggestion tasks. Item 16 removed the
+    /// channel trigger; the claim stays a single atomic exchange because a /clear or restart can
+    /// post credentials again while a first bootstrap is still in flight.</para>
+    /// <para>A failed delivery <see cref="Release"/>s the claim, so Oracle's next credential post can
+    /// try again. That keeps "at most one bootstrap delivered" rather than "at most one attempted".</para>
     /// </remarks>
     public sealed class OracleBootstrapGate
     {

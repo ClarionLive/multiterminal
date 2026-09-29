@@ -306,14 +306,9 @@ namespace MultiTerminal.Services
                 flags += $" --mcp-config '{safeMcpPath}'";
             }
 
-            // --dangerously-load-development-channels: Authorize the plugin's channel server.
-            // Plugins loaded via --plugin-dir get the sentinel marketplace "inline" (not the
-            // actual marketplace directory name). Claude Code sets source to "name@inline".
-            if (pluginDir != null && Directory.Exists(Path.Combine(pluginDir, "server")))
-            {
-                string pluginName = Path.GetFileName(pluginDir);
-                flags += $" --dangerously-load-development-channels plugin:{pluginName}@inline";
-            }
+            // No channel authorization flag (ticket 0ff1b520, item 16). MT delivers into sessions
+            // through Claude Code's native cross-session messaging, so there is no channel server to
+            // authorize, and the flag's startup warning dialog no longer needs auto-accepting.
 
             // Force MT's own statusline.js as the statusLine command. A project that
             // overrides statusLine in its .claude/settings.local.json (e.g. ClarionAssistant's

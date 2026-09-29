@@ -140,7 +140,7 @@ plugin:multiterminal@inline · plugin not installed</code></pre>
         <div class="card">
           <p><strong>⚠️ Do not &ldquo;fix&rdquo; it by changing <code>@inline</code> to <code>@multiterminal-marketplace</code>.</strong> That silently kills channel messaging. Registration runs a <em>different</em> check from the warning, and a marketplace mismatch is skipped <em>before</em> the development-channel flag is considered &mdash; so <code>--dangerously-load-development-channels</code> does not rescue it. Nothing throws and nothing logs an error. Polling (<code>get_messages</code>) keeps working perfectly, so the only symptom is that pushed messages stop arriving, which reads as &ldquo;nobody messaged me&rdquo; rather than as a fault.</p>
           <p>Switching to the installed plugin instead (enabling it at user scope and dropping <code>--plugin-dir</code>) does not help either: the installed copy lives in a separate cache directory that is a snapshot taken at install time, and it does not contain the channel server at all.</p>
-          <p><code>MultiTerminal.Tests/ChannelFlagContractTests.cs</code> pins <code>@inline</code> across every launch path so this cannot be changed by accident.</p>
+          <p>Since ticket 0ff1b520 (item 16) MT no longer launches with this flag at all; <code>MultiTerminal.Tests/LaunchFlagContractTests.cs</code> pins that no launch path emits it.</p>
         </div>
 
         <h2 id="env">Environment variables</h2>

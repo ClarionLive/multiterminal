@@ -828,7 +828,7 @@ namespace MultiTerminal.Controls
 
             _renderer?.WriteToTerminal(data);
 
-            // Startup detection (Claude Code banner + dev-channel warning) scans the
+            // Startup detection (the Claude Code banner) scans the
             // ACCUMULATED output buffer, NOT the current chunk: ConPTY delivers output in ~16ms
             // batches (ConPtyTerminal.FlushOutputQueue), so a multi-line TUI box routinely
             // straddles two chunks. Matching rules, buffer bounds and when detection stops all
@@ -839,39 +839,9 @@ namespace MultiTerminal.Controls
                 {
                     StartupScan scan = _startupDetector.Append(System.Text.Encoding.UTF8.GetString(data));
 
-                    if (scan.DevChannelDumpRaw != null)
-                    {
-                        LogTrace("Dev-channel RAW buffer (escaped, redacted): " + scan.DevChannelDumpRaw);
-                    }
-
                     if (scan.DisarmLog != null)
                     {
                         LogTrace(scan.DisarmLog);
-                    }
-
-                    // Auto-accept the dev-channel warning dialog. The menu's option 1 is
-                    // "I am using this for local development"; the user confirmed pressing the
-                    // digit '1' selects-and-proceeds reliably (a bare Enter was dropped
-                    // intermittently before Claude's raw-mode prompt was ready).
-                    if (scan.DevChannelWarning)
-                    {
-                        LogTrace("Dev-channel warning detected in normalized output buffer — auto-accepting by sending '1'");
-                        System.Threading.Tasks.Task.Run(async () =>
-                        {
-                            // Brief settle so the dialog box is rendered and raw mode is ready
-                            // before the keystroke lands.
-                            await System.Threading.Tasks.Task.Delay(400);
-                            if (!_isDisposed)
-                            {
-                                BeginInvoke(new Action(() =>
-                                {
-                                    // Send just the digit '1' (no line ending): on the select
-                                    // prompt this picks option 1 and proceeds.
-                                    TypeInput("1", "none");
-                                    LogTrace("Dev-channel auto-accept: sent '1'");
-                                }));
-                            }
-                        });
                     }
 
                     if (scan.BannerAnchor != null)

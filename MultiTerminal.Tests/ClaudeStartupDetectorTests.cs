@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using MultiTerminal.Controls;
 using Xunit;
 
@@ -23,10 +24,10 @@ namespace MultiTerminal.Tests
     /// The split-chunk and single-character facts would fail under it, but only because their fixture is
     /// the escape-spaced banner, not because of what they test.</para>
     ///
-    /// <para>Provenance of the fixtures: <see cref="CapturedDevChannelDialog"/> is transcribed from the
-    /// raw dump MT logged at 2026-09-22 11:38:19. The escape-spaced BANNER is SYNTHESIZED. No raw banner
-    /// bytes have been captured yet; it applies the spacing convention visible in that dump
-    /// (<c>WARNING:\x1b[1CLoading</c>) to the banner text shown on screen.</para>
+    /// <para>Provenance of the fixtures: the escape-spaced BANNER is SYNTHESIZED. No raw banner bytes
+    /// have been captured yet; it applies the spacing convention visible in the development-channel
+    /// dialog MT dumped at 2026-09-22 11:38:19 (<c>WARNING:\x1b[1CLoading</c>) to the banner text shown
+    /// on screen. That dialog's own fixture went with its auto-accept (ticket 0ff1b520, item 16).</para>
     /// </summary>
     public class ClaudeStartupDetectorTests
     {
@@ -36,18 +37,14 @@ namespace MultiTerminal.Tests
         private static readonly string EscapeSpacedBanner =
             Esc + "[1mClaude" + Esc + "[1CCode" + Esc + "[m" + Esc + "[1C" + Esc + "[38;2;153;153;153mv2.1.280" + Esc + "[m";
 
-        /// <summary>Transcribed from the 11:38:19 "Dev-channel RAW buffer" trace, from the rule line onward.</summary>
-        private static readonly string CapturedDevChannelDialog =
-            Esc + "]0;claude\u0007" + Esc + "[?25l" + Esc + "[38;2;255;107;128m\r\n" +
-            "───────────────────────────────────────────────────────────────────────────────────────────" +
-            Esc + "[1m" + Esc + "[3;3HWARNING:" + Esc + "[1CLoading" + Esc + "[1Cdevelopment" + Esc + "[1Cchannels" + Esc + "[m" +
-            Esc + "[5;3H--dangerously-load-development-channels" + Esc + "[1Cis" + Esc + "[1Cfor" + Esc + "[1Clocal" +
-            Esc + "[1Cchannel" + Esc + "[1Cdevelopment" + Esc + "[1Conly." +
-            Esc + "[38;2;153;153;153m" + Esc + "[10;3HChannels:" + Esc + "[1Cplugin:multiterminal@inline" +
-            Esc + "[38;2;177;185;249m" + Esc + "[12;3H>" + Esc + "[38;2;153;153;153m" + Esc + "[1C1." +
-            Esc + "[38;2;177;185;249m" + Esc + "[1CI" + Esc + "[1Cam" + Esc + "[1Cusing" + Esc + "[1Cthis" + Esc + "[1Cfor" +
-            Esc + "[1Clocal" + Esc + "[1Cdevelopment" + Esc + "[38;2;153;153;153m" + Esc + "[13;5H2." + Esc + "[m" + Esc + "[1CExit" +
-            Esc + "[38;2;153;153;153m" + Esc + "[3m" + Esc + "[15;3HEnter" + Esc + "[1Cto" + Esc + "[1Cconfirm" + Esc + "[1C·" +
+        /// <summary>
+        /// A startup confirmation prompt, drawn escape-spaced like every Claude Code dialog, ending in the
+        /// generic "Enter to confirm" line the removed dev-channel auto-accept used to match on.
+        /// </summary>
+        private static readonly string ConfirmPrompt =
+            Esc + "[3;3HDo" + Esc + "[1Cyou" + Esc + "[1Ctrust" + Esc + "[1Cthe" + Esc + "[1Cfiles" + Esc + "[1Cin" +
+            Esc + "[1Cthis" + Esc + "[1Cfolder?" + Esc + "[12;3H>" + Esc + "[1C1." + Esc + "[1CYes" +
+            Esc + "[13;5H2." + Esc + "[1CNo" + Esc + "[15;3HEnter" + Esc + "[1Cto" + Esc + "[1Cconfirm" + Esc + "[1C·" +
             Esc + "[1CEsc" + Esc + "[1Cto" + Esc + "[1Ccancel";
 
         /// <summary>Shaped like CLAUDE_CODE_MESSAGING_TOKEN: 32 hex characters. Not a real credential.</summary>
@@ -110,16 +107,42 @@ namespace MultiTerminal.Tests
             Assert.True(LegacyBannerCheck(prose)); // the old check fired on exactly this
         }
 
+        /// <summary>
+        /// A confirmation prompt is not a banner, reports nothing, and leaves detection watching for the
+        /// banner that follows it. Before item 16 this same text made the detector report a dev-channel
+        /// warning, which TerminalControl answered by typing "1" into whatever the prompt was. This fact
+        /// alone would still pass under that code (it pins that the banner is found after a prompt); what
+        /// fails if a prompt action comes back is the structural pin below.
+        /// </summary>
         [Fact]
-        public void The_captured_dev_channel_dialog_is_handled_and_is_not_a_banner()
+        public void A_confirmation_prompt_triggers_nothing_and_the_banner_is_still_found_after_it()
         {
             var detector = new ClaudeStartupDetector(launchesClaude: true);
 
-            StartupScan scan = detector.Append(CapturedDevChannelDialog);
+            StartupScan scan = detector.Append(ConfirmPrompt);
 
-            Assert.True(scan.DevChannelWarning);
             Assert.Null(scan.BannerAnchor);
-            Assert.NotNull(scan.DevChannelDumpRaw);
+            Assert.Null(scan.DisarmLog);
+            Assert.True(detector.IsWatching);
+            Assert.NotNull(detector.Append(EscapeSpacedBanner).BannerAnchor);
+        }
+
+        /// <summary>
+        /// Structural pin on what a scan can ask TerminalControl to do. Every member of
+        /// <see cref="StartupScan"/> is acted on there, so a new one is a new startup action. Adding one is
+        /// allowed; adding one without asking which OTHER prompts its match could fire on is how "enter to
+        /// confirm" came to be armed. Update this list in the same commit, deliberately.
+        /// </summary>
+        [Fact]
+        public void A_startup_scan_reports_only_the_banner_and_a_disarm()
+        {
+            string[] members = typeof(StartupScan)
+                .GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+                .Select(p => p.Name)
+                .OrderBy(n => n, StringComparer.Ordinal)
+                .ToArray();
+
+            Assert.Equal(new[] { nameof(StartupScan.BannerAnchor), nameof(StartupScan.DisarmLog) }, members);
         }
 
         /// <summary>
@@ -154,7 +177,7 @@ namespace MultiTerminal.Tests
             Assert.Null(detector.NotifyLineSubmitted("again")); // once, not per prompt
         }
 
-        /// <summary>The dev-channel dialog is answered with a bare "1"; that is not the session starting.</summary>
+        /// <summary>A startup menu can be answered with one key; that is not the session starting.</summary>
         [Fact]
         public void A_single_character_submission_does_not_disarm()
         {
@@ -399,15 +422,18 @@ namespace MultiTerminal.Tests
             Assert.Contains("example.com", excerpt);
         }
 
+        /// <summary>
+        /// Redaction runs between escapes, not across them. Across them, the cursor move's "3H" glued onto
+        /// a hyphenated flag gave it a digit and made it look like a structured token.
+        /// </summary>
         [Fact]
-        public void The_dev_channel_dump_keeps_the_wording_and_redacts_tokens()
+        public void A_hyphenated_flag_after_a_cursor_move_survives_redaction_and_a_token_does_not()
         {
-            var detector = new ClaudeStartupDetector(launchesClaude: true);
+            string excerpt = ClaudeStartupDetector.ExcerptForLog(
+                "claude " + Esc + "[5;3H--dangerously-skip-permissions" + Esc + "[1C" + FakeToken);
 
-            StartupScan scan = detector.Append(FakeToken + "\r\n" + CapturedDevChannelDialog);
-
-            Assert.Contains("--dangerously-load-development-channels", scan.DevChannelDumpRaw);
-            Assert.DoesNotContain(FakeToken, scan.DevChannelDumpRaw);
+            Assert.Contains("--dangerously-skip-permissions", excerpt);
+            Assert.DoesNotContain(FakeToken, excerpt);
         }
     }
 }

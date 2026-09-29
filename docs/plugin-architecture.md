@@ -135,15 +135,17 @@ With the plugin handling hooks and CLAUDE.md, `LaunchCommandBuilder.cs` is simpl
 claude --add-dir <mt-source> --settings <settings.local.json> --mcp-config <mcp.json> --dangerously-skip-permissions --channels server:multiterminal-channel
 ```
 
-**Now** (what `LaunchCommandBuilder.BuildFlags` emits; checked against source 2026-09-22, task cb4883b6):
+**Now** (what `LaunchCommandBuilder.BuildFlags` emits; checked against source 2026-09-29, ticket 0ff1b520 item 16):
 ```
-claude --plugin-dir '<plugin>' --mcp-config '<%APPDATA%\multiterminal\.mcp.json>' --dangerously-load-development-channels plugin:multiterminal@inline [--settings <forced statusline> --setting-sources user,project] --dangerously-skip-permissions; exit
+claude --plugin-dir '<plugin>' --mcp-config '<%APPDATA%\multiterminal\.mcp.json>' [--settings <forced statusline> --setting-sources user,project] --dangerously-skip-permissions; exit
 ```
 
 > ⚠️ The "Before" line above is history. Its `--channels server:multiterminal-channel` form is **not** what
 > MT emits, and Claude Code no longer resolves it (ClarionAssistant hit exactly this; GitHub #20). A plugin
-> loaded with `--plugin-dir` is sourced as `name@inline`, and the channel flag must say so.
-> `MultiTerminal.Tests/ChannelFlagContractTests.cs` enforces it.
+> loaded with `--plugin-dir` is sourced as `name@inline`, which is what the channel flag used to say.
+> Since ticket 0ff1b520 item 16 MT emits no channel flag at all: messages reach sessions through Claude
+> Code's native cross-session messaging. `MultiTerminal.Tests/LaunchFlagContractTests.cs` enforces both
+> halves: every launch site loads the plugin, and none authorizes a development channel.
 
 - `--add-dir` removed: Plugin provides CLAUDE.md; project has its own
 - `--plugin-dir` added: loads the MT plugin (hooks, skills, agents, CLAUDE.md) into MT terminals only

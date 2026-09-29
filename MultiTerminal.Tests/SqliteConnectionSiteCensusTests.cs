@@ -30,7 +30,7 @@ namespace MultiTerminal.Tests
     /// guard.</para>
     ///
     /// <para><b>Why METHOD-granular and not file-granular.</b> This codebase has now been bitten by the
-    /// file-granular version twice in two days. <c>ChannelFlagContractTests</c> listed <em>files</em>, so
+    /// file-granular version twice in two days. <c>LaunchFlagContractTests</c> listed <em>files</em>, so
     /// <c>MainForm.cs</c> being on a known-defect list for one method hid a second, worse method in the
     /// same file (task 77d1182f). Then this very ticket's planning census was keyed on one environment
     /// variable name and reported "no leaking file" while two classes were opening the production
@@ -130,7 +130,7 @@ namespace MultiTerminal.Tests
         ///
         /// <para>Now matched on the syntax tree: comments and doc-comments are TRIVIA, not invocation
         /// expressions, so prose cannot satisfy it. Same discipline as
-        /// <c>ChannelFlagContractTests.ScanLaunchSites</c>, which walks string tokens for the same reason.</para>
+        /// <c>LaunchFlagContractTests.ScanLaunchSites</c>, which walks string tokens for the same reason.</para>
         /// </remarks>
         [Fact]
         public void Every_declared_site_draws_its_path_from_a_guarded_source()
@@ -279,7 +279,7 @@ namespace MultiTerminal.Tests
         /// <summary>
         /// Walks production C# and yields "relativePath::MemberName" for every member that constructs a
         /// SQLiteConnection. Leaf members only, so a type's own tokens are not re-counted for each member
-        /// inside it — the same discipline as ChannelFlagContractTests.ScanLaunchSites.
+        /// inside it — the same discipline as LaunchFlagContractTests.ScanLaunchSites.
         /// </summary>
         private static IEnumerable<KeyValuePair<string, string>> ScanConnectionSites()
         {
@@ -320,7 +320,7 @@ namespace MultiTerminal.Tests
         /// guard. That is the exact failure this census claims to prevent, one level up.</para>
         ///
         /// <para>⚠️ Exclusions are matched against the path RELATIVE to <paramref name="repoRoot"/>, never
-        /// the absolute path — the trap <c>ChannelFlagContractTests.EnumerateFirstPartySources</c>
+        /// the absolute path — the trap <c>LaunchFlagContractTests.EnumerateFirstPartySources</c>
         /// documents from experience. When the suite runs inside an MT task worktree the repo root is
         /// itself <c>…\.claude\worktrees\&lt;id&gt;</c>, so an absolute-substring test for <c>.claude</c>
         /// excludes every file in the repository and the census silently matches nothing.</para>

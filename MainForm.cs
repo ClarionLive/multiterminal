@@ -378,7 +378,7 @@ namespace MultiTerminal
                     agent_name = "Janitor",
                 });
                 using var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
-                using var response = await _channelHttpClient.PostAsync("http://localhost:5050/api/notifications?forcePush=true", content);
+                using var response = await _loopbackHttpClient.PostAsync("http://localhost:5050/api/notifications?forcePush=true", content);
                 if (!response.IsSuccessStatusCode)
                 {
                     _debugLogService?.Warning("Janitor", $"Severe push rejected: HTTP {(int)response.StatusCode}");
@@ -1916,45 +1916,34 @@ namespace MultiTerminal
                 "Just connected"
             );
             _debugLogService?.Info("MainForm", $"Terminal registered: {e.Name}, seeded initial activity");
-
-            // ORACLE BOOTSTRAP: When Oracle registers its channel, send it the digest processing message.
-            // Only send once per app session to avoid duplicate digest tasks on crash restarts.
-            // The port check comes FIRST so a portless registration never consumes the claim.
-            // (Ticket 0ff1b520: item 16 removes this trigger; OnMessagingCredentialsStored is its successor.)
-            if (e.ChannelPort > 0 && _oracleBootstrap.TryClaim(e.Name))
-            {
-                _ = SendOracleBootstrapAsync(e.ChannelPort, e.Name);
-            }
         }
 
         /// <summary>
-        /// Oracle bootstrap on native messaging credentials arriving (ticket 0ff1b520, item 15) — the
-        /// trigger that survives the channel's retirement, since nothing reports a channel port after it.
-        /// Raised on the REST thread that handled <c>POST /api/messaging/credentials</c>, like the
-        /// registration trigger above; the bootstrap is fire-and-forget and touches no UI.
+        /// ORACLE BOOTSTRAP: when Oracle's native messaging credentials arrive, send it the digest
+        /// processing message (ticket 0ff1b520, item 15). The only trigger since item 16 removed the
+        /// channel-port one from <see cref="OnMcpTerminalRegistered"/>: MT no longer launches with the
+        /// channel flag, so a channel port is no longer a sign that Oracle can be reached.
+        /// Once per app session (<see cref="OracleBootstrapGate"/>) to avoid duplicate digest tasks on
+        /// crash restarts. Raised on the REST thread that handled <c>POST /api/messaging/credentials</c>;
+        /// the bootstrap is fire-and-forget and touches no UI.
         /// </summary>
         private void OnMessagingCredentialsStored(object sender, string terminalName)
         {
             if (!_oracleBootstrap.TryClaim(terminalName)) return;
-
-            // Native first, and the channel as fallback if Oracle's row already has a port, the same
-            // shape as every other MT-originated delivery (DeliverToSessionAsync).
-            int? channelPort = _mcpServer?.Broker?.GetTerminal(terminalName)?.ChannelPort;
-            _ = SendOracleBootstrapAsync(channelPort, terminalName);
+            _ = SendOracleBootstrapAsync(terminalName);
         }
 
         /// <summary>
-        /// Send Oracle its bootstrap message after channel registration.
+        /// Send Oracle its bootstrap message once its native messaging ingress is known.
         /// Oracle processes the daily digest and creates suggestion tasks.
         /// </summary>
-        /// <param name="channelPort">Oracle's Claude Code Channel port, or null when there is no channel to fall back to.</param>
         /// <param name="registeredName">
         /// The name Oracle actually registered under. The caller's gate matches it against
         /// <see cref="OracleService.OracleName"/> case-INsensitively, so passing the canonical
         /// constant here would put a `to` on the wire that a future case-sensitive channel-server
         /// identity check would reject for a terminal registered as e.g. "oracle" (pipeline Run 2).
         /// </param>
-        private async Task SendOracleBootstrapAsync(int? channelPort, string registeredName)
+        private async Task SendOracleBootstrapAsync(string registeredName)
         {
             try
             {
@@ -1965,14 +1954,16 @@ namespace MultiTerminal
                     "Run the /daily-intel skill to process the digest pipeline. Do NOT call get_daily_digest directly — you MUST use /daily-intel. " +
                     "Then let the Owner know you're online and ready.";
 
-                bool delivered = await DeliverToSessionAsync(registeredName, channelPort, "System", bootstrapMessage);
+                // Native only (null port). No MT terminal authorizes the channel since item 16, so a
+                // channel "delivery" could be accepted and never reach the session.
+                bool delivered = await DeliverToSessionAsync(registeredName, null, "System", bootstrapMessage);
                 if (delivered)
                 {
                     _debugLogService?.Info("MainForm", "Oracle bootstrap message delivered");
                 }
                 else
                 {
-                    // Undelivered, so let the other trigger try (see OracleBootstrapGate).
+                    // Undelivered, so Oracle's next credential post (a restart or /clear) may try again.
                     _oracleBootstrap.Release();
                     _debugLogService?.Warning("MainForm", "Oracle bootstrap message delivery failed");
                 }
@@ -2694,10 +2685,11 @@ namespace MultiTerminal
         }
 
         /// <summary>
-        /// Shared HttpClient for channel message delivery. Reused across calls to avoid
+        /// Shared HttpClient for MainForm's loopback POSTs: MT's own REST API (the janitor push) and,
+        /// until stage 2 of ticket 0ff1b520 removes it, channel delivery. Reused across calls to avoid
         /// socket exhaustion (TIME_WAIT buildup from per-request HttpClient instances).
         /// </summary>
-        private static readonly System.Net.Http.HttpClient _channelHttpClient = new System.Net.Http.HttpClient
+        private static readonly System.Net.Http.HttpClient _loopbackHttpClient = new System.Net.Http.HttpClient
         {
             Timeout = TimeSpan.FromSeconds(5)
         };
@@ -2944,7 +2936,7 @@ namespace MultiTerminal
                 });
 
                 using var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
-                using var response = await _channelHttpClient.PostAsync($"http://127.0.0.1:{channelPort}/message", content);
+                using var response = await _loopbackHttpClient.PostAsync($"http://127.0.0.1:{channelPort}/message", content);
                 return response.IsSuccessStatusCode;
             }
             catch (Exception ex)
