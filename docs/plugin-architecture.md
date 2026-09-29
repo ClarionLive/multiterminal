@@ -135,14 +135,20 @@ With the plugin handling hooks and CLAUDE.md, `LaunchCommandBuilder.cs` is simpl
 claude --add-dir <mt-source> --settings <settings.local.json> --mcp-config <mcp.json> --dangerously-skip-permissions --channels server:multiterminal-channel
 ```
 
-**After (1 flag):**
+**Now** (what `LaunchCommandBuilder.BuildFlags` emits; checked against source 2026-09-22, task cb4883b6):
 ```
-claude --mcp-config <mcp.json> --dangerously-skip-permissions --channels server:multiterminal-channel
+claude --plugin-dir '<plugin>' --mcp-config '<%APPDATA%\multiterminal\.mcp.json>' --dangerously-load-development-channels plugin:multiterminal@inline [--settings <forced statusline> --setting-sources user,project] --dangerously-skip-permissions; exit
 ```
 
+> ⚠️ The "Before" line above is history. Its `--channels server:multiterminal-channel` form is **not** what
+> MT emits, and Claude Code no longer resolves it (ClarionAssistant hit exactly this; GitHub #20). A plugin
+> loaded with `--plugin-dir` is sourced as `name@inline`, and the channel flag must say so.
+> `MultiTerminal.Tests/ChannelFlagContractTests.cs` enforces it.
+
 - `--add-dir` removed: Plugin provides CLAUDE.md; project has its own
-- `--settings` removed: Plugin provides hooks via hooks.json; no settings-based hook wiring needed
-- `--mcp-config` kept: Centralized MCP server registration at `%APPDATA%\multiterminal\.mcp.json`
+- `--plugin-dir` added: loads the MT plugin (hooks, skills, agents, CLAUDE.md) into MT terminals only
+- `--mcp-config` kept: Centralized MCP server registration at `%APPDATA%\multiterminal\.mcp.json`. The app heals that file at startup and again at launch if it is missing (`Services/CentralMcpConfig.cs`); before task cb4883b6, nothing wrote it on an installed machine (GitHub #8)
+- `--settings` is back, for a different purpose: it forces MT's statusline over a project's own (tasks 72444250, 1ba59334), not hook wiring
 
 ---
 

@@ -28,6 +28,9 @@ namespace MultiTerminal.Tests
     {
         private const string Agent = "Alice";
 
+        /// <summary>A pane close as the broker makes it: token read first, then the close.</summary>
+        private static bool Close(AgentAttentionService svc) => svc.NoteTerminalClosed(Agent, svc.GetStartToken(Agent));
+
         private static Dictionary<string, object> Notification(string sessionId, string rawType = "permission_prompt")
             => new Dictionary<string, object>
             {
@@ -283,6 +286,275 @@ namespace MultiTerminal.Tests
             var card = Assert.Single(svc.Snapshot());
             Assert.Equal(AttentionState.Unknown, card.State);
             Assert.Null(card.LastActivity);
+        }
+
+        /// <summary>
+        /// The sequence observed live (task 891488b3): a helper's Stop hook wrote its TURN_END row
+        /// 172 ms AFTER close_helper had closed its pane and the card had been evicted. The watcher
+        /// found no card for the name, fell back to the bare name as the key, and NoteTurnEnded
+        /// minted a new entry with no AgentName, which the rail rendered as "(unnamed)" until MT
+        /// restarted. Nothing else would ever remove it, because the close edge had already fired.
+        /// </summary>
+        [Fact]
+        public void A_turn_end_that_lands_after_the_pane_closed_does_not_bring_the_card_back()
+        {
+            var svc = new AgentAttentionService();
+            var closedAt = DateTime.UtcNow;
+            svc.NoteTerminalStarted(Agent);
+            svc.NoteObservedActivity(Agent, closedAt.AddSeconds(-4), isSubagent: false, toolUseId: null, agentName: Agent, activitySummary: "send_message");
+            Close(svc);
+            int announced = 0;
+            svc.AttentionChanged += (s, e) => announced++;
+
+            Assert.False(svc.NoteTurnEnded(Agent, closedAt.AddMilliseconds(172), isSubagent: false));
+
+            Assert.Empty(svc.Snapshot());
+            Assert.Null(svc.GetByAgent(Agent));
+            Assert.Equal(0, announced);
+        }
+
+        /// <summary>
+        /// The same race on every other way a closed pane's session can still reach the service: a
+        /// tool row's display line, a tool row's clear edge (with and without an agent name), a
+        /// notification keyed by the real session uuid (refused by its agent name, since its key is
+        /// not a name), and MarkOffline.
+        /// </summary>
+        [Fact]
+        public void Nothing_that_arrives_late_for_a_closed_pane_creates_a_card()
+        {
+            var svc = new AgentAttentionService();
+            var late = DateTime.UtcNow.AddMilliseconds(200);
+            svc.NoteTerminalStarted(Agent);
+            svc.ApplyNotification(Notification("sess-1"));
+            Close(svc);
+
+            Assert.False(svc.NoteActivityLineOnly(Agent, "Bash: git status", late));
+            Assert.False(svc.NoteObservedActivity(Agent, late, isSubagent: false, toolUseId: null, agentName: Agent, activitySummary: "Edit: A.cs"));
+
+            // No agent name: the create branch then reads the name back from the entry it just made,
+            // which a refused create no longer leaves behind. Must not throw.
+            Assert.False(svc.NoteObservedActivity(Agent, late, isSubagent: false, toolUseId: null, agentName: null, activitySummary: "Edit: B.cs"));
+            Assert.False(svc.ApplyNotification(Notification("sess-1")));
+            Assert.False(svc.ApplyNotification(Notification("sess-2", rawType: "idle_prompt")));
+            Assert.False(svc.MarkOffline(Agent));
+
+            Assert.Empty(svc.Snapshot());
+        }
+
+        [Fact]
+        public void The_closed_mark_is_case_insensitive_like_the_card_keys()
+        {
+            var svc = new AgentAttentionService();
+            svc.NoteTerminalStarted(Agent);
+            Close(svc);
+
+            Assert.False(svc.NoteTurnEnded("ALICE", DateTime.UtcNow, isSubagent: false));
+
+            Assert.Empty(svc.Snapshot());
+        }
+
+        /// <summary>
+        /// NoteTerminalClosed evicts as well as marking, so a card a late row created between the
+        /// broker's own eviction (NoteTerminalGone, on the disconnect event) and the mark is removed.
+        /// </summary>
+        [Fact]
+        public void A_card_created_between_the_disconnect_and_the_close_is_removed_by_the_close()
+        {
+            var svc = new AgentAttentionService();
+            svc.NoteTerminalStarted(Agent);
+            svc.NoteTerminalGone(Agent);
+            svc.NoteTurnEnded(Agent, DateTime.UtcNow, isSubagent: false);
+            Assert.Single(svc.Snapshot());
+
+            Assert.True(Close(svc));
+
+            Assert.Empty(svc.Snapshot());
+        }
+
+        /// <summary>
+        /// <c>/clear</c> disconnects the broker row through the SessionEnd hook while the pane and
+        /// its agent carry on (pipeline run 1, debugger). The next thing that agent does is usually
+        /// ask the session-start question, and that notification MUST get a card: a disconnect is not
+        /// a close, and only a close may suppress.
+        /// </summary>
+        [Fact]
+        public void A_disconnect_without_a_close_suppresses_nothing()
+        {
+            var svc = new AgentAttentionService();
+            svc.NoteTerminalStarted(Agent);
+            svc.NoteTerminalGone(Agent);
+
+            Assert.True(svc.ApplyNotification(Notification("sess-after-clear", rawType: "ask_user_question")));
+
+            var card = Assert.Single(svc.Snapshot());
+            Assert.Equal(AttentionState.BlockedQuestion, card.State);
+        }
+
+        /// <summary>
+        /// The close path checks "no live terminal holds this name" and then closes, and a same-name
+        /// registration can land between the two (pipeline runs 1 and 2, adversary). The close was
+        /// decided about the OLD terminal, so it must neither mark nor evict: the new terminal's
+        /// FIRST notification is one-shot, and a refused question would never be re-sent. The
+        /// notification here is exactly that one-shot question, not replayable activity.
+        /// </summary>
+        [Fact]
+        public void A_close_decided_before_a_same_name_start_touches_nothing()
+        {
+            var svc = new AgentAttentionService();
+            svc.NoteTerminalStarted(Agent);
+            long tokenReadByTheClosePath = svc.GetStartToken(Agent);
+
+            svc.NoteTerminalStarted(Agent);   // the same-name registration wins the race
+
+            Assert.False(svc.NoteTerminalClosed(Agent, tokenReadByTheClosePath));
+            Assert.Single(svc.Snapshot());   // the new terminal's card was not evicted
+            Assert.True(svc.ApplyNotification(Notification("sess-new", rawType: "ask_user_question")));
+            Assert.Equal(AttentionState.BlockedQuestion, Assert.Single(svc.Snapshot()).State);
+        }
+
+        /// <summary>
+        /// A row is judged by when its hook WROTE it, not by when the watcher gets to it (pipeline
+        /// run 2, code review + adversary). The watcher's poll interval is configurable up to 60 s, so
+        /// judging by processing time let the very straggler this ticket is about through again
+        /// whenever a poll ran late.
+        /// </summary>
+        [Fact]
+        public void A_straggler_processed_long_after_the_close_is_still_refused()
+        {
+            var now = DateTime.UtcNow;
+            var svc = new AgentAttentionService { UtcNow = () => now };
+            svc.NoteTerminalStarted(Agent);
+            var closedAt = now;
+            Close(svc);
+
+            now = closedAt + TimeSpan.FromSeconds(45);   // a slow poll, well past the grace
+
+            Assert.False(svc.NoteTurnEnded(Agent, closedAt.AddMilliseconds(172), isSubagent: false));
+            Assert.Empty(svc.Snapshot());
+        }
+
+        /// <summary>
+        /// The other side of the rule: once BOTH the stamp and the arrival are past the grace, the row
+        /// is not the closed pane's output. Pinned at the boundary, one millisecond each way on the
+        /// stamp, with arrival already past.
+        /// </summary>
+        [Fact]
+        public void Evidence_stamped_and_arriving_after_the_grace_creates_a_card()
+        {
+            var now = DateTime.UtcNow;
+            var svc = new AgentAttentionService { UtcNow = () => now };
+            svc.NoteTerminalStarted(Agent);
+            var closedAt = now;
+            Close(svc);
+            now = closedAt + AgentAttentionService.ClosedPaneGrace + TimeSpan.FromSeconds(1);
+
+            Assert.False(svc.NoteTurnEnded(Agent, closedAt + AgentAttentionService.ClosedPaneGrace - TimeSpan.FromMilliseconds(1), isSubagent: false));
+            Assert.True(svc.NoteTurnEnded(Agent, closedAt + AgentAttentionService.ClosedPaneGrace + TimeSpan.FromMilliseconds(1), isSubagent: false));
+            Assert.Single(svc.Snapshot());
+        }
+
+        /// <summary>
+        /// A stamp AHEAD of this clock (skew, or the clock stepped back) would read as post-grace by
+        /// its stamp alone (pipeline run 3, adversary MEDIUM). Its arrival is inside the grace, and
+        /// either time is enough to refuse.
+        /// </summary>
+        [Fact]
+        public void A_future_stamped_straggler_is_refused_by_its_arrival()
+        {
+            var now = DateTime.UtcNow;
+            var svc = new AgentAttentionService { UtcNow = () => now };
+            svc.NoteTerminalStarted(Agent);
+            var closedAt = now;
+            Close(svc);
+            now = closedAt + TimeSpan.FromSeconds(1);
+
+            Assert.False(svc.NoteTurnEnded(Agent, closedAt + TimeSpan.FromHours(1), isSubagent: false));
+            Assert.Empty(svc.Snapshot());
+        }
+
+        /// <summary>
+        /// Whatever the marks and times say, a name a live terminal holds RIGHT NOW is never refused
+        /// (pipeline run 3, adversary HIGH): the refusal asks the broker at the moment it would act.
+        /// The notification is the one-shot kind whose loss the whole rail exists to prevent.
+        /// </summary>
+        [Fact]
+        public void A_name_a_live_terminal_holds_is_never_refused()
+        {
+            var svc = new AgentAttentionService();
+            svc.NoteTerminalStarted(Agent);
+            Close(svc);
+
+            svc.LiveNameProbe = name => string.Equals(name, Agent, StringComparison.OrdinalIgnoreCase);
+
+            Assert.True(svc.ApplyNotification(Notification("sess-live", rawType: "ask_user_question")));
+            Assert.Equal(AttentionState.BlockedQuestion, Assert.Single(svc.Snapshot()).State);
+        }
+
+        /// <summary>
+        /// A notification carries no timestamp of its own, so it is judged at the moment it arrives.
+        /// </summary>
+        [Fact]
+        public void A_notification_is_judged_by_when_it_arrives()
+        {
+            var now = DateTime.UtcNow;
+            var svc = new AgentAttentionService { UtcNow = () => now };
+            svc.NoteTerminalStarted(Agent);
+            var closedAt = now;
+            Close(svc);
+
+            now = closedAt + TimeSpan.FromSeconds(1);
+            Assert.False(svc.ApplyNotification(Notification("sess-1")));
+
+            now = closedAt + AgentAttentionService.ClosedPaneGrace + TimeSpan.FromSeconds(1);
+            Assert.True(svc.ApplyNotification(Notification("sess-1")));
+        }
+
+        /// <summary>
+        /// The mark must not outlive the NEXT terminal with that name: a relaunched Alice gets her
+        /// card back at once, not after the grace period, and her activity lands on it.
+        /// </summary>
+        [Fact]
+        public void A_relaunched_terminal_with_the_same_name_is_tracked_again()
+        {
+            var svc = new AgentAttentionService();
+            svc.NoteTerminalStarted(Agent);
+            Close(svc);
+
+            Assert.True(svc.NoteTerminalStarted(Agent));
+            Assert.True(svc.NoteObservedActivity(Agent, DateTime.UtcNow, isSubagent: false, toolUseId: null, agentName: Agent, activitySummary: "Bash: git status"));
+            Assert.True(svc.ApplyNotification(Notification("sess-2")));
+
+            var card = Assert.Single(svc.Snapshot());
+            Assert.Equal("sess-2", card.SessionId);
+            Assert.Equal(Agent, card.AgentName);
+            Assert.Equal(AttentionState.BlockedPermission, card.State);
+        }
+
+        [Fact]
+        public void One_agents_closed_mark_does_not_touch_another_agent()
+        {
+            var svc = new AgentAttentionService();
+            svc.NoteTerminalStarted(Agent);
+            Close(svc);
+
+            Assert.True(svc.NoteTurnEnded("Bob", DateTime.UtcNow, isSubagent: false));
+
+            var card = Assert.Single(svc.Snapshot());
+            Assert.Equal("Bob", card.SessionId);
+        }
+
+        /// <summary>
+        /// Only a name whose pane CLOSED is refused. An agent the service never saw start (the
+        /// existing facts above build cards that way) still gets a card from its first observation.
+        /// </summary>
+        [Fact]
+        public void An_agent_never_seen_starting_is_still_tracked_as_before()
+        {
+            var svc = new AgentAttentionService();
+
+            Assert.True(svc.NoteTurnEnded(Agent, DateTime.UtcNow, isSubagent: false));
+
+            Assert.Single(svc.Snapshot());
         }
     }
 }

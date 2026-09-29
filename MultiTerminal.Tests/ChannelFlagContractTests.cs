@@ -95,11 +95,11 @@ namespace MultiTerminal.Tests
         /// was left RED on it until the routing fix landed in the same change set — the proof that
         /// the census can see a second broken method in an already-listed file. It now routes
         /// through <c>LaunchCommandBuilder</c> and emits no launch literal, so it is not a site at all.
+        /// <para><c>MainForm.OnLaunchAsIdentityRequested</c> (task 5999a182) was the last entry. It
+        /// took the same route in task cb4883b6, so the list is empty. Keep the list: the next
+        /// hand-rolled site is declared here, not quietly exempted.</para>
         /// </remarks>
-        private static readonly KnownDefect[] KnownDefectiveLaunchSites =
-        {
-            new KnownDefect("MainForm.cs", "OnLaunchAsIdentityRequested", "5999a182"),
-        };
+        private static readonly KnownDefect[] KnownDefectiveLaunchSites = Array.Empty<KnownDefect>();
 
         /// <summary>
         /// Methods that contain the hand-rolled launch literal but do NOT launch anything: they

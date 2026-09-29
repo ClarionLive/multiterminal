@@ -158,6 +158,25 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// The live failure of task 891488b3, end to end: the pane is closed and its card evicted,
+        /// THEN the watcher polls the TURN_END its Stop hook wrote in the pane's last instant. The
+        /// watcher finds no card, falls back to the bare name, and before the fix that row minted a
+        /// nameless card the rail showed as "(unnamed)" until MT restarted.
+        /// </summary>
+        [Fact]
+        public void A_turn_end_polled_after_the_pane_closed_leaves_no_card()
+        {
+            Assert.True(_watcher.Prime());
+            Block();
+            Row("TURN_END", "Turn ended", MainThread(string.Empty));
+
+            _attention.NoteTerminalClosed(Agent, _attention.GetStartToken(Agent));
+            _watcher.Poll();
+
+            Assert.Empty(_attention.Snapshot());
+        }
+
+        /// <summary>
         /// A subagent's rows are logged under the PARENT's name. Clearing on them would render a
         /// calm card for a parent still waiting — the silent failure this whole feature is built
         /// around avoiding. The row is dropped outright: not even the display line moves, because a

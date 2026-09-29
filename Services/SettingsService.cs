@@ -158,8 +158,6 @@ namespace MultiTerminal.Services
         // Terminal placement settings
         private const string MaxGridPanesKey = "MaxGridPanes";
         private const int DefaultMaxGridPanes = 4;
-        private const string MaxTabsPerGridKey = "MaxTabsPerGrid";
-        private const int DefaultMaxTabsPerGrid = 3;
 
         // Agent panel layout settings
         private const string AgentPanelLayoutKey = "AgentPanelLayout";
@@ -641,25 +639,6 @@ namespace MultiTerminal.Services
         public void SetMaxGridPanes(int value)
         {
             Set(MaxGridPanesKey, Math.Max(1, Math.Min(9, value)).ToString());
-        }
-
-        /// <summary>
-        /// Gets the maximum number of tabs per grid pane (1-10).
-        /// </summary>
-        public int GetMaxTabsPerGrid()
-        {
-            string value = Get(MaxTabsPerGridKey);
-            if (int.TryParse(value, out int result))
-                return Math.Max(1, Math.Min(10, result));
-            return DefaultMaxTabsPerGrid;
-        }
-
-        /// <summary>
-        /// Sets the maximum number of tabs per grid pane (1-10).
-        /// </summary>
-        public void SetMaxTabsPerGrid(int value)
-        {
-            Set(MaxTabsPerGridKey, Math.Max(1, Math.Min(10, value)).ToString());
         }
 
         /// <summary>

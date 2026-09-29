@@ -64,17 +64,20 @@ SignedUninstaller=yes
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Types]
-Name: "full"; Description: "Full installation (app + Claude Code integration)"
-Name: "app"; Description: "Application only"
+Name: "full"; Description: "Full installation (app + Claude Code integration + documentation)"
+Name: "app"; Description: "Application + Claude Code integration (no documentation)"
 Name: "custom"; Description: "Custom installation"; Flags: iscustom
 
 [Components]
 Name: "main"; Description: "MultiTerminal Application"; Types: full app custom; Flags: fixed
 Name: "tools"; Description: "Bundled tools (ripgrep)"; Types: full app custom; Flags: fixed
 Name: "docs"; Description: "HTML Documentation"; Types: full
-Name: "claude"; Description: "Claude Code Integration"; Types: full
-Name: "claude\mcp"; Description: "MCP Servers (agent tools + gateway)"; Types: full
-Name: "claude\plugin"; Description: "MultiTerminal Claude Code plugin (hooks, skills, agents, CLAUDE.md)"; Types: full
+; Task cb4883b6 (GitHub #20): the Claude Code integration is in EVERY type, "app" included. Without
+; the plugin and the MCP servers, MT's agents have no tools and nothing says why — "Application only"
+; used to be exactly that install. Only "custom" can leave them out, as a deliberate choice.
+Name: "claude"; Description: "Claude Code Integration"; Types: full app
+Name: "claude\mcp"; Description: "MCP Servers (agent tools + gateway)"; Types: full app
+Name: "claude\plugin"; Description: "MultiTerminal Claude Code plugin (hooks, skills, agents, CLAUDE.md)"; Types: full app
 ; GH#2: global registration is OPT-IN (no Types: = unchecked by default in every install type).
 ; MT-spawned terminals never need it — they get MCP servers via --mcp-config and the plugin via
 ; --plugin-dir at launch (LaunchCommandBuilder). Check this only if you want Claude Code sessions

@@ -210,7 +210,52 @@ namespace MultiTerminal
                 RestoreSession();
                 StartWorktreeJanitor();
                 StartIdleRemoteModeWatcher();
+                // Posted, not called: a modal dialog here would hold the rest of this handler's work.
+                BeginInvoke(new Action(WarnIfClaudeIntegrationMissing));
             };
+        }
+
+        /// <summary>
+        /// Task cb4883b6: warns ONCE, visibly, when new terminals would start without MultiTerminal's
+        /// agent tools — MCP server or plugin missing from THIS account's profile (the elevated-install
+        /// trap), or no node on PATH. Every one of these used to be silent: the terminal opened and the
+        /// agent just had no tools. "Don't show again" is keyed to the exact problem set, so a deliberate
+        /// custom install is not nagged but a new, different problem still surfaces.
+        /// </summary>
+        private void WarnIfClaudeIntegrationMissing()
+        {
+            try
+            {
+                string indexJs = Services.CentralMcpConfig.DefaultMcpIndexJs;
+                string pluginDir = LaunchCommandBuilder.ExpectedMtPluginPath;
+                var problems = Services.ClaudeIntegrationCheck.Find(
+                    indexJs, pluginDir,
+                    Environment.GetEnvironmentVariable("PATH"), Environment.GetEnvironmentVariable("PATHEXT"),
+                    File.Exists, Directory.Exists);
+
+                if (problems.Count > 0)
+                    _debugLogService?.Warning("MainForm", $"Claude integration incomplete: {Services.ClaudeIntegrationCheck.Fingerprint(problems)}");
+
+                string suppressed = _settings?.Get(Services.ClaudeIntegrationCheck.SuppressedFingerprintKey);
+                if (!Services.ClaudeIntegrationCheck.ShouldWarn(problems, suppressed))
+                    return;
+
+                var answer = MessageBox.Show(
+                    this,
+                    Services.ClaudeIntegrationCheck.BuildMessage(problems, indexJs, pluginDir),
+                    "MultiTerminal: agent tools unavailable",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning);
+
+                if (answer == DialogResult.No)
+                    _settings?.Set(Services.ClaudeIntegrationCheck.SuppressedFingerprintKey, Services.ClaudeIntegrationCheck.Fingerprint(problems));
+            }
+#pragma warning disable CA1031 // A diagnostic must never take the app down.
+            catch (Exception ex)
+#pragma warning restore CA1031
+            {
+                _debugLogService?.Warning("MainForm", $"Claude integration check failed: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -510,6 +555,12 @@ namespace MultiTerminal
             _gatewayService = new Services.GatewayIntegrationService(
                 (source, msg) => _debugLogService?.Info(source, msg));
             _mcpConfigService.GatewayService = _gatewayService;
+
+            // Heal %APPDATA%\multiterminal\.mcp.json if it is missing or broken (a working one is left
+            // alone), so LaunchCommandBuilder can pass it per-launch via --mcp-config. The installer never
+            // writes this file — its opt-in global step writes ~/.claude.json instead — so without this,
+            // terminals on installed machines got no core MCP servers (GitHub #8).
+            _gatewayService.EnsureGatewayRegistered();
             _projectPanel.SetGatewayService(_gatewayService);
             _projectPanel.SetDebugLogService(_debugLogService); // route ProjectPanel + its renderer's diagnostics to the unified sink (4c86f18d)
 
@@ -938,6 +989,7 @@ namespace MultiTerminal
                 _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 18: Setting OnSpawnRequested");
                 _mcpServer.SpawnService.OnSpawnRequested = OnSpawnRequested;
                 _mcpServer.SpawnService.OnSpawnAgentRequested = OnSpawnAgentRequested;
+                _mcpServer.SpawnService.OnCloseRequested = OnSpawnedPaneCloseRequested;
                 _mcpServer.SpawnService.Jobs.Collected += OnSpawnJobCollected;
 
                 // Gloss backfill writer (task a455e295). The broker decides WHETHER to run one and
@@ -1905,6 +1957,46 @@ namespace MultiTerminal
             {
                 _debugLogService?.Error("MainForm", $"Oracle bootstrap failed: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Closes the terminal pane with this DocId for close_helper (task 7f389704), on the UI thread.
+        /// Authorization happened in SpawnController; this only closes. <c>Close()</c> is what the tab's
+        /// ✕ and its "Close" menu item do, so OnDockContentRemoved runs the same teardown: unregister,
+        /// drop from the doc map, kill the process tree. Searches <c>Contents</c>, not <c>Documents</c>,
+        /// because Documents leaves out a floated terminal and a floated helper must still be closable.
+        /// Returns whether a pane with that DocId was open; throws if it was open but is not out of the
+        /// dock and disposed afterwards, so close_helper never reports a close that did not happen.
+        /// </summary>
+        private async Task<bool> OnSpawnedPaneCloseRequested(string docId)
+        {
+            bool found = false;
+            await Task.Run(() =>
+            {
+                Invoke(new Action(() =>
+                {
+                    var doc = _dockPanel.Contents.OfType<TerminalDocument>()
+                        .FirstOrDefault(d => string.Equals(d.DocId, docId, StringComparison.Ordinal));
+                    if (doc == null || doc.IsDisposed)
+                        return;
+
+                    found = true;
+                    _debugLogService?.Info("MainForm", $"close_helper: closing pane docId={docId} name='{doc.CustomTitle}' (task 7f389704)");
+                    doc.Close();
+
+                    // Pipeline Run 1 (Codex adversary): do not report "closed" on the strength of Close()
+                    // alone. OnDockContentRemoved only QUEUES the Dispose that kills the process tree, so
+                    // do it here, synchronously; Dispose is idempotent and the queued one re-checks
+                    // IsDisposed. Then require the teardown to be visible: out of the dock and disposed.
+                    // Anything else throws, which the controller reports as a 500, not a success.
+                    if (!doc.IsDisposed)
+                        doc.Dispose();
+
+                    if (doc.DockPanel != null || !doc.IsDisposed)
+                        throw new InvalidOperationException($"Pane {docId} did not close (still docked: {doc.DockPanel != null}, disposed: {doc.IsDisposed}).");
+                }));
+            });
+            return found;
         }
 
         /// <summary>
@@ -3653,59 +3745,42 @@ namespace MultiTerminal
 
             string terminalName = null;
 
-            // Smart terminal placement based on MaxGridPanes and MaxTabsPerGrid settings
+            // Terminal placement by MaxGridPanes; never floats (task 7f91349f, see TerminalPlacement).
             int maxGrids = _settings?.GetMaxGridPanes() ?? 4;
-            int maxTabs = _settings?.GetMaxTabsPerGrid() ?? 3;
             var activeDoc = _dockPanel.ActiveDocument as TerminalDocument;
 
-            _debugLogService?.Trace("AddNewTerminal", $"Showing terminal in DockPanel (maxGrids: {maxGrids}, maxTabs: {maxTabs}, forceTab: {forceTabMode})...");
+            _debugLogService?.Trace("AddNewTerminal", $"Showing terminal in DockPanel (maxGrids: {maxGrids}, forceTab: {forceTabMode})...");
             if (forceTabMode)
             {
                 doc.Show(_dockPanel, DockState.Document);
             }
             else
             {
-                // Get distinct panes containing terminal documents
-                var terminalDocs = _dockPanel.Documents.OfType<TerminalDocument>().ToList();
-                var panes = terminalDocs.Select(d => d.Pane).Where(p => p != null).Distinct().ToList();
-                int gridCount = panes.Count;
+                // Distinct panes holding a terminal, each with its visible-terminal count
+                var panes = _dockPanel.Documents.OfType<TerminalDocument>()
+                    .Select(d => d.Pane)
+                    .Where(p => p != null)
+                    .Distinct()
+                    .Select(p => new TerminalPlacement.PaneInfo<DockPane>(
+                        p,
+                        p.DockState == DockState.Document,
+                        p.Contents.OfType<TerminalDocument>().Count(t => !t.IsHidden)))
+                    .ToList();
 
-                if (gridCount == 0)
+                var placement = TerminalPlacement.Decide(panes, activeDoc?.Pane, maxGrids);
+                switch (placement.Kind)
                 {
-                    // First terminal — just show it
-                    doc.Show(_dockPanel, DockState.Document);
-                }
-                else if (gridCount < maxGrids)
-                {
-                    // Room for another grid pane — split from active pane
-                    var splitFrom = activeDoc?.Pane ?? panes[panes.Count - 1];
-                    doc.Show(splitFrom, DockAlignment.Right, 0.5);
-                }
-                else
-                {
-                    // All grid slots taken — find a pane with room for tabs
-                    DockPane bestPane = null;
-                    int fewestTabs = int.MaxValue;
-                    foreach (var pane in panes)
-                    {
-                        int tabCount = pane.Contents.Count;
-                        if (tabCount < maxTabs && tabCount < fewestTabs)
-                        {
-                            fewestTabs = tabCount;
-                            bestPane = pane;
-                        }
-                    }
-
-                    if (bestPane != null)
-                    {
-                        // Add as tab to the pane with fewest tabs
-                        doc.Show(bestPane, null);
-                    }
-                    else
-                    {
-                        // All panes full — undock as floating window
-                        doc.Show(_dockPanel, DockState.Float);
-                    }
+                    case TerminalPlacement.Kind.SplitFrom:
+                        doc.Show(placement.Target, DockAlignment.Right, 0.5);
+                        break;
+                    case TerminalPlacement.Kind.TabInto:
+                        doc.Show(placement.Target, null);
+                        break;
+                    case TerminalPlacement.Kind.FirstDocument:
+                        doc.Show(_dockPanel, DockState.Document);
+                        break;
+                    default:
+                        throw new InvalidOperationException($"Unhandled terminal placement '{placement.Kind}'.");
                 }
             }
             _debugLogService?.Trace("AddNewTerminal", "Terminal shown in DockPanel");
@@ -4975,11 +5050,18 @@ namespace MultiTerminal
             if (doc != null && doc.IsRendererReady)
             {
                 // Wait for Claude Code to finish showing its banner and prompt before injecting.
-                // Detection fires when "Claude Code" appears in output, but the input prompt
+                // Detection fires on the version-anchored banner (ClaudeStartupDetector), but the input prompt
                 // may not be ready yet. Wait 1.5s for the prompt to appear.
                 await Task.Delay(1500);
                 _debugLogService?.Trace("MainForm", "Post-detection delay complete, injecting 'initializing...' via TypeInput");
                 doc.TypeInput("initializing...", "cr", 20);
+            }
+            else
+            {
+                // Previously a silent skip: the pane then sits on its banner exactly as it does when
+                // the banner is never detected, and the log could not tell the two apart (task 00cdd389).
+                _debugLogService?.Warning("MainForm",
+                    $"Claude Code detected but 'initializing...' NOT injected: {(doc == null ? "sender is not a TerminalDocument" : "renderer not ready")}");
             }
         }
 
@@ -5296,6 +5378,11 @@ namespace MultiTerminal
                 _mcpServer.Broker.UnregisterTerminal(doc.DocId);
             }
 
+            // A closed helper can never be matched by close_helper again, whoever closed it; and a closed
+            // SPAWNER keeps no power over the helpers it spawned (task 7f389704, pipeline Run 1).
+            _mcpServer?.SpawnService?.Panes.Forget(doc.DocId);
+            _mcpServer?.SpawnService?.Panes.ForgetSpawner(doc.DocId);
+
             // Drop it from the terminal -> doc map.
             lock (_terminalDocMapLock)
             {
@@ -5355,12 +5442,11 @@ namespace MultiTerminal
             // env var stays empty — bypassing the wiring fix from AddNewTerminal.
             workingDirectory = ResolveSpawnDir(terminalName, workingDirectory, out string taskWorktreePath);
 
-            // Just launch claude - let the user choose to resume or start fresh
-            // Using plain "claude" lets Claude prompt about resuming recent sessions
-            // TODO: Make --dangerously-skip-permissions configurable in settings
-            string pluginDir = LaunchCommandBuilder.GetMtPluginPath();
-            string pluginFlag = pluginDir != null ? $" --plugin-dir '{pluginDir.Replace("'", "''")}'" : "";
-            string autoRunCommand = $"claude --dangerously-skip-permissions{pluginFlag}";
+            // Built by LaunchCommandBuilder like every other launch (task cb4883b6). The hand-rolled
+            // command this replaced passed --plugin-dir only: no --mcp-config (so no core MCP servers,
+            // even on a working machine), no channel flag (task 5999a182), no forced statusline.
+            // No --resume, so Claude still offers to resume a recent session.
+            string autoRunCommand = LaunchCommandBuilder.BuildClaudeCommand(null, workingDirectory).AutoRunCommand;
 
             // Stop current terminal and restart with new identity
             doc.Terminal.Stop();
@@ -5369,7 +5455,7 @@ namespace MultiTerminal
 
             // Auto-initialization is handled by OnClaudeCodeDetected when Claude Code's output is detected.
             // This ensures injection happens AFTER Claude Code is ready, not just after WebView2 loads.
-            // The _claudeCodeDetectedThisSession flag is reset in TerminalControl.DoStart() so the event fires for restarted terminals.
+            // TerminalControl.DoStart() resets its ClaudeStartupDetector so the event fires for restarted terminals.
             _debugLogService?.Trace("MainForm.OnLaunchAsIdentityRequested", $"Terminal restarted for {terminalName}, waiting for Claude Code detection to auto-inject");
         }
 
@@ -7882,9 +7968,9 @@ namespace MultiTerminal
             }
             try
             {
-                // Regenerate both global and project-level MCP configs.
-                // Global config goes to ~/.claude/.mcp.json (available in all sessions).
-                // Project config goes to {sourcePath}/.mcp.json (project-specific servers).
+                // Syncs the project's gateway profile and REMOVES any stale {sourcePath}/.mcp.json
+                // (backed up to .mcp.json.bak). It writes no MCP config: core servers reach every
+                // terminal through %APPDATA%\multiterminal\.mcp.json via --mcp-config (CentralMcpConfig).
                 _mcpConfigService.EnsureMcpConfigsForProject(args.ProjectId, args.SourcePath);
                 _projectPanel?.NotifyMcpJsonWriteResult(true);
             }
