@@ -5835,7 +5835,7 @@ function assertToolDefHandlerConsistency() {
 // server used to cover both gaps. This server covers the first, because it runs inside every session
 // and inherits that session's environment. Observed 2026-09-29 (item 11): a stdio MCP server sees
 // CLAUDE_CODE_MESSAGING_SOCKET/TOKEN, and its parent process is claude. The second gap is covered by
-// the broker's liveness reaper (see below).
+// the broker's liveness reaper for such a session only (see below).
 
 //
 // WHY THERE IS NO RELEASE ON EXIT (pipeline run 2, debugger). An earlier version released the claimed
@@ -5844,6 +5844,11 @@ function assertToolDefHandlerConsistency() {
 // releasing without that wait would drop a live terminal on a plain /mcp reconnect. The broker's
 // liveness reaper already removes a row whose owner process has died (register_terminal sends
 // ownerPid) within one sweep, 30s by default, and clears its credentials. That is the release.
+// ONLY for a row the broker MINTS from this registration, i.e. a session with no MULTITERMINAL_DOC_ID.
+// A session inside an MT pane sends its docId, and the broker instead RENAMES that pane's existing
+// row, a path that binds no ownerPid. That row is Unowned, the reaper skips it, and after /quit it
+// stays connected, with stale credentials, until the tab closes (pipeline run 1 of the item-13
+// placeholder fix, debugger). Tracked with the stage-2 session-id keying work.
 
 // The name THIS process claimed through register_terminal, if any. Deliberately NOT the name MT
 // launched the session under: that one is MT's to manage (its SessionEnd hook, the broker's docId
@@ -5920,7 +5925,8 @@ async function releasePreviousClaim(newName, deps = {}) {
     return res && res.ok ? "released" : "refused";
   } catch {
     // MT unreachable. The old name then stays routed here until this session ends, when the reaper
-    // removes its row (same ownerPid) and clears its credentials.
+    // removes its row (same ownerPid) and clears its credentials, for a minted row only. A renamed
+    // MT-pane row has no ownerPid and lasts until the tab closes (see WHY THERE IS NO RELEASE ON EXIT).
     return "failed";
   }
 }
