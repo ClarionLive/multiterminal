@@ -3371,22 +3371,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // unseeded placeholder). The broker requires it to match before letting this registration
         // adopt+promote an "Unassigned" placeholder, blocking docId-inheritance identity hijacks.
         const launchNonce = process.env.MULTITERMINAL_LAUNCH_NONCE;
-        // Do NOT set channelPort here — the channel MCP server (multiterminal-channel.mjs)
-        // reports its own port via reportPortToBroker() after it starts listening.
-        // If we set it here, we'd overwrite the actual port with the env var default (8800),
-        // which is wrong when the channel server fell back to a random port.
+        // No channelPort: the channel is retired (ticket 0ff1b520). Delivery is native, via the
+        // credentials posted below.
         const regPayload = {
           name: args.name,
           docId: effectiveDocId,
         };
         if (launchNonce) regPayload.nonce = launchNonce;
-        // Owning process id (task c9285d2a). This MCP server and the channel server are siblings
-        // under one claude.exe, so process.ppid is the same integer for both and is the only thing
-        // they share when MT did not launch the session (no MULTITERMINAL_LAUNCH_NONCE to echo).
-        // Sending it is what lets an ADOPTED terminal — a plain shell that ran register_terminal —
-        // have its channel server discover the claimed name and prove it belongs to the same
-        // session. Read from the process, never from a caller arg, so an agent cannot assert
-        // someone else's pid.
+        // Owning process id (task c9285d2a): the claude.exe this MCP server runs under. The broker's
+        // liveness reaper removes the row, and clears its credentials, once this process is dead.
+        // That is how a session MT did not launch leaves the roster on /quit (its SessionEnd hook
+        // skips it, having no MULTITERMINAL_NAME). Read from the process, never from a caller arg,
+        // so an agent cannot assert someone else's pid.
         if (process.ppid) regPayload.ownerPid = process.ppid;
         const result = await apiCall("/api/messaging/register", "POST", regPayload);
         // Item 13: the name is ours now, so this session's native ingress goes with it, and a name it
