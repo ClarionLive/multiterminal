@@ -5845,9 +5845,14 @@ function assertToolDefHandlerConsistency() {
 // liveness reaper already removes a row whose owner process has died (register_terminal sends
 // ownerPid) within one sweep, 30s by default, and clears its credentials. That is the release.
 
-// The name this session currently holds: set after a successful register_terminal, starting from the
-// name MT launched it under, if any.
+// The name THIS process claimed through register_terminal, if any. Deliberately NOT the name MT
+// launched the session under: that one is MT's to manage (its SessionEnd hook, the broker's docId
+// rename), and it can be the SHARED placeholder "Unassigned", where a disconnect by name would tear
+// down some other pane's live row (pipeline run 3, debugger).
 let claimedTerminalName = null;
+
+// MainForm launches an as-yet-unnamed pane as this; many panes can hold it at once.
+const PLACEHOLDER_TERMINAL_NAME = "Unassigned";
 
 const CLAIM_POST_TIMEOUT_MS = 3000;
 const RELEASE_TIMEOUT_MS = 1500;
@@ -5894,17 +5899,17 @@ async function postClaimedCredentials(name, env, sessionId, fetchImpl = fetch) {
 }
 
 /**
- * After this session successfully claims `newName`, releases the name it held before, if different
- * (pipeline run 2, security gate). Otherwise the old name keeps routing messages to this session:
- * its credentials stay posted under it, and nothing else would clear them while the session lives.
- * Case-insensitive, matching how the broker keys names (OrdinalIgnoreCase). Runs while the session
- * is alive, so it cannot hit the shutdown deadlock described above.
+ * After this session successfully claims `newName`, releases the name it claimed before through
+ * register_terminal, if different (pipeline run 2, security gate). Otherwise the old name keeps
+ * routing messages to this session: this server posted its credentials, and nothing else would clear
+ * them while the session lives. Only a name this process claimed, and never the shared placeholder
+ * (see claimedTerminalName). Case-insensitive, matching how the broker keys names (OrdinalIgnoreCase).
+ * Runs while the session is alive, so it cannot hit the shutdown deadlock described above.
  */
 async function releasePreviousClaim(newName, deps = {}) {
-  const held = deps.held !== undefined
-    ? deps.held
-    : (claimedTerminalName || process.env.MULTITERMINAL_NAME || null);
+  const held = deps.held !== undefined ? deps.held : claimedTerminalName;
   if (!held || held.toUpperCase() === String(newName).toUpperCase()) return "nothing-to-release";
+  if (held.toUpperCase() === PLACEHOLDER_TERMINAL_NAME.toUpperCase()) return "nothing-to-release";
   try {
     const res = await (deps.fetchImpl || fetch)(API_BASE + "/api/messaging/disconnect", {
       method: "POST",

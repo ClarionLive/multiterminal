@@ -131,6 +131,27 @@ test("re-claim: the same name (any case) or nothing held releases nothing", asyn
   assert.equal(f.calls.length, 0);
 });
 
+test("re-claim: never releases the shared placeholder name (it would tear down ANOTHER pane's live row)", async () => {
+  const { mod } = load();
+  const f = recordingFetch();
+  assert.equal(await mod.releasePreviousClaim("Bravo", { held: "unassigned", fetchImpl: f.impl }), "nothing-to-release");
+  assert.equal(f.calls.length, 0);
+});
+
+test("re-claim: the name MT launched the session under is not this server's to release", async () => {
+  const { mod } = load();
+  const f = recordingFetch();
+  const saved = process.env.MULTITERMINAL_NAME;
+  process.env.MULTITERMINAL_NAME = "Alpha";
+  try {
+    // Nothing claimed through register_terminal yet: the launch name must not be used as the held name.
+    assert.equal(await mod.releasePreviousClaim("Bravo", { fetchImpl: f.impl }), "nothing-to-release");
+    assert.equal(f.calls.length, 0);
+  } finally {
+    if (saved === undefined) delete process.env.MULTITERMINAL_NAME; else process.env.MULTITERMINAL_NAME = saved;
+  }
+});
+
 test("re-claim: an unreachable broker is reported, not thrown", async () => {
   const { mod } = load();
   assert.equal(await mod.releasePreviousClaim("Bravo", { held: "Alpha", fetchImpl: recordingFetch({ throws: true }).impl }), "failed");
@@ -179,6 +200,6 @@ test("the helper strips comments on this file's real line endings", () => {
 test("no release-on-exit handler: a stdio server cannot see its parent exit while the parent waits on it", () => {
   const code = codeOnly(src);
   assert.ok(code.length > 100000, "index.js code suspiciously short");
-  assert.ok(!/process\.stdin\.on\(\s*["']end["']/.test(code), "a stdin 'end' handler is back; see the block comment for why it cannot release");
-  assert.ok(!/process\.on\(\s*["']SIG(INT|TERM)["']/.test(code), "a signal handler is back; on Windows it never runs, and it suppresses Node's default exit");
+  assert.ok(!/process\.stdin\.(on|once|addListener)\(\s*["'](end|close)["']/.test(code), "a stdin end/close handler is back; see the block comment for why it cannot release");
+  assert.ok(!/process\.(on|once|addListener)\(\s*["'](SIGINT|SIGTERM|exit|beforeExit)["']/.test(code), "a process exit/signal handler is back; a stdio server cannot see its parent exit, and on Windows signal handlers never run");
 });
