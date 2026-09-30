@@ -48,6 +48,27 @@ namespace MultiTerminal.MCPServer.Services
     }
 
     /// <summary>
+    /// Outcome of <see cref="MessageBroker.TryStoreMessagingCredentials"/> (ticket 9a731cda item 3).
+    /// </summary>
+    public enum CredentialPostVerdict
+    {
+        /// <summary>The poster was admitted and the credential stored.</summary>
+        Accepted,
+
+        /// <summary>No connected, non-dead terminal holds the name. Nothing stored.</summary>
+        NotConnected,
+
+        /// <summary>A pid-held row, and the poster did not present its owner pid. Nothing stored.</summary>
+        OwnerPidMismatch,
+
+        /// <summary>A nonce-held row, and the poster presented a different nonce. Nothing stored.</summary>
+        NonceMismatch,
+
+        /// <summary>Admitted, but the store refused the values (blank name, socket or token).</summary>
+        Invalid,
+    }
+
+    /// <summary>
     /// In-memory holder for terminals' native messaging ingress credentials (ticket 0ff1b520, item 3).
     /// </summary>
     /// <remarks>

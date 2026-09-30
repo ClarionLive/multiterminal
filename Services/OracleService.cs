@@ -2,6 +2,8 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Windows.Forms;
+using MultiTerminal.MCPServer.Models;
+using MultiTerminal.MCPServer.Services;
 using WeifenLuo.WinFormsUI.Docking;
 
 namespace MultiTerminal.Services
@@ -35,7 +37,28 @@ namespace MultiTerminal.Services
         private Timer _restartTimer;
         private DockState _lastDockState = DockState.Float;
         private DockPanel _dockPanel;
-        private string _registeredDocId;
+        // Generated once per OracleService and reused across crash restarts, so the broker row, the
+        // ConPTY env and every restart agree on one identity.
+        private readonly string _registeredDocId = $"oracle-{Guid.NewGuid().ToString("N").Substring(0, 8)}";
+
+        // Per-launch proof-of-origin nonce (ticket 9a731cda run 1), the same shape TerminalDocument
+        // uses: a full 32-hex GUID, injected into the child env as MULTITERMINAL_LAUNCH_NONCE and seeded
+        // on the broker row by RegisterWithBroker.
+        //
+        // Why Oracle needs one: the MCP server's startup self-registration echoes this nonce together
+        // with ownerPid = claude.exe. Without a nonce on the row, that registration binds the pid and
+        // the row becomes PID-HELD, and a pid-held row refuses a credential post that omits ownerPid,
+        // which is exactly what the deployed plugin's SessionStart hook sends. Oracle's bootstrap is
+        // triggered only by MessagingCredentialsStored, so that refusal would silence her entirely. A
+        // nonce-held row accepts the omitted-nonce post (plugin compatibility, c032a177 section D).
+        //
+        // Crash restarts KEEP this nonce, like the docId. The broker registration is made once, by
+        // MainForm, and is not repeated on restart; the restarted child's MCP self-registration must
+        // present the value the row already holds, because a present-but-different nonce is refused
+        // by gate (4) while the old row is still connected. If the reaper removed the old row in the
+        // meantime, the restarted child's registration creates a new row seeded with this same nonce,
+        // so the row is nonce-held either way.
+        private readonly string _launchNonce = Guid.NewGuid().ToString("N");
 
         /// <summary>Fired after Oracle's terminal process starts successfully.</summary>
         public event EventHandler OracleStarted;
@@ -48,6 +71,20 @@ namespace MultiTerminal.Services
 
         /// <summary>The docId used for Oracle's terminal registration and ConPTY.</summary>
         public string DocId => _registeredDocId;
+
+        /// <summary>
+        /// Oracle's launch nonce: injected into her terminal's env and seeded on her broker row.
+        /// Stable for this service's lifetime, crash restarts included (see the field comment).
+        /// </summary>
+        public string LaunchNonce => _launchNonce;
+
+        /// <summary>
+        /// Registers Oracle with the broker under her docId AND her launch nonce, so the row is
+        /// nonce-held before her MCP server's self-registration binds an owner pid onto it. Returns
+        /// the broker's result (null when there is no broker) so the caller can report a refusal.
+        /// </summary>
+        public RegisterResult RegisterWithBroker(MessageBroker broker)
+            => broker?.RegisterTerminal(OracleName, _registeredDocId, nonce: _launchNonce);
 
         /// <summary>
         /// The dockable content hosting Oracle (null until Start). Used by MainForm's
@@ -79,10 +116,6 @@ namespace MultiTerminal.Services
 
             _dockPanel = dockPanel;
 
-            // Generate docId once on first start; reuse on crash restarts
-            if (_registeredDocId == null)
-                _registeredDocId = $"oracle-{Guid.NewGuid().ToString("N").Substring(0, 8)}";
-
             try
             {
                 _form = new OracleTerminal.OracleTerminalForm(_debugLogService);
@@ -91,7 +124,7 @@ namespace MultiTerminal.Services
                 string autoRunCommand = BuildAutoRunCommand();
                 string workingDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "multiterminal");
 
-                _form.StartTerminal(workingDir, _registeredDocId, autoRunCommand);
+                _form.StartTerminal(workingDir, _registeredDocId, autoRunCommand, _launchNonce);
 
                 _restartAttempt = 0;
                 _log("Oracle", "Oracle terminal started (always-on)");

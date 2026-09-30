@@ -143,17 +143,13 @@ namespace MultiTerminal.API.Controllers
             if (string.IsNullOrEmpty(request?.Name))
                 return Problem(detail: "Name is required", statusCode: 400);
 
-            // Ticket 0ff1b520 item 3: a session's ingress credential dies with the session. Clearing
-            // rides THIS path rather than getting its own endpoint, because this is the call the
-            // SessionEnd hook already makes and has made for a long time — a second lifecycle that
-            // something must remember to call is a lifecycle that will eventually not be called.
-            //
-            // Targeted, never ClearAll: demonstrated 2026-09-21 by swapping in ClearAll and watching
-            // ONLY MessagingCredentialStoreTests.Disconnecting_one_terminal_leaves_the_others_alone
-            // go red. A blanket clear passes the obvious test and cuts every other terminal's ingress
-            // each time any one session ends.
-            _credentials.Clear(request.Name);
-
+            // A session's ingress credential dies with the session, and the broker's teardown is what
+            // clears it: DisconnectTerminalByName snapshots the credential under _registrationLock and
+            // compare-and-clears it only when no live row still carries the name. This action used to
+            // clear by name unconditionally BEFORE that call (0ff1b520 item 3), which cut the ingress
+            // of a live same-name session whenever any one of them disconnected, and cleared a
+            // credential a new session had just stored. Removed by ticket 9a731cda item 4; there is
+            // one clear, and it is the guarded one.
             _broker.DisconnectTerminalByName(request.Name);
             return Ok(new { name = request.Name });
         }
@@ -171,9 +167,16 @@ namespace MultiTerminal.API.Controllers
         /// client log nobody was thinking about.
         /// </para>
         /// <para>
-        /// Validation is intentionally minimal here because the hook already refuses malformed values
-        /// at the source, where the environment is visible. This end checks only that the fields are
-        /// present, so that a future non-hook caller cannot store blanks.
+        /// Format validation is intentionally minimal here because the hook already refuses malformed
+        /// values at the source, where the environment is visible. This end checks only that the
+        /// fields are present, so that a future non-hook caller cannot store blanks.
+        /// </para>
+        /// <para>
+        /// ORIGIN is checked (ticket 9a731cda item 3), by the broker, against the connected row that
+        /// holds the name: 409 when no live row holds it, when a pid-held row's owner pid is not
+        /// presented, or when a nonce-held row gets a different nonce. See
+        /// <see cref="MessageBroker.TryStoreMessagingCredentials"/> for the rules. Refusals are
+        /// logged by name and verdict only, never with the body.
         /// </para>
         /// </remarks>
         [HttpPost("credentials")]
@@ -184,9 +187,28 @@ namespace MultiTerminal.API.Controllers
             if (string.IsNullOrWhiteSpace(request.Socket) || string.IsNullOrWhiteSpace(request.Token))
                 return Problem(detail: "Socket and token are required", statusCode: 400);
 
-            bool stored = _credentials.Store(request.Name, request.SessionId, request.Socket, request.Token);
-            if (!stored)
-                return Problem(detail: "Credentials could not be stored", statusCode: 400);
+            CredentialPostVerdict verdict = _broker.TryStoreMessagingCredentials(
+                _credentials, request.Name, request.SessionId, request.Socket, request.Token, request.OwnerPid, request.Nonce);
+
+            if (verdict != CredentialPostVerdict.Accepted)
+            {
+                _broker.DebugLogService?.Warning("MessagingController",
+                    $"Credential post for '{request.Name}' refused: {verdict}. ticket 9a731cda");
+            }
+
+            switch (verdict)
+            {
+                case CredentialPostVerdict.Accepted:
+                    break;
+                case CredentialPostVerdict.NotConnected:
+                    return Problem(detail: $"'{request.Name}' is not registered as a connected terminal", statusCode: 409);
+                case CredentialPostVerdict.OwnerPidMismatch:
+                    return Problem(detail: "Credentials must come from the terminal's owning process", statusCode: 409);
+                case CredentialPostVerdict.NonceMismatch:
+                    return Problem(detail: "Launch nonce does not match the terminal holding this name", statusCode: 409);
+                default:
+                    return Problem(detail: "Credentials could not be stored", statusCode: 400);
+            }
 
             // Item 15: the name only, never the body. See MessageBroker.MessagingCredentialsStored.
             _broker.NotifyMessagingCredentialsStored(request.Name);
@@ -314,6 +336,20 @@ namespace MultiTerminal.API.Controllers
         public string Socket { get; set; }
 
         public string Token { get; set; }
+
+        /// <summary>
+        /// PID of the Claude Code process posting (ticket 9a731cda item 3). Required, and must match,
+        /// when the terminal holding the name is pid-held (bound owner pid, no launch nonce). Ignored
+        /// for other rows.
+        /// </summary>
+        public int? OwnerPid { get; set; }
+
+        /// <summary>
+        /// The session's launch nonce (ticket 9a731cda item 3). When present it must match a
+        /// nonce-held row's nonce. Omitting it is accepted for now so the deployed SessionStart hook,
+        /// which sends none, keeps working; ticket c032a177 section D closes that.
+        /// </summary>
+        public string Nonce { get; set; }
     }
 
     public class UploadMessageImagesRequest

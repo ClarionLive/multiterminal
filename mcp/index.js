@@ -7,6 +7,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { readFileSync } from "fs";
+import { execFile } from "child_process";
 import { fileURLToPath } from "url";
 import path from "path";
 
@@ -219,6 +220,21 @@ async function apiCall(endpoint, method = "GET", body = null, timeoutMs = API_TI
     }
   }
   throw lastErr;
+}
+
+// The body of POST /api/messaging/register, shared by the register_terminal tool and the startup
+// self-registration (selfRegisterTerminal, in the claimed-identity block) so the two cannot drift apart.
+// Identity comes from the environment MT launched this process with, never from a caller argument, for
+// the reasons given in the tool handler.
+function buildRegisterPayload(name, argDocId, env, ppid) {
+  // MULTITERMINAL_DOC_ID wins: it is the real DocId and always matches the TerminalDocument.
+  const payload = {
+    name,
+    docId: env.MULTITERMINAL_DOC_ID || argDocId,
+  };
+  if (env.MULTITERMINAL_LAUNCH_NONCE) payload.nonce = env.MULTITERMINAL_LAUNCH_NONCE;
+  if (ppid) payload.ownerPid = ppid;
+  return payload;
 }
 
 // Resolve the active project scope for this MCP server process.
@@ -807,7 +823,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "register_terminal",
-        description: "Register your terminal with MultiTerminal to send/receive messages",
+        description: "Register your terminal with MultiTerminal to send/receive messages. A terminal MultiTerminal launched (MULTITERMINAL_NAME and MULTITERMINAL_DOC_ID set) is registered by MultiTerminal before the session starts, and this server refreshes that registration when it starts, so it only needs this to register under a different name or without a docId; calling it again with the same name is harmless.",
         inputSchema: {
           type: "object",
           properties: {
@@ -3364,26 +3380,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Use MULTITERMINAL_DOC_ID env var if available — this is the real DocId
         // set by ConPtyTerminal and always matches the TerminalDocument.
         // The caller-provided docId is unreliable (often a made-up value).
-        const effectiveDocId = process.env.MULTITERMINAL_DOC_ID || args.docId;
         // Proof-of-origin nonce (task fd3437e6): echo back the per-launch secret MT injected into
         // THIS child's env. It is read ONLY from the env — never from a caller-supplied arg — so an
         // agent can't forge it, and it's absent for legacy/foreign launches (broker fails open on an
         // unseeded placeholder). The broker requires it to match before letting this registration
         // adopt+promote an "Unassigned" placeholder, blocking docId-inheritance identity hijacks.
-        const launchNonce = process.env.MULTITERMINAL_LAUNCH_NONCE;
         // No channelPort: the channel is retired (ticket 0ff1b520). Delivery is native, via the
         // credentials posted below.
-        const regPayload = {
-          name: args.name,
-          docId: effectiveDocId,
-        };
-        if (launchNonce) regPayload.nonce = launchNonce;
         // Owning process id (task c9285d2a): the claude.exe this MCP server runs under. The broker's
         // liveness reaper removes the row, and clears its credentials, once this process is dead.
         // That is how a session MT did not launch leaves the roster on /quit (its SessionEnd hook
         // skips it, having no MULTITERMINAL_NAME). Read from the process, never from a caller arg,
         // so an agent cannot assert someone else's pid.
-        if (process.ppid) regPayload.ownerPid = process.ppid;
+        // All three are read by the shared buildRegisterPayload (task 54005ee7).
+        const regPayload = buildRegisterPayload(args.name, args.docId, process.env, process.ppid);
         const result = await apiCall("/api/messaging/register", "POST", regPayload);
         // Item 13: the name is ours now, so this session's native ingress goes with it, and a name it
         // held before stops routing here. After a successful register only: a refused claim must not
@@ -5889,14 +5899,24 @@ function messagingCredentialsFromEnv(env) {
  * Deliberately NOT apiCall: that funnel's error path quotes server responses into messages, and this
  * body must never be anywhere near a message.
  */
-async function postClaimedCredentials(name, env, sessionId, fetchImpl = fetch) {
+async function postClaimedCredentials(name, env, sessionId, fetchImpl = fetch, ppid = process.ppid) {
   const creds = messagingCredentialsFromEnv(env);
   if (!creds) return "unavailable";
   try {
+    // ownerPid and nonce (ticket 9a731cda) are the owner proof the broker checks before accepting
+    // credentials for a row: a pid-held row wants the ownerPid its registration bound, a nonce-held row
+    // refuses a wrong nonce. Sending both is always correct. The nonce comes only from the env, like
+    // register_terminal's.
+    // MIRRORED in the plugin's hooks/session-status-hook.js (credentialOwner/credentialsBody), which
+    // builds the same body for the SessionStart post. The two ship separately and cannot share code;
+    // change both field sets together.
+    const body = { name, sessionId: sessionId || "", socket: creds.socket, token: creds.token };
+    if (ppid) body.ownerPid = ppid;
+    if (env.MULTITERMINAL_LAUNCH_NONCE) body.nonce = env.MULTITERMINAL_LAUNCH_NONCE;
     const res = await fetchImpl(API_BASE + "/api/messaging/credentials", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, sessionId: sessionId || "", socket: creds.socket, token: creds.token }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(CLAIM_POST_TIMEOUT_MS),
     });
     return res && res.ok ? "sent" : "refused";
@@ -5932,12 +5952,235 @@ async function releasePreviousClaim(newName, deps = {}) {
     return "failed";
   }
 }
+
+const IMAGE_LOOKUP_TIMEOUT_MS = 3000;
+
+function runExecFile(file, args, opts) {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, opts, (err, stdout) => (err ? reject(err) : resolve(String(stdout))));
+  });
+}
+
+/**
+ * The image name of one process ("claude.exe"), or null on any failure or no match (ticket 9a731cda).
+ * One `tasklist` call filtered to that pid. `run(file, args, opts)` resolves to stdout; it is a
+ * parameter so tests never spawn tasklist.
+ */
+async function getProcessImageName(pid, run = runExecFile) {
+  try {
+    if (!Number.isInteger(pid) || pid <= 0) return null;
+    const stdout = await run("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"],
+      { windowsHide: true, timeout: IMAGE_LOOKUP_TIMEOUT_MS });
+    // Each row is quoted CSV: "claude.exe","1234","Console","1","123,456 K". No match prints an
+    // "INFO: No tasks are running..." line instead, which has no quoted fields.
+    for (const line of String(stdout ?? "").split(/\r?\n/)) {
+      if (!line.trim().startsWith('"')) continue;
+      const fields = [...line.matchAll(/"((?:[^"]|"")*)"/g)].map((m) => m[1].replace(/""/g, '"'));
+      if (fields.length >= 2 && fields[1] === String(pid) && fields[0]) return fields[0];
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Startup self-registration (task 54005ee7, ported by ticket 9a731cda). Two cases:
+//
+// 1. A pane MT launched (MULTITERMINAL_NAME and MULTITERMINAL_DOC_ID set, not a ClarionAssistant tab).
+//    This is a REFRESH, not what makes the terminal registered: MT registers every terminal it launches
+//    before the shell starts (MainForm.PreRegisterTerminal and PreRegisterTerminalWithName). What this
+//    adds is what /session-start's register_terminal call used to add, without the model turn: the row
+//    is confirmed under this name, and ownerPid is bound. It is done here and not in a SessionStart hook
+//    because ownerPid feeds the liveness reaper: this process's parent is claude.exe, a hook's parent
+//    may not be.
+//    After the broker ACCEPTS it, this also posts the session's native credentials (ticket 9a731cda,
+//    run 1). The plugin's SessionStart hook posts them too, but can reach MT before the row is
+//    connected (e.g. an Oracle crash-restart reuses its docId and MainForm does not re-register it):
+//    that post gets a 409 and nothing retries it. This one follows a successful registration, so the
+//    row exists. A refused registration posts nothing. claimedTerminalName is deliberately NOT set here:
+//    the launch name is MT's to manage (see claimedTerminalName).
+//
+// 2. A ClarionAssistant tab (isClarionEmbedded and MULTITERMINAL_NAME set, NO MULTITERMINAL_DOC_ID).
+//    MT did not launch it, so this registers it by name with ownerPid, then posts its native
+//    credentials. Only when all of these hold, else it skips:
+//      - /api/health answers with MultiTerminal's service marker (MT_HEALTH_SERVICE_MARKER). This is a
+//        FINGERPRINT, NOT AUTHENTICATION: it stops a foreign server on :5050 that happens to list a
+//        capability from being trusted by accident, but anything can send that string. An authenticated
+//        handshake is deferred to ticket c032a177 section D.
+//      - It lists the "ca-embedded-v1" capability. MT is meant to advertise it only when its liveness
+//        reaper runs and reaping clears credentials, so a tab that dies (CA closes tabs by killing
+//        claude) does not leave a connected row routing to a dead pipe.
+//      - This process's parent is claude.exe. The reaper keys on ownerPid; if a node shim sat between
+//        claude and this server, ppid would name the shim, and the row would be owned by the wrong
+//        process. Skipping leaves the tab inbox-only and unregistered instead.
+//      - The broker accepted the registration. A refusal (e.g. the name is held by another live owner)
+//        stops here: posting credentials would route that owner's messages into this tab.
+//    Nothing inherited from a MultiTerminal shell is sent: no docId, no launch nonce.
+//    A CA tab can start before MT, or while MT is still starting (ticket 9a731cda, run 1). So health
+//    unreachable, a non-2xx, or a body without the capability is RETRIED on CA_HEALTH_RETRY_DELAYS_MS,
+//    then given up with one stderr line. A definitive answer is never retried: the wrong service
+//    marker, a parent that is not claude.exe, or a refused registration.
+//
+// EMBEDDED together with MULTITERMINAL_DOC_ID skips entirely: that is the Clarion IDE having inherited
+// an MT shell's environment, and it must not claim that pane. The shared placeholder name "Unassigned"
+// is never self-registered in either case: many panes hold it, and binding an ownerPid to it would make
+// an open pane's row owned by, and reapable with, this process.
+//
+// The caller does not await it, and every failure (MT down, a refusal, a timeout) is logged to stderr
+// and swallowed, so MCP startup can never block or crash on it, and the stdio transport never waits on
+// it. Each network step has its own deadline, and the retry waits on unref'd timers, so a pending
+// retry never keeps the process alive. A timeout does not undo a registration the broker already
+// received.
+const SELF_REGISTER_TIMEOUT_MS = 5000;
+const HEALTH_TIMEOUT_MS = 2000;
+const CA_EMBEDDED_CAPABILITY = "ca-embedded-v1";
+// HealthIdentity.ServiceMarker in Services/Startup/HealthIdentity.cs, compared the way
+// StartupHealthProbe.Parse compares it: exact, ordinal. mcp/test/selfRegister.test.mjs pins the two equal.
+const MT_HEALTH_SERVICE_MARKER = "multiterminal-rest-api";
+// Waits between health attempts: 6 attempts over 59s.
+const CA_HEALTH_RETRY_DELAYS_MS = [2000, 4000, 8000, 15000, 30000];
+
+/**
+ * Is this session a ClarionAssistant tab? True iff CLARION_ASSISTANT_EMBEDDED is a non-empty string
+ * whose trimmed, lower-cased value is not "0" or "false".
+ * MIRRORED in the plugin's hooks/embedded-session.js (isClarionEmbedded). The two ship separately and
+ * cannot share code; they must agree, or one session is a CA tab to this server and an MT pane to the
+ * plugin's hooks.
+ */
+function isClarionEmbedded(env) {
+  if (!env || typeof env !== "object") return false;
+  const v = env.CLARION_ASSISTANT_EMBEDDED;
+  if (typeof v !== "string" || v === "") return false;
+  const norm = v.trim().toLowerCase();
+  return norm !== "" && norm !== "0" && norm !== "false";
+}
+
+function withDeadline(promiseFactory, ms, what) {
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
+    if (timer && typeof timer.unref === "function") timer.unref();
+  });
+  const work = Promise.resolve().then(promiseFactory);
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
+}
+
+// A wait that never keeps the process alive: when the session ends, a pending retry just stops.
+function unrefSleep(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    if (timer && typeof timer.unref === "function") timer.unref();
+  });
+}
+
+async function selfRegisterTerminal(env, ppid, post, deps = {}) {
+  const name = env.MULTITERMINAL_NAME;
+  if (!name) return "skipped";
+  // A deny-only guard: trimming here can only skip more, never register a name the broker keys differently.
+  if (String(name).trim().toUpperCase() === PLACEHOLDER_TERMINAL_NAME.toUpperCase()) return "skipped";
+  if (isClarionEmbedded(env)) {
+    if (env.MULTITERMINAL_DOC_ID) return "skipped";
+    return registerEmbeddedTab(name, env, ppid, post, deps);
+  }
+  if (!env.MULTITERMINAL_DOC_ID) return "skipped";
+  let result;
+  try {
+    result = await post("/api/messaging/register", buildRegisterPayload(name, undefined, env, ppid));
+  } catch (e) {
+    console.error(`[self-register] Startup registration of '${name}' failed; register_terminal still works: ${e?.message ?? e}`);
+    return "failed";
+  }
+  // Accepted: the row is connected now, so the credentials post cannot 409 for want of one. Never throws.
+  const credStatus = await withDeadline(
+    () => postClaimedCredentials(name, env, env.CLAUDE_CODE_SESSION_ID, deps.fetchImpl || fetch, ppid),
+    deps.stepTimeoutMs ?? CLAIM_POST_TIMEOUT_MS + 500, "credentials post").catch(() => "failed");
+  console.error(`[self-register] Registered '${name}' at startup (terminalId ${result?.terminalId ?? "unknown"}); native credentials: ${credStatus}.`);
+  return "registered";
+}
+
+// One /api/health read for case 2. Never throws. { kind: "ok" } | { kind: "retry", reason } |
+// { kind: "not-multiterminal", reason }.
+async function probeCaHealth(deps, step) {
+  let health;
+  try {
+    health = await withDeadline(() => deps.get("/api/health"), step ?? HEALTH_TIMEOUT_MS, "health check");
+  } catch (e) {
+    return { kind: "retry", reason: `MultiTerminal health check failed: ${e?.message ?? e}` };
+  }
+  // Fingerprint, not authentication (see the block comment above).
+  if (!health || typeof health !== "object" || health.service !== MT_HEALTH_SERVICE_MARKER) {
+    return { kind: "not-multiterminal", reason: `the health endpoint is not MultiTerminal's (service marker is not ${MT_HEALTH_SERVICE_MARKER})` };
+  }
+  const caps = Array.isArray(health.capabilities) ? health.capabilities : [];
+  if (!caps.includes(CA_EMBEDDED_CAPABILITY)) {
+    return { kind: "retry", reason: `this MultiTerminal does not advertise ${CA_EMBEDDED_CAPABILITY}` };
+  }
+  return { kind: "ok" };
+}
+
+// Case 2 above. Never throws. Returns a status word; logs a reason, never a credential.
+async function registerEmbeddedTab(name, env, ppid, post, deps) {
+  const step = deps.stepTimeoutMs;
+  const sleep = deps.sleep || unrefSleep;
+  const tag = `[self-register] ClarionAssistant tab '${name}'`;
+  try {
+    let probe;
+    for (let attempt = 0; ; attempt++) {
+      probe = await probeCaHealth(deps, step);
+      if (probe.kind !== "retry") break;
+      if (attempt >= CA_HEALTH_RETRY_DELAYS_MS.length) {
+        console.error(`${tag}: not registered, gave up after ${attempt + 1} attempts: ${probe.reason}.`);
+        return "no-capability";
+      }
+      await sleep(CA_HEALTH_RETRY_DELAYS_MS[attempt]);
+    }
+    if (probe.kind === "not-multiterminal") {
+      console.error(`${tag}: not registered, ${probe.reason}.`);
+      return "not-multiterminal";
+    }
+
+    const imageName = await withDeadline(() => (deps.imageName || getProcessImageName)(ppid),
+      step ?? IMAGE_LOOKUP_TIMEOUT_MS + 500, "parent image lookup").catch(() => null);
+    if (typeof imageName !== "string" || imageName.toLowerCase() !== "claude.exe") {
+      console.error(`${tag}: not registered, parent process ${ppid} is ${imageName ?? "unknown"}, not claude.exe.`);
+      return "wrong-parent";
+    }
+
+    // Name-only: whatever MultiTerminal identity this process inherited is not this tab's.
+    const ownEnv = { ...env };
+    delete ownEnv.MULTITERMINAL_DOC_ID;
+    delete ownEnv.MULTITERMINAL_LAUNCH_NONCE;
+    let result;
+    try {
+      result = await withDeadline(
+        () => post("/api/messaging/register", buildRegisterPayload(name, undefined, ownEnv, ppid)),
+        step ?? SELF_REGISTER_TIMEOUT_MS, "registration");
+    } catch (e) {
+      console.error(`${tag}: registration refused or failed, no credentials posted: ${e?.message ?? e}`);
+      return "refused";
+    }
+
+    claimedTerminalName = name;
+    const credStatus = await withDeadline(
+      () => postClaimedCredentials(name, ownEnv, env.CLAUDE_CODE_SESSION_ID, deps.fetchImpl || fetch, ppid),
+      step ?? CLAIM_POST_TIMEOUT_MS + 500, "credentials post").catch(() => "failed");
+    console.error(`${tag}: registered at startup (terminalId ${result?.terminalId ?? "unknown"}); native credentials: ${credStatus}.`);
+    return "registered";
+  } catch (e) {
+    console.error(`${tag}: startup registration failed: ${e?.message ?? e}`);
+    return "failed";
+  }
+}
 // ── end claimed-identity duties ──
 
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   assertToolDefHandlerConsistency();
+  // Not awaited: startup must not wait on MT (task 54005ee7).
+  selfRegisterTerminal(process.env, process.ppid,
+    (endpoint, body) => apiCall(endpoint, "POST", body, SELF_REGISTER_TIMEOUT_MS),
+    { get: (endpoint) => apiCall(endpoint, "GET", null, HEALTH_TIMEOUT_MS) });
   console.error("MultiTerminal MCP server running on stdio");
   console.error(
     `  env: CLAUDE_PROJECT_DIR=${process.env.CLAUDE_PROJECT_DIR || "(unset)"}` +

@@ -75,14 +75,25 @@ test("credentials: well-formed env is accepted; malformed values are refused, no
   assert.equal(mod.messagingCredentialsFromEnv({ ...goodEnv, CLAUDE_CODE_MESSAGING_TOKEN: "short" }), null);
 });
 
-test("post: sends name, session id, socket and token to the credentials endpoint", async () => {
+test("post: sends name, session id, socket, token and ownerPid to the credentials endpoint", async () => {
   const { mod } = load();
   const f = recordingFetch();
-  const status = await mod.postClaimedCredentials("Robin", goodEnv, "sess-1", f.impl);
+  const status = await mod.postClaimedCredentials("Robin", goodEnv, "sess-1", f.impl, 4242);
   assert.equal(status, "sent");
   assert.equal(f.calls.length, 1);
   assert.equal(f.calls[0].url, "http://mt.test/api/messaging/credentials");
-  assert.deepEqual(f.calls[0].body, { name: "Robin", sessionId: "sess-1", socket: GOOD_SOCKET, token: SENTINEL_TOKEN });
+  // No MULTITERMINAL_LAUNCH_NONCE in the env: the key is absent, not empty.
+  assert.deepEqual(f.calls[0].body, { name: "Robin", sessionId: "sess-1", socket: GOOD_SOCKET, token: SENTINEL_TOKEN, ownerPid: 4242 });
+});
+
+test("post: owner proof (ticket 9a731cda) — the env's launch nonce is sent, and ownerPid defaults to process.ppid", async () => {
+  const { mod } = load();
+  const f = recordingFetch();
+  assert.equal(await mod.postClaimedCredentials("Robin", { ...goodEnv, MULTITERMINAL_LAUNCH_NONCE: "nonce-xyz" }, "s", f.impl), "sent");
+  assert.equal(f.calls[0].body.nonce, "nonce-xyz");
+  // Discriminator: the test runner's ppid is a real, non-zero pid, so an omitted ownerPid fails here.
+  assert.ok(process.ppid > 0);
+  assert.equal(f.calls[0].body.ownerPid, process.ppid);
 });
 
 test("post: no credentials means no request at all; broker refusal and outage are reported, not thrown", async () => {

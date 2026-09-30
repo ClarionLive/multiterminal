@@ -108,8 +108,9 @@ namespace MultiTerminal.Tests
         [Fact]
         public void DisconnectTerminalByName_clears_the_credentials_itself()
         {
-            // Called on the broker directly, NOT through MessagingController, whose disconnect action
-            // clears on its own. This proves the broker path, which is what non-REST callers reach.
+            // Called on the broker directly, NOT through MessagingController. Since ticket 9a731cda
+            // item 4 the controller's disconnect action no longer clears on its own, so this broker
+            // path is the only clear either caller gets.
             using var broker = new MessageBroker();
             var store = broker.MessagingCredentials;
 
@@ -198,6 +199,9 @@ namespace MultiTerminal.Tests
             var controller = new MessagingController(broker, broker.MessagingCredentials);
             var raised = new List<string>();
             broker.MessagingCredentialsStored += (_, name) => raised.Add(name);
+
+            // Since ticket 9a731cda item 3 a credential is stored only for a name a connected terminal holds.
+            broker.RegisterTerminal("Oracle", docId: "doc-oracle");
 
             var result = controller.StoreMessagingCredentials(new StoreMessagingCredentialsRequest
             {

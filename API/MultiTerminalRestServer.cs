@@ -151,6 +151,9 @@ namespace MultiTerminal.API
                 // its own would give the controller an empty store whose misses look exactly like
                 // "no credentials yet", which is the normal state and therefore invisible.
                 builder.Services.AddSingleton(_broker.MessagingCredentials);
+                // Ticket 9a731cda item 2: GET /api/health's capabilities, answered from the broker's
+                // runtime state on every request (see CaEmbeddedCapabilityProvider).
+                builder.Services.AddSingleton<ICapabilityProvider>(new CaEmbeddedCapabilityProvider(_broker));
                 // SessionDatabase removed — sessions now stored in multiterminal.db via SessionLineageService
                 builder.Services.AddSingleton<PlanDatabase>();
                 builder.Services.AddSingleton<TaskDatabase>();

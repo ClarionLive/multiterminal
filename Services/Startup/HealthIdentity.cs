@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Reflection;
 
@@ -52,6 +53,13 @@ namespace MultiTerminal.Services.Startup
 
         /// <summary>UTC process start time (ISO 8601) — lets the user see whether the holder is a fresh or stale instance.</summary>
         public string StartedUtc { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Capability tokens in force right now (ticket 9a731cda item 2), e.g. <c>ca-embedded-v1</c>.
+        /// Filled by <c>HealthController</c> from runtime providers; empty, never null, otherwise.
+        /// Additive: the startup self-probe keys on <see cref="Service"/> alone and ignores this.
+        /// </summary>
+        public IReadOnlyList<string> Capabilities { get; set; } = Array.Empty<string>();
 
         /// <summary>
         /// Build the identity for the current process. Reflection/version lookups are

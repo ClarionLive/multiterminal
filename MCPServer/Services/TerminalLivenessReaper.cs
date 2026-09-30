@@ -59,6 +59,13 @@ namespace MultiTerminal.MCPServer.Services
         /// <summary>The sweep interval in effect after env parsing and clamping.</summary>
         public int IntervalMs => _intervalMs;
 
+        /// <summary>
+        /// True while the sweep timer is armed: after a <see cref="Start"/> that was not refused by
+        /// <c>MULTITERMINAL_TERMINAL_REAPER</c>, and before <see cref="Dispose"/>. Read by
+        /// <see cref="CaEmbeddedCapabilityProvider"/> (ticket 9a731cda item 2).
+        /// </summary>
+        public bool IsRunning => !_disposed && Volatile.Read(ref _timer) != null;
+
         /// <summary>True when the reaper is disabled by <c>MULTITERMINAL_TERMINAL_REAPER</c>.</summary>
         public static bool IsDisabled()
         {

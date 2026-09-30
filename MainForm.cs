@@ -5499,7 +5499,11 @@ namespace MultiTerminal
             _mcpServer?.Broker?.UnregisterTerminal(doc.DocId);
 
             // Register with the new identity name
-            string terminalName = PreRegisterTerminalWithName(doc.DocId, identityName);
+            // With the doc's launch nonce, as every other pane registration passes (ticket 9a731cda
+            // run 1). doc.StartTerminal below injects that same nonce into the child env; without it
+            // on the row, the MCP self-registration's owner pid makes the row pid-held and the deployed
+            // plugin's credential post (no ownerPid) is refused, losing native delivery.
+            string terminalName = PreRegisterTerminalWithName(doc.DocId, identityName, launchNonce: doc.LaunchNonce);
 
             // AC7 launch-root strategy (task c6ed236c): same logic as AddNewTerminal —
             // when this identity owns an active task with a materialized worktree, spawn
@@ -7142,7 +7146,13 @@ namespace MultiTerminal
                 // the way PreRegisterTerminalWithName does. The honest handling is therefore to say so:
                 // Oracle still starts (it is useful locally even when unaddressable), but the refusal
                 // reaches the log with the broker's own sentence instead of vanishing.
-                var oracleRegistration = _mcpServer?.Broker?.RegisterTerminal(OracleService.OracleName, _oracleService.DocId);
+                //
+                // Ticket 9a731cda run 1: registered WITH Oracle's launch nonce (the one injected into her
+                // terminal's env), through OracleService so the nonce and docId come from one owner. A
+                // nonce-less row would become pid-held once her MCP server's self-registration binds
+                // claude.exe's pid, and a pid-held row refuses the deployed plugin's credential post,
+                // which omits ownerPid; her bootstrap fires only on MessagingCredentialsStored.
+                var oracleRegistration = _oracleService.RegisterWithBroker(_mcpServer?.Broker);
                 if (oracleRegistration != null && !oracleRegistration.Success)
                 {
                     _debugLogService?.Warning("MainForm", $"Registration of '{OracleService.OracleName}' was refused by the broker. Oracle is running but is NOT addressable — messages to it will not route. Broker said: {oracleRegistration.Error ?? "(no reason given)"}");
@@ -7481,6 +7491,10 @@ namespace MultiTerminal
                     msg => _debugLogService?.Info("TerminalLivenessReaper", msg));
                 reaper.Start();
                 _terminalLivenessReaper = reaper;
+
+                // GET /api/health asks this instance whether it is running before advertising
+                // ca-embedded-v1 (ticket 9a731cda item 2); a disabled reaper answers false.
+                broker.LivenessReaper = reaper;
             }
             catch (Exception ex)
             {

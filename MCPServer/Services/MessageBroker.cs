@@ -3831,7 +3831,8 @@ namespace MultiTerminal.MCPServer.Services
             if (!nameStillLive)
             {
                 _profileService.SetProfileOffline(terminal.Name);
-                ClearTornDownMessagingCredential(terminal.Name, credentialAtTeardown);
+                if (ReapClearsMessagingCredentials)
+                    ClearTornDownMessagingCredential(terminal.Name, credentialAtTeardown);
             }
 
             DebugLogService?.Info("MessageBroker", $"Reaped '{terminal.Name}': owner pid {candidate.OwnerPid} is dead, so it is disconnected and TerminalDisconnected was raised (profile offline: {!nameStillLive}). task d1151661");
@@ -3864,6 +3865,116 @@ namespace MultiTerminal.MCPServer.Services
         private void ClearTornDownMessagingCredential(string name, MessagingCredential snapshot)
         {
             if (snapshot != null) MessagingCredentials.ClearIfCurrent(name, snapshot);
+        }
+
+        // ─── Credential-post proof (ticket 9a731cda item 3) ─────────────────────────────────────
+
+        /// <summary>
+        /// Whether <see cref="TryStoreMessagingCredentials"/> demands proof of origin from the poster.
+        /// True in production; only the test assembly can turn it off.
+        /// </summary>
+        /// <remarks>
+        /// A property rather than nothing, so that the <c>ca-embedded-v1</c> capability
+        /// (<see cref="CaEmbeddedCapabilityProvider"/>) reads the switch this check branches on, and
+        /// switching the check off withdraws the capability. It does NOT stop the capability outliving
+        /// a deleted check: remove the branch and this stays true. What catches that is the behaviour
+        /// tests with the switch on (CredentialPostProofTests' pid-mismatch facts);
+        /// <c>Proof_switched_off_admits_a_mismatched_owner_pid</c> pins that the switch gates the check.
+        /// </remarks>
+        public bool CredentialPostProofEnforced { get; internal set; } = true;
+
+        /// <summary>
+        /// Whether <see cref="TryReapDeadOwner"/> clears the reaped terminal's messaging credentials.
+        /// True in production; only the test assembly can turn it off. Read by
+        /// <see cref="CaEmbeddedCapabilityProvider"/> for the same reason, and with the same limit, as
+        /// <see cref="CredentialPostProofEnforced"/>: deleting the clear leaves this true, and it is the
+        /// reap-clears facts in MessagingCredentialTeardownTests, not the capability, that catch it.
+        /// <c>Reap_clearing_switched_off_leaves_the_credentials</c> pins that the switch gates the clear.
+        /// </summary>
+        public bool ReapClearsMessagingCredentials { get; internal set; } = true;
+
+        /// <summary>
+        /// The liveness reaper MainForm started, if any. Set by MainForm after <c>Start()</c>; null in a
+        /// host that never starts one. Read by <see cref="CaEmbeddedCapabilityProvider"/>, which asks
+        /// the instance whether it is running rather than assuming it is.
+        /// </summary>
+        public TerminalLivenessReaper LivenessReaper { get; set; }
+
+        /// <summary>
+        /// Stores a terminal's messaging credentials only if the poster proves it belongs to the
+        /// terminal that currently holds <paramref name="name"/> (ticket 9a731cda item 3).
+        /// </summary>
+        /// <remarks>
+        /// <para>The decision and the store happen together under <c>_registrationLock</c>, the lock
+        /// registration and every teardown take to decide. Deciding under it and storing after it would
+        /// let a rebind or a teardown land between the check and the write.</para>
+        /// <para>Rules, applied to every CONNECTED row carrying the name (OrdinalIgnoreCase, untrimmed,
+        /// as everywhere else in the broker) whose owner is not provably Dead:</para>
+        /// <list type="bullet">
+        /// <item>No such row: refused. A credential stored for a name nobody holds would route to
+        /// whoever registers that name next.</item>
+        /// <item>Row holds a launch nonce: a presented nonce must match it. An OMITTED nonce is
+        /// accepted, because the deployed plugin SessionStart hook sends none; closing that is ticket
+        /// c032a177 section D.</item>
+        /// <item>Row has a bound owner pid and no nonce (the shape gate (4)'s pidProves accepts): the
+        /// presented owner pid must be present and equal.</item>
+        /// <item>Row with neither: accepted, as before this ticket.</item>
+        /// </list>
+        /// <para>Dead-owner rows are skipped, as gate (4) releases them: the process they would be
+        /// compared against no longer exists. A name held only by such a row counts as not held.</para>
+        /// <para>When two live rows share the name, every one must admit the poster. Admitting on any
+        /// one would let the weakest row's rule decide for the stronger one.</para>
+        /// </remarks>
+        public CredentialPostVerdict TryStoreMessagingCredentials(
+            MessagingCredentialStore store, string name, string sessionId, string socket, string token, int? ownerPid, string nonce)
+        {
+            ArgumentNullException.ThrowIfNull(store);
+
+            lock (_registrationLock)
+            {
+                CredentialPostVerdict verdict = AuthorizeCredentialPostLocked(name, ownerPid, nonce);
+                if (verdict != CredentialPostVerdict.Accepted) return verdict;
+
+                return store.Store(name, sessionId, socket, token)
+                    ? CredentialPostVerdict.Accepted
+                    : CredentialPostVerdict.Invalid;
+            }
+        }
+
+        private CredentialPostVerdict AuthorizeCredentialPostLocked(string name, int? ownerPid, string nonce)
+        {
+            if (string.IsNullOrEmpty(name)) return CredentialPostVerdict.NotConnected;
+
+            List<TerminalInfo> holders = _terminals.Values
+                .Where(t => t.IsConnected
+                            && string.Equals(t.Name, name, StringComparison.OrdinalIgnoreCase)
+                            && ResolveOwnerLiveness(t) != OwnerLiveness.Dead)
+                .ToList();
+
+            if (holders.Count == 0) return CredentialPostVerdict.NotConnected;
+            if (!CredentialPostProofEnforced) return CredentialPostVerdict.Accepted;
+
+            foreach (TerminalInfo row in holders)
+            {
+                if (!string.IsNullOrEmpty(row.LaunchNonce))
+                {
+                    if (!string.IsNullOrEmpty(nonce)
+                        && !string.Equals(nonce, row.LaunchNonce, StringComparison.Ordinal))
+                    {
+                        return CredentialPostVerdict.NonceMismatch;
+                    }
+
+                    continue;
+                }
+
+                if (row.OwnerPid != null
+                    && (ownerPid == null || ownerPid.Value != row.OwnerPid.Value))
+                {
+                    return CredentialPostVerdict.OwnerPidMismatch;
+                }
+            }
+
+            return CredentialPostVerdict.Accepted;
         }
 
         /// <summary>

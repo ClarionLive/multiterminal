@@ -157,8 +157,10 @@ namespace MultiTerminal.Tests
             // Drives the endpoint the SessionEnd hook actually POSTs to. If someone adds the clear to
             // the store but never wires it into disconnect, the store-level test above still passes
             // and this one fails — which is the point of having both.
+            // The broker's own store, as production wires it: since ticket 9a731cda item 4 the clear
+            // is the broker teardown's, not a separate one in the controller.
             using var broker = new MessageBroker();
-            var store = new MessagingCredentialStore();
+            var store = broker.MessagingCredentials;
             var controller = new MessagingController(broker, store);
 
             store.Store("Alice", "session-1", Socket, Token);
@@ -177,7 +179,7 @@ namespace MultiTerminal.Tests
             // other terminal's ingress each time any one session ended. Two live entries, one
             // disconnect, and the survivor is what distinguishes a targeted clear from a blanket one.
             using var broker = new MessageBroker();
-            var store = new MessagingCredentialStore();
+            var store = broker.MessagingCredentials;
             var controller = new MessagingController(broker, store);
 
             store.Store("Alice", "session-1", Socket, Token);

@@ -58,8 +58,10 @@ namespace MultiTerminal.OracleTerminal
         /// <summary>
         /// Start the Claude Code terminal with the given autorun command.
         /// Forces handle creation so WebView2 initializes before the terminal starts.
+        /// <paramref name="launchNonce"/> becomes the child's MULTITERMINAL_LAUNCH_NONCE; it must be the
+        /// nonce OracleService seeds on Oracle's broker row (ticket 9a731cda run 1).
         /// </summary>
-        public void StartTerminal(string workingDirectory, string docId, string autoRunCommand)
+        public void StartTerminal(string workingDirectory, string docId, string autoRunCommand, string launchNonce)
         {
             // Force handle creation so the WebView2 renderer initializes (triggers HandleCreated).
             if (!Created)
@@ -69,7 +71,8 @@ namespace MultiTerminal.OracleTerminal
                 workingDirectory: workingDirectory,
                 docId: docId,
                 terminalName: OracleService.OracleName,
-                autoRunCommand: autoRunCommand);
+                autoRunCommand: autoRunCommand,
+                launchNonce: launchNonce);
 
             IsTerminalRunning = true;
         }
