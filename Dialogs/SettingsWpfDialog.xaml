@@ -1062,6 +1062,7 @@
                                                      Height="28"
                                                      PasswordChanged="MC_Secret_PasswordChanged"
                                                      GotKeyboardFocus="MC_Secret_GotKeyboardFocus"
+                                                     LostKeyboardFocus="MC_Secret_LostKeyboardFocus"
                                                      PreviewMouseLeftButtonDown="MC_Secret_PreviewMouseLeftButtonDown"/>
                                         <TextBlock x:Name="MC_PhoneAuthPasswordSource"
                                                    Text="(source: not set)"
@@ -1093,6 +1094,7 @@
                                                      Height="28"
                                                      PasswordChanged="MC_Secret_PasswordChanged"
                                                      GotKeyboardFocus="MC_Secret_GotKeyboardFocus"
+                                                     LostKeyboardFocus="MC_Secret_LostKeyboardFocus"
                                                      PreviewMouseLeftButtonDown="MC_Secret_PreviewMouseLeftButtonDown"/>
                                         <TextBlock x:Name="MC_RelayApiKeySource"
                                                    Text="(source: not set)"
@@ -1107,6 +1109,7 @@
                                                      Height="28"
                                                      PasswordChanged="MC_Secret_PasswordChanged"
                                                      GotKeyboardFocus="MC_Secret_GotKeyboardFocus"
+                                                     LostKeyboardFocus="MC_Secret_LostKeyboardFocus"
                                                      PreviewMouseLeftButtonDown="MC_Secret_PreviewMouseLeftButtonDown"/>
                                         <TextBlock x:Name="MC_NotificationSecretSource"
                                                    Text="(source: not set)"

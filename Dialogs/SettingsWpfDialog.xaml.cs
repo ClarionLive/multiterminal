@@ -41,6 +41,10 @@ namespace MultiTerminal.Dialogs
         private bool _mcRelayApiKeyDirty;           // user edited the relay ApiKey box this session
         private bool _mcRestartNeeded;              // a restart-required field changed during this save
 
+        // Secret boxes emptied on focus because they showed the placeholder; restored on leave if untouched.
+        private readonly HashSet<PasswordBox> _mcPlaceholderClearedBoxes = new HashSet<PasswordBox>();
+        private bool _mcSecretFocusSwap;              // true while focus handling swaps placeholder text (not a user edit)
+
         // Effective values captured at load, so save only writes a field the user actually changed
         // (leaving an unchanged appsettings/default value as a fallback rather than shadowing it).
         private string _mcOrigGatewayPort = "";
@@ -740,19 +744,20 @@ namespace MultiTerminal.Dialogs
             SaveStringIfChanged(MC_VapidSubjectText, _mcOrigVapidSubject, _settings.SetMultiConnectVapidSubject, restartRequired: true);
             SaveStringIfChanged(MC_RelayBaseUrlText, _mcOrigRelayBaseUrl, _settings.SetMultiConnectRelayBaseUrl, restartRequired: true);
 
-            // Secrets: write ONLY when the box was edited this session. An untouched masked
-            // placeholder is skipped entirely, so the stored DPAPI secret is never clobbered.
-            // An explicit clear (dirty + blank) routes through the setter's Remove() path.
-            if (_mcPhonePasswordDirty)
+            // Secrets: write ONLY when the box was edited this session, and never a value that
+            // still carries the masked placeholder (SecretBoxRules). An untouched placeholder is
+            // skipped entirely, so the stored DPAPI secret is never clobbered. An explicit clear
+            // (dirty + blank) routes through the setter's Remove() path.
+            if (SecretBoxRules.ShouldWrite(_mcPhonePasswordDirty, MC_PhoneAuthPasswordBox.Password, SecretPlaceholder))
                 _settings.SetMultiConnectPhoneAuthPassword(MC_PhoneAuthPasswordBox.Password); // auth, not restart-required
 
-            if (_mcNotificationSecretDirty)
+            if (SecretBoxRules.ShouldWrite(_mcNotificationSecretDirty, MC_NotificationSecretBox.Password, SecretPlaceholder))
             {
                 _settings.SetMultiConnectNotificationSecret(MC_NotificationSecretBox.Password);
                 _mcRestartNeeded = true; // NotificationSecret is restart-required
             }
 
-            if (_mcRelayApiKeyDirty)
+            if (SecretBoxRules.ShouldWrite(_mcRelayApiKeyDirty, MC_RelayApiKeyBox.Password, SecretPlaceholder))
                 _settings.SetMultiConnectRelayApiKey(MC_RelayApiKeyBox.Password); // relay ApiKey read per-forward, not restart-required
         }
 
@@ -828,17 +833,49 @@ namespace MultiTerminal.Dialogs
 
         private void MC_Secret_PasswordChanged(object sender, RoutedEventArgs e)
         {
-            if (_mcLoading) return; // programmatic load, not a user edit
+            if (_mcLoading || _mcSecretFocusSwap) return; // programmatic change, not a user edit
+            _mcPlaceholderClearedBoxes.Remove(sender as PasswordBox);
             if (sender == MC_PhoneAuthPasswordBox) _mcPhonePasswordDirty = true;
             else if (sender == MC_NotificationSecretBox) _mcNotificationSecretDirty = true;
             else if (sender == MC_RelayApiKeyBox) _mcRelayApiKeyDirty = true;
         }
 
-        // Select the whole (placeholder) contents on focus so the first keystroke replaces it —
-        // the user never edits "into" the dots and produces a garbage secret.
+        // On focus, a box showing the stored-secret placeholder is EMPTIED rather than merely
+        // selected: a selection can be lost (arrow key, End, a second click) and the user then
+        // types or pastes next to the dots. The swap is programmatic (_mcSecretFocusSwap), so
+        // focusing alone marks nothing dirty and saves nothing. If the user leaves without
+        // typing, the placeholder comes back. SecretBoxRules is the backstop at save time.
         private void MC_Secret_GotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
         {
-            (sender as PasswordBox)?.SelectAll();
+            if (sender is not PasswordBox pb) return;
+            if (pb.Password == SecretPlaceholder)
+            {
+                SwapSecretText(pb, "");
+                _mcPlaceholderClearedBoxes.Add(pb);
+            }
+            else
+            {
+                pb.SelectAll();
+            }
+        }
+
+        private void MC_Secret_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+        {
+            if (sender is PasswordBox pb && _mcPlaceholderClearedBoxes.Remove(pb) && pb.Password.Length == 0)
+                SwapSecretText(pb, SecretPlaceholder); // untouched: the stored secret is still there
+        }
+
+        private void SwapSecretText(PasswordBox pb, string text)
+        {
+            _mcSecretFocusSwap = true;
+            try
+            {
+                pb.Password = text;
+            }
+            finally
+            {
+                _mcSecretFocusSwap = false;
+            }
         }
 
         private void MC_Secret_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -846,7 +883,7 @@ namespace MultiTerminal.Dialogs
             if (sender is PasswordBox pb && !pb.IsKeyboardFocusWithin)
             {
                 e.Handled = true;
-                pb.Focus(); // routes to GotKeyboardFocus → SelectAll
+                pb.Focus(); // routes to GotKeyboardFocus (empties a placeholder, else SelectAll)
             }
         }
 
