@@ -6359,11 +6359,12 @@ namespace MultiTerminal
                 //     orphan/blank renderer that defeated the statusline. Skip it.
                 if (_pendingTerminalSessions == null || _terminalRestoreIndex >= _pendingTerminalSessions.Count)
                 {
-                    // Surface the drop in the in-app debug log (not just Trace.WriteLine, which is
-                    // invisible in a release run) so a skipped pane is observable if reconciliation
-                    // ever drops one the user expected (adversary finding, task d14048ef).
+                    // Record the drop in the in-app debug log so a skipped pane can be traced if
+                    // reconciliation ever drops one the user expected (adversary finding, task
+                    // d14048ef). The log exists by now (created in InitializeDockPanel on the
+                    // constructor path; this factory runs from RestoreSession on Shown). Trace level
+                    // records in Debug builds only: Release's Info floor drops it (follow-up 5512c1df).
                     string skipMsg = $"[RestoreSession] Skipping extra TerminalDocument pane (index {_terminalRestoreIndex} >= session count {_pendingTerminalSessions?.Count ?? 0}) — drifted layout would spawn a phantom blank terminal";
-                    System.Diagnostics.Trace.WriteLine(skipMsg);
                     _debugLogService?.Trace("RestoreSession", skipMsg);
                     return null;
                 }
@@ -6378,7 +6379,6 @@ namespace MultiTerminal
                 if (!string.IsNullOrEmpty(title) && !_restoredTerminalTitles.Add(title))
                 {
                     string dupMsg = $"[RestoreSession] Skipping duplicate TerminalDocument for agent '{title}' (one-name-one-terminal invariant)";
-                    System.Diagnostics.Trace.WriteLine(dupMsg);
                     _debugLogService?.Trace("RestoreSession", dupMsg);
                     return null;
                 }
