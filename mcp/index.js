@@ -710,13 +710,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "send_message",
-        description: "Send a message to another terminal. Use priority to surface urgent messages (blockers, completion reports) above routine chatter.",
+        description: "Send a message to another terminal. Use priority to surface urgent messages (blockers, completion reports) above routine chatter. The sender defaults to your own MultiTerminal name, so you can omit fromTerminalId.",
         inputSchema: {
           type: "object",
           properties: {
             fromTerminalId: {
               type: "string",
-              description: "Your terminal ID",
+              description: "Optional. Your MultiTerminal name. Omit it: MultiTerminal fills in your name, and corrects a different one when it can tell who you are.",
             },
             to: {
               type: "string",
@@ -732,7 +732,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Message priority: critical (blockers), high (task complete/needs review), normal (routine, default), low (FYI)",
             },
           },
-          required: ["fromTerminalId", "to", "message"],
+          required: ["to", "message"],
         },
       },
       {
@@ -805,20 +805,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "broadcast_message",
-        description: "Broadcast a message to all terminals",
+        description: "Broadcast a message to all terminals. The sender defaults to your own MultiTerminal name, so you can omit fromTerminalId.",
         inputSchema: {
           type: "object",
           properties: {
             fromTerminalId: {
               type: "string",
-              description: "Your terminal ID",
+              description: "Optional. Your MultiTerminal name. Omit it: MultiTerminal fills in your name, and corrects a different one when it can tell who you are.",
             },
             message: {
               type: "string",
               description: "Message content",
             },
           },
-          required: ["fromTerminalId", "message"],
+          required: ["message"],
         },
       },
       {
@@ -3149,8 +3149,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "send_message": {
+        // Ticket eb585e6e: the model may not know its own name. Advisory, not authentication (cf017d24).
+        const sender = chooseSender(args.fromTerminalId, await resolveSenderIdentity());
+        if (sender.error) {
+          return { isError: true, content: [{ type: "text", text: `❌ Message NOT sent to ${args.to}: ${sender.error}.` }] };
+        }
+        const senderNote = sender.note ? `\n${sender.note}` : "";
         const sendPayload = {
-          fromTerminalId: args.fromTerminalId,
+          fromTerminalId: sender.from,
           to: args.to,
           message: args.message,
         };
@@ -3181,7 +3187,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             content: [
               {
                 type: "text",
-                text: `❌ Message NOT sent to ${args.to}${priorityLabel} — ${sendResult.error ?? "send rejected"}. Nothing was queued; nothing will retry.`,
+                text: `❌ Message NOT sent to ${args.to}${priorityLabel} — ${sendResult.error ?? "send rejected"}. Nothing was queued; nothing will retry.${senderNote}`,
               },
             ],
           };
@@ -3197,7 +3203,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         if (ownerName && args.to?.toLowerCase() === ownerName) {
           apiCall("/api/messaging/send", "POST", {
-            fromTerminalId: args.fromTerminalId,
+            fromTerminalId: sender.from,
             to: "ClaudeRemote",
             message: args.message,
           }).catch(() => {});
@@ -3209,9 +3215,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: "text",
-              text: confirmedDelivered
+              text: (confirmedDelivered
                 ? `✅ Message sent to ${args.to}${priorityLabel}`
-                : `📮 Message QUEUED for ${args.to}${priorityLabel} — their live channel is down; MT persisted it and will retry a limited number of times, and attempts an inbox-file copy as a backstop. Not confirmed received. [msg ${sendResult?.messageId ?? "?"}]`,
+                : `📮 Message QUEUED for ${args.to}${priorityLabel} — their live channel is down; MT persisted it and will retry a limited number of times, and attempts an inbox-file copy as a backstop. Not confirmed received. [msg ${sendResult?.messageId ?? "?"}]`) + senderNote,
             },
           ],
         };
@@ -3362,15 +3368,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "broadcast_message": {
+        // Same sender defaulting as send_message (ticket eb585e6e).
+        const sender = chooseSender(args.fromTerminalId, await resolveSenderIdentity());
+        if (sender.error) {
+          return { isError: true, content: [{ type: "text", text: `❌ Broadcast NOT sent: ${sender.error}.` }] };
+        }
         await apiCall("/api/messaging/broadcast", "POST", {
-          fromTerminalId: args.fromTerminalId,
+          fromTerminalId: sender.from,
           message: args.message,
         });
         return {
           content: [
             {
               type: "text",
-              text: `✅ Message broadcast to all terminals`,
+              text: `✅ Message broadcast to all terminals${sender.note ? `\n${sender.note}` : ""}`,
             },
           ],
         };
@@ -4229,6 +4240,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "reply_to_inbox": {
+        // No sender field to default (the reply attaches to an existing inbox message), but an
+        // unregistered ClarionAssistant tab may be reading another terminal's inbox (ticket eb585e6e).
+        const notRegistered = unregisteredError(await resolveSenderIdentity());
+        if (notRegistered) {
+          return { isError: true, content: [{ type: "text", text: `❌ Reply NOT sent: ${notRegistered}.` }] };
+        }
         await apiCall(`/api/tasks/inbox/${seg(args.messageId)}/reply`, "POST", {
           replyText: args.replyText,
         });
@@ -5953,6 +5970,121 @@ async function releasePreviousClaim(newName, deps = {}) {
   }
 }
 
+// ── Sender identity (ticket eb585e6e) ──
+// A model often does not know its own MultiTerminal name: a ClarionAssistant tab is never told it, and
+// an MT pane is told only once, at SessionStart. So send_message/broadcast_message work it out here.
+//
+// Only the LIVE answer is authoritative: the broker's row bound to this session's claude.exe (our
+// parent; the ownerPid every registration path binds). MULTITERMINAL_NAME is a launch-time snapshot,
+// so after a pane is renamed it is wrong, and it must never override a name the model gave.
+// claimedTerminalName is what THIS process last claimed, which the broker may since have refused or
+// replaced, so it is a default only, too.
+//
+// A ClarionAssistant session (CLARION_ASSISTANT_EMBEDDED, with or without a MULTITERMINAL_DOC_ID) is the
+// exception to the env default. A CA tab's MULTITERMINAL_NAME is only a REQUEST: CA picks a free-looking
+// name at launch, but its roster check can miss a clash (MT down, or two IDEs racing), and then the broker
+// refuses this tab and the name belongs to someone else. An embedded session WITH a docId inherited an MT
+// pane's environment (selfRegisterTerminal skips it for exactly that reason), so its env name is the
+// pane's, never its own. An MT pane is never embedded; its env name was pre-registered by MT for that
+// pane. So an embedded session with no live row and no successful claim is NOT REGISTERED and must not
+// send as anyone (Charlie, c175492a pipeline; debugger run 1). selfRegistrationOutcome says why.
+const SENDER_LOOKUP_TIMEOUT_MS = 1500;
+
+// The startup self-registration's outcome once it settles (null while it runs). Set by main().
+let selfRegistrationOutcome = null;
+
+/**
+ * { name, authoritative, unconfirmed? } for this session, { name: null } when it has none, or
+ * { name: null, unregistered: { as, outcome } } for a ClarionAssistant session that must not send.
+ * `unconfirmed` is set when the live lookup FAILED (as opposed to answering "no row"): the default
+ * may then be stale, and the caller says so rather than reporting a plausible success (adversary run 1).
+ * Never throws.
+ */
+async function resolveSenderIdentity(deps = {}) {
+  const env = deps.env || process.env;
+  const ppid = deps.ppid !== undefined ? deps.ppid : process.ppid;
+  const held = deps.held !== undefined ? deps.held : claimedTerminalName;
+  const outcome = deps.outcome !== undefined ? deps.outcome : selfRegistrationOutcome;
+  const embedded = deps.embedded !== undefined ? deps.embedded : isClarionEmbedded(env);
+  const get = deps.get || ((endpoint) => apiCall(endpoint, "GET", null, SENDER_LOOKUP_TIMEOUT_MS));
+
+  let unconfirmed = null;
+  if (Number.isInteger(ppid) && ppid > 0) {
+    try {
+      const live = await get(`/api/messaging/channel-identity?ppid=${encodeURIComponent(ppid)}`);
+      if (live && typeof live.name === "string" && live.name) return { name: live.name, authoritative: true };
+      unconfirmed = "MultiTerminal gave no name for this session";
+    } catch (e) {
+      // A 404 is an ANSWER: no live row is bound to our claude.exe. Anything else (timeout, MT down, an
+      // older MT without the route) means we could not ask.
+      if (!(e && e.status === 404)) unconfirmed = `could not reach MultiTerminal to confirm: ${e?.message ?? e}`;
+    }
+  }
+  const candidates = embedded ? [held] : [held, env.MULTITERMINAL_NAME];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || !candidate) continue;
+    // Many panes share the placeholder, so it identifies nobody. Trimmed and any case: deny-only.
+    if (candidate.trim().toUpperCase() === PLACEHOLDER_TERMINAL_NAME.toUpperCase()) continue;
+    return unconfirmed ? { name: candidate, authoritative: false, unconfirmed } : { name: candidate, authoritative: false };
+  }
+  if (embedded && env.MULTITERMINAL_NAME) {
+    return { name: null, authoritative: false, unregistered: { as: env.MULTITERMINAL_NAME, outcome } };
+  }
+  return { name: null, authoritative: false };
+}
+
+/**
+ * The error a ClarionAssistant session gets instead of sending, or null.
+ * CA's prompt tells the model to STOP and tell the developer when a tool says "not registered" or "held by
+ * another terminal": keep both phrases stable, and keep them OUT of the still-in-progress text, which is
+ * a few-second startup race the model should simply retry (code-reviewer run 1).
+ */
+function unregisteredError(resolved) {
+  const u = resolved && resolved.unregistered;
+  if (!u) return null;
+  if (u.outcome === null || u.outcome === undefined) {
+    return `this session's MultiTerminal registration as ${u.as} is still in progress; try again in a few seconds`;
+  }
+  const why = u.outcome === "refused"
+    ? `the name is held by another terminal, so MultiTerminal refused this session`
+    : u.outcome === "skipped"
+      ? `this session inherited another terminal's MultiTerminal environment, so it did not register`
+      : `MultiTerminal registration did not complete (${u.outcome})`;
+  return `this session is not registered as ${u.as}: ${why}. Do not send as ${u.as}; tell the developer`;
+}
+
+/**
+ * Which sender to send as, and what to tell the model. Pure.
+ * { from, note } or { error }. ADVISORY ONLY: REST can be called directly, so this proves nothing about
+ * who sent a message. Server-side binding of the sender is ticket cf017d24.
+ */
+function chooseSender(given, resolved) {
+  // Before anything else: a given name must not get an unregistered CA session past this, because the
+  // name it would give is exactly the one it was told and does not hold.
+  const notRegistered = unregisteredError(resolved);
+  if (notRegistered) return { error: notRegistered };
+  const hasGiven = typeof given === "string" && given.length > 0;
+  const own = resolved && resolved.name;
+  if (!hasGiven) {
+    if (!own) return { error: "fromTerminalId is required: this session has no MultiTerminal identity to default to" };
+    if (resolved.unconfirmed) {
+      return { from: own, note: `Sent as ${own}, but ${resolved.unconfirmed}. If this session was renamed, pass fromTerminalId.` };
+    }
+    return { from: own, note: null };
+  }
+  // A Task-tool subagent ("Agent <label>") shares its parent's MCP server, so the live lookup answers
+  // with the PARENT's name. Correcting would rewrite a right name to a wrong one, so pass it through.
+  // Mirrors MessageBroker.IsTemporaryAgent: StartsWith("Agent ", OrdinalIgnoreCase) (debugger run 1).
+  if (given.toUpperCase().startsWith("AGENT ")) return { from: given, note: null };
+  // Compared exactly as the broker keys names: OrdinalIgnoreCase, untrimmed. A given terminal id also
+  // lands here and passes through when no live identity disagrees; the broker accepts an id or a name.
+  if (own && resolved.authoritative && given.toUpperCase() !== own.toUpperCase()) {
+    return { from: own, note: `Sent as ${own} (your MultiTerminal name); you passed fromTerminalId "${given}".` };
+  }
+  return { from: given, note: null };
+}
+// ── end sender identity ──
+
 const IMAGE_LOOKUP_TIMEOUT_MS = 3000;
 
 function runExecFile(file, args, opts) {
@@ -6156,8 +6288,14 @@ async function registerEmbeddedTab(name, env, ppid, post, deps) {
         () => post("/api/messaging/register", buildRegisterPayload(name, undefined, ownEnv, ppid)),
         step ?? SELF_REGISTER_TIMEOUT_MS, "registration");
     } catch (e) {
-      console.error(`${tag}: registration refused or failed, no credentials posted: ${e?.message ?? e}`);
-      return "refused";
+      // "refused" ONLY when the broker answered no: MessagingController.RegisterTerminal returns 400 for
+      // every refused registration. In practice that is a name held by a live terminal; its only other 400
+      // (a freshly minted id colliding) is effectively unreachable. A timeout, an unreachable MT or any
+      // other status is "failed". The two reach the model as different errors (ticket eb585e6e): "held by
+      // another terminal" is a diagnosis, and it is wrong for a registration that never landed.
+      const refused = e && e.status === 400;
+      console.error(`${tag}: registration ${refused ? "refused" : "failed"}, no credentials posted: ${e?.message ?? e}`);
+      return refused ? "refused" : "failed";
     }
 
     claimedTerminalName = name;
@@ -6177,10 +6315,12 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   assertToolDefHandlerConsistency();
-  // Not awaited: startup must not wait on MT (task 54005ee7).
+  // Not awaited: startup must not wait on MT (task 54005ee7). The outcome feeds the sender check
+  // (ticket eb585e6e); selfRegisterTerminal never throws, but a rejection must not go unhandled either.
   selfRegisterTerminal(process.env, process.ppid,
     (endpoint, body) => apiCall(endpoint, "POST", body, SELF_REGISTER_TIMEOUT_MS),
-    { get: (endpoint) => apiCall(endpoint, "GET", null, HEALTH_TIMEOUT_MS) });
+    { get: (endpoint) => apiCall(endpoint, "GET", null, HEALTH_TIMEOUT_MS) })
+    .then((outcome) => { selfRegistrationOutcome = outcome; }, () => { selfRegistrationOutcome = "failed"; });
   console.error("MultiTerminal MCP server running on stdio");
   console.error(
     `  env: CLAUDE_PROJECT_DIR=${process.env.CLAUDE_PROJECT_DIR || "(unset)"}` +

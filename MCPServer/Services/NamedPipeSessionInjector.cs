@@ -134,7 +134,7 @@ namespace MultiTerminal.MCPServer.Services
         /// hook refuses control characters in the token before it ever reaches here, and the reason
         /// this does not hand-roll string concatenation.
         /// </remarks>
-        public static byte[] BuildPayload(string token, string fromName, string content)
+        public static byte[] BuildPayload(string token, string fromName, string content, string toName = null)
         {
             var auth = new JsonObject
             {
@@ -148,7 +148,7 @@ namespace MultiTerminal.MCPServer.Services
                 ["message"] = new JsonObject
                 {
                     ["role"] = "user",
-                    ["content"] = WrapForAttribution(fromName, content),
+                    ["content"] = WrapForAttribution(fromName, toName, content),
                 },
             };
 
@@ -168,12 +168,20 @@ namespace MultiTerminal.MCPServer.Services
         };
 
         /// <summary>
-        /// Names the sender inside the message body. See the class remarks: labelling, not a boundary.
+        /// Names the sender, and the recipient when known, inside the message body. See the class
+        /// remarks: labelling, not a boundary.
         /// </summary>
-        private static string WrapForAttribution(string fromName, string content)
+        /// <remarks>
+        /// The recipient is named because a session is often never told its own MultiTerminal name
+        /// (a ClarionAssistant tab never is), and the header is the one place it reliably sees it
+        /// (ticket eb585e6e). The prefix "[MultiTerminal message from " is unchanged: the plugin's
+        /// desktop-presence hook recognises injected messages by exactly that prefix.
+        /// </remarks>
+        private static string WrapForAttribution(string fromName, string toName, string content)
         {
             if (string.IsNullOrWhiteSpace(fromName)) return content ?? string.Empty;
-            return $"[MultiTerminal message from {fromName}]\n\n{content}";
+            if (string.IsNullOrWhiteSpace(toName)) return $"[MultiTerminal message from {fromName}]\n\n{content}";
+            return $"[MultiTerminal message from {fromName} to {toName}]\n\n{content}";
         }
 
         /// <inheritdoc />
@@ -202,7 +210,7 @@ namespace MultiTerminal.MCPServer.Services
             try
             {
                 // Built BEFORE connecting — see the class remarks on the 30-second empty-connection rule.
-                byte[] payload = BuildPayload(credential.Token, fromName, content);
+                byte[] payload = BuildPayload(credential.Token, fromName, content, terminalName);
 
                 using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.Out, PipeOptions.Asynchronous);
                 await pipe.ConnectAsync(ConnectTimeoutMs, cancellationToken).ConfigureAwait(false);

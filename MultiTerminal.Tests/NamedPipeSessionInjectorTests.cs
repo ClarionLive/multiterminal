@@ -117,6 +117,52 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public async Task The_message_names_its_recipient_over_a_real_pipe()
+        {
+            // Ticket eb585e6e. A session is often never told its own MultiTerminal name, so the header
+            // tells it. Driven through TryInjectAsync, not BuildPayload, because the defect this guards
+            // is the WIRING: TryInjectAsync knowing the recipient and not passing it on.
+            // The recipient "Zed" appears nowhere else in this test's inputs, so its presence in the
+            // body can only come from the terminalName argument.
+            string pipeName = NewPipeName();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+            Task<string> serverRead = ReadOneConnectionAsync(pipeName, cts.Token);
+
+            var store = new MessagingCredentialStore();
+            store.Store("Zed", "s", SocketPathFor(pipeName), Token);
+            var injector = new NamedPipeSessionInjector(store);
+
+            Assert.True(await injector.TryInjectAsync("Zed", "Bob", "ship it", cts.Token));
+
+            string wire = await serverRead;
+            string[] lines = wire.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            string content = JsonNode.Parse(lines[1])["message"]["content"].GetValue<string>();
+
+            Assert.StartsWith("[MultiTerminal message from Bob to Zed]\n\n", content, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void Header_keeps_the_prefix_the_plugin_hook_matches()
+        {
+            // The plugin's desktop-presence hook recognises an injected message by the regex
+            // /^\s*\[MultiTerminal message from /m. Naming the recipient must not change that prefix.
+            byte[] payload = NamedPipeSessionInjector.BuildPayload(Token, "Bob", "hi", "Zed");
+            string content = JsonNode.Parse(Encoding.UTF8.GetString(payload).Split('\n')[1])["message"]["content"].GetValue<string>();
+
+            Assert.Equal("[MultiTerminal message from Bob to Zed]\n\nhi", content);
+        }
+
+        [Fact]
+        public void No_recipient_keeps_the_legacy_header()
+        {
+            byte[] payload = NamedPipeSessionInjector.BuildPayload(Token, "Bob", "hi", "  ");
+            string content = JsonNode.Parse(Encoding.UTF8.GetString(payload).Split('\n')[1])["message"]["content"].GetValue<string>();
+
+            Assert.Equal("[MultiTerminal message from Bob]\n\nhi", content);
+        }
+
+        [Fact]
         public void A_newline_in_the_body_cannot_forge_a_second_frame()
         {
             // The frame separator is '\n', so an un-escaped body containing one would split into two

@@ -267,7 +267,27 @@ test("main() starts self-registration without awaiting it, on the short timeouts
   assert.match(body, /apiCall\(endpoint, "POST", body, SELF_REGISTER_TIMEOUT_MS\)/);
   assert.match(body, /get: \(endpoint\) => apiCall\(endpoint, "GET", null, HEALTH_TIMEOUT_MS\)/);
   assert.doesNotMatch(body, /await\s+selfRegisterTerminal/);
-  assert.doesNotMatch(body, /selfRegisterTerminal\([^;]*\)\s*\.then/);
+  // Ticket eb585e6e: main() now RECORDS the outcome for the sender check. That one .then is allowed, and
+  // pinned exactly: both handlers may only assign selfRegistrationOutcome. Anything else chained here
+  // (more startup work, an await) is what this fact exists to keep out, so it still fails.
+  // (A first version matched the handlers with [^;]*, which never matched because the handlers contain
+  // ';', so the pin silently never ran. Falsification caught it. Hence the explicit "found" assert.)
+  // The statement ends at the first ';' that ends a line; the handlers' own ';' are followed by ' }'.
+  const call = body.indexOf("selfRegisterTerminal(process.env");
+  assert.ok(call >= 0, "self-registration call not found in main()");
+  const end = /;[ \t]*\r?\n/.exec(body.slice(call));
+  assert.ok(end, "end of the self-registration statement not found");
+  const statement = body.slice(call, call + end.index + 1);
+  const thenAt = statement.indexOf(".then(");
+  if (thenAt >= 0) {
+    const chained = /\.then\(([\s\S]*)\);$/.exec(statement.slice(thenAt));
+    assert.ok(chained, "found a .then on self-registration but could not read its handlers");
+    assert.equal(
+      chained[1].replace(/\s+/g, " ").trim(),
+      '(outcome) => { selfRegistrationOutcome = outcome; }, () => { selfRegistrationOutcome = "failed"; }',
+      "main() chains more onto self-registration than recording its outcome",
+    );
+  }
 });
 
 // ── Amendment (a): the shared placeholder is never self-registered ──────────────────────────────────
@@ -433,7 +453,9 @@ test("CA: unreachable twice, then healthy -> registers (an MT that starts after 
 
 test("CA: definitive refusals are not retried: register refused, wrong parent, wrong service marker", async () => {
   const cases = [
-    [{ register: async () => { const e = new Error("API error: 409 — name held"); e.status = 409; throw e; } }, "refused",
+    // 400, not 409: MessagingController.RegisterTerminal answers every refused registration with 400, and
+    // since ticket eb585e6e only that status counts as "refused" (anything else is "failed").
+    [{ register: async () => { const e = new Error("API error: 400 — name held"); e.status = 400; throw e; } }, "refused",
       ["get /api/health", "image 777", "post /api/messaging/register"]],
     [{ image: "node.exe" }, "wrong-parent", ["get /api/health", "image 777"]],
     [{ health: { service: "something-else", capabilities: ["ca-embedded-v1"] } }, "not-multiterminal", ["get /api/health"]],
@@ -547,10 +569,14 @@ test("CA: a refused, failed or hung registration posts no credentials and record
   const refused = async () => { const e = new Error("API error: 400 — name in use"); e.status = 400; throw e; };
   const syncThrow = () => { throw new TypeError("boom"); };
   const hang = () => new Promise(() => {});
-  for (const register of [refused, syncThrow, hang]) {
+  // Ticket eb585e6e: only a broker "no" is "refused"; a throw or a hang is "failed". The outcome word now
+  // reaches the model ("held by another terminal" vs "did not complete"), so it must not conflate them.
+  // A status that is NOT the broker's refusal: separates "status is 400" from "has a status".
+  const serverError = async () => { const e = new Error("API error: 500"); e.status = 500; throw e; };
+  for (const [register, expected] of [[refused, "refused"], [serverError, "failed"], [syncThrow, "failed"], [hang, "failed"]]) {
     const { mod } = load();
     const h = harness({ register });
-    assert.equal(await within(mod.selfRegisterTerminal(CA_ENV, 777, h.post, h.deps)), "refused");
+    assert.equal(await within(mod.selfRegisterTerminal(CA_ENV, 777, h.post, h.deps)), expected);
     assert.deepEqual(h.seq, ["get /api/health", "image 777", "post /api/messaging/register"]);
     assert.equal(mod.getClaimed(), null);
   }
