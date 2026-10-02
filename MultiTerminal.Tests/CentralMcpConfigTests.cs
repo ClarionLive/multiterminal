@@ -237,9 +237,9 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
-        /// Task a796e5f9: the launch path used to heal only when the file was ABSENT, so a file that broke
-        /// after startup was handed to every terminal until MultiTerminal restarted. The heal now runs
-        /// before every launch, including when a file is there.
+        /// Task a796e5f9: <see cref="CentralMcpConfig.PathForLaunch"/> runs the heal even when a file is
+        /// there. (<c>LaunchCommandBuilder.GetMcpConfigPath</c> delegates to it; that one line is not
+        /// pinned here, because it targets the real <c>%APPDATA%</c> path.)
         /// </summary>
         [Fact]
         public void PathForLaunch_heals_even_when_a_file_exists()
@@ -268,6 +268,42 @@ namespace MultiTerminal.Tests
 
             Assert.Equal(path, result);
             Assert.Null(CentralMcpConfig.WhyUnhealthy(File.ReadAllText(path), Both, exists));
+        }
+
+        /// <summary>
+        /// Pipeline Run 1 (adversary, security): the heal runs before every launch, so a path that is
+        /// missing for a moment must not cost a person the servers they added. Only the broken core entry
+        /// is replaced. Falsified: a whole-file overwrite turns this red.
+        /// </summary>
+        [Fact]
+        public void A_user_added_server_survives_a_heal()
+        {
+            Directory.CreateDirectory(_tempDir);
+            string path = Path.Combine(_tempDir, ".mcp.json");
+            File.WriteAllText(path, Config(PublishExe, IndexJs).Replace(
+                "\"mcpServers\": {", "\"mcpServers\": {\n    \"hand-added\": { \"command\": \"python\", \"args\": [\"x.py\"] },", StringComparison.Ordinal));
+            var exists = Existing(InstalledExe, IndexJs); // PublishExe has gone
+
+            var outcome = CentralMcpConfig.Ensure(path, Both, exists, log: null);
+
+            Assert.Equal(CentralMcpConfig.Outcome.Written, outcome);
+            JsonNode servers = JsonNode.Parse(File.ReadAllText(path))!["mcpServers"]!;
+            Assert.Equal("python", (string?)servers["hand-added"]!["command"]);
+            Assert.Equal(InstalledExe, (string?)servers["mcp-gateway"]!["command"]);
+            Assert.Equal(IndexJs, (string?)servers["multiterminal"]!["args"]![0]);
+        }
+
+        /// <summary>A healthy core entry is not replaced when its sibling is: here only the missing 'multiterminal' is added.</summary>
+        [Fact]
+        public void A_heal_replaces_only_the_core_entry_that_needs_it()
+        {
+            const string OnlyGateway = """{ "mcpServers": { "mcp-gateway": { "command": "dotnet", "args": ["run", "--project", "D:\\keep\\me"] } } }""";
+
+            string healed = CentralMcpConfig.Heal(OnlyGateway, Both, Existing(@"D:\keep\me", IndexJs))!;
+
+            JsonNode servers = JsonNode.Parse(healed)!["mcpServers"]!;
+            Assert.Equal(@"D:\keep\me", (string?)servers["mcp-gateway"]!["args"]![2]);
+            Assert.Equal(IndexJs, (string?)servers["multiterminal"]!["args"]![0]);
         }
 
         [Fact]

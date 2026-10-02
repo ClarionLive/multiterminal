@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -22,8 +23,9 @@ namespace MultiTerminal.Services
     /// it would have replaced a hand-set gateway build with whichever build the resolver found first —
     /// silently, on every launch. A config nobody asked to change should not change.</para>
     ///
-    /// <para>Only the two core entries are inspected. Any other server a person added is left alone,
-    /// and survives a heal only if the heal is needed at all.</para>
+    /// <para>Only the two core entries are inspected, and a heal replaces only those (see
+    /// <see cref="Heal"/>). Any other server a person added survives a heal, unless the whole file
+    /// cannot be read as JSON.</para>
     /// </summary>
     internal static class CentralMcpConfig
     {
@@ -175,15 +177,14 @@ namespace MultiTerminal.Services
                 if (reason == null)
                     return Outcome.Healthy;
 
-                string? json = Generate(sources);
+                string? json = Heal(existing, sources, pathExists);
                 if (json == null)
                 {
-                    log?.Invoke($"{configPath} needs healing ({reason}), but no core MCP server can be generated; left as is");
+                    log?.Invoke($"{configPath} needs healing ({reason}), but nothing it lacks can be generated; left as is");
                     return Outcome.NothingToWrite;
                 }
 
-                Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
-                File.WriteAllText(configPath, json, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                WriteAtomically(configPath, json);
                 log?.Invoke($"Wrote {configPath} ({reason})");
                 return Outcome.Written;
             }
@@ -191,6 +192,77 @@ namespace MultiTerminal.Services
             {
                 log?.Invoke($"Could not heal {configPath}: {ex.Message}");
                 return Outcome.Failed;
+            }
+        }
+
+        /// <summary>
+        /// The JSON to write for an unhealthy file, or null when nothing it lacks can be generated.
+        /// MERGES (task a796e5f9): only a core entry that is missing or names a path that does not exist
+        /// is replaced; every other server a person added, and every other root property, is kept. The
+        /// heal now runs before every launch, so a path that is missing for a moment must not cost
+        /// anyone their own servers. Only a file that cannot be read as a JSON object (unparseable, a
+        /// repeated key, the wrong shape) is replaced whole, because there is nothing to merge into.
+        /// </summary>
+        internal static string? Heal(string? existingJson, Sources sources, Func<string, bool> pathExists)
+        {
+            string? generated = Generate(sources);
+            if (generated == null)
+                return null;
+            if (existingJson == null)
+                return generated;
+
+            try
+            {
+                if (JsonNode.Parse(existingJson) is not JsonObject root)
+                    return generated;
+                if (root["mcpServers"] is not JsonObject servers)
+                    root["mcpServers"] = servers = new JsonObject();
+
+                var fresh = (JsonObject)JsonNode.Parse(generated)!["mcpServers"]!;
+                bool changed = false;
+                foreach (string name in new[] { GatewayServerName, MultiTerminalServerName })
+                {
+                    if (!fresh.TryGetPropertyValue(name, out JsonNode? replacement) || replacement == null)
+                        continue;
+                    if (servers.TryGetPropertyValue(name, out JsonNode? current) && current is JsonObject currentObject
+                        && RootedPaths(currentObject).All(pathExists))
+                        continue;
+
+                    servers[name] = replacement.DeepClone();
+                    changed = true;
+                }
+
+                return changed ? root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) : null;
+            }
+            catch (JsonException)
+            {
+                return generated;
+            }
+            catch (ArgumentException)
+            {
+                // A repeated key: JsonObject throws on first access (see WhyUnhealthy).
+                return generated;
+            }
+        }
+
+        /// <summary>
+        /// Writes through a temp file in the same directory and a replace-move, so a reader (a launching
+        /// terminal, Claude Code) never sees a half-written file.
+        /// </summary>
+        private static void WriteAtomically(string configPath, string json)
+        {
+            string dir = Path.GetDirectoryName(configPath)!;
+            Directory.CreateDirectory(dir);
+            string temp = Path.Combine(dir, $".mcp.json.{Guid.NewGuid():N}.tmp");
+            try
+            {
+                File.WriteAllText(temp, json, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                File.Move(temp, configPath, overwrite: true);
+            }
+            finally
+            {
+                if (File.Exists(temp))
+                    File.Delete(temp);
             }
         }
 

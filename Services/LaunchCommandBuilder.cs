@@ -603,11 +603,20 @@ namespace MultiTerminal.Services
         /// </summary>
         public static string GetMcpConfigPath()
         {
+            Action<string> log = _log == null ? null : msg => _log.Info("LaunchCommandBuilder", msg);
             return CentralMcpConfig.PathForLaunch(
                 CentralMcpConfig.DefaultPath,
-                () => CentralMcpConfig.EnsureDefault(log: null),
-                log: null);
+                () => CentralMcpConfig.EnsureDefault(log),
+                log);
         }
+
+        private static DebugLogService _log;
+
+        /// <summary>
+        /// Wires the shared <see cref="DebugLogService"/> sink for the launch-time .mcp.json heal. Called
+        /// once by MainForm. Unwired (or in unit tests), heal outcomes are simply not logged.
+        /// </summary>
+        public static void SetLogger(DebugLogService logger) => _log = logger;
 
         /// <summary>
         /// Resolves the working directory for Claude Code to start in.

@@ -243,8 +243,8 @@ namespace MultiTerminal.Services
         /// Ensures %APPDATA%\multiterminal\.mcp.json exists and works, so every launch can pass it via
         /// --mcp-config (LaunchCommandBuilder). Heals a missing or broken file and never rewrites a
         /// healthy one; see <see cref="CentralMcpConfig"/> for why (task cb4883b6, GitHub #8).
-        /// Called once at startup; <see cref="LaunchCommandBuilder.GetMcpConfigPath"/> heals again at
-        /// launch if the file has gone missing since.
+        /// Called once at startup; <see cref="LaunchCommandBuilder.GetMcpConfigPath"/> runs the same heal
+        /// before every launch, so a file that goes missing or breaks later is repaired too (task a796e5f9).
         /// </summary>
         public void EnsureGatewayRegistered()
         {
