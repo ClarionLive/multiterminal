@@ -41,17 +41,23 @@ namespace MultiTerminal.Terminal
             }
 
             if (data.GetDataPresent(DataFormats.UnicodeText, true) &&
-                data.GetData(DataFormats.UnicodeText, true) is string text &&
-                text.Length > 0)
+                data.GetData(DataFormats.UnicodeText, true) is string text)
             {
-                return text;
+                string clean = StripControlCharacters(text);
+                if (clean.Length > 0)
+                {
+                    return clean;
+                }
             }
 
             if (data.GetDataPresent(DataFormats.Bitmap, true) &&
-                data.GetData(DataFormats.Bitmap, true) is Image image)
+                data.GetData(DataFormats.Bitmap, true) is Image clipboardImage)
             {
-                string path = SaveImage(image, imageDirectory, now);
-                return FormatPathForPaste(path);
+                using (Image image = clipboardImage)
+                {
+                    string path = SaveImage(image, imageDirectory, now);
+                    return FormatPathForPaste(path);
+                }
             }
 
             return null;
@@ -78,11 +84,34 @@ namespace MultiTerminal.Terminal
         }
 
         /// <summary>
-        /// Quotes a path containing a space, as Windows Terminal does for a dropped file, so the
-        /// app reads it as one path rather than several words.
+        /// Removes C0 control characters except tab, CR and LF — as Windows Terminal does on paste.
+        /// This drops every ESC, so clipboard text cannot carry its own <c>ESC[201~</c> to end the
+        /// bracketed paste early and have the rest run as typed input (paste-jacking).
+        /// C1 controls (U+0080–U+009F) and DEL are left alone.
+        /// </summary>
+        internal static string StripControlCharacters(string text)
+        {
+            var sb = new System.Text.StringBuilder(text.Length);
+            foreach (char c in text)
+            {
+                if (c >= 0x20 || c == '\t' || c == '\r' || c == '\n')
+                {
+                    sb.Append(c);
+                }
+            }
+
+            return sb.ToString();
+        }
+
+        /// <summary>Characters that make a pasted path unsafe to leave unquoted in a shell.</summary>
+        private const string PathCharsNeedingQuotes = " '&$;()`,{}[]^%!|<>@#=";
+
+        /// <summary>
+        /// Quotes a path containing a space or a shell metacharacter, as Windows Terminal does for
+        /// a dropped file, so the app reads it as one path rather than words or shell syntax.
         /// </summary>
         internal static string FormatPathForPaste(string path) =>
-            path.Contains(' ', StringComparison.Ordinal) ? "\"" + path + "\"" : path;
+            path.IndexOfAny(PathCharsNeedingQuotes.ToCharArray()) >= 0 ? "\"" + path + "\"" : path;
 
         private static void PruneOldImages(string directory, DateTime now)
         {

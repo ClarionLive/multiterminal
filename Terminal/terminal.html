@@ -361,9 +361,15 @@
             //    right-click is one action (MT's) and never also the app's.
             // Stopping propagation here also skips the bubble-phase 'terminalclick' listener
             // further down, so the right mousedown sends it itself (it closes an open menu).
+            //
+            // rightButtonPressed marks a contextmenu as mouse-driven. The Apps/Menu key and
+            // Shift+F10 fire contextmenu with no mousedown before it; those open the menu and must
+            // never paste the clipboard unasked (in cmd.exe a multi-line paste executes).
+            let rightButtonPressed = false;
             container.addEventListener('mousedown', (e) => {
                 if (e.button === 2) {
                     e.stopPropagation();
+                    rightButtonPressed = true;
                     sendToHost({ type: 'terminalclick' });
                 }
             }, true);
@@ -377,8 +383,10 @@
                 e.preventDefault();
                 e.stopPropagation();
                 const selectedText = (term && term.hasSelection()) ? term.getSelection() : '';
+                const fromMouse = rightButtonPressed;
+                rightButtonPressed = false;
 
-                if (e.shiftKey) {
+                if (e.shiftKey || !fromMouse) {
                     sendToHost({
                         type: 'contextmenu',
                         x: e.clientX,
@@ -438,6 +446,8 @@
             return btoa(binary);
         }
 
+        // Shared by terminal output ('data') and pastes ('paste'). The & 0xFF mask is needed for
+        // multi-byte UTF-8 (emoji).
         function base64ToUtf8(b64) {
             const binaryString = atob(b64);
             const bytes = new Uint8Array(binaryString.length);
@@ -531,15 +541,8 @@
 
                     switch (command) {
                         case 'data':
-                            // Base64 encoded terminal data - decode as UTF-8
-                            // Note: Must mask with 0xFF to handle multi-byte UTF-8 chars (emojis)
-                            const binaryString = atob(data);
-                            const bytes = new Uint8Array(binaryString.length);
-                            for (let i = 0; i < binaryString.length; i++) {
-                                bytes[i] = binaryString.charCodeAt(i) & 0xFF;
-                            }
-                            const text = new TextDecoder('utf-8').decode(bytes);
-                            term.write(text);
+                            // Base64 encoded terminal data - decode as UTF-8 (see base64ToUtf8)
+                            term.write(base64ToUtf8(data));
                             break;
 
                         case 'theme':

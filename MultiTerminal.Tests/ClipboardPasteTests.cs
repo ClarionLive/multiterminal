@@ -112,10 +112,50 @@ namespace MultiTerminal.Tests
             Assert.True(File.Exists(unrelated), "only MT's own paste-*.png files are pruned");
         }
 
+        /// <summary>
+        /// Paste-jacking: clipboard text carrying its own ESC[201~ would end the bracketed paste
+        /// early, and everything after it would reach the app as typed input — here a command plus
+        /// Enter. Every ESC must be gone. Falsified: letting 0x1B through the filter turns this red.
+        /// </summary>
+        [Fact]
+        public void An_embedded_bracketed_paste_terminator_arrives_without_its_ESC()
+        {
+            var data = new DataObject();
+            data.SetData(DataFormats.UnicodeText, "notes\u001b[201~rm -rf ~\r");
+
+            string result = ClipboardPaste.ResolvePasteText(data, _dir, DateTime.Now);
+
+            Assert.Equal("notes[201~rm -rf ~\r", result);
+            Assert.DoesNotContain('\u001b', result);
+        }
+
+        [Fact]
+        public void Tab_CR_and_LF_survive_and_other_C0_controls_are_stripped()
+        {
+            Assert.Equal("a\tb\r\nc", ClipboardPaste.StripControlCharacters("a\tb\r\nc"));
+            Assert.Equal("xyz", ClipboardPaste.StripControlCharacters("\u0000x\u0003y\u0007\u001bz\u001f"));
+        }
+
+        [Fact]
+        public void Text_made_only_of_control_characters_pastes_nothing()
+        {
+            var data = new DataObject();
+            data.SetData(DataFormats.UnicodeText, "\u001b\u0003");
+
+            Assert.Null(ClipboardPaste.ResolvePasteText(data, _dir, DateTime.Now));
+        }
+
         [Theory]
         [InlineData(@"C:\Temp\paste-1.png", @"C:\Temp\paste-1.png")]
+        [InlineData(@"C:\Users\JOHNHI~1\AppData\Local\Temp\paste-1.png", @"C:\Users\JOHNHI~1\AppData\Local\Temp\paste-1.png")]
         [InlineData(@"C:\Users\John Smith\AppData\Local\Temp\paste-1.png", "\"C:\\Users\\John Smith\\AppData\\Local\\Temp\\paste-1.png\"")]
-        public void A_path_is_quoted_only_when_it_contains_a_space(string path, string expected)
+        [InlineData(@"C:\Users\R&D\paste-1.png", "\"C:\\Users\\R&D\\paste-1.png\"")]
+        [InlineData(@"C:\Users\o'brien\paste-1.png", "\"C:\\Users\\o'brien\\paste-1.png\"")]
+        [InlineData(@"C:\Users\a;b\paste-1.png", "\"C:\\Users\\a;b\\paste-1.png\"")]
+        [InlineData(@"C:\Users\$x\paste-1.png", "\"C:\\Users\\$x\\paste-1.png\"")]
+        [InlineData(@"C:\Users\a(1)\paste-1.png", "\"C:\\Users\\a(1)\\paste-1.png\"")]
+        [InlineData(@"C:\Users\a`b\paste-1.png", "\"C:\\Users\\a`b\\paste-1.png\"")]
+        public void A_path_is_quoted_when_it_contains_a_space_or_shell_metacharacter(string path, string expected)
         {
             Assert.Equal(expected, ClipboardPaste.FormatPathForPaste(path));
         }

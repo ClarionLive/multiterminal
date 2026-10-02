@@ -405,6 +405,15 @@ namespace MultiTerminal.Terminal
         /// <summary>Inputs at least this long (a paste, not a keystroke) are logged with their size.</summary>
         private const int LargeInputLogThreshold = 1024;
 
+        private static readonly byte[] BracketedPasteStart = Encoding.ASCII.GetBytes("\x1b[200~");
+        private static readonly byte[] BracketedPasteEnd = Encoding.ASCII.GetBytes("\x1b[201~");
+
+        private static bool StartsWith(byte[] data, byte[] prefix) =>
+            data.Length >= prefix.Length && data.AsSpan(0, prefix.Length).SequenceEqual(prefix);
+
+        private static bool EndsWith(byte[] data, byte[] suffix) =>
+            data.Length >= suffix.Length && data.AsSpan(data.Length - suffix.Length).SequenceEqual(suffix);
+
         private void OnTerminalInput(string base64Data)
         {
             if (string.IsNullOrEmpty(base64Data)) return;
@@ -433,11 +442,18 @@ namespace MultiTerminal.Terminal
                     return; // Don't send to terminal
                 }
 
-                if (data.Length >= LargeInputLogThreshold)
+                bool bracketed = StartsWith(data, BracketedPasteStart);
+                if (bracketed || data.Length >= LargeInputLogThreshold)
                 {
                     // A paste arrives as one input message. Logging its size lets a truncated
                     // paste (GH #24.3) be told apart: was it short here, or lost after ConPTY?
-                    DebugLogService?.Info("WebViewTerminalRenderer", $"Input: {data.Length} bytes forwarded to ConPTY");
+                    // For a bracketed paste, also whether the closing ESC[201~ is present — a
+                    // lost closer leaves the app stuck inside the paste. Sizes and flags only,
+                    // never content.
+                    string bracketInfo = bracketed
+                        ? $" (bracketed: starts=true, ends={EndsWith(data, BracketedPasteEnd).ToString().ToLowerInvariant()})"
+                        : string.Empty;
+                    DebugLogService?.Info("WebViewTerminalRenderer", $"Input: {data.Length} bytes forwarded to ConPTY{bracketInfo}");
                 }
 
                 DataReceived?.Invoke(data);
@@ -487,7 +503,11 @@ namespace MultiTerminal.Terminal
         /// </summary>
         public void PasteFromClipboard()
         {
-            if (!_isInitialized || _webView?.CoreWebView2 == null) return;
+            if (!_isInitialized || _webView?.CoreWebView2 == null)
+            {
+                DebugLogService?.Info("WebViewTerminalRenderer", "Paste ignored: terminal view not ready");
+                return;
+            }
 
             string text;
             try
