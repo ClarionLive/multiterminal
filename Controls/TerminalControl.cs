@@ -87,6 +87,11 @@ namespace MultiTerminal.Controls
         public event EventHandler<TerminalContextMenuEventArgs> ContextMenuRequested;
 
         /// <summary>
+        /// Event fired when Esc is pressed while the context menu is open; the owner closes the menu.
+        /// </summary>
+        public event EventHandler ContextMenuDismissRequested;
+
+        /// <summary>
         /// Event fired when the terminal is clicked.
         /// </summary>
         public event EventHandler TerminalClicked;
@@ -149,6 +154,7 @@ namespace MultiTerminal.Controls
             _renderer.CtrlEnterKeyPressed += OnRendererCtrlEnterKeyPressed;
             _renderer.AltVKeyPressed += OnRendererAltVKeyPressed;
             _renderer.ContextMenuRequested += OnRendererContextMenuRequested;
+            _renderer.ContextMenuDismissRequested += OnRendererContextMenuDismissRequested;
             _renderer.TerminalClicked += OnRendererTerminalClicked;
 
             Controls.Add(_renderer);
@@ -289,6 +295,24 @@ namespace MultiTerminal.Controls
         public void Write(byte[] data)
         {
             _terminal?.Write(data);
+        }
+
+        /// <summary>
+        /// Pastes the clipboard through xterm.js (bracketed paste) — the same path as Ctrl+V and
+        /// right-click. Use this, not <see cref="Write(string)"/>, for a user paste (GH #24).
+        /// </summary>
+        public void PasteFromClipboard()
+        {
+            _renderer?.PasteFromClipboard();
+        }
+
+        /// <summary>
+        /// Tells the renderer the context menu is open/closed so Esc dismisses it without reaching
+        /// the app.
+        /// </summary>
+        public void SetContextMenuOpen(bool open)
+        {
+            _renderer?.SetContextMenuOpen(open);
         }
 
         /// <summary>
@@ -948,6 +972,11 @@ namespace MultiTerminal.Controls
             ContextMenuRequested?.Invoke(this, e);
         }
 
+        private void OnRendererContextMenuDismissRequested(object sender, EventArgs e)
+        {
+            ContextMenuDismissRequested?.Invoke(this, e);
+        }
+
         /// <summary>
         /// Handles terminal click from the renderer.
         /// </summary>
@@ -975,6 +1004,7 @@ namespace MultiTerminal.Controls
                     _renderer.CtrlEnterKeyPressed -= OnRendererCtrlEnterKeyPressed;
                     _renderer.AltVKeyPressed -= OnRendererAltVKeyPressed;
                     _renderer.ContextMenuRequested -= OnRendererContextMenuRequested;
+                    _renderer.ContextMenuDismissRequested -= OnRendererContextMenuDismissRequested;
                     _renderer.TerminalClicked -= OnRendererTerminalClicked;
                 }
 

@@ -174,9 +174,12 @@ namespace MultiTerminal.Terminal
                 _inputWriter.Write(data, 0, data.Length);
                 _inputWriter.Flush();
             }
-            catch (IOException)
+            catch (IOException ex)
             {
-                // Pipe broken - process likely exited
+                // Pipe broken - process likely exited. Logged, not silent: a write that fails
+                // here drops the whole input, which is indistinguishable from a truncated paste
+                // (GH #24.3) unless it leaves a trace.
+                DebugLogService?.Error("ConPtyTerminal", $"Input write of {data.Length} bytes failed: {ex.Message}");
             }
         }
 

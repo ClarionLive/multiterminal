@@ -629,6 +629,7 @@ namespace MultiTerminal.Docking
             _terminal.TitleChanged += OnTerminalTitleChanged;
             _terminal.ProcessExited += OnTerminalProcessExited;
             _terminal.ContextMenuRequested += OnTerminalContextMenuRequested;
+            _terminal.ContextMenuDismissRequested += OnTerminalContextMenuDismissRequested;
             _terminal.Ready += (s, e) => TerminalReady?.Invoke(this, EventArgs.Empty);
             _terminal.RendererReady += (s, e) => RendererReady?.Invoke(this, EventArgs.Empty);
             _terminal.ClaudeCodeDetected += (s, e) => ClaudeCodeDetected?.Invoke(this, EventArgs.Empty);
@@ -2314,16 +2315,11 @@ namespace MultiTerminal.Docking
             };
             menu.Items.Add(copyItem);
 
-            // Paste
+            // Paste — through the same path as Ctrl+V and right-click (bracketed paste via
+            // xterm.js; a bitmap is pasted as a saved PNG's path). GH #24.
             var pasteItem = new ToolStripMenuItem("Paste");
-            pasteItem.Enabled = Clipboard.ContainsText();
-            pasteItem.Click += (s, args) =>
-            {
-                if (Clipboard.ContainsText())
-                {
-                    _terminal.Write(Clipboard.GetText());
-                }
-            };
+            pasteItem.Enabled = Clipboard.ContainsText() || Clipboard.ContainsImage();
+            pasteItem.Click += (s, args) => _terminal.PasteFromClipboard();
             menu.Items.Add(pasteItem);
 
             // Save as Prompt
@@ -2369,9 +2365,26 @@ namespace MultiTerminal.Docking
                 menu.Items.Add(launchAsMenu);
             }
 
+            // Tell xterm.js the menu is up, so an Esc pressed to dismiss it is swallowed rather
+            // than reaching the app as an abort (GH #24). Cleared however the menu closes.
+            menu.Closed += (s, args) =>
+            {
+                _terminal?.SetContextMenuOpen(false);
+                if (ReferenceEquals(_currentContextMenu, menu))
+                {
+                    _currentContextMenu = null;
+                }
+            };
+
             // Show menu (store reference so it can be closed on terminal click)
             _currentContextMenu = menu;
+            _terminal.SetContextMenuOpen(true);
             menu.Show(_terminal, e.Location);
+        }
+
+        private void OnTerminalContextMenuDismissRequested(object sender, EventArgs e)
+        {
+            _currentContextMenu?.Close();
         }
 
         /// <summary>
@@ -3947,6 +3960,7 @@ namespace MultiTerminal.Docking
                     _terminal.TitleChanged -= OnTerminalTitleChanged;
                     _terminal.ProcessExited -= OnTerminalProcessExited;
                     _terminal.ContextMenuRequested -= OnTerminalContextMenuRequested;
+                    _terminal.ContextMenuDismissRequested -= OnTerminalContextMenuDismissRequested;
                     _terminal.Stop();
                     _terminal.Dispose();
                     _terminal = null;
