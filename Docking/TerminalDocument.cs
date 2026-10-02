@@ -2654,6 +2654,16 @@ namespace MultiTerminal.Docking
                 return;
             }
             if (!string.Equals(args.AgentName, _originalAgentName, StringComparison.Ordinal)) return;
+
+            // The header's "working on" marker follows the active task (task 19a26090). Before the
+            // _hudGit check, so a pane without a Git HUD still refreshes. The event fires after the
+            // broker swapped the task's state, so the in-memory read in UpdateStatusBar sees it.
+            try
+            {
+                if (IsHandleCreated && !IsDisposed) BeginInvoke(new Action(UpdateStatusBar));
+            }
+            catch (InvalidOperationException) { /* handle torn down between the check and the post */ }
+
             if (_hudGit == null) return;
 
             // Re-resolve worktree path AND projectId from broker-owned state
@@ -2779,23 +2789,27 @@ namespace MultiTerminal.Docking
                 _debugLogService?.Trace("TerminalDocument", $"UpdateStatusBar: _messageBroker is null, updating with name only: {terminalName}");
             }
 
-            // Look up project by working directory path. If the folder isn't a
-            // registered MT project, fall back to the folder's leaf name so Row 1
-            // still shows something meaningful (not the agent name).
+            // Look up the project that CONTAINS the working directory, so a task worktree
+            // (<root>\.claude\worktrees\<id>\...) shows its project rather than the worktree's
+            // folder name (task 19a26090). The statusline drift block already resolved this way;
+            // this exact-path match was the one place that did not. If the folder isn't under a
+            // registered MT project, fall back to the folder's leaf name so Row 1 still shows
+            // something meaningful (not the agent name).
             string projectName = null;
+            string projectId = null;
             string projectDescription = null;
             string workDir = GetWorkingDirectory();
+            List<MultiTerminal.Models.ProjectRegistryEntry> projects = null;
             if (_messageBroker?.ProjectService != null && !string.IsNullOrEmpty(workDir))
             {
                 try
                 {
-                    var projects = _messageBroker.ProjectService.GetAllRegisteredProjects();
-                    var matchedEntry = projects.FirstOrDefault(p =>
-                        !string.IsNullOrEmpty(p.Path) &&
-                        string.Equals(p.Path.TrimEnd('\\', '/'), workDir.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase));
+                    projects = _messageBroker.ProjectService.GetAllRegisteredProjects();
+                    var matchedEntry = MultiTerminal.Services.ProjectPathResolver.ResolveByContainment(projects, workDir);
                     if (matchedEntry != null)
                     {
                         projectName = matchedEntry.Name;
+                        projectId = matchedEntry.Id;
                         // Load full project for description
                         var fullProject = _messageBroker.ProjectService.LoadProject(matchedEntry.Path);
                         if (fullProject != null)
@@ -2809,6 +2823,31 @@ namespace MultiTerminal.Docking
                 projectName = System.IO.Path.GetFileName(workDir.TrimEnd('\\', '/'));
             }
 
+            // "Working on: X" when the active task belongs to another project (Owner decision,
+            // task 19a26090). Keyed by the stable identity, not the displayed title, for the same
+            // reason the statusline is. The Attention card reads these two properties rather than
+            // recomputing them, so the header and the card cannot describe this pane differently.
+            string workingOn = null;
+            if (_messageBroker != null)
+            {
+                try
+                {
+                    // The registry list fetched above (the same source GetProjectsList reads), so
+                    // the header does not load the registry twice per refresh.
+                    projects ??= _messageBroker.ProjectService?.GetAllRegisteredProjects();
+                    var projectNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var p in projects ?? new List<MultiTerminal.Models.ProjectRegistryEntry>())
+                    {
+                        if (p?.Id != null && !string.IsNullOrWhiteSpace(p.Name)) projectNames[p.Id] = p.Name;
+                    }
+                    workingOn = MultiTerminal.Services.WorkingOnProject.Resolve(
+                        _messageBroker.GetTasks(), _originalAgentName ?? terminalName, projectId, projectName, projectNames);
+                }
+                catch { /* Non-critical — the marker is simply omitted */ }
+            }
+            HeaderProjectName = projectName;
+            HeaderWorkingOnProject = workingOn;
+
             _debugLogService?.Trace("TerminalDocument", $"UpdateStatusBar: Calling _statusBar.UpdateStatus with:");
             _debugLogService?.Trace("TerminalDocument", $"  - terminalName: '{terminalName}'");
             _debugLogService?.Trace("TerminalDocument", $"  - avatarUrl: '{avatarUrl}'");
@@ -2818,10 +2857,29 @@ namespace MultiTerminal.Docking
             _debugLogService?.Trace("TerminalDocument", $"  - status: '{status}'");
             _debugLogService?.Trace("TerminalDocument", $"  - projectName: '{projectName}'");
 
-            _statusBar.UpdateStatus(terminalName, avatarUrl, activityDescription, taskTitle, taskId, status, projectName, projectDescription);
+            _statusBar.UpdateStatus(terminalName, avatarUrl, activityDescription, taskTitle, taskId, status, projectName, projectDescription, workingOn);
 
             _debugLogService?.Trace("TerminalDocument", "_statusBar.UpdateStatus call completed");
         }
+
+        /// <summary>
+        /// The project this pane's header last showed: the registered project containing the
+        /// session's folder, else the folder's name. Null until the header has rendered once.
+        /// Read by the Attention panel so its card names the same project (task 19a26090).
+        /// </summary>
+        public string HeaderProjectName { get; private set; }
+
+        /// <summary>
+        /// The header's "working on" project — the active task's project when it differs from
+        /// <see cref="HeaderProjectName"/> — or null (task 19a26090).
+        /// </summary>
+        public string HeaderWorkingOnProject { get; private set; }
+
+        /// <summary>
+        /// The agent this pane belongs to: the stable identity once promoted, else the displayed
+        /// title. What the Attention panel matches a card's agent against.
+        /// </summary>
+        public string PaneAgentName => StatusLineIdentity;
 
         /// <summary>
         /// Pre-writes a fallback statusline JSON file containing just the folder path

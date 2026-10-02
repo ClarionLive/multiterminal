@@ -11,7 +11,8 @@ namespace MultiTerminal.Tests
     ///
     /// <para><see cref="A_pane_with_the_wrong_name_still_reads_its_own_file"/> is the 2026-10-01
     /// state: Charlie's pane polled as "Grace" and read Grace's file. Falsified by restoring the
-    /// name-scoped exact lookup: it went red, returning Grace's file.</para>
+    /// name-scoped exact lookup (predicted beforehand: this fact and the relaunch fact red, the other
+    /// three green; observed exactly that).</para>
     /// </summary>
     public sealed class StatusLineFilePickTests : IDisposable
     {

@@ -30,6 +30,14 @@ namespace MultiTerminal.AttentionPanel
         /// <param name="agentProjects">
         /// FALLBACK project name by agent name, derived from the agent's claimed task. Optional.
         /// </param>
+        /// <param name="paneProjects">
+        /// What each agent's terminal header shows, by agent name (task 19a26090). Optional. When
+        /// present it beats every other source, for both the project and the "working on" marker.
+        /// </param>
+        /// <param name="activeTaskProjects">
+        /// The ACTIVE task's project name by agent name, for agents with no pane (task 19a26090).
+        /// Optional. Becomes "working on" when it differs from the card's project.
+        /// </param>
         /// <remarks>
         /// <para>
         /// <b>Why a fallback exists at all (task 42052f0c).</b> <see cref="AgentAttentionEntry.Project"/>
@@ -53,7 +61,9 @@ namespace MultiTerminal.AttentionPanel
             IReadOnlyDictionary<string, AttentionTicketClaim> claims,
             DateTime nowUtc,
             IReadOnlyDictionary<string, string> agentProjects = null,
-            IReadOnlyDictionary<string, MultiTerminal.Services.TerminalUsageStats> agentStats = null)
+            IReadOnlyDictionary<string, MultiTerminal.Services.TerminalUsageStats> agentStats = null,
+            IReadOnlyDictionary<string, AttentionPaneProject> paneProjects = null,
+            IReadOnlyDictionary<string, string> activeTaskProjects = null)
         {
             var cards = new List<AttentionCard>();
             if (entries == null) return cards;
@@ -95,8 +105,35 @@ namespace MultiTerminal.AttentionPanel
                                   && pct >= 0
                                   && pct <= 100;
 
-                // Observed beats inferred — see the remarks on Project().
-                string project = string.IsNullOrWhiteSpace(e.Project) ? fallbackProject : e.Project;
+                // Observed beats inferred — see the remarks on Project(). The agent's own terminal
+                // header is the freshest observation of all (task 19a26090): it follows the session's
+                // folder live, while e.Project is learned from a notification and never cleared. So a
+                // pane's header wins, then the notification, then the claimed task.
+                AttentionPaneProject pane = null;
+                if (paneProjects != null && !string.IsNullOrWhiteSpace(agent)) paneProjects.TryGetValue(agent, out pane);
+
+                string project = !string.IsNullOrWhiteSpace(pane?.Project)
+                    ? pane.Project
+                    : (string.IsNullOrWhiteSpace(e.Project) ? fallbackProject : e.Project);
+
+                // "Working on" — the pane's own value when it has one, so the card and the header
+                // say the same thing; otherwise the active task's project if it differs.
+                string workingOn;
+                if (!string.IsNullOrWhiteSpace(pane?.Project))
+                {
+                    workingOn = pane.WorkingOn;
+                }
+                else
+                {
+                    string activeProject = null;
+                    if (activeTaskProjects != null && !string.IsNullOrWhiteSpace(agent))
+                        activeTaskProjects.TryGetValue(agent, out activeProject);
+                    workingOn = !string.IsNullOrWhiteSpace(activeProject)
+                                && !string.IsNullOrWhiteSpace(project)
+                                && !activeProject.Equals(project, StringComparison.OrdinalIgnoreCase)
+                        ? activeProject
+                        : null;
+                }
 
                 cards.Add(new AttentionCard
                 {
@@ -104,6 +141,7 @@ namespace MultiTerminal.AttentionPanel
                     Agent = agent,
                     Color = string.IsNullOrWhiteSpace(color) ? DefaultColor : color,
                     Project = project,
+                    WorkingOn = string.IsNullOrWhiteSpace(workingOn) ? null : workingOn,
                     State = e.State.ToString(),
                     ObservedVerb = Verb(e.State),
                     ObservedDetail = DetailFor(e),
@@ -235,5 +273,16 @@ namespace MultiTerminal.AttentionPanel
         private static long Seconds(TimeSpan span) =>
             span.Ticks <= 0 ? 0 : (long)span.TotalSeconds;
 
+    }
+
+    /// <summary>
+    /// What an agent's terminal header currently shows (task 19a26090): the project the session
+    /// runs in, and the active task's project when it differs.
+    /// </summary>
+    public sealed class AttentionPaneProject
+    {
+        public string Project { get; set; }
+
+        public string WorkingOn { get; set; }
     }
 }

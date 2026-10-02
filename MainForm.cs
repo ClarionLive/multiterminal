@@ -7590,8 +7590,37 @@ namespace MultiTerminal
                     _debugLogService?.Info("AttentionPanel", $"Account quota read failed: {quotaEx.Message}");
                 }
 
+                // What each pane's header shows, so the card names the same project and the same
+                // "working on" marker as the agent's own terminal (task 19a26090). Read from the
+                // header's last render rather than recomputed: two computations are two chances to
+                // disagree, which is the defect this ticket was opened for.
+                var paneProjects = new Dictionary<string, AttentionPanel.AttentionPaneProject>(StringComparer.OrdinalIgnoreCase);
+                foreach (var doc in _dockPanel.Documents.OfType<TerminalDocument>())
+                {
+                    string agent = doc.PaneAgentName;
+                    if (string.IsNullOrWhiteSpace(agent) || string.IsNullOrWhiteSpace(doc.HeaderProjectName)) continue;
+                    if (TerminalRegistrationBinder.IsUnassigned(agent) || paneProjects.ContainsKey(agent)) continue;
+                    paneProjects[agent] = new AttentionPanel.AttentionPaneProject
+                    {
+                        Project = doc.HeaderProjectName,
+                        WorkingOn = doc.HeaderWorkingOnProject,
+                    };
+                }
+
+                // Agents with no pane (e.g. ClarionAssistant tabs) still get a marker from their
+                // active task, compared against whatever project their card ends up showing.
+                var activeTaskProjects = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var allTasks = broker.GetTasks();
+                foreach (var entry in snapshot)
+                {
+                    string agent = entry?.AgentName;
+                    if (string.IsNullOrWhiteSpace(agent) || paneProjects.ContainsKey(agent) || activeTaskProjects.ContainsKey(agent)) continue;
+                    string activeProject = Services.WorkingOnProject.ActiveTaskProjectName(allTasks, agent, projectNames, out _);
+                    if (activeProject != null) activeTaskProjects[agent] = activeProject;
+                }
+
                 var cards = AttentionPanel.AttentionCardProjector.Project(
-                    snapshot, colors, claims, DateTime.UtcNow, agentProjects, agentStats);
+                    snapshot, colors, claims, DateTime.UtcNow, agentProjects, agentStats, paneProjects, activeTaskProjects);
 
                 // The account reading is offered ALONGSIDE the per-terminal copies rather than
                 // instead of them: From() already ranks a shared-source reading above a

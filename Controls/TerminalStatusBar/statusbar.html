@@ -146,6 +146,27 @@
             color: var(--text-primary);
         }
 
+        /* Name + "working on" marker (task 19a26090). min-width:0 lets the marker ellipsize
+           instead of pushing the pills off the row. */
+        .name-line {
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+            min-width: 0;
+        }
+
+        .working-on {
+            font-size: var(--font-size-xs);
+            color: var(--text-secondary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .working-on[hidden] {
+            display: none;
+        }
+
         .current-task {
             font-size: var(--font-size-xs);
             color: var(--text-secondary);
@@ -526,7 +547,10 @@
                 <div class="status-indicator" id="status-indicator"></div>
             </div>
             <div class="info-container">
-                <div class="terminal-name" id="terminal-name">Terminal</div>
+                <div class="name-line">
+                    <div class="terminal-name" id="terminal-name">Terminal</div>
+                    <span class="working-on" id="working-on" hidden></span>
+                </div>
                 <div class="current-task" id="current-task">
                     <span class="task-label">Ready to work</span>
                 </div>
@@ -653,6 +677,18 @@
             // Update display name: show project name if available, otherwise agent name
             var displayName = (projectName && projectName.trim() !== '') ? projectName : (name || 'Terminal');
             document.getElementById('terminal-name').textContent = displayName;
+
+            // The active task's project, only when it differs from the one above (task 19a26090).
+            var workingOnEl = document.getElementById('working-on');
+            var workingOn = data.workingOnProject;
+            if (workingOn && workingOn.trim() !== '') {
+                workingOnEl.textContent = '· working on ' + workingOn;
+                workingOnEl.title = 'The active task belongs to ' + workingOn + '; this session runs in ' + displayName + '.';
+                workingOnEl.hidden = false;
+            } else {
+                workingOnEl.textContent = '';
+                workingOnEl.hidden = true;
+            }
 
             // Update avatar (still based on agent name)
             var avatarEl = document.getElementById('avatar');

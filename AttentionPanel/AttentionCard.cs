@@ -37,9 +37,19 @@ namespace MultiTerminal.AttentionPanel
         [JsonPropertyName("color")]
         public string Color { get; set; }
 
-        /// <summary>Project name, learned from the notification payload.</summary>
+        /// <summary>
+        /// The project the session runs in: the agent's terminal header when it has a pane, else
+        /// the notification payload, else the claimed task's project (task 19a26090).
+        /// </summary>
         [JsonPropertyName("project")]
         public string Project { get; set; }
+
+        /// <summary>
+        /// The active task's project when it differs from <see cref="Project"/>, else null
+        /// (task 19a26090). Rendered as "working on X".
+        /// </summary>
+        [JsonPropertyName("workingOn")]
+        public string WorkingOn { get; set; }
 
         /// <summary>
         /// <see cref="MCPServer.Services.AttentionState"/> as a string. The view keys its stripe,

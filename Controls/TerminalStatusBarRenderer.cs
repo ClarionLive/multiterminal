@@ -349,7 +349,8 @@ namespace MultiTerminal.Controls
         /// <param name="status">Activity status (active, idle, offline)</param>
         /// <param name="projectName">Project name (or null if no project matched)</param>
         /// <param name="projectDescription">Project description (or null)</param>
-        public void UpdateStatus(string name, string avatarUrl, string activityDescription, string taskTitle, string taskId, string status, string projectName = null, string projectDescription = null)
+        /// <param name="workingOnProject">The active task's project when it differs from <paramref name="projectName"/>, else null (task 19a26090)</param>
+        public void UpdateStatus(string name, string avatarUrl, string activityDescription, string taskTitle, string taskId, string status, string projectName = null, string projectDescription = null, string workingOnProject = null)
         {
             _debugLogService?.Trace("TerminalStatusBar", $"UpdateStatus called:");
             _debugLogService?.Trace("TerminalStatusBar", $"  - name: '{name}'");
@@ -370,7 +371,8 @@ namespace MultiTerminal.Controls
                 taskId = taskId ?? "",
                 status = status ?? "idle",
                 projectName = projectName ?? "",
-                projectDescription = projectDescription ?? ""
+                projectDescription = projectDescription ?? "",
+                workingOnProject = workingOnProject ?? ""
             };
 
             string json = JsonSerializer.Serialize(data);

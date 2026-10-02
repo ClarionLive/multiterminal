@@ -9,9 +9,10 @@ namespace MultiTerminal.Tests
     ///
     /// <para><see cref="The_2026_10_01_restore_replay_binds_every_agent_to_the_pane_it_launched_in"/>
     /// is the incident, step for step, with the docIds from that day's log. Falsified by removing the
-    /// proven-origin return in <see cref="TerminalRegistrationBinder.Resolve"/>: it went red at the first
-    /// launch, binding Alice to index 1 (the pane restored with the title "Alice"), which is the
-    /// production cross that was logged.</para>
+    /// proven-origin return in <see cref="TerminalRegistrationBinder.Resolve"/> (predicted beforehand:
+    /// this fact and the reused-pane fact red, the other 12 green; observed exactly that). The replay
+    /// failed at the first launch with route <c>CollisionReResolved</c>: the guard re-resolving Alice
+    /// away from her own pane, which is the production cross.</para>
     /// </summary>
     public class TerminalRegistrationBinderTests
     {
