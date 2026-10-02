@@ -3097,24 +3097,6 @@ namespace MultiTerminal
                 }
             };
 
-            _dashboardHeader.SwitchTerminalRequested += (name) =>
-            {
-                // Oracle click → activate/bring her to front (she's a dockable DockContent now)
-                if (_oracleService != null && string.Equals(name, OracleService.OracleName, StringComparison.OrdinalIgnoreCase))
-                {
-                    _oracleService.Activate();
-                    return;
-                }
-
-                // Find the terminal by name and activate it
-                var terminal = _gridManager.GetTerminalDocuments()
-                    .FirstOrDefault(t => string.Equals(t.TabText, name, StringComparison.OrdinalIgnoreCase));
-                if (terminal != null)
-                {
-                    terminal.Activate();
-                }
-            };
-
             _dashboardHeader.DashboardReady += () =>
             {
                 DashboardContentReady?.Invoke(this, EventArgs.Empty);
@@ -4990,9 +4972,6 @@ namespace MultiTerminal
                         // detectable all along; nothing was telling the rail about it.
                         SyncAttentionPanelFocus(doc);
 
-                        // Update dashboard header active session chip
-                        _dashboardHeader?.SetActiveSession(doc.TabText);
-
                         break;
                     }
                 }
@@ -5368,9 +5347,6 @@ namespace MultiTerminal
                 {
                     // Focus the terminal when switching
                     activeDoc.FocusTerminal();
-
-                    // Update dashboard header active session chip
-                    _dashboardHeader?.SetActiveSession(activeDoc.TabText);
 
                     // If we just switched TO a Home screen, re-read its project list so the
                     // "Last opened" card data reflects any stamp that landed while the tab sat
