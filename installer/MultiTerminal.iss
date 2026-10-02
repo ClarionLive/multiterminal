@@ -52,8 +52,11 @@ ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
 UsedUserAreasWarning=no
 WizardStyle=modern
-SetupIconFile=
+SetupIconFile=..\Assets\MultiTerminal.ico
 UninstallDisplayIcon={app}\{#AppExeName}
+; Broadcast SHCNE_ASSOCCHANGED at the end of setup so Explorer re-reads icons. An upgrade from a
+; build without an exe icon otherwise leaves existing pins/shortcuts on the cached generic icon (GH #36).
+ChangesAssociations=yes
 LicenseFile=..\LICENSE
 DisableProgramGroupPage=yes
 ; Code signing (requires Sectigo EV dongle to be plugged in)
@@ -307,6 +310,12 @@ Name: "{group}\{#AppName} Documentation"; Filename: "{app}\docs\html\index.html"
 Filename: "node"; Parameters: """{tmp}\post-install.js"" ""{app}"" ""{userappdata}"" ""{%USERPROFILE}"" {code:GetDotNetFlag} {code:GetSelectedMcps} {code:GetGlobalRegFlag}"; \
   StatusMsg: "Configuring Claude Code integration..."; \
   Components: claude; Flags: runhidden waituntilterminated
+
+; Refresh the icon cache for the user who pinned MT (runasoriginaluser: setup itself runs elevated,
+; possibly as a different admin account). Complements ChangesAssociations above (GH #36).
+Filename: "{sys}\ie4uinit.exe"; Parameters: "-show"; \
+  StatusMsg: "Refreshing icons..."; \
+  Flags: runhidden waituntilterminated runasoriginaluser skipifdoesntexist
 
 ; Offer to launch the app
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent

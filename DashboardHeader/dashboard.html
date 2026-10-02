@@ -174,28 +174,6 @@
 
   .no-task { font-size: 13px; color: var(--text-dim); font-style: italic; }
 
-  /* Session chips */
-  .sessions-group { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; overflow: hidden; }
-
-  .session-chip {
-    display: flex; align-items: center; gap: 6px;
-    padding: 6px 12px; border-radius: 16px; font-size: 12px; font-weight: 500;
-    cursor: pointer; transition: all 0.15s ease; white-space: nowrap;
-    background: var(--surface); border: 1px solid var(--border);
-  }
-
-  .session-chip:hover { background: var(--bg-hover); border-color: var(--bg-active); }
-  .session-chip.active { background: rgba(137,180,250,0.15); border-color: var(--accent); }
-  body.light .session-chip.active { background: rgba(30,102,245,0.1); }
-
-  .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .status-dot.running { background: var(--green); box-shadow: 0 0 6px var(--green); }
-  .status-dot.idle { background: var(--yellow); }
-  .status-dot.waiting { background: var(--blue); animation: pulse 2s infinite; }
-  .status-dot.error { background: var(--red); }
-
-  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-
   .gap-sm { width: 6px; flex-shrink: 0; }
 </style>
 </head>
@@ -257,12 +235,6 @@
         <span id="progressText">0/0</span>
       </div>
     </div>
-
-    <div class="divider"></div>
-
-    <div class="sessions-group" id="sessionsGroup">
-      <!-- Session chips injected dynamically -->
-    </div>
   </div>
 </div>
 
@@ -271,12 +243,6 @@
   function sendAction(action) {
     if (window.chrome && window.chrome.webview) {
       window.chrome.webview.postMessage({ type: 'action', action: action });
-    }
-  }
-
-  function sendTerminalClick(terminalName) {
-    if (window.chrome && window.chrome.webview) {
-      window.chrome.webview.postMessage({ type: 'switch_terminal', name: terminalName });
     }
   }
 
@@ -300,14 +266,10 @@
         updateProject(msg);
       } else if (msg.type === 'task') {
         updateTask(msg);
-      } else if (msg.type === 'sessions') {
-        updateSessions(msg.sessions);
       } else if (msg.type === 'inbox_count') {
         updateInboxBadge(msg.count);
       } else if (msg.type === 'panel_state') {
         updatePanelState(msg.panel, msg.visible);
-      } else if (msg.type === 'active_session') {
-        setActiveSession(msg.name);
       } else if (msg.type === 'version') {
         document.getElementById('appVersion').textContent = 'MultiTerminal ' + msg.version;
       }
@@ -344,24 +306,6 @@
     }
   }
 
-  function updateSessions(sessions) {
-    const container = document.getElementById('sessionsGroup');
-    container.innerHTML = '';
-
-    if (!sessions || sessions.length === 0) {
-      container.innerHTML = '<span style="font-size:12px;color:var(--text-dim)">No terminals</span>';
-      return;
-    }
-
-    sessions.forEach(s => {
-      const chip = document.createElement('div');
-      chip.className = 'session-chip' + (s.active ? ' active' : '');
-      chip.onclick = () => sendTerminalClick(s.name);
-      chip.innerHTML = '<div class="status-dot ' + escapeHtml(s.status || 'idle') + '"></div>' + escapeHtml(s.name);
-      container.appendChild(chip);
-    });
-  }
-
   function updateInboxBadge(count) {
     const badge = document.getElementById('inboxBadge');
     if (count > 0) {
@@ -379,21 +323,6 @@
     }
   }
 
-  function setActiveSession(name) {
-    const chips = document.querySelectorAll('.session-chip');
-    chips.forEach(chip => {
-      const chipName = chip.textContent.trim();
-      chip.classList.toggle('active', chipName === name);
-    });
-  }
-
-
-  // ============ Utilities ============
-  function escapeHtml(str) {
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML;
-  }
 
   // ============ Ready Signal ============
   if (window.chrome && window.chrome.webview) {

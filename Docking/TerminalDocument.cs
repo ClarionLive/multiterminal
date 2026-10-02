@@ -467,16 +467,47 @@ namespace MultiTerminal.Docking
         /// those are the identity <c>MainForm</c> matches terminals by and the statusline reads files by
         /// (ab50355f). The role suffix takes the same display-only path the project name already took.</para>
         ///
+        /// <para>The "Unassigned" placeholder (a project with no team lead) is dropped when there is a
+        /// project to show, so the tab reads <c>Project</c> rather than <c>Unassigned - Project</c>
+        /// (GH #26). With no project it stays, since it is then the only text the tab has.</para>
+        ///
         /// <para>Pure and static so the composition is testable without a WinForms document.</para>
         /// </summary>
         internal static string ComposeTabTitle(string agentName, string projectName, MultiTerminal.Terminal.TerminalRole role)
         {
-            var title = !string.IsNullOrEmpty(projectName)
-                ? $"{agentName} - {projectName}"
-                : agentName;
+            bool isPlaceholder = string.Equals(agentName, "Unassigned", StringComparison.OrdinalIgnoreCase);
+            var title = string.IsNullOrEmpty(projectName)
+                ? agentName
+                : isPlaceholder
+                    ? projectName
+                    : $"{agentName} - {projectName}";
 
             return title + MultiTerminal.Terminal.TerminalRoles.TabSuffix(role);
         }
+
+        /// <summary>
+        /// Finds the terminal an agent NAME refers to: the doc whose broker-confirmed
+        /// <see cref="OriginalAgentName"/> matches first (survives a cosmetic tab rename), else the doc
+        /// whose <see cref="CustomTitle"/> matches (restored or not-yet-promoted terminals).
+        ///
+        /// <para>The displayed title (Text/TabText) is deliberately not an input. Since GH #26 a project
+        /// with no team lead shows just "Proj", so an agent named like a project would match that
+        /// placeholder tab, and chat injection would type into the wrong session (158d60ac). Before that,
+        /// a renamed tab or a console title could match in the same way.</para>
+        ///
+        /// <para>Generic over the document so it is testable without constructing a WinForms terminal.</para>
+        /// </summary>
+        internal static T FindByIdentity<T>(IEnumerable<T> docs, string name, Func<T, string> originalAgentName, Func<T, string> customTitle)
+            where T : class
+        {
+            if (string.IsNullOrEmpty(name) || docs == null) return null;
+            var list = docs as IList<T> ?? docs.ToList();
+            return list.FirstOrDefault(d => string.Equals(originalAgentName(d), name, StringComparison.OrdinalIgnoreCase))
+                ?? list.FirstOrDefault(d => string.Equals(customTitle(d), name, StringComparison.OrdinalIgnoreCase));
+        }
+
+        internal static TerminalDocument FindByIdentity(IEnumerable<TerminalDocument> docs, string name) =>
+            FindByIdentity(docs, name, d => d.OriginalAgentName, d => d.CustomTitle);
 
         private void UpdateTabTitle()
         {

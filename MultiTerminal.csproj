@@ -21,7 +21,15 @@
     <!-- Suppress CA1416: This is a Windows-only WinForms app -->
     <!-- Suppress CS0067/CS0414: Unused events/fields (reserved for future use or designer artifacts) -->
     <NoWarn>$(NoWarn);MSB3277;CA1416;CS0067;CS0414</NoWarn>
+    <!-- Win32 icon resource in the apphost exe, so pins/shortcuts/Explorer show it while MT is closed (GH #36).
+         Regenerate with scripts\generate-app-icon.ps1. -->
+    <ApplicationIcon>Assets\MultiTerminal.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <!-- The same .ico, for the window icon at runtime (AppIcon.cs). -->
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\MultiTerminal.ico" LogicalName="MultiTerminal.AppIcon.ico" />
+  </ItemGroup>
 
   <!-- Exclude the test project folders -->
   <ItemGroup>

@@ -1621,7 +1621,7 @@
                 '<td class="list-status-cell"><span class="status-badge status-' + rowStatus.toLowerCase() + '">' + esc(rowStatus) + '</span></td>' +
                 '<td>' + (project.teamLead
                     ? '<span class="team-lead-badge" title="Team Leader: ' + esc(project.teamLead) + '">&#128100; ' + esc(project.teamLead) + '</span>'
-                    : '<span class="last-opened">—</span>') + '</td>' +
+                    : '<span class="last-opened">Unassigned</span>') + '</td>' +
                 '<td><span class="last-opened" title="' + esc(project.createdAt || 'unknown') + '">' + relativeTime(project.createdAt) + '</span></td>' +
                 '<td><span class="last-opened" title="' + esc(project.lastOpenedAt || 'never') + '">' + relativeTime(project.lastOpenedAt) + '</span></td>' +
                 '<td class="list-terminal-cell"><span class="list-terminal-chip">' + esc(termName) + '</span></td>' +

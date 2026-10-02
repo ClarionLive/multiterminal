@@ -17,7 +17,7 @@ namespace MultiTerminal.DashboardHeader
 {
     /// <summary>
     /// WebView2-based dashboard header that replaces the traditional ToolStrip.
-    /// Shows: logo menu, new terminal, panel toggles, project info, active task, session chips.
+    /// Shows: logo menu, new terminal, panel toggles, project info, active task.
     /// </summary>
     public class DashboardHeaderControl : UserControl
     {
@@ -41,7 +41,6 @@ namespace MultiTerminal.DashboardHeader
         public event Action AboutRequested;
         public event Action<string> TogglePanelRequested;
         public event Action<string> GridLayoutRequested;
-        public event Action<string> SwitchTerminalRequested;
         public event Action ExitRequested;
         public event Action ShowChatHistoryRequested;
         public event Action DashboardReady;
@@ -77,8 +76,6 @@ namespace MultiTerminal.DashboardHeader
             _broker = broker;
 
             // Subscribe to broker events for live updates
-            _broker.TerminalRegistered += OnTerminalRegistered;
-            _broker.TerminalDisconnected += OnTerminalDisconnected;
             _broker.TasksUpdated += OnTasksUpdated;
             _broker.TaskClaimed += OnTaskClaimed;
             _broker.InboxUpdated += OnInboxUpdated;
@@ -217,11 +214,6 @@ namespace MultiTerminal.DashboardHeader
                     case "action":
                         if (root.TryGetProperty("action", out var actionEl))
                             HandleAction(actionEl.GetString());
-                        break;
-
-                    case "switch_terminal":
-                        if (root.TryGetProperty("name", out var nameEl))
-                            SwitchTerminalRequested?.Invoke(nameEl.GetString());
                         break;
                 }
             }
@@ -371,7 +363,6 @@ namespace MultiTerminal.DashboardHeader
                 }
 
                 // Send initial data
-                RefreshSessions();
                 RefreshActiveTask();
                 RefreshInbox();
 
@@ -435,13 +426,6 @@ namespace MultiTerminal.DashboardHeader
             PostJsonMessage($"{{\"type\":\"task\",\"title\":\"{t}\",\"done\":{done},\"total\":{total}}}");
         }
 
-        public void UpdateSessions(IEnumerable<SessionInfo> sessions)
-        {
-            var items = sessions.Select(s => $"{{\"name\":\"{EscapeJson(s.Name)}\",\"status\":\"{EscapeJson(s.Status)}\",\"active\":{(s.IsActive ? "true" : "false")}}}");
-            var json = $"{{\"type\":\"sessions\",\"sessions\":[{string.Join(",", items)}]}}";
-            PostJsonMessage(json);
-        }
-
         public void UpdateInboxCount(int count)
         {
             PostJsonMessage($"{{\"type\":\"inbox_count\",\"count\":{count}}}");
@@ -452,11 +436,6 @@ namespace MultiTerminal.DashboardHeader
             PostJsonMessage($"{{\"type\":\"panel_state\",\"panel\":\"{EscapeJson(panel)}\",\"visible\":{(visible ? "true" : "false")}}}");
         }
 
-        public void SetActiveSession(string terminalName)
-        {
-            PostJsonMessage($"{{\"type\":\"active_session\",\"name\":\"{EscapeJson(terminalName ?? "")}\"}}");
-        }
-
         public void UpdateVersion(string version)
         {
             PostJsonMessage($"{{\"type\":\"version\",\"version\":\"{EscapeJson(version)}\"}}");
@@ -464,8 +443,6 @@ namespace MultiTerminal.DashboardHeader
 
         // ============ Broker Event Handlers ============
 
-        private void OnTerminalRegistered(object sender, TerminalInfo e) => SafeInvoke(RefreshSessions);
-        private void OnTerminalDisconnected(object sender, TerminalInfo e) => SafeInvoke(RefreshSessions);
         private void OnTasksUpdated(object sender, List<KanbanTask> e) => SafeInvoke(() => RefreshActiveTaskFromList(e));
         private void OnTaskClaimed(object sender, TaskClaimedEventArgs e) => SafeInvoke(RefreshActiveTask);
         // GH#6 (ticket 2b202b9a): InboxUpdatedEventArgs carries BOTH the UserId whose inbox
@@ -494,19 +471,6 @@ namespace MultiTerminal.DashboardHeader
             var recipient = _broker?.DefaultInboxRecipient;
             if (string.IsNullOrEmpty(recipient) || string.IsNullOrEmpty(userId)) return false;
             return string.Equals(userId, recipient, StringComparison.OrdinalIgnoreCase);
-        }
-
-        private void RefreshSessions()
-        {
-            if (_broker == null) return;
-            var terminals = _broker.GetTerminals();
-            var sessions = terminals.Select(t => new SessionInfo
-            {
-                Name = t.Name ?? "Unknown",
-                Status = t.IsConnected ? "running" : "idle",
-                IsActive = false // Will be set by MainForm based on active tab
-            });
-            UpdateSessions(sessions);
         }
 
         private void RefreshActiveTask()
@@ -585,8 +549,6 @@ namespace MultiTerminal.DashboardHeader
             {
                 if (_broker != null)
                 {
-                    _broker.TerminalRegistered -= OnTerminalRegistered;
-                    _broker.TerminalDisconnected -= OnTerminalDisconnected;
                     _broker.TasksUpdated -= OnTasksUpdated;
                     _broker.TaskClaimed -= OnTaskClaimed;
                     _broker.InboxUpdated -= OnInboxUpdated;
@@ -596,15 +558,6 @@ namespace MultiTerminal.DashboardHeader
                 _logoMenu?.Dispose();
             }
             base.Dispose(disposing);
-        }
-
-        // ============ Data Model ============
-
-        public class SessionInfo
-        {
-            public string Name { get; set; }
-            public string Status { get; set; }
-            public bool IsActive { get; set; }
         }
     }
 }

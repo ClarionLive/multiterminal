@@ -54,7 +54,7 @@ namespace MultiTerminal.Dialogs
 
         private void PopulateTeamLeadDropdown()
         {
-            TeamLeadCombo.Items.Add("(none)");
+            TeamLeadCombo.Items.Add("Unassigned");
             foreach (var (_, displayName, _) in _teamLeadProfiles)
             {
                 TeamLeadCombo.Items.Add(displayName ?? "(unnamed)");
@@ -178,7 +178,7 @@ namespace MultiTerminal.Dialogs
             ProjectFolder = folder;
 
             int selectedIndex = TeamLeadCombo.SelectedIndex;
-            // Index 0 is "(none)", indices 1+ map to _teamLeadProfiles
+            // Index 0 is "Unassigned", indices 1+ map to _teamLeadProfiles
             if (selectedIndex > 0 && selectedIndex - 1 < _teamLeadProfiles.Count)
                 SelectedTeamLead = _teamLeadProfiles[selectedIndex - 1].DisplayName;
             else
