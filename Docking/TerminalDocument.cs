@@ -449,6 +449,38 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
+        /// Makes <paramref name="agentName"/> this pane's identity for the launch now running in it,
+        /// replacing any earlier one (task 19a26090). Unlike <see cref="PromoteOriginalAgentName"/>
+        /// this is not first-wins, so it may only be called by sources that speak for THIS launch:
+        /// <see cref="StartTerminal"/>, and a registration that proved it is this pane's child by
+        /// echoing its docId and launch nonce (<see cref="TerminalRegistrationBinder"/>).
+        ///
+        /// <para>First-wins was right within one launch and wrong across launches. A pane is reused —
+        /// returned to the start screen and relaunched as another agent — and first-wins kept the
+        /// previous agent's name forever, so the header read that agent's statusline file. The
+        /// 2026-10-01 incident added a worse variant: a registration bound a pane to the wrong name,
+        /// and that pane's own StartTerminal, which knew the right one, was silently ignored.</para>
+        ///
+        /// <para>A null, empty or "Unassigned" name clears the identity, so the real registration that
+        /// follows a placeholder launch can promote into it instead of inheriting the last agent.</para>
+        /// </summary>
+        internal void AdoptLaunchIdentity(string agentName)
+        {
+            string next = string.IsNullOrEmpty(agentName) || TerminalRegistrationBinder.IsUnassigned(agentName)
+                ? null
+                : agentName;
+            if (string.Equals(next, _originalAgentName, StringComparison.Ordinal)) return;
+
+            string previous = _originalAgentName;
+            _originalAgentName = next;
+            // Same publication order as PromoteOriginalAgentName: cache cleared, then the generation
+            // bumped, so an in-flight tick that read the previous identity's file drops its payload.
+            _lastStatusLineContent = null;
+            System.Threading.Interlocked.Increment(ref _statusLineIdentityGen);
+            _debugLogService?.Info("TerminalDocument", $"DocId='{_docId}' launch identity '{previous ?? ""}' → '{next ?? ""}' (task 19a26090).");
+        }
+
+        /// <summary>
         /// The identity used for statusline file lookup: the broker-confirmed stable agent
         /// name once promoted, else the displayed title (restored tabs pre-promotion). Kept
         /// separate from <see cref="CustomTitle"/> so a cosmetic tab rename can never
@@ -1313,16 +1345,16 @@ namespace MultiTerminal.Docking
 
             // Set terminal name as custom title if provided. StartTerminal is
             // an AUTHORITATIVE identity source — the terminalName comes from
-            // the live launch context, not from persisted UI state — so we
-            // also promote it into _originalAgentName for stable broker-event
-            // filtering. PromoteOriginalAgentName is first-wins so subsequent
-            // launches (rare) won't clobber.
+            // the live launch context, not from persisted UI state — so it
+            // becomes this pane's identity for stable broker-event filtering and
+            // statusline lookup. Per LAUNCH, not first-ever (task 19a26090): a
+            // reused pane must follow the agent now running in it.
             if (!string.IsNullOrEmpty(terminalName))
             {
                 _debugLogService?.Trace("TerminalDocument.StartTerminal", $"Setting CustomTitle to '{terminalName}'");
                 CustomTitle = terminalName;
-                PromoteOriginalAgentName(terminalName);
             }
+            AdoptLaunchIdentity(terminalName);
 
             // Pre-write a fallback statusline file with the folder path so the header
             // always shows SOMETHING even if the Claude Code process has a project-level
@@ -2839,58 +2871,70 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
-        /// Resolves which statusline temp file to read for this terminal. Prefers the
-        /// docId-scoped file (<c>mt-statusline-{name}-{_docId}.json</c>) written for a
-        /// freshly spawned child. If that's missing — the restore/re-adopt case where the
-        /// child keeps writing under a prior instance's docId while this TerminalDocument
-        /// minted a new random <c>_docId</c> — returns the newest
-        /// <c>mt-statusline-{name}-*.json</c> by its embedded <c>timestamp</c> so the
-        /// restored terminal's banner picks up live data instead of staying blank. Returns
-        /// <c>null</c> when no candidate exists. Mirrors the name-based fallback the REST
-        /// stats endpoint already uses (StatusLineStatsReader.FindNewestPerTerminalFile),
-        /// including its skip of future-dated (clock-skewed/planted) files.
-        ///
-        /// <para>Freshness floor (task 1ba59334): glob candidates older than this
-        /// terminal's launch (<see cref="_launchedAtMs"/>) are rejected, so a terminal can
-        /// never adopt a PRIOR run's or a foreign same-named terminal's frozen value (the
-        /// symptom: a restored terminal whose child uses a project statusLine override —
-        /// e.g. a Clarion-addin terminal — writes no fresh mt-statusline file, and the
-        /// banner stuck on a stale file). A legitimately restored MT child keeps writing
-        /// fresh files (timestamp &gt; floor) so it is still adopted; only stale files are
-        /// dropped, leaving the fresh blank placeholder rather than a misleading number.</para>
+        /// Resolves which statusline temp file this pane reads; the rules live on
+        /// <see cref="PickStatusLineFile"/>. Returns <c>null</c> when no candidate exists.
         /// </summary>
         private string ResolveStatusLineFilePath(string terminalName)
         {
-            // Strict per-instance binding (task d14048ef, item C): the docId-scoped file is
-            // unique to THIS TerminalDocument (each instance mints its own random _docId), so a
-            // live terminal always reads its own banner data and never a same-named sibling's.
-            // The glob fallback below is reached ONLY when this instance has no own file yet —
-            // the re-adopt-after-restart path — and is bounded by the freshness floor so it can't
-            // latch a prior run's / a removed duplicate's frozen file.
-            string exact = Path.Combine(Path.GetTempPath(), $"mt-statusline-{terminalName}-{_docId}.json");
-            if (File.Exists(exact))
+            var pick = PickStatusLineFile(Path.GetTempPath(), terminalName, _docId,
+                _launchedAtMs - StatuslineFreshnessGraceMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            NoteResolvedStatusLinePath(pick.Path, viaFallback: !pick.OwnPane);
+            return pick.Path;
+        }
+
+        /// <summary>
+        /// The statusline file choice, pure over a directory so it is unit-testable (task 19a26090).
+        ///
+        /// <para><b>1. This pane's own files, found by docId alone.</b> <c>mt-statusline-*-{docId}.json</c>,
+        /// most recently written. The docId is minted per pane and injected only into that pane's child,
+        /// which writes it into the file name, so these files can only have come from this pane. The
+        /// agent-name segment is deliberately NOT part of this match: on 2026-10-01 two panes had the
+        /// wrong name and each polled <c>{wrong name}-{own docId}</c>, missed, and fell through to the
+        /// name glob below, which handed them a SIBLING's file. Their own correctly named files were
+        /// sitting next to it the whole time. A pane relaunched as another agent leaves two own files;
+        /// the live one is the most recently written, because the previous agent's process has exited.
+        /// Ranked by write time rather than the embedded timestamp so a torn mid-rename read can never
+        /// drop the pane's only own file and push it onto the foreign fallback.</para>
+        ///
+        /// <para><b>2. Only if the pane has no file of its own:</b> the newest
+        /// <c>mt-statusline-{name}-*.json</c> by embedded timestamp, above the freshness floor (task
+        /// 1ba59334). This is the re-adopt case: after an MT restart a restored pane mints a new docId
+        /// while its child keeps writing under the old one. It is the only path that can read another
+        /// pane's file, which is why it is last and bounded.</para>
+        /// </summary>
+        internal static (string Path, bool OwnPane) PickStatusLineFile(string directory, string terminalName, string docId, long freshnessFloorMs, long nowMs)
+        {
+            if (IsSafeStatusLineSegment(docId))
             {
-                NoteResolvedStatusLinePath(exact, viaFallback: false);
-                return exact;
+                try
+                {
+                    string own = Directory.GetFiles(directory, $"mt-statusline-*-{docId}.json")
+                        .OrderByDescending(File.GetLastWriteTimeUtc)
+                        .FirstOrDefault();
+                    if (own != null) return (own, true);
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                {
+                    // Fall through to the name-based fallback.
+                }
             }
 
-            // Only the fallback glob needs a safe segment; reject names that could widen
+            // Only the fallback glob needs a safe name segment; reject names that could widen
             // the search beyond the intended mt-statusline-{name}-*.json shape.
-            if (!IsSafeStatusLineSegment(terminalName)) return null;
+            if (!IsSafeStatusLineSegment(terminalName)) return (null, false);
 
             string[] candidates;
             try
             {
-                candidates = Directory.GetFiles(Path.GetTempPath(), $"mt-statusline-{terminalName}-*.json");
+                candidates = Directory.GetFiles(directory, $"mt-statusline-{terminalName}-*.json");
             }
             catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
             {
-                return null;
+                return (null, false);
             }
 
             string newest = null;
             long newestTs = long.MinValue;
-            long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             foreach (var path in candidates)
             {
                 try
@@ -2903,12 +2947,12 @@ namespace MultiTerminal.Docking
                     long ts = tsEl.GetInt64();
                     if (ts > nowMs) continue;          // ignore future-dated (skewed/planted) files
                     // Reject stale prior-run / foreign files (task 1ba59334): never show a frozen
-                    // value from before this terminal launched. A grace window admits a render that
-                    // landed just before an MT restart/re-adopt — so a RESTORED IDLE terminal (whose
-                    // child may not re-render after re-adopt, codex adversary MEDIUM) still shows its
-                    // last-known data instead of a permanent blank — while hours-old stale files are
-                    // still rejected.
-                    if (ts < _launchedAtMs - StatuslineFreshnessGraceMs) continue;
+                    // value from before this terminal launched. The caller's floor includes a grace
+                    // window that admits a render landing just before an MT restart/re-adopt — so a
+                    // RESTORED IDLE terminal (whose child may not re-render after re-adopt, codex
+                    // adversary MEDIUM) still shows its last-known data — while hours-old stale files
+                    // are still rejected.
+                    if (ts < freshnessFloorMs) continue;
                     if (ts > newestTs) { newestTs = ts; newest = path; }
                 }
                 catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is JsonException)
@@ -2916,8 +2960,7 @@ namespace MultiTerminal.Docking
                     // Torn/corrupt/locked sibling — skip it, keep scanning.
                 }
             }
-            NoteResolvedStatusLinePath(newest, viaFallback: true);
-            return newest;
+            return (newest, false);
         }
 
         // Last statusline file this instance resolved to — used purely to log the re-adopt
