@@ -159,11 +159,16 @@ namespace MultiTerminal.Tests
             // GH #26 / 158d60ac: a placeholder in project "Proj" with no team lead displays just "Proj".
             // An agent NAMED "Proj" registering without a docId must bind by identity, not display text.
             //
-            // The guarantee is structural: PaneIdentity has no TabText, so this stays green however
-            // Resolve is written. It records the collision. Before the field was removed, with the
-            // placeholder's TabText set to "Proj", this went red as predicted (1 of 11), returning -1
-            // rather than the predicted 0: the placeholder matched by TabText and the nonce gate then
-            // refused it, so the agent bound to no pane at all.
+            // Documentary. This fact does not show the placeholder's display text is "Proj": that is
+            // TerminalIdentityLookupTests' job, and on branches predating GH #26 it is not true. The
+            // guarantee is structural: PaneIdentity has no TabText, so this cannot go red for a
+            // display-text reason, because no Resolve body can see one. It can still go red if name
+            // matching itself breaks.
+            //
+            // Falsified before the field was removed, with the placeholder's TabText set to "Proj":
+            // red, 1 of 11, as predicted. The predicted index was 0; observed -1, because the
+            // placeholder matched by TabText and the nonce gate then refused it, so the agent bound
+            // to no pane at all.
             var panes = new List<PaneIdentity>
             {
                 Pane("aaaa1111", null, "Unassigned", "nonce-a"),
