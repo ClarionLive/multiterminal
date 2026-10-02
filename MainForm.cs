@@ -183,6 +183,8 @@ namespace MultiTerminal
         public MainForm()
         {
             InitializeComponent();
+            // Same .ico as the exe's Win32 icon (GH #36); without this the window shows WinForms' default.
+            if (AppIcon.Value != null) Icon = AppIcon.Value;
             InitializeDockPanel();
             InitializeDashboardHeader();
             LoadSettings();

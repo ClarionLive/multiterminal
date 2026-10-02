@@ -95,7 +95,7 @@ namespace MultiTerminal.TaskLifecycleBoard
             MinimumSize = new Size(700, 500);
             StartPosition = FormStartPosition.CenterScreen;
             TopMost = true;
-            Icon = null; // Use default
+            Icon = AppIcon.Value; // its own taskbar entry, so it shows the app icon (GH #36)
             ShowInTaskbar = true;
             Font = new Font("Segoe UI", 9f);
 
