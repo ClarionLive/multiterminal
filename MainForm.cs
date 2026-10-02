@@ -4284,7 +4284,8 @@ namespace MultiTerminal
             var teamLeads = _sharedProjectDatabase?.GetTeamLeadProfiles()
                             ?? new List<(string, string, string)>();
 
-            var wpfDialog = new Dialogs.NewProjectWpfDialog(_currentTheme.IsDark, teamLeads);
+            var wpfDialog = new Dialogs.NewProjectWpfDialog(_currentTheme.IsDark, teamLeads,
+                initialQuietStart: _settings?.GetLastNewProjectQuietStart() ?? false);
             var helper = new System.Windows.Interop.WindowInteropHelper(wpfDialog);
             helper.Owner = this.Handle;
             if (wpfDialog.ShowDialog() != true) return;
@@ -4330,6 +4331,14 @@ namespace MultiTerminal
                     else
                         _sharedProjectDatabase?.SaveRichProject(project);
                 }
+
+                // Quiet start (GitHub #34). Written out-of-band rather than through CreateProject, so
+                // the broker's create path (shared with the create_project MCP tool) is unchanged, and
+                // BEFORE StartTerminal below, which reads it to decide this first launch. A reused
+                // existing project gets the dialog's value too: the user just chose it for this folder.
+                _sharedProjectDatabase?.SetQuietStart(project.Id, wpfDialog.SelectedQuietStart);
+                project.QuietStart = wpfDialog.SelectedQuietStart;
+                _settings?.SetLastNewProjectQuietStart(wpfDialog.SelectedQuietStart);
 
                 // Build launch command for the project's default terminal (Claude Code or Codex)
                 var terminalKind = Models.TerminalKindHelper.ParseOrDefault(project.DefaultTerminal);
@@ -4381,7 +4390,9 @@ namespace MultiTerminal
                     {
                         sourceDoc.ClaudeCodeDetected -= newProjectHandler;
 
-                        // Wait for Claude Code to settle after standard "initializing..." injection
+                        // Give Claude Code time to settle: past the "initializing..." kick and the
+                        // session-start turn it starts, or, on a quiet-start project (GitHub #34), where
+                        // nothing is typed, simply until the prompt is ready.
                         await Task.Delay(3000);
                         _debugLogService?.Trace("MainForm", "New project flow: injecting /new-project");
 
@@ -5092,6 +5103,16 @@ namespace MultiTerminal
                 _ = Task.Run(async () => await _sessionIndexingService?.IndexProjectSessionsAsync(workingDir));
             }
 
+            // Quiet start (GitHub #34, task e0fa9d90): nothing is typed, so the user gets an idle
+            // prompt. The SessionStart hook has already registered the session without asking for
+            // session-start. A deliberately injected command (e.g. the New Project flow's /new-project)
+            // is a separate handler and still runs.
+            if (doc != null && doc.IsQuietStart)
+            {
+                _debugLogService?.Trace("MainForm", "Claude Code detected: quiet start, 'initializing...' not injected");
+                return;
+            }
+
             // Auto-initialize Claude Code by injecting "initializing..." to trigger startup hooks.
             // Uses TypeInput (atomic xterm.js character typing + Enter) instead of the old
             // two-step InjectInputAsync (ConPTY write + separate JS Enter) which caused
@@ -5505,10 +5526,17 @@ namespace MultiTerminal
             // No --resume, so Claude still offers to resume a recent session.
             string autoRunCommand = LaunchCommandBuilder.BuildClaudeCommand(null, workingDirectory).AutoRunCommand;
 
+            // Quiet start (GitHub #34, pipeline run 1): "Launch as..." is not a project launch, so it passes
+            // no projectId (that would also set MULTITERMINAL_PROJECT_PM and the "(PM)" badge, which this
+            // route deliberately does not get). The project is passed for the quiet-start lookup only:
+            // the one registered for the launch folder, else the pane's last launch project.
+            string quietStartProjectId = _projectService?.DiscoverProject(workingDirectory)?.Id ?? doc.LaunchProjectId;
+
             // Stop current terminal and restart with new identity
             doc.Terminal.Stop();
             doc.CustomTitle = terminalName;
-            doc.StartTerminal(workingDirectory, terminalName, autoRunCommand, taskWorktreePath: taskWorktreePath);
+            doc.StartTerminal(workingDirectory, terminalName, autoRunCommand, taskWorktreePath: taskWorktreePath,
+                quietStartProjectId: quietStartProjectId);
 
             // Auto-initialization is handled by OnClaudeCodeDetected when Claude Code's output is detected.
             // This ensures injection happens AFTER Claude Code is ready, not just after WebView2 loads.

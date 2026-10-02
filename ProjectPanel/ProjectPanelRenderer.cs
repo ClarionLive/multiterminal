@@ -422,6 +422,7 @@ namespace MultiTerminal.ProjectPanel
 
             // Status / flags (new fields)
             sb.Append($"\"isPinned\":{(project.IsPinned ? "true" : "false")},");
+            sb.Append($"\"quietStart\":{(project.IsQuietStart ? "true" : "false")},");
             sb.Append($"\"createdBy\":\"{EscapeJson(project.CreatedBy ?? "")}\",");
 
             // Timestamps (new fields) — ISO 8601 so JS can parse them

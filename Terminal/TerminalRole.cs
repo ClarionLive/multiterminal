@@ -71,6 +71,19 @@ namespace MultiTerminal.Terminal
             Resolve(projectId, spawnerName) == TerminalRole.ProjectManager;
 
         /// <summary>
+        /// Whether this launch is a quiet start (GitHub #34, task e0fa9d90): the project has Quiet start
+        /// on AND the terminal is not a spawned helper. A helper is never quiet: it must get its first
+        /// turn to collect its job (get_my_spawn_job), and nobody is waiting to type into it.
+        ///
+        /// <para>The one decision behind <c>MULTITERMINAL_QUIET_START</c> (the SessionStart hook's
+        /// signal), MT's "initializing..." kick, and the post-/clear kick. If those disagreed, a
+        /// terminal would get the menu despite the setting, or sit idle with the hook still asking
+        /// for session-start.</para>
+        /// </summary>
+        internal static bool IsQuietStart(bool projectQuietStart, string spawnerName) =>
+            projectQuietStart && Resolve(null, spawnerName) != TerminalRole.Helper;
+
+        /// <summary>
         /// The role a tab may actually SHOW, given the project it is currently naming.
         ///
         /// <para><see cref="Resolve"/> answers "what was this terminal granted at launch", and that answer

@@ -142,6 +142,25 @@ namespace MultiTerminal.Models
         /// </summary>
         public string DefaultTerminal { get; set; } = TerminalKindHelper.ClaudeCodeValue;
 
+        /// <summary>
+        /// "Quiet start" (GitHub #34, task e0fa9d90): when true, a terminal opened on this project
+        /// only gets into its folder and registers its identity. MT does not type "initializing...",
+        /// and the SessionStart hook does not ask for /multiterminal:session-start, so the user gets
+        /// an idle prompt instead of the recap and menu.
+        /// <para>Claude Code only: a Codex launch always passes its startup prompt, and the setting
+        /// does not change that (labelled as such in the UI).</para>
+        /// <para>Nullable for the same reason as <see cref="Status"/>: it is a SQLite-only column
+        /// that project.json does not carry, and the SaveRichProject UPSERT COALESCEs it, so a
+        /// re-save from project.json leaves null and must not reset a project the user turned
+        /// quiet. Null reads as OFF (the Owner's default for existing projects); use
+        /// <see cref="IsQuietStart"/>. Written deliberately via
+        /// ProjectDatabase.SetQuietStart / UpdateProjectField.</para>
+        /// </summary>
+        public bool? QuietStart { get; set; }
+
+        /// <summary><see cref="QuietStart"/> with null read as off.</summary>
+        public bool IsQuietStart => QuietStart == true;
+
         // ── Git configuration ─────────────────────────────────────────────────
 
         /// <summary>
