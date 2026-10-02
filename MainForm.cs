@@ -4298,7 +4298,8 @@ namespace MultiTerminal
             var teamLeads = _sharedProjectDatabase?.GetTeamLeadProfiles()
                             ?? new List<(string, string, string)>();
 
-            var wpfDialog = new Dialogs.NewProjectWpfDialog(_currentTheme.IsDark, teamLeads);
+            var wpfDialog = new Dialogs.NewProjectWpfDialog(_currentTheme.IsDark, teamLeads,
+                initialQuietStart: _settings?.GetLastNewProjectQuietStart() ?? false);
             var helper = new System.Windows.Interop.WindowInteropHelper(wpfDialog);
             helper.Owner = this.Handle;
             if (wpfDialog.ShowDialog() != true) return;
@@ -4344,6 +4345,14 @@ namespace MultiTerminal
                     else
                         _sharedProjectDatabase?.SaveRichProject(project);
                 }
+
+                // Quiet start (GitHub #34). Written out-of-band rather than through CreateProject, so
+                // the broker's create path (shared with the create_project MCP tool) is unchanged, and
+                // BEFORE StartTerminal below, which reads it to decide this first launch. A reused
+                // existing project gets the dialog's value too: the user just chose it for this folder.
+                _sharedProjectDatabase?.SetQuietStart(project.Id, wpfDialog.SelectedQuietStart);
+                project.QuietStart = wpfDialog.SelectedQuietStart;
+                _settings?.SetLastNewProjectQuietStart(wpfDialog.SelectedQuietStart);
 
                 // Build launch command for the project's default terminal (Claude Code or Codex)
                 var terminalKind = Models.TerminalKindHelper.ParseOrDefault(project.DefaultTerminal);
@@ -5107,6 +5116,16 @@ namespace MultiTerminal
 
                 // Index sessions for this project when Claude starts (fire-and-forget)
                 _ = Task.Run(async () => await _sessionIndexingService?.IndexProjectSessionsAsync(workingDir));
+            }
+
+            // Quiet start (GitHub #34, task e0fa9d90): nothing is typed, so the user gets an idle
+            // prompt. The SessionStart hook has already registered the session without asking for
+            // session-start. A deliberately injected command (e.g. the New Project flow's /new-project)
+            // is a separate handler and still runs.
+            if (doc != null && doc.IsQuietStart)
+            {
+                _debugLogService?.Trace("MainForm", "Claude Code detected: quiet start, 'initializing...' not injected");
+                return;
             }
 
             // Auto-initialize Claude Code by injecting "initializing..." to trigger startup hooks.

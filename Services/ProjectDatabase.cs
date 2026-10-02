@@ -196,7 +196,10 @@ namespace MultiTerminal.Services
                 ("team_lead",          "TEXT"),
                 ("default_terminal",   "TEXT NOT NULL DEFAULT 'claude-code'"),
                 ("source_control_account_id", "TEXT"),
-                ("status",             "TEXT DEFAULT 'active'")
+                ("status",             "TEXT DEFAULT 'active'"),
+                // No DEFAULT: NULL reads as off, so every existing project keeps today's startup
+                // (Owner decision, GitHub #34 / task e0fa9d90). Project.QuietStart explains why null.
+                ("quiet_start",        "INTEGER")
             };
 
             foreach (var (colName, colDef) in newColumns)
@@ -415,7 +418,7 @@ namespace MultiTerminal.Services
             "build_command", "deploy_command", "launch_command", "project_type", "current_version",
             "change_log", "icon", "icon_color", "git_repo_url", "git_default_branch", "git_auto_commit",
             "is_pinned", "status", "created_by", "last_opened_at", "team_lead", "default_terminal",
-            "source_control_account_id"
+            "source_control_account_id", "quiet_start"
         };
 
         // Map camelCase JS field names to snake_case SQLite column names.
@@ -433,12 +436,13 @@ namespace MultiTerminal.Services
             ["status"] = "status", ["createdBy"] = "created_by", ["lastOpenedAt"] = "last_opened_at",
             ["teamLead"] = "team_lead", ["defaultTerminal"] = "default_terminal",
             ["sourceControlAccountId"] = "source_control_account_id",
+            ["quietStart"] = "quiet_start",
         };
 
         // Fields that map to INTEGER 0/1 booleans in the database.
         private static readonly HashSet<string> _booleanProjectFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "git_auto_commit", "is_pinned"
+            "git_auto_commit", "is_pinned", "quiet_start"
         };
 
         /// <summary>
@@ -583,7 +587,7 @@ namespace MultiTerminal.Services
                            source_path, deploy_path, build_output_path, build_command, deploy_command,
                            launch_command, project_type, current_version, change_log, is_pinned,
                            icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
-                           team_lead, default_terminal, source_control_account_id, status
+                           team_lead, default_terminal, source_control_account_id, status, quiet_start
                     FROM projects
                     WHERE id = @id
                 ";
@@ -615,7 +619,7 @@ namespace MultiTerminal.Services
                            source_path, deploy_path, build_output_path, build_command, deploy_command,
                            launch_command, project_type, current_version, change_log, is_pinned,
                            icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
-                           team_lead, default_terminal, source_control_account_id, status
+                           team_lead, default_terminal, source_control_account_id, status, quiet_start
                     FROM projects
                     ORDER BY is_pinned DESC, created_at DESC
                 ";
@@ -701,12 +705,12 @@ namespace MultiTerminal.Services
                            source_path, deploy_path, build_output_path, build_command, deploy_command,
                            launch_command, project_type, current_version, change_log, is_pinned,
                            icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
-                           team_lead, default_terminal, source_control_account_id, status)
+                           team_lead, default_terminal, source_control_account_id, status, quiet_start)
                     VALUES (@id, @name, @description, @path, @createdBy, @createdAt, @updatedAt,
                            @sourcePath, @deployPath, @buildOutputPath, @buildCommand, @deployCommand,
                            @launchCommand, @projectType, @currentVersion, @changeLog, @isPinned,
                            @icon, @iconColor, @lastOpenedAt, @gitRepoUrl, @gitDefaultBranch, @gitAutoCommit,
-                           @teamLead, @defaultTerminal, @sourceControlAccountId, @status)
+                           @teamLead, @defaultTerminal, @sourceControlAccountId, @status, @quietStart)
                     ON CONFLICT(id) DO UPDATE SET
                         name = COALESCE(@name, projects.name),
                         description = COALESCE(@description, projects.description),
@@ -731,7 +735,8 @@ namespace MultiTerminal.Services
                         team_lead = COALESCE(@teamLead, projects.team_lead),
                         default_terminal = COALESCE(@defaultTerminal, projects.default_terminal),
                         source_control_account_id = COALESCE(@sourceControlAccountId, projects.source_control_account_id),
-                        status = COALESCE(@status, projects.status)
+                        status = COALESCE(@status, projects.status),
+                        quiet_start = COALESCE(@quietStart, projects.quiet_start)
                 ";
 
                 using var command = new SQLiteCommand(sql, _connection);
@@ -773,6 +778,9 @@ namespace MultiTerminal.Services
                     string.IsNullOrWhiteSpace(project.Status)
                         ? (object)DBNull.Value
                         : MultiTerminal.Models.Project.NormalizeStatus(project.Status).ToLowerInvariant());
+                // NULL when unset so the COALESCE keeps the stored value (see Project.QuietStart).
+                command.Parameters.AddWithValue("@quietStart",
+                    project.QuietStart.HasValue ? (object)(project.QuietStart.Value ? 1 : 0) : DBNull.Value);
 
                 command.ExecuteNonQuery();
             }
@@ -828,6 +836,31 @@ namespace MultiTerminal.Services
             }
         }
 
+        /// <summary>
+        /// Sets a project's quiet-start flag (GitHub #34, task e0fa9d90) out-of-band from the
+        /// COALESCE-ing SaveRichProject UPSERT, for the same reason as
+        /// <see cref="SetSourceControlAccount"/>: an explicit "off" must be writable, and a
+        /// project.json re-save must not be able to reset it.
+        /// </summary>
+        /// <returns>True if a row was updated, false if the project was not found.</returns>
+        public bool SetQuietStart(string projectId, bool quietStart)
+        {
+            if (string.IsNullOrWhiteSpace(projectId))
+                return false;
+
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand(
+                    "UPDATE projects SET quiet_start = @quietStart, updated_at = @updatedAt WHERE id = @id",
+                    _connection);
+                command.Parameters.AddWithValue("@quietStart", quietStart ? 1 : 0);
+                command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
+                command.Parameters.AddWithValue("@id", projectId);
+
+                return command.ExecuteNonQuery() > 0;
+            }
+        }
+
         private MultiTerminal.Models.Project ReadRichProject(SQLiteDataReader reader)
         {
             return new MultiTerminal.Models.Project
@@ -860,7 +893,8 @@ namespace MultiTerminal.Services
                     reader.IsDBNull(24) ? null : reader.GetString(24)),
                 SourceControlAccountId = reader.IsDBNull(25) ? null : reader.GetString(25),
                 Status = MultiTerminal.Models.Project.NormalizeStatus(
-                    reader.IsDBNull(26) ? null : reader.GetString(26))
+                    reader.IsDBNull(26) ? null : reader.GetString(26)),
+                QuietStart = reader.IsDBNull(27) ? (bool?)null : reader.GetInt32(27) == 1
             };
         }
 

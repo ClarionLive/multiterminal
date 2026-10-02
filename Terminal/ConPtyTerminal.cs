@@ -309,6 +309,25 @@ namespace MultiTerminal.Terminal
         internal const string ProjectPmClearAssignment = "$env:MULTITERMINAL_PROJECT_PM = $null; ";
 
         /// <summary>
+        /// Whether the session in this terminal starts quietly (GitHub #34, task e0fa9d90). Set by the
+        /// owner BEFORE <see cref="Start"/>; the caller has already applied
+        /// <see cref="TerminalRoles.IsQuietStart"/>. Emitted as <c>MULTITERMINAL_QUIET_START</c>, which
+        /// the plugin's SessionStart hook reads to skip the session-start auto-run and prefetch.
+        /// </summary>
+        public bool QuietStart { get; set; }
+
+        /// <summary>
+        /// The <c>MULTITERMINAL_QUIET_START</c> assignment: <c>'true'</c> for a quiet start, otherwise the
+        /// <c>$null</c> clear form, so a shell started inside a quiet terminal (or an MT launched from
+        /// one) can never pass the flag on to a terminal that is not quiet.
+        /// </summary>
+        internal static string BuildQuietStartEnvAssignment(bool quietStart) =>
+            quietStart ? QuietStartSetAssignment : QuietStartClearAssignment;
+
+        internal const string QuietStartSetAssignment = "$env:MULTITERMINAL_QUIET_START = 'true'; ";
+        internal const string QuietStartClearAssignment = "$env:MULTITERMINAL_QUIET_START = $null; ";
+
+        /// <summary>
         /// The longest session name Claude Code accepts. A name at this cap was once rejected by
         /// <c>SendMessage</c> even when copied straight out of <c>ListAgents</c> (CLI 2.1.234).
         /// </summary>
@@ -529,6 +548,11 @@ namespace MultiTerminal.Terminal
             DebugLogService?.Trace("ConPtyTerminal", projectPmAssignment == ProjectPmSetAssignment
                 ? "Setting MULTITERMINAL_PROJECT_PM = 'true'"
                 : "Clearing inherited MULTITERMINAL_PROJECT_PM");
+
+            envSetup += BuildQuietStartEnvAssignment(QuietStart);
+            DebugLogService?.Trace("ConPtyTerminal", QuietStart
+                ? "Setting MULTITERMINAL_QUIET_START = 'true'"
+                : "Clearing inherited MULTITERMINAL_QUIET_START");
 
             if (!string.IsNullOrEmpty(gatewayProfile))
             {

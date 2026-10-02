@@ -1678,6 +1678,14 @@
                                 <option value="codex"${project.defaultTerminal === 'codex' ? ' selected' : ''}>Codex</option>
                             </select>
                         </div>
+                        <div class="info-row" title="On: a new terminal opens straight to an idle prompt. No recap, no startup menu, nothing typed for you. Ask for /multiterminal:session-start when you want it. Applies to terminals opened after the change.">
+                            <span class="info-label">Quiet start</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox" data-field="quietStart" ${project.quietStart ? 'checked' : ''} onchange="saveToggleField(this)">
+                                <span class="toggle-track"></span>
+                                <span class="toggle-label">${project.quietStart ? 'On' : 'Off'}</span>
+                            </label>
+                        </div>
             `;
 
             if (project.currentVersion != null) {
@@ -2354,7 +2362,8 @@
             const field = checkboxEl.dataset.field;
             const value = checkboxEl.checked ? 'true' : 'false';
             const label = checkboxEl.closest('.toggle-switch')?.querySelector('.toggle-label');
-            if (label) label.textContent = (field === 'gitAutoCommit') ? (checkboxEl.checked ? 'On' : 'Off') : (checkboxEl.checked ? 'Yes' : 'No');
+            const onOff = field === 'gitAutoCommit' || field === 'quietStart';
+            if (label) label.textContent = onOff ? (checkboxEl.checked ? 'On' : 'Off') : (checkboxEl.checked ? 'Yes' : 'No');
             sendToHost({ type: 'updateField', field: field, value: value });
             flashElement(checkboxEl.closest('.toggle-switch'));
         }

@@ -155,6 +155,12 @@ namespace MultiTerminal.Docking
         public bool IsRendererReady => _terminal?.IsRendererReady ?? false;
 
         /// <summary>
+        /// True when this terminal's current launch is a quiet start (GitHub #34, task e0fa9d90).
+        /// MainForm.OnClaudeCodeDetected reads it to skip typing "initializing...".
+        /// </summary>
+        public bool IsQuietStart => _terminal?.QuietStart ?? false;
+
+        /// <summary>
         /// Event fired when the terminal process exits.
         /// </summary>
         public event EventHandler TerminalExited;
@@ -1310,6 +1316,24 @@ namespace MultiTerminal.Docking
                 _debugLogService?.Warning("TerminalDocument", $"#PROJ# [TerminalDocument.StartTerminal] Fell back to folder-name projectName='{_projectName}' from workingDirectory='{workingDirectory}'");
             }
             _debugLogService?.Trace("TerminalDocument", $"#PROJ# [TerminalDocument.StartTerminal] Final _projectName='{_projectName}' for projectId='{projectId}'");
+
+            // Quiet start (GitHub #34, task e0fa9d90), decided for EVERY launch so a reused pane never
+            // keeps the last project's value. Read from the rich row because the setting is SQLite-only.
+            // A failed lookup is a normal start: today's behaviour is the safe default.
+            bool projectQuietStart = false;
+            if (!string.IsNullOrEmpty(projectId) && _messageBroker?.ProjectDatabase != null)
+            {
+                try
+                {
+                    projectQuietStart = _messageBroker.ProjectDatabase.GetRichProject(projectId)?.IsQuietStart ?? false;
+                }
+                catch (Exception quietEx)
+                {
+                    _debugLogService?.Error("TerminalDocument", $"Quiet start lookup threw for project '{projectId}': {quietEx.Message}");
+                }
+            }
+            _terminal.QuietStart = MultiTerminal.Terminal.TerminalRoles.IsQuietStart(projectQuietStart, spawnerName);
+            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"quietStart: '{_terminal.QuietStart}' (project setting '{projectQuietStart}')");
 
             // Set terminal name as custom title if provided. StartTerminal is
             // an AUTHORITATIVE identity source — the terminalName comes from

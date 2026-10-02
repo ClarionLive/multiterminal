@@ -293,6 +293,8 @@ namespace MultiTerminal.Docking
                 // "claude-code", so leaving it out did not blank the dropdown — it silently
                 // rendered a Codex project AS Claude Code on every re-render.
                 DefaultTerminal = project.DefaultTerminal,
+                // Omitting it would show every quiet-start project as off after a re-render.
+                QuietStart = project.QuietStart,
                 // Not currently serialized by ProjectPanelRenderer (so the panel's status badge,
                 // guarded by `project.status !== undefined`, never renders). Copied anyway so the
                 // clone is complete; surfacing the badge is a separate change.
@@ -677,6 +679,7 @@ namespace MultiTerminal.Docking
                 case "gitRepoUrl": _currentProject.GitRepoUrl = value; break;
                 case "gitDefaultBranch": _currentProject.GitDefaultBranch = value; break;
                 case "gitAutoCommit": _currentProject.GitAutoCommit = value == "true" || value == "1"; break;
+                case "quietStart": _currentProject.QuietStart = value == "true" || value == "1"; break;
                 case "sourceControlAccountId": _currentProject.SourceControlAccountId = value; break;
                 case "changeLog": _currentProject.ChangeLog = value; break;
                 case "teamLead": _currentProject.TeamLead = value; break;

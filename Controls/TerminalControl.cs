@@ -239,7 +239,7 @@ namespace MultiTerminal.Controls
             _renderer.SetTheme(_pendingTheme);
 
             // Create and start terminal
-            _terminal = new ConPtyTerminal { DebugLogService = _debugLogService };
+            _terminal = new ConPtyTerminal { DebugLogService = _debugLogService, QuietStart = QuietStart };
             _terminal.DataReceived += OnTerminalDataReceived;
             _terminal.ProcessExited += OnTerminalProcessExited;
 
@@ -668,6 +668,13 @@ namespace MultiTerminal.Controls
             }
         }
 
+        /// <summary>
+        /// Quiet start for the NEXT <see cref="Start"/> and for /clear in this session (GitHub #34, task
+        /// e0fa9d90). Set by TerminalDocument.StartTerminal from <see cref="TerminalRoles.IsQuietStart"/>
+        /// before every launch, so a reused pane never keeps a previous project's value.
+        /// </summary>
+        public bool QuietStart { get; set; }
+
         // Dedupe window so the hook-driven path and the keystroke fallback can't both
         // inject "initializing..." for a single /clear (task be599e08).
         private const int ClearInjectDedupeWindowMs = 5000;
@@ -746,6 +753,14 @@ namespace MultiTerminal.Controls
             if (!IsRendererReady)
             {
                 LogTrace($"/clear injection failed: renderer not ready after {waitedMs}ms (renderer={(_renderer == null ? "null" : "not initialized")})");
+                return;
+            }
+
+            // Quiet start (GitHub #34): the session/lineage flush above still runs, but nothing is typed.
+            // The SessionStart hook does not ask for session-start in a quiet terminal either.
+            if (QuietStart)
+            {
+                LogTrace("/clear injection skipped: quiet start");
                 return;
             }
 

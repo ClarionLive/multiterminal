@@ -111,6 +111,7 @@ namespace MultiTerminal.Services
         }
 
         private const string LastDirectoryKey = "LastDirectory";
+        private const string LastNewProjectQuietStartKey = "LastNewProjectQuietStart";
         private const string DefaultWorkingDirectoryKey = "DefaultWorkingDirectory";
         private const string RecentDirectoriesKey = "RecentDirectories";
         private const int MaxRecentDirectories = 10;
@@ -1236,6 +1237,18 @@ namespace MultiTerminal.Services
         {
             Set(DefaultWorkingDirectoryKey, path ?? "");
         }
+
+        /// <summary>
+        /// The Quiet start value chosen for the last project created in the New Project dialog,
+        /// which pre-fills the next one (Owner decision, GitHub #34 / task e0fa9d90). False until
+        /// a project has been created with it, so the dialog starts at today's behaviour.
+        /// </summary>
+        public bool GetLastNewProjectQuietStart() =>
+            string.Equals(Get(LastNewProjectQuietStartKey), "true", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>Records the Quiet start value of the project the dialog just created.</summary>
+        public void SetLastNewProjectQuietStart(bool quietStart) =>
+            Set(LastNewProjectQuietStartKey, quietStart ? "true" : "false");
 
         /// <summary>
         /// Gets the last working directory.

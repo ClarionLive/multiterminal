@@ -9,9 +9,9 @@ using MultiTerminal.Models;
 namespace MultiTerminal.Dialogs
 {
     /// <summary>
-    /// WPF replacement for NewProjectDialog. Dark-themed window with four fields:
-    /// project name, project folder (with browse), team lead dropdown, and
-    /// default-terminal dropdown (Claude Code / Codex).
+    /// WPF replacement for NewProjectDialog. Dark-themed window with five fields:
+    /// project name, project folder (with browse), team lead dropdown,
+    /// default-terminal dropdown (Claude Code / Codex), and the Quiet start checkbox.
     /// Uses WindowInteropHelper so it can be owned by the WinForms MainForm handle.
     /// </summary>
     public partial class NewProjectWpfDialog : Window
@@ -35,9 +35,15 @@ namespace MultiTerminal.Dialogs
         /// </summary>
         public string SelectedDefaultTerminal { get; private set; } = TerminalKindHelper.ClaudeCodeValue;
 
+        /// <summary>The Quiet start choice for the new project (GitHub #34).</summary>
+        public bool SelectedQuietStart { get; private set; }
+
+        /// <param name="initialQuietStart">Pre-fills Quiet start. The caller passes the value chosen
+        /// for the last project created here (Owner decision, task e0fa9d90).</param>
         public NewProjectWpfDialog(
             bool isDark,
-            List<(string Id, string DisplayName, string AvatarUrl)> teamLeadProfiles)
+            List<(string Id, string DisplayName, string AvatarUrl)> teamLeadProfiles,
+            bool initialQuietStart = false)
         {
             _teamLeadProfiles = teamLeadProfiles ?? new List<(string, string, string)>();
 
@@ -49,6 +55,7 @@ namespace MultiTerminal.Dialogs
 
             PopulateTeamLeadDropdown();
             PopulateDefaultTerminalDropdown();
+            QuietStartCheck.IsChecked = initialQuietStart;
             SetupPlaceholder();
         }
 
@@ -187,6 +194,8 @@ namespace MultiTerminal.Dialogs
             SelectedDefaultTerminal = DefaultTerminalCombo.SelectedIndex == 1
                 ? TerminalKindHelper.CodexValue
                 : TerminalKindHelper.ClaudeCodeValue;
+
+            SelectedQuietStart = QuietStartCheck.IsChecked == true;
 
             DialogResult = true;
         }
