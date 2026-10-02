@@ -16,6 +16,14 @@ namespace MultiTerminal.Tests
     /// </summary>
     public class AppIconTests
     {
+        private const int IconDirSize = 6;     // ICONDIR: reserved, type, count (3 x int16)
+        private const int DirEntrySize = 16;   // ICONDIRENTRY
+        private const int EntryBytesOffset = 8;    // ICONDIRENTRY.dwBytesInRes
+        private const int EntryImageOffset = 12;   // ICONDIRENTRY.dwImageOffset
+        private const int MinFrameBytes = 40;  // BITMAPINFOHEADER alone; any real frame (DIB or PNG) is larger
+
+        private static int Entry(int index) => IconDirSize + DirEntrySize * index;
+
         private static byte[] ReadEmbeddedIcon()
         {
             using var stream = typeof(AppIcon).Assembly.GetManifestResourceStream(AppIcon.ResourceName);
@@ -36,7 +44,7 @@ namespace MultiTerminal.Tests
             int count = BitConverter.ToInt16(bytes, 4);
 
             var sizes = Enumerable.Range(0, count)
-                .Select(i => bytes[6 + 16 * i] == 0 ? 256 : bytes[6 + 16 * i])   // width byte 0 means 256
+                .Select(i => bytes[Entry(i)] == 0 ? 256 : bytes[Entry(i)])   // width byte 0 means 256
                 .OrderBy(s => s)
                 .ToArray();
 
@@ -54,9 +62,9 @@ namespace MultiTerminal.Tests
             int count = BitConverter.ToInt16(bytes, 4);
             for (int i = 0; i < count; i++)
             {
-                int length = BitConverter.ToInt32(bytes, 6 + 16 * i + 8);
-                int offset = BitConverter.ToInt32(bytes, 6 + 16 * i + 12);
-                Assert.True(length > 40, $"frame {i} is {length} bytes");
+                int length = BitConverter.ToInt32(bytes, Entry(i) + EntryBytesOffset);
+                int offset = BitConverter.ToInt32(bytes, Entry(i) + EntryImageOffset);
+                Assert.True(length > MinFrameBytes, $"frame {i} is {length} bytes");
                 Assert.True(offset + length <= bytes.Length, $"frame {i} runs past the end of the file");
             }
         }
