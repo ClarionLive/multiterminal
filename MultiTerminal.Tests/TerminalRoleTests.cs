@@ -91,6 +91,25 @@ namespace MultiTerminal.Tests
             Assert.Equal("Oracle", TerminalDocument.ComposeTabTitle("Oracle", null, TerminalRole.None));
         }
 
+        [Theory]
+        [InlineData("Unassigned")]
+        [InlineData("unassigned")]
+        public void An_unassigned_team_lead_shows_only_the_project(string placeholder)
+        {
+            // GH #26: a project with no team lead launches under the "Unassigned" placeholder, and the
+            // tab used to read "Unassigned - MultiTerminal". The role suffix is still appended.
+            Assert.Equal("MultiTerminal", TerminalDocument.ComposeTabTitle(placeholder, "MultiTerminal", TerminalRole.None));
+            Assert.Equal("MultiTerminal (PM)",
+                TerminalDocument.ComposeTabTitle(placeholder, "MultiTerminal", TerminalRole.ProjectManager));
+        }
+
+        [Fact]
+        public void An_unassigned_terminal_with_no_project_keeps_its_placeholder()
+        {
+            // With no project the placeholder is the tab's only text; dropping it would leave a blank tab.
+            Assert.Equal("Unassigned", TerminalDocument.ComposeTabTitle("Unassigned", null, TerminalRole.None));
+        }
+
         [Fact]
         public void A_renamed_tab_keeps_its_role()
         {

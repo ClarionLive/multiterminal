@@ -467,13 +467,20 @@ namespace MultiTerminal.Docking
         /// those are the identity <c>MainForm</c> matches terminals by and the statusline reads files by
         /// (ab50355f). The role suffix takes the same display-only path the project name already took.</para>
         ///
+        /// <para>The "Unassigned" placeholder (a project with no team lead) is dropped when there is a
+        /// project to show, so the tab reads <c>Project</c> rather than <c>Unassigned - Project</c>
+        /// (GH #26). With no project it stays, since it is then the only text the tab has.</para>
+        ///
         /// <para>Pure and static so the composition is testable without a WinForms document.</para>
         /// </summary>
         internal static string ComposeTabTitle(string agentName, string projectName, MultiTerminal.Terminal.TerminalRole role)
         {
-            var title = !string.IsNullOrEmpty(projectName)
-                ? $"{agentName} - {projectName}"
-                : agentName;
+            bool isPlaceholder = string.Equals(agentName, "Unassigned", StringComparison.OrdinalIgnoreCase);
+            var title = string.IsNullOrEmpty(projectName)
+                ? agentName
+                : isPlaceholder
+                    ? projectName
+                    : $"{agentName} - {projectName}";
 
             return title + MultiTerminal.Terminal.TerminalRoles.TabSuffix(role);
         }
