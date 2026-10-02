@@ -235,5 +235,61 @@ namespace MultiTerminal.Tests
         {
             Assert.Equal(CentralMcpConfig.Outcome.SkippedUnderTestHost, CentralMcpConfig.EnsureDefault(log: null));
         }
+
+        /// <summary>
+        /// Task a796e5f9: the launch path used to heal only when the file was ABSENT, so a file that broke
+        /// after startup was handed to every terminal until MultiTerminal restarted. The heal now runs
+        /// before every launch, including when a file is there.
+        /// </summary>
+        [Fact]
+        public void PathForLaunch_heals_even_when_a_file_exists()
+        {
+            Directory.CreateDirectory(_tempDir);
+            string path = Path.Combine(_tempDir, ".mcp.json");
+            File.WriteAllText(path, Config(PublishExe, IndexJs));
+            int heals = 0;
+
+            string? result = CentralMcpConfig.PathForLaunch(path, () => { heals++; return CentralMcpConfig.Outcome.Healthy; }, log: null);
+
+            Assert.Equal(1, heals);
+            Assert.Equal(path, result);
+        }
+
+        /// <summary>The end-to-end shape: the gateway build the file named is gone, and the launch gets a repaired file.</summary>
+        [Fact]
+        public void PathForLaunch_hands_out_a_repaired_file_when_a_named_path_has_gone()
+        {
+            Directory.CreateDirectory(_tempDir);
+            string path = Path.Combine(_tempDir, ".mcp.json");
+            File.WriteAllText(path, Config(PublishExe, IndexJs));
+            var exists = Existing(InstalledExe, IndexJs);
+
+            string? result = CentralMcpConfig.PathForLaunch(path, () => CentralMcpConfig.Ensure(path, Both, exists, log: null), log: null);
+
+            Assert.Equal(path, result);
+            Assert.Null(CentralMcpConfig.WhyUnhealthy(File.ReadAllText(path), Both, exists));
+        }
+
+        [Fact]
+        public void PathForLaunch_does_not_fail_a_launch_when_the_heal_throws()
+        {
+            Directory.CreateDirectory(_tempDir);
+            string path = Path.Combine(_tempDir, ".mcp.json");
+            File.WriteAllText(path, Config(PublishExe, IndexJs));
+            var logged = new List<string>();
+
+            string? result = CentralMcpConfig.PathForLaunch(path, () => throw new InvalidOperationException("boom"), logged.Add);
+
+            Assert.Equal(path, result);
+            Assert.Single(logged);
+        }
+
+        [Fact]
+        public void PathForLaunch_returns_null_when_there_is_still_no_file()
+        {
+            string path = Path.Combine(_tempDir, ".mcp.json");
+
+            Assert.Null(CentralMcpConfig.PathForLaunch(path, () => CentralMcpConfig.Outcome.NothingToWrite, log: null));
+        }
     }
 }

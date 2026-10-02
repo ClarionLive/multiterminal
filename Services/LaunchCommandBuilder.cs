@@ -595,17 +595,18 @@ namespace MultiTerminal.Services
                 "marketplaces", "multiterminal-marketplace", "plugins", "multiterminal");
 
         /// <summary>
-        /// Returns the path to the centralized MCP config file, recreating it first if it has gone
-        /// missing since startup. Null only when it cannot be created — and then every launch runs
-        /// without the core MCP servers, which is the silent failure GitHub #8 reported.
+        /// Returns the path to the centralized MCP config file, healing it first if it has gone
+        /// missing or broken since startup (a working file is left alone). Null only when it cannot be
+        /// created — and then every launch runs without the core MCP servers, which is the silent
+        /// failure GitHub #8 reported.
         /// Location: %APPDATA%\multiterminal\.mcp.json
         /// </summary>
         public static string GetMcpConfigPath()
         {
-            string mcpConfig = CentralMcpConfig.DefaultPath;
-            if (!File.Exists(mcpConfig))
-                CentralMcpConfig.EnsureDefault(log: null);
-            return File.Exists(mcpConfig) ? mcpConfig : null;
+            return CentralMcpConfig.PathForLaunch(
+                CentralMcpConfig.DefaultPath,
+                () => CentralMcpConfig.EnsureDefault(log: null),
+                log: null);
         }
 
         /// <summary>

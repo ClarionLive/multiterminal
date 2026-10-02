@@ -160,7 +160,7 @@ namespace MultiTerminal.Services
         /// Heals the file at <paramref name="configPath"/> if it needs it. Does not throw for any file
         /// CONTENT (<see cref="WhyUnhealthy"/> turns every parse failure into a reason) and catches the
         /// I/O and access errors a read or write can raise. It does not catch everything: the startup
-        /// caller wraps it in a catch-all; the launch-path caller reaches it only when the file is absent.
+        /// caller wraps it in a catch-all, and so does <see cref="PathForLaunch"/>.
         /// </summary>
         internal static Outcome Ensure(
             string configPath,
@@ -192,6 +192,29 @@ namespace MultiTerminal.Services
                 log?.Invoke($"Could not heal {configPath}: {ex.Message}");
                 return Outcome.Failed;
             }
+        }
+
+        /// <summary>
+        /// Heals the file, then returns its path for <c>--mcp-config</c>, or null when there is still no
+        /// file to pass. Runs before EVERY launch, not only when the file is absent (task a796e5f9): a file
+        /// that broke after startup — an index.js or gateway that moved, a bad hand edit — was otherwise
+        /// handed to every terminal until MultiTerminal restarted. Safe to run each time because
+        /// <see cref="Ensure"/> leaves a healthy file byte-identical.
+        /// <para>Never throws: a launch must not fail because a heal did. On an unexpected error the
+        /// existing file, if any, is passed as it is.</para>
+        /// </summary>
+        internal static string? PathForLaunch(string configPath, Func<Outcome> ensure, Action<string>? log)
+        {
+            try
+            {
+                ensure();
+            }
+            catch (Exception ex)
+            {
+                log?.Invoke($"Could not check {configPath} before launch: {ex.Message}");
+            }
+
+            return File.Exists(configPath) ? configPath : null;
         }
 
         /// <summary>
