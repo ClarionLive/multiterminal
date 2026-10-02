@@ -78,8 +78,10 @@ namespace MultiTerminal.Docking
         // adopt+promote an "Unassigned" placeholder. A foreign process that leaked only the
         // docId (env inheritance, task ab50355f residual) never learns this nonce, so it can no
         // longer claim the identity and lock out the real owner. Fresh per instance (incl.
-        // restore/re-adopt), so it tracks this terminal's own launch — same lifetime as _docId.
-        private readonly string _launchNonce = Guid.NewGuid().ToString("N");
+        // restore/re-adopt), and since task 19a26090 fresh per LAUNCH too: RotateLaunchNonce
+        // replaces it whenever a launch ends, so a process left over from an earlier launch in
+        // this reused pane no longer holds proof. Not readonly for that reason only.
+        private volatile string _launchNonce = Guid.NewGuid().ToString("N");
 
         // Wall-clock (Unix ms) this TerminalDocument instance was constructed. Used as
         // the freshness floor for the statusline name-glob fallback (task 1ba59334): a
@@ -124,6 +126,30 @@ namespace MultiTerminal.Docking
         /// an empty seed so session-restore / legacy / non-lockstep-deploy paths keep working.
         /// </summary>
         public string LaunchNonce => _launchNonce;
+
+        /// <summary>
+        /// Retires this pane's launch nonce and mints a new one. Called when a launch ENDS — the
+        /// child exited, the pane went home, or "Launch as…" is about to replace it — so the nonce
+        /// proves the CURRENT launch rather than any launch this pane has ever hosted (task
+        /// 19a26090, pipeline Run 1: Codex security-auditor and cross-model adversary, the same
+        /// HIGH found independently).
+        ///
+        /// <para>Why it matters now: a registration presenting this pane's docId and nonce is
+        /// trusted to REPLACE the pane's identity (<see cref="TerminalRegistrationBinder"/>). With a
+        /// pane-lifetime nonce, a delayed or leftover process from launch A could overwrite launch
+        /// B's identity and put A's status, task and folder back on B's header — the defect this
+        /// ticket exists to remove.</para>
+        ///
+        /// <para>Never call it between pre-registration and <see cref="StartTerminal"/>: the broker
+        /// row is seeded with the nonce at pre-registration and the child receives it at start, and
+        /// they must be the same value. Rotating at the END of a launch keeps both inside one
+        /// launch by construction.</para>
+        /// </summary>
+        internal void RotateLaunchNonce()
+        {
+            _launchNonce = Guid.NewGuid().ToString("N");
+            _debugLogService?.Trace("TerminalDocument", $"DocId='{_docId}' launch nonce rotated (launch ended; task 19a26090).");
+        }
 
         /// <summary>
         /// The broker-confirmed, stable agent identity for this terminal (set once via
@@ -456,6 +482,38 @@ namespace MultiTerminal.Docking
             _lastStatusLineContent = null;
             System.Threading.Interlocked.Increment(ref _statusLineIdentityGen);
             _debugLogService?.Trace("TerminalDocument.PromoteOriginalAgentName", $"DocId='{_docId}' set _originalAgentName='{authoritativeAgentName}'.");
+        }
+
+        /// <summary>
+        /// Makes <paramref name="agentName"/> this pane's identity for the launch now running in it,
+        /// replacing any earlier one (task 19a26090). Unlike <see cref="PromoteOriginalAgentName"/>
+        /// this is not first-wins, so it may only be called by sources that speak for THIS launch:
+        /// <see cref="StartTerminal"/>, and a registration that proved it is this pane's child by
+        /// echoing its docId and launch nonce (<see cref="TerminalRegistrationBinder"/>).
+        ///
+        /// <para>First-wins was right within one launch and wrong across launches. A pane is reused —
+        /// returned to the start screen and relaunched as another agent — and first-wins kept the
+        /// previous agent's name forever, so the header read that agent's statusline file. The
+        /// 2026-10-01 incident added a worse variant: a registration bound a pane to the wrong name,
+        /// and that pane's own StartTerminal, which knew the right one, was silently ignored.</para>
+        ///
+        /// <para>A null, empty or "Unassigned" name clears the identity, so the real registration that
+        /// follows a placeholder launch can promote into it instead of inheriting the last agent.</para>
+        /// </summary>
+        internal void AdoptLaunchIdentity(string agentName)
+        {
+            string next = string.IsNullOrEmpty(agentName) || TerminalRegistrationBinder.IsUnassigned(agentName)
+                ? null
+                : agentName;
+            if (string.Equals(next, _originalAgentName, StringComparison.Ordinal)) return;
+
+            string previous = _originalAgentName;
+            _originalAgentName = next;
+            // Same publication order as PromoteOriginalAgentName: cache cleared, then the generation
+            // bumped, so an in-flight tick that read the previous identity's file drops its payload.
+            _lastStatusLineContent = null;
+            System.Threading.Interlocked.Increment(ref _statusLineIdentityGen);
+            _debugLogService?.Info("TerminalDocument", $"DocId='{_docId}' launch identity '{previous ?? ""}' → '{next ?? ""}' (task 19a26090).");
         }
 
         /// <summary>
@@ -1375,16 +1433,16 @@ namespace MultiTerminal.Docking
 
             // Set terminal name as custom title if provided. StartTerminal is
             // an AUTHORITATIVE identity source — the terminalName comes from
-            // the live launch context, not from persisted UI state — so we
-            // also promote it into _originalAgentName for stable broker-event
-            // filtering. PromoteOriginalAgentName is first-wins so subsequent
-            // launches (rare) won't clobber.
+            // the live launch context, not from persisted UI state — so it
+            // becomes this pane's identity for stable broker-event filtering and
+            // statusline lookup. Per LAUNCH, not first-ever (task 19a26090): a
+            // reused pane must follow the agent now running in it.
             if (!string.IsNullOrEmpty(terminalName))
             {
                 _debugLogService?.Trace("TerminalDocument.StartTerminal", $"Setting CustomTitle to '{terminalName}'");
                 CustomTitle = terminalName;
-                PromoteOriginalAgentName(terminalName);
             }
+            AdoptLaunchIdentity(terminalName);
 
             // Pre-write a fallback statusline file with the folder path so the header
             // always shows SOMETHING even if the Claude Code process has a project-level
@@ -2353,6 +2411,9 @@ namespace MultiTerminal.Docking
             // Reset terminal state so the tab can be reused for a new session
             _isTerminalStarted = false;
 
+            // The launch is over: its nonce must not prove anything about the next one.
+            RotateLaunchNonce();
+
             // Return to start screen on process exit so the tab can be reused
             ShowStartScreen();
 
@@ -2477,6 +2538,7 @@ namespace MultiTerminal.Docking
             {
                 _terminal.Stop();
                 _isTerminalStarted = false;
+                RotateLaunchNonce();   // the launch is over (task 19a26090)
 
                 // Notify MainForm — OnTerminalExited handles UnregisterTerminal + doc map cleanup
                 // (consistent with OnTerminalProcessExited pattern)
@@ -2696,6 +2758,16 @@ namespace MultiTerminal.Docking
                 return;
             }
             if (!string.Equals(args.AgentName, _originalAgentName, StringComparison.Ordinal)) return;
+
+            // The header's "working on" marker follows the active task (task 19a26090). Before the
+            // _hudGit check, so a pane without a Git HUD still refreshes. The event fires after the
+            // broker swapped the task's state, so the in-memory read in UpdateStatusBar sees it.
+            try
+            {
+                if (IsHandleCreated && !IsDisposed) BeginInvoke(new Action(UpdateStatusBar));
+            }
+            catch (InvalidOperationException) { /* handle torn down between the check and the post */ }
+
             if (_hudGit == null) return;
 
             // Re-resolve worktree path AND projectId from broker-owned state
@@ -2787,6 +2859,11 @@ namespace MultiTerminal.Docking
             string taskId = null;
             string status = "idle";
 
+            // One snapshot of the task cache per refresh: GetTasks() copies and sorts the whole cache,
+            // and this runs on the UI thread on every activity update. Shared by the task-title lookup
+            // and the "working on" marker below.
+            List<MultiTerminal.MCPServer.Models.KanbanTask> tasks = null;
+
             // Get profile and activity data from MessageBroker
             if (_messageBroker != null)
             {
@@ -2808,7 +2885,8 @@ namespace MultiTerminal.Docking
                     // Get task title if task ID is set
                     if (!string.IsNullOrEmpty(taskId))
                     {
-                        var task = _messageBroker.GetTasks().FirstOrDefault(t => t.Id == taskId);
+                        tasks ??= _messageBroker.GetTasks();
+                        var task = tasks.FirstOrDefault(t => t.Id == taskId);
                         if (task != null)
                         {
                             taskTitle = task.Title;
@@ -2821,23 +2899,27 @@ namespace MultiTerminal.Docking
                 _debugLogService?.Trace("TerminalDocument", $"UpdateStatusBar: _messageBroker is null, updating with name only: {terminalName}");
             }
 
-            // Look up project by working directory path. If the folder isn't a
-            // registered MT project, fall back to the folder's leaf name so Row 1
-            // still shows something meaningful (not the agent name).
+            // Look up the project that CONTAINS the working directory, so a task worktree
+            // (<root>\.claude\worktrees\<id>\...) shows its project rather than the worktree's
+            // folder name (task 19a26090). The statusline drift block already resolved this way;
+            // this exact-path match was the one place that did not. If the folder isn't under a
+            // registered MT project, fall back to the folder's leaf name so Row 1 still shows
+            // something meaningful (not the agent name).
             string projectName = null;
+            string projectId = null;
             string projectDescription = null;
             string workDir = GetWorkingDirectory();
+            List<MultiTerminal.Models.ProjectRegistryEntry> projects = null;
             if (_messageBroker?.ProjectService != null && !string.IsNullOrEmpty(workDir))
             {
                 try
                 {
-                    var projects = _messageBroker.ProjectService.GetAllRegisteredProjects();
-                    var matchedEntry = projects.FirstOrDefault(p =>
-                        !string.IsNullOrEmpty(p.Path) &&
-                        string.Equals(p.Path.TrimEnd('\\', '/'), workDir.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase));
+                    projects = _messageBroker.ProjectService.GetAllRegisteredProjects();
+                    var matchedEntry = MultiTerminal.Services.ProjectPathResolver.ResolveByContainment(projects, workDir);
                     if (matchedEntry != null)
                     {
                         projectName = matchedEntry.Name;
+                        projectId = matchedEntry.Id;
                         // Load full project for description
                         var fullProject = _messageBroker.ProjectService.LoadProject(matchedEntry.Path);
                         if (fullProject != null)
@@ -2851,6 +2933,32 @@ namespace MultiTerminal.Docking
                 projectName = System.IO.Path.GetFileName(workDir.TrimEnd('\\', '/'));
             }
 
+            // "Working on: X" when the active task belongs to another project (Owner decision,
+            // task 19a26090). Keyed by the stable identity, not the displayed title, for the same
+            // reason the statusline is. The Attention card reads these two properties rather than
+            // recomputing them, so the header and the card cannot describe this pane differently.
+            string workingOn = null;
+            if (_messageBroker != null)
+            {
+                try
+                {
+                    // The registry list fetched above (the same source GetProjectsList reads), so
+                    // the header does not load the registry twice per refresh.
+                    projects ??= _messageBroker.ProjectService?.GetAllRegisteredProjects();
+                    tasks ??= _messageBroker.GetTasks();
+                    workingOn = MultiTerminal.Services.WorkingOnProject.Resolve(
+                        tasks, _originalAgentName ?? terminalName, projectId, projectName,
+                        MultiTerminal.Services.WorkingOnProject.NameIndex(projects?.Select(p => (p?.Id, p?.Name))));
+                }
+                catch (Exception ex)
+                {
+                    // Non-critical — the marker is simply omitted, but say why.
+                    _debugLogService?.Trace("TerminalDocument", $"UpdateStatusBar: working-on marker skipped: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+            HeaderProjectName = projectName;
+            HeaderWorkingOnProject = workingOn;
+
             _debugLogService?.Trace("TerminalDocument", $"UpdateStatusBar: Calling _statusBar.UpdateStatus with:");
             _debugLogService?.Trace("TerminalDocument", $"  - terminalName: '{terminalName}'");
             _debugLogService?.Trace("TerminalDocument", $"  - avatarUrl: '{avatarUrl}'");
@@ -2860,10 +2968,29 @@ namespace MultiTerminal.Docking
             _debugLogService?.Trace("TerminalDocument", $"  - status: '{status}'");
             _debugLogService?.Trace("TerminalDocument", $"  - projectName: '{projectName}'");
 
-            _statusBar.UpdateStatus(terminalName, avatarUrl, activityDescription, taskTitle, taskId, status, projectName, projectDescription);
+            _statusBar.UpdateStatus(terminalName, avatarUrl, activityDescription, taskTitle, taskId, status, projectName, projectDescription, workingOn);
 
             _debugLogService?.Trace("TerminalDocument", "_statusBar.UpdateStatus call completed");
         }
+
+        /// <summary>
+        /// The project this pane's header last showed: the registered project containing the
+        /// session's folder, else the folder's name. Null until the header has rendered once.
+        /// Read by the Attention panel so its card names the same project (task 19a26090).
+        /// </summary>
+        public string HeaderProjectName { get; private set; }
+
+        /// <summary>
+        /// The header's "working on" project — the active task's project when it differs from
+        /// <see cref="HeaderProjectName"/> — or null (task 19a26090).
+        /// </summary>
+        public string HeaderWorkingOnProject { get; private set; }
+
+        /// <summary>
+        /// The agent this pane belongs to: the stable identity once promoted, else the displayed
+        /// title. What the Attention panel matches a card's agent against.
+        /// </summary>
+        public string PaneAgentName => StatusLineIdentity;
 
         /// <summary>
         /// Pre-writes a fallback statusline JSON file containing just the folder path
@@ -2913,58 +3040,70 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
-        /// Resolves which statusline temp file to read for this terminal. Prefers the
-        /// docId-scoped file (<c>mt-statusline-{name}-{_docId}.json</c>) written for a
-        /// freshly spawned child. If that's missing — the restore/re-adopt case where the
-        /// child keeps writing under a prior instance's docId while this TerminalDocument
-        /// minted a new random <c>_docId</c> — returns the newest
-        /// <c>mt-statusline-{name}-*.json</c> by its embedded <c>timestamp</c> so the
-        /// restored terminal's banner picks up live data instead of staying blank. Returns
-        /// <c>null</c> when no candidate exists. Mirrors the name-based fallback the REST
-        /// stats endpoint already uses (StatusLineStatsReader.FindNewestPerTerminalFile),
-        /// including its skip of future-dated (clock-skewed/planted) files.
-        ///
-        /// <para>Freshness floor (task 1ba59334): glob candidates older than this
-        /// terminal's launch (<see cref="_launchedAtMs"/>) are rejected, so a terminal can
-        /// never adopt a PRIOR run's or a foreign same-named terminal's frozen value (the
-        /// symptom: a restored terminal whose child uses a project statusLine override —
-        /// e.g. a Clarion-addin terminal — writes no fresh mt-statusline file, and the
-        /// banner stuck on a stale file). A legitimately restored MT child keeps writing
-        /// fresh files (timestamp &gt; floor) so it is still adopted; only stale files are
-        /// dropped, leaving the fresh blank placeholder rather than a misleading number.</para>
+        /// Resolves which statusline temp file this pane reads; the rules live on
+        /// <see cref="PickStatusLineFile"/>. Returns <c>null</c> when no candidate exists.
         /// </summary>
         private string ResolveStatusLineFilePath(string terminalName)
         {
-            // Strict per-instance binding (task d14048ef, item C): the docId-scoped file is
-            // unique to THIS TerminalDocument (each instance mints its own random _docId), so a
-            // live terminal always reads its own banner data and never a same-named sibling's.
-            // The glob fallback below is reached ONLY when this instance has no own file yet —
-            // the re-adopt-after-restart path — and is bounded by the freshness floor so it can't
-            // latch a prior run's / a removed duplicate's frozen file.
-            string exact = Path.Combine(Path.GetTempPath(), $"mt-statusline-{terminalName}-{_docId}.json");
-            if (File.Exists(exact))
+            var pick = PickStatusLineFile(Path.GetTempPath(), terminalName, _docId,
+                _launchedAtMs - StatuslineFreshnessGraceMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            NoteResolvedStatusLinePath(pick.Path, viaFallback: !pick.OwnPane);
+            return pick.Path;
+        }
+
+        /// <summary>
+        /// The statusline file choice, pure over a directory so it is unit-testable (task 19a26090).
+        ///
+        /// <para><b>1. This pane's own files, found by docId alone.</b> <c>mt-statusline-*-{docId}.json</c>,
+        /// most recently written. The docId is minted per pane and injected only into that pane's child,
+        /// which writes it into the file name, so these files can only have come from this pane. The
+        /// agent-name segment is deliberately NOT part of this match: on 2026-10-01 two panes had the
+        /// wrong name and each polled <c>{wrong name}-{own docId}</c>, missed, and fell through to the
+        /// name glob below, which handed them a SIBLING's file. Their own correctly named files were
+        /// sitting next to it the whole time. A pane relaunched as another agent leaves two own files;
+        /// the live one is the most recently written, because the previous agent's process has exited.
+        /// Ranked by write time rather than the embedded timestamp so a torn mid-rename read can never
+        /// drop the pane's only own file and push it onto the foreign fallback.</para>
+        ///
+        /// <para><b>2. Only if the pane has no file of its own:</b> the newest
+        /// <c>mt-statusline-{name}-*.json</c> by embedded timestamp, above the freshness floor (task
+        /// 1ba59334). This is the re-adopt case: after an MT restart a restored pane mints a new docId
+        /// while its child keeps writing under the old one. It is the only path that can read another
+        /// pane's file, which is why it is last and bounded.</para>
+        /// </summary>
+        internal static (string Path, bool OwnPane) PickStatusLineFile(string directory, string terminalName, string docId, long freshnessFloorMs, long nowMs)
+        {
+            if (IsSafeStatusLineSegment(docId))
             {
-                NoteResolvedStatusLinePath(exact, viaFallback: false);
-                return exact;
+                try
+                {
+                    string own = Directory.GetFiles(directory, $"mt-statusline-*-{docId}.json")
+                        .OrderByDescending(File.GetLastWriteTimeUtc)
+                        .FirstOrDefault();
+                    if (own != null) return (own, true);
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                {
+                    // Fall through to the name-based fallback.
+                }
             }
 
-            // Only the fallback glob needs a safe segment; reject names that could widen
+            // Only the fallback glob needs a safe name segment; reject names that could widen
             // the search beyond the intended mt-statusline-{name}-*.json shape.
-            if (!IsSafeStatusLineSegment(terminalName)) return null;
+            if (!IsSafeStatusLineSegment(terminalName)) return (null, false);
 
             string[] candidates;
             try
             {
-                candidates = Directory.GetFiles(Path.GetTempPath(), $"mt-statusline-{terminalName}-*.json");
+                candidates = Directory.GetFiles(directory, $"mt-statusline-{terminalName}-*.json");
             }
             catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
             {
-                return null;
+                return (null, false);
             }
 
             string newest = null;
             long newestTs = long.MinValue;
-            long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             foreach (var path in candidates)
             {
                 try
@@ -2977,12 +3116,12 @@ namespace MultiTerminal.Docking
                     long ts = tsEl.GetInt64();
                     if (ts > nowMs) continue;          // ignore future-dated (skewed/planted) files
                     // Reject stale prior-run / foreign files (task 1ba59334): never show a frozen
-                    // value from before this terminal launched. A grace window admits a render that
-                    // landed just before an MT restart/re-adopt — so a RESTORED IDLE terminal (whose
-                    // child may not re-render after re-adopt, codex adversary MEDIUM) still shows its
-                    // last-known data instead of a permanent blank — while hours-old stale files are
-                    // still rejected.
-                    if (ts < _launchedAtMs - StatuslineFreshnessGraceMs) continue;
+                    // value from before this terminal launched. The caller's floor includes a grace
+                    // window that admits a render landing just before an MT restart/re-adopt — so a
+                    // RESTORED IDLE terminal (whose child may not re-render after re-adopt, codex
+                    // adversary MEDIUM) still shows its last-known data — while hours-old stale files
+                    // are still rejected.
+                    if (ts < freshnessFloorMs) continue;
                     if (ts > newestTs) { newestTs = ts; newest = path; }
                 }
                 catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is JsonException)
@@ -2990,8 +3129,7 @@ namespace MultiTerminal.Docking
                     // Torn/corrupt/locked sibling — skip it, keep scanning.
                 }
             }
-            NoteResolvedStatusLinePath(newest, viaFallback: true);
-            return newest;
+            return (newest, false);
         }
 
         // Last statusline file this instance resolved to — used purely to log the re-adopt

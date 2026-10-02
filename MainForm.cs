@@ -1728,189 +1728,104 @@ namespace MultiTerminal
                 }
             }
 
-            // Map the MCP terminal ID to the TerminalDocument
-            // Strategy: try DocId first, then name match, then last active as final fallback
-            TerminalDocument targetDoc = null;
+            // Map the MCP terminal ID to the TerminalDocument. The decision lives in
+            // TerminalRegistrationBinder so it can be unit-tested (task 19a26090): docId first, and a
+            // registration that also echoes that pane's launch nonce is the pane's own process and binds
+            // there unconditionally. Otherwise name match, the 1:1 guard and the fd3437e6 nonce gate,
+            // unchanged. No last-resort fallback: the old _lastActiveTerminal fallback misrouted two
+            // terminals registering in quick succession.
+            var docs = _dockPanel.Documents.OfType<TerminalDocument>().ToList();
+            var binding = TerminalRegistrationBinder.Resolve(
+                docs.Select(d => new PaneIdentity(d.DocId, d.OriginalAgentName, d.CustomTitle, d.LaunchNonce)).ToList(),
+                e.Name, e.DocId, e.LaunchNonce);
+            TerminalDocument targetDoc = binding.Index >= 0 ? docs[binding.Index] : null;
 
-            // Local helper: case-insensitive match of a document by its CustomTitle (null-safe). Not
-            // TabText: that is display text, and a placeholder tab titled just "Proj" (GH #26) would
-            // bind a registering agent named "Proj" to the wrong pane (158d60ac).
-            static bool MatchesByName(TerminalDocument t, string name) =>
-                t.CustomTitle?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false;
-
-            if (!string.IsNullOrEmpty(e.DocId))
+            switch (binding.Route)
             {
-                // Find terminal by DocId - most reliable mapping
-                targetDoc = _dockPanel.Documents
-                    .OfType<TerminalDocument>()
-                    .FirstOrDefault(t => t.DocId == e.DocId);
+                case PaneBindingRoute.None:
+                    _debugLogService?.Info("MainForm", $"Terminal '{e.Name}' (id={e.Id}, docId={e.DocId}) could not be mapped to any TerminalDocument — channel/inbox delivery still works.");
+                    break;
+                case PaneBindingRoute.CollisionReResolved:
+                case PaneBindingRoute.CollisionUnbound:
+                    _debugLogService?.Info("MainForm", $"Registration collision: '{e.Name}' (id={e.Id}, docId={e.DocId}) first resolved to a document already bound to '{binding.BoundIdentity}' without proving it launched there. Refusing to clobber it; re-resolved to {(targetDoc == null ? "nothing" : $"docId={targetDoc.DocId}")}.");
+                    if (targetDoc == null)
+                        _debugLogService?.Warning("MainForm", $"No document matches '{e.Name}' — skipping tab/identity update to avoid clobbering another terminal.");
+                    break;
+                case PaneBindingRoute.NonceDenied:
+                    // Log only WHETHER a nonce was presented — never the value (it's a live secret).
+                    _debugLogService?.Warning("MainForm", $"Placeholder adoption DENIED (nonce mismatch): registration '{e.Name}' (id={e.Id}, docId={e.DocId}, noncePresented={!string.IsNullOrEmpty(e.LaunchNonce)}) does not prove origin for an unclaimed doc. Refusing to promote it onto this placeholder.");
+                    _debugLogService?.Warning("SWAPDIAG", $"NONCE-DENY name='{e.Name}' e.DocId='{e.DocId}' noncePresented={!string.IsNullOrEmpty(e.LaunchNonce)} => promote refused (task fd3437e6)");
+                    break;
+                case PaneBindingRoute.ProvenOwnLaunch:
+                    if (binding.BoundIdentity != null && !binding.BoundIdentity.Equals(e.Name, StringComparison.OrdinalIgnoreCase))
+                        _debugLogService?.Info("MainForm", $"Registration '{e.Name}' proved it launched in docId={e.DocId} (nonce match); it replaces that pane's previous identity '{binding.BoundIdentity}' (restored title or earlier launch). task 19a26090");
+                    break;
             }
 
-            // Fall back to name match (handles re-registration where Claude passes wrong DocId
-            // but pre-registration already set CustomTitle correctly)
-            if (targetDoc == null && !string.IsNullOrEmpty(e.Name))
-            {
-                targetDoc = _dockPanel.Documents
-                    .OfType<TerminalDocument>()
-                    .FirstOrDefault(t => MatchesByName(t, e.Name));
-            }
-
-            // No last-resort fallback — DocId and name-match are the only reliable mapping paths.
-            // The old _lastActiveTerminal fallback caused misrouting when two terminals registered
-            // in quick succession and _lastActiveTerminal pointed to the wrong tab.
-            if (targetDoc == null)
-            {
-                _debugLogService?.Info("MainForm", $"Terminal '{e.Name}' (id={e.Id}, docId={e.DocId}) could not be mapped to any TerminalDocument — channel/inbox delivery still works.");
-            }
-
-            // SWAPDIAG (task ab32897c): header-swap diagnostic. Captures, per registration,
-            // the broker-received (name,docId) and which TerminalDocument it bound to, plus a
-            // snapshot of every live doc's (docId,instance,customTitle,contentDir). Comparing
-            // the matched docId against each doc's own launch dir reveals the cross. Remove
-            // after root cause is confirmed.
+            // SWAPDIAG (task ab32897c): per registration, the broker-received (name,docId), the route,
+            // and which TerminalDocument it bound to, plus a snapshot of every live doc. Remove after
+            // root cause is confirmed.
             try
             {
-                var allDocs = _dockPanel.Documents.OfType<TerminalDocument>()
-                    .Select(d => $"[inst={d.InstanceId} docId={d.DocId} title='{d.CustomTitle}' dir='{d.GetWorkingDirectory()}']");
+                var allDocs = docs.Select(d => $"[inst={d.InstanceId} docId={d.DocId} title='{d.CustomTitle}' promoted='{d.OriginalAgentName}' dir='{d.GetWorkingDirectory()}']");
                 _debugLogService?.Info("SWAPDIAG",
-                    $"REGISTER name='{e.Name}' e.DocId='{e.DocId}' e.Id='{e.Id}' => BOUND " +
+                    $"REGISTER name='{e.Name}' e.DocId='{e.DocId}' e.Id='{e.Id}' route={binding.Route} => BOUND " +
                     (targetDoc == null
                         ? "(none)"
                         : $"inst={targetDoc.InstanceId} docId={targetDoc.DocId} title='{targetDoc.CustomTitle}' dir='{targetDoc.GetWorkingDirectory()}'") +
                     " | ALL_DOCS: " + string.Join(" ", allDocs));
-
-                // SWAPDIAG cross detector (task ab32897c): the swap is rare/unreproducible,
-                // so flag it LOUDLY the moment it happens. _originalAgentName is the doc's
-                // launch-time identity (first-wins promotion); it is read here BEFORE this
-                // registration's own promotion (below, lines ~1266/1273) overwrites it, so
-                // a mismatch means this registration is binding a name onto a document that
-                // launched as a DIFFERENT agent — i.e. the header cross. WARNING-level so a
-                // recurrence is grep-able as "SWAPDIAG CROSS" across all persisted logs.
-                if (targetDoc != null && !string.IsNullOrEmpty(e.Name))
-                {
-                    var launchIdentity = targetDoc.OriginalAgentName;
-                    if (!string.IsNullOrEmpty(launchIdentity) &&
-                        !launchIdentity.Equals(e.Name, StringComparison.OrdinalIgnoreCase))
-                    {
-                        _debugLogService?.Warning("SWAPDIAG",
-                            $"CROSS DETECTED: registration name='{e.Name}' (e.DocId='{e.DocId}') bound to " +
-                            $"inst={targetDoc.InstanceId} docId={targetDoc.DocId} which LAUNCHED as " +
-                            $"'{launchIdentity}' dir='{targetDoc.GetWorkingDirectory()}'. Header will show " +
-                            $"'{e.Name}' over '{launchIdentity}' content. task ab32897c");
-                    }
-                }
             }
             catch { /* diagnostic only */ }
 
-            // 1:1 binding guard: if the resolved document is already bound to a DIFFERENT
-            // agent identity, this registration belongs to another terminal — do NOT
-            // overwrite its title/identity. That cross-wire is what makes a second
-            // terminal's name clobber the first's tab, and it also strands the first
-            // terminal's HUD Git rebind (which is filtered by _originalAgentName). Re-resolve
-            // to an as-yet unclaimed document matching this name so the registering terminal
-            // still binds to its OWN tab; if none exists, skip the tab/identity update
-            // (channel/inbox delivery still works via e.Id / e.Name).
-            //
-            // Effective identity (ab50355f): OriginalAgentName when promoted; otherwise fall
-            // back to the displayed CustomTitle. The fallback closes the PRE-PROMOTION window
-            // — a restored tab has CustomTitle from session state but no promotion yet
-            // (cycle-7 deliberately keeps the setter promotion-free), and a foreign
-            // registration carrying this doc's docId (inherited env) could relabel it before
-            // its own agent re-registered. "Unassigned" placeholders and empty titles stay
-            // unclaimed so the designed placeholder→name rename flow is unaffected.
-            string boundIdentity = !string.IsNullOrEmpty(targetDoc?.OriginalAgentName)
-                ? targetDoc.OriginalAgentName
-                : (!string.IsNullOrEmpty(targetDoc?.CustomTitle)
-                   && !targetDoc.CustomTitle.Equals("Unassigned", StringComparison.OrdinalIgnoreCase)
-                    ? targetDoc.CustomTitle
-                    : null);
-
-            if (targetDoc != null
-                && !string.IsNullOrEmpty(e.Name)
-                && boundIdentity != null
-                && !boundIdentity.Equals(e.Name, StringComparison.OrdinalIgnoreCase))
-            {
-                _debugLogService?.Info("MainForm", $"Registration collision: '{e.Name}' (id={e.Id}, docId={e.DocId}) resolved to a document already bound to '{boundIdentity}' (promoted='{targetDoc.OriginalAgentName ?? ""}', docId={targetDoc.DocId}, title='{targetDoc.CustomTitle}'). Refusing to clobber it; re-resolving to this terminal's own document.");
-
-                // Re-resolve to THIS terminal's OWN document, keyed by the un-clobberable
-                // stable identity FIRST: a freshly-launched terminal's own doc is already
-                // claimed under its own name (StartTerminal promotes _originalAgentName at
-                // launch), so prefer the doc whose OriginalAgentName == e.Name. Only if no
-                // such doc exists (e.g. an identity not yet promoted) fall back to an
-                // as-yet unclaimed doc matching by displayed title. Without the identity-first
-                // step, the legitimate target — already self-claimed — would be skipped by
-                // the unclaimed filter and the terminal would never bind to its own tab.
-                var docs = _dockPanel.Documents.OfType<TerminalDocument>().ToList();
-                targetDoc =
-                    docs.FirstOrDefault(t => t.OriginalAgentName?.Equals(e.Name, StringComparison.OrdinalIgnoreCase) ?? false)
-                    ?? docs.FirstOrDefault(t => string.IsNullOrEmpty(t.OriginalAgentName) && MatchesByName(t, e.Name));
-
-                if (targetDoc == null)
-                {
-                    _debugLogService?.Warning("MainForm", $"No document matches '{e.Name}' — skipping tab/identity update to avoid clobbering another terminal.");
-                }
-            }
-
-            // Proof-of-origin gate (fd3437e6): before promoting e.Name onto an UNCLAIMED placeholder
-            // document, require the registration to echo the launch nonce MT injected into THAT
-            // document's child. This is the UI-side half of the placeholder-adoption defense: even if
-            // a foreign registration (inherited/leaked docId) reaches here, it cannot become the
-            // document's first stable identity — which would permanently lock out the real owner —
-            // unless it proves it is the terminal MT actually launched. Only unclaimed placeholders are
-            // gated; an already-promoted/named doc took the boundIdentity path above. Fail-open only
-            // when the doc carries no nonce (defensive — a real TerminalDocument always has one).
-            if (targetDoc != null && !string.IsNullOrEmpty(targetDoc.LaunchNonce))
-            {
-                bool docUnclaimed = string.IsNullOrEmpty(targetDoc.OriginalAgentName)
-                    && (string.IsNullOrEmpty(targetDoc.CustomTitle)
-                        || targetDoc.CustomTitle.Equals("Unassigned", StringComparison.OrdinalIgnoreCase));
-                if (docUnclaimed && !string.Equals(e.LaunchNonce, targetDoc.LaunchNonce, StringComparison.Ordinal))
-                {
-                    // Log only WHETHER a nonce was presented — never the value (it's a live secret).
-                    _debugLogService?.Warning("MainForm", $"Placeholder adoption DENIED (nonce mismatch): registration '{e.Name}' (id={e.Id}, docId={e.DocId}, noncePresented={!string.IsNullOrEmpty(e.LaunchNonce)}) does not prove origin for unclaimed doc inst={targetDoc.InstanceId} docId={targetDoc.DocId}. Refusing to promote it onto this placeholder.");
-                    _debugLogService?.Warning("SWAPDIAG", $"NONCE-DENY name='{e.Name}' e.DocId='{e.DocId}' targetInst={targetDoc.InstanceId} targetDocId={targetDoc.DocId} noncePresented={!string.IsNullOrEmpty(e.LaunchNonce)} => promote refused (task fd3437e6)");
-
-                    // Re-resolve ONLY to a document this registrant legitimately owns (already promoted
-                    // under e.Name). Deliberately NO unclaimed-by-name fallback here: that fallback is
-                    // the very adoption vector we're closing, so a foreign registration with no promoted
-                    // doc of its own binds nowhere (channel/inbox delivery by e.Id/e.Name still works).
-                    targetDoc = _dockPanel.Documents.OfType<TerminalDocument>()
-                        .FirstOrDefault(t => t.OriginalAgentName?.Equals(e.Name, StringComparison.OrdinalIgnoreCase) ?? false);
-                }
-            }
-
             if (targetDoc != null)
             {
-                lock (_terminalDocMapLock)
+                bool provenOwnLaunch = binding.Route == PaneBindingRoute.ProvenOwnLaunch;
+
+                // Everything that commits this binding runs HERE, on the UI thread, as one step:
+                // the stale-launch check, the routing maps and the identity. The nonce only rotates
+                // on the UI thread (process exit, Home, "Launch as..."), so a check made here cannot
+                // be overtaken before the writes that depend on it. Checking on the broker thread and
+                // writing afterwards left exactly that window (pipeline Run 3, Codex adversary).
+                void ApplyIdentity()
                 {
-                    _terminalDocMap[e.Id] = targetDoc;
-                    // Maintain reverse lookup: agent name → terminal document
+                    if (provenOwnLaunch && !string.Equals(e.LaunchNonce, targetDoc.LaunchNonce, StringComparison.Ordinal))
+                    {
+                        // Proven against a launch that has since ended: it belongs to nobody now. It
+                        // must not reroute the pane's terminal id or agent name (an inject meant for
+                        // the old agent would be typed into the new one) or even retitle the tab.
+                        _debugLogService?.Info("MainForm", $"Registration '{e.Name}' proved docId={e.DocId} for a launch that has since ended (nonce rotated); not mapping it and leaving the pane's identity untouched. task 19a26090");
+                        return;
+                    }
+
+                    lock (_terminalDocMapLock)
+                    {
+                        _terminalDocMap[e.Id] = targetDoc;
+                        // Maintain reverse lookup: agent name → terminal document
+                        if (!string.IsNullOrEmpty(e.Name))
+                            _agentNameToTerminalDoc[e.Name] = targetDoc;
+                    }
+
                     if (!string.IsNullOrEmpty(e.Name))
-                        _agentNameToTerminalDoc[e.Name] = targetDoc;
+                        targetDoc.CustomTitle = e.Name;  // Display the Claude name in the tab
+                    // Broker-confirmed registration is an authoritative identity source for
+                    // OnBrokerTaskActiveChanged filtering and statusline lookup. A registration that
+                    // PROVED it is this pane's own process (docId + nonce, task 19a26090) replaces
+                    // whatever identity the pane carried — a restored title or an earlier launch.
+                    // Anything weaker only promotes first-wins (cycle-7 codex-adversary HIGH fix), and
+                    // neither the "Unassigned" placeholder nor an empty name replaces a real identity.
+                    if (provenOwnLaunch && !string.IsNullOrEmpty(e.Name) && !TerminalRegistrationBinder.IsUnassigned(e.Name))
+                        targetDoc.AdoptLaunchIdentity(e.Name);
+                    else
+                        targetDoc.PromoteOriginalAgentName(e.Name);
+                    targetDoc.UpdateStatusBar();     // Update the terminal banner with name, avatar, and task
                 }
 
                 // CRITICAL: Must update UI controls on the UI thread!
                 // This event fires from MCP server background thread.
                 if (InvokeRequired)
-                {
-                    Invoke(new Action(() =>
-                    {
-                        targetDoc.CustomTitle = e.Name;  // Display the Claude name in the tab
-                        // Broker-confirmed registration is an authoritative
-                        // identity source — promote into stable agent name
-                        // for OnBrokerTaskActiveChanged filtering. First-wins,
-                        // so StartTerminal's prior promotion (if any) keeps
-                        // priority (cycle-7 codex-adversary HIGH fix).
-                        targetDoc.PromoteOriginalAgentName(e.Name);
-                        targetDoc.UpdateStatusBar();     // Update the terminal banner with name, avatar, and task
-                    }));
-                }
+                    Invoke(new Action(ApplyIdentity));
                 else
-                {
-                    targetDoc.CustomTitle = e.Name;  // Display the Claude name in the tab
-                    targetDoc.PromoteOriginalAgentName(e.Name);
-                    targetDoc.UpdateStatusBar();     // Update the terminal banner with name, avatar, and task
-                }
+                    ApplyIdentity();
             }
 
             // Auto-seed activity data for new terminal so Activity Panel shows it immediately
@@ -5506,6 +5421,11 @@ namespace MultiTerminal
             // Unregister the old terminal from MCP
             _mcpServer?.Broker?.UnregisterTerminal(doc.DocId);
 
+            // This replaces the running launch, so retire its nonce BEFORE the new identity is
+            // pre-registered with it (task 19a26090): the process being stopped below must not
+            // keep proof that could overwrite the new identity.
+            doc.RotateLaunchNonce();
+
             // Register with the new identity name
             // With the doc's launch nonce, as every other pane registration passes (ticket 9a731cda
             // run 1). doc.StartTerminal below injects that same nonce into the child env; without it
@@ -7608,10 +7528,7 @@ namespace MultiTerminal
                 var projectNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 try
                 {
-                    foreach (var p in broker.GetProjectsList())
-                    {
-                        if (p?.Id != null && !string.IsNullOrWhiteSpace(p.Name)) projectNames[p.Id] = p.Name;
-                    }
+                    projectNames = Services.WorkingOnProject.NameIndex(broker.GetProjectsList()?.Select(p => (p?.Id, p?.Name)));
                 }
                 catch (Exception projEx)
                 {
@@ -7625,7 +7542,9 @@ namespace MultiTerminal
                 // receive the notification that is the ONLY writer of entry.Project (task 42052f0c).
                 var agentProjects = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-                foreach (var task in broker.GetTasks())
+                // One snapshot for both the claims loop and the active-task projects below.
+                var allTasks = broker.GetTasks();
+                foreach (var task in allTasks)
                 {
                     if (task == null || string.IsNullOrWhiteSpace(task.Assignee)) continue;
                     if (!string.Equals(task.Status, "in_progress", StringComparison.OrdinalIgnoreCase)) continue;
@@ -7722,8 +7641,44 @@ namespace MultiTerminal
                     _debugLogService?.Info("AttentionPanel", $"Account quota read failed: {quotaEx.Message}");
                 }
 
+                // What each pane's header shows, so the card names the same project and the same
+                // "working on" marker as the agent's own terminal (task 19a26090). Read from the
+                // header's last render rather than recomputed: two computations are two chances to
+                // disagree, which is the defect this ticket was opened for.
+                var paneProjects = new Dictionary<string, AttentionPanel.AttentionPaneProject>(StringComparer.OrdinalIgnoreCase);
+                // Launched panes first: PaneAgentName falls back to the displayed title, and an
+                // unlaunched pane restored with an agent's old title must not claim that agent's
+                // card ahead of the pane the agent is actually running in (pipeline Run 1, debugger).
+                // Running first, then panes with a launched identity: an exited pane keeps its
+                // OriginalAgentName, so "has a name" alone is not "is running" (Run 2, debugger LOW).
+                var panesLaunchedFirst = _dockPanel.Documents.OfType<TerminalDocument>()
+                    .OrderBy(d => d.IsTerminalStarted ? 0 : 1)
+                    .ThenBy(d => string.IsNullOrEmpty(d.OriginalAgentName) ? 1 : 0);
+                foreach (var doc in panesLaunchedFirst)
+                {
+                    string agent = doc.PaneAgentName;
+                    if (string.IsNullOrWhiteSpace(agent) || string.IsNullOrWhiteSpace(doc.HeaderProjectName)) continue;
+                    if (TerminalRegistrationBinder.IsUnassigned(agent) || paneProjects.ContainsKey(agent)) continue;
+                    paneProjects[agent] = new AttentionPanel.AttentionPaneProject
+                    {
+                        Project = doc.HeaderProjectName,
+                        WorkingOn = doc.HeaderWorkingOnProject,
+                    };
+                }
+
+                // Agents with no pane (e.g. ClarionAssistant tabs) still get a marker from their
+                // active task, compared against whatever project their card ends up showing.
+                var activeTaskProjects = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var entry in snapshot)
+                {
+                    string agent = entry?.AgentName;
+                    if (string.IsNullOrWhiteSpace(agent) || paneProjects.ContainsKey(agent) || activeTaskProjects.ContainsKey(agent)) continue;
+                    string activeProject = Services.WorkingOnProject.ActiveTaskProjectName(allTasks, agent, projectNames, out _);
+                    if (activeProject != null) activeTaskProjects[agent] = activeProject;
+                }
+
                 var cards = AttentionPanel.AttentionCardProjector.Project(
-                    snapshot, colors, claims, DateTime.UtcNow, agentProjects, agentStats);
+                    snapshot, colors, claims, DateTime.UtcNow, agentProjects, agentStats, paneProjects, activeTaskProjects);
 
                 // The account reading is offered ALONGSIDE the per-terminal copies rather than
                 // instead of them: From() already ranks a shared-source reading above a

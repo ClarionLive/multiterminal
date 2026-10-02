@@ -171,6 +171,7 @@ button.gear[aria-expanded="true"] { border-color: var(--accent); color: var(--te
     width: 6px; height: 6px; border-radius: 2px; flex-shrink: 0;
     background: var(--proj-c, var(--border));
 }
+.proj-working-on { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .elapsed { font-size: 10px; color: var(--text-muted); flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .card[data-blocking="true"] .elapsed { color: var(--text-secondary); font-weight: 600; }
 
@@ -593,6 +594,15 @@ function render() {
             var pname = document.createElement("span");
             pname.textContent = s.project;
             pr.appendChild(tick); pr.appendChild(pname);
+            // The active task's project when it is not the session's (task 19a26090). Same value
+            // the agent's terminal header shows.
+            if (s.workingOn) {
+                var won = document.createElement("span");
+                won.className = "proj-working-on";
+                won.textContent = "· working on " + s.workingOn;
+                won.title = "The active task belongs to " + s.workingOn + "; this session runs in " + s.project + ".";
+                pr.appendChild(won);
+            }
         }
         who.appendChild(n); who.appendChild(pr);
 
