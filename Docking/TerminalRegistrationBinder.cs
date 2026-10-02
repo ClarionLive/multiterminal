@@ -77,7 +77,7 @@ namespace MultiTerminal.Docking
             pane.CustomTitle?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false;
 
         /// <summary>
-        /// The identity a pane is treated as bound to: its promoted name, else its displayed title
+        /// The identity a pane is treated as bound to: its promoted name, else its CustomTitle
         /// (the pre-promotion window, ab50355f). Placeholders and empty titles count as unbound.
         /// </summary>
         internal static string BoundIdentityOf(PaneIdentity pane)
