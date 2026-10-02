@@ -84,17 +84,20 @@ namespace MultiTerminal.Terminal
         }
 
         /// <summary>
-        /// Removes C0 control characters except tab, CR and LF — as Windows Terminal does on paste.
-        /// This drops every ESC, so clipboard text cannot carry its own <c>ESC[201~</c> to end the
-        /// bracketed paste early and have the rest run as typed input (paste-jacking).
-        /// C1 controls (U+0080–U+009F) and DEL are left alone.
+        /// Removes C0 control characters except tab, CR and LF — as Windows Terminal does on paste —
+        /// plus DEL and the C1 controls (U+007F–U+009F). Dropping every ESC means clipboard text
+        /// cannot carry its own <c>ESC[201~</c> to end the bracketed paste early and have the rest
+        /// run as typed input (paste-jacking); dropping C1 also removes the single-character CSI
+        /// (U+009B), which a receiver that honours 8-bit controls would read as <c>ESC[</c>.
         /// </summary>
         internal static string StripControlCharacters(string text)
         {
             var sb = new System.Text.StringBuilder(text.Length);
             foreach (char c in text)
             {
-                if (c >= 0x20 || c == '\t' || c == '\r' || c == '\n')
+                bool c0 = c < 0x20 && c != '\t' && c != '\r' && c != '\n';
+                bool delOrC1 = c >= 0x7F && c <= 0x9F;
+                if (!c0 && !delOrC1)
                 {
                     sb.Append(c);
                 }

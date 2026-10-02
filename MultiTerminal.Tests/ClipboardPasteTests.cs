@@ -136,6 +136,18 @@ namespace MultiTerminal.Tests
             Assert.Equal("xyz", ClipboardPaste.StripControlCharacters("\u0000x\u0003y\u0007\u001bz\u001f"));
         }
 
+        /// <summary>
+        /// Defence in depth: U+009B is the single-character CSI, read as ESC[ by a receiver that
+        /// honours 8-bit controls. DEL and the rest of C1 go too; the neighbours U+007E and U+00A0
+        /// are ordinary text and must survive (pins both edges of the range). Falsified: letting ONLY
+        /// U+009B through (rest of the range still stripped) turns this red.
+        /// </summary>
+        [Fact]
+        public void DEL_and_C1_controls_including_the_8bit_CSI_are_stripped()
+        {
+            Assert.Equal("a201~b~ ", ClipboardPaste.StripControlCharacters("a\u009b201~\u007fb\u0080\u009f~ "));
+        }
+
         [Fact]
         public void Text_made_only_of_control_characters_pastes_nothing()
         {

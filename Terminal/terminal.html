@@ -182,10 +182,15 @@
                     return true;
                 }
 
-                // CTRL+V: Request paste from C# (avoids clipboard permission prompts).
-                // The host answers with "paste:<base64>", which goes through term.paste() — the
-                // same single path as right-click and the menu's Paste (see requestPaste).
-                if (event.ctrlKey && event.key === 'v' && event.type === 'keydown') {
+                // CTRL+V (any case: Caps Lock / Ctrl+Shift+V give 'V') and SHIFT+Insert: request
+                // the paste from C#, which strips control characters (GH #24). preventDefault here
+                // stops the browser's native paste event, which xterm would otherwise handle with
+                // the RAW clipboard text; the capture-phase 'paste' listener in initTerminal is the
+                // backstop for any paste keystroke this misses.
+                const isPasteKey =
+                    (event.ctrlKey && (event.key === 'v' || event.key === 'V')) ||
+                    (event.shiftKey && !event.ctrlKey && !event.altKey && event.key === 'Insert');
+                if (isPasteKey && event.type === 'keydown') {
                     event.preventDefault();
                     event.stopPropagation();
                     requestPaste();
@@ -366,6 +371,17 @@
             // Shift+F10 fire contextmenu with no mousedown before it; those open the menu and must
             // never paste the clipboard unasked (in cmd.exe a multi-line paste executes).
             let rightButtonPressed = false;
+            // A stale flag must not turn a later Apps-key/Shift+F10 contextmenu into a paste:
+            // clear it on any non-modifier keydown (modifiers are skipped because a held Ctrl or
+            // Shift auto-repeats keydown between the mousedown and its contextmenu) and on blur.
+            window.addEventListener('keydown', (e) => {
+                if (e.key !== 'Shift' && e.key !== 'Control' && e.key !== 'Alt' && e.key !== 'Meta') {
+                    rightButtonPressed = false;
+                }
+            }, true);
+            window.addEventListener('blur', () => {
+                rightButtonPressed = false;
+            });
             container.addEventListener('mousedown', (e) => {
                 if (e.button === 2) {
                     e.stopPropagation();
@@ -405,6 +421,17 @@
                 term.focus();
             }, true);
 
+            // Backstop for the native browser paste (GH #24 run 2): any 'paste' event — from a
+            // keystroke the key handler does not recognise, or anything else — would otherwise
+            // reach xterm's own listener on its textarea and be sent with the RAW clipboard text,
+            // skipping the host's control-character stripping. Caught in the CAPTURE phase on the
+            // container (the textarea is a descendant), cancelled, and re-routed to the host.
+            container.addEventListener('paste', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                requestPaste();
+            }, true);
+
             // Notify C# when terminal is clicked (for dropdown close)
             container.addEventListener('mousedown', () => {
                 sendToHost({ type: 'terminalclick' });
@@ -426,9 +453,12 @@
         // True while the host's Shift+Right-click menu is showing ("contextMenu:1"/"contextMenu:0").
         let contextMenuOpen = false;
 
-        // Every paste — Ctrl+V, right-click, the menu's Paste — starts here. The host reads the
-        // clipboard (text, or a bitmap saved to a temp PNG whose path is pasted) and answers with
-        // "paste:<base64 utf-8>", which handleHostMessage hands to term.paste().
+        // Every user paste from the page starts here: Ctrl+V in any case, Ctrl+Shift+V,
+        // Shift+Insert, mouse right-click, and — via the capture-phase 'paste' listener — any
+        // native browser paste event. (The menu's Paste enters host-side, calling the same C#
+        // PasteFromClipboard this request reaches.) The host reads the clipboard (text
+        // with control characters stripped, or a bitmap saved to a temp PNG whose path is pasted)
+        // and answers with "paste:<base64 utf-8>", which handleHostMessage hands to term.paste().
         function requestPaste() {
             sendToHost({ type: 'paste' });
         }
