@@ -485,6 +485,30 @@ namespace MultiTerminal.Docking
             return title + MultiTerminal.Terminal.TerminalRoles.TabSuffix(role);
         }
 
+        /// <summary>
+        /// Finds the terminal an agent NAME refers to: the doc whose broker-confirmed
+        /// <see cref="OriginalAgentName"/> matches first (survives a cosmetic tab rename), else the doc
+        /// whose <see cref="CustomTitle"/> matches (restored or not-yet-promoted terminals).
+        ///
+        /// <para>The displayed title (Text/TabText) is deliberately not an input. Since GH #26 a project
+        /// with no team lead shows just "Proj", so an agent named like a project would match that
+        /// placeholder tab, and chat injection would type into the wrong session (158d60ac). Before that,
+        /// a renamed tab or a console title could match in the same way.</para>
+        ///
+        /// <para>Generic over the document so it is testable without constructing a WinForms terminal.</para>
+        /// </summary>
+        internal static T FindByIdentity<T>(IEnumerable<T> docs, string name, Func<T, string> originalAgentName, Func<T, string> customTitle)
+            where T : class
+        {
+            if (string.IsNullOrEmpty(name) || docs == null) return null;
+            var list = docs as IList<T> ?? docs.ToList();
+            return list.FirstOrDefault(d => string.Equals(originalAgentName(d), name, StringComparison.OrdinalIgnoreCase))
+                ?? list.FirstOrDefault(d => string.Equals(customTitle(d), name, StringComparison.OrdinalIgnoreCase));
+        }
+
+        internal static TerminalDocument FindByIdentity(IEnumerable<TerminalDocument> docs, string name) =>
+            FindByIdentity(docs, name, d => d.OriginalAgentName, d => d.CustomTitle);
+
         private void UpdateTabTitle()
         {
             if (!string.IsNullOrEmpty(_customTitle))

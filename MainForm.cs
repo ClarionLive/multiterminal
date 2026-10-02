@@ -1337,13 +1337,13 @@ namespace MultiTerminal
 
         private async void OnChatInjectRequested(object sender, InjectMessageEventArgs e)
         {
-            // Find the terminal by name using _terminalDocMap (more reliable than _dockPanel.Documents)
+            // Find the terminal by identity using _terminalDocMap (more reliable than _dockPanel.Documents).
+            // Never by TabText: that is display text, and a placeholder tab titled "Proj" would take a
+            // message meant for an agent named "Proj" (158d60ac).
             TerminalDocument targetTerminal = null;
             lock (_terminalDocMapLock)
             {
-                targetTerminal = _terminalDocMap.Values.FirstOrDefault(t =>
-                    (t.CustomTitle?.Equals(e.TerminalName, StringComparison.OrdinalIgnoreCase) ?? false) ||
-                    t.TabText.Equals(e.TerminalName, StringComparison.OrdinalIgnoreCase));
+                targetTerminal = TerminalDocument.FindByIdentity(_terminalDocMap.Values, e.TerminalName);
             }
 
             if (targetTerminal != null)
@@ -1390,13 +1390,12 @@ namespace MultiTerminal
 
         private async void OnChatReplyRequested(object sender, ReplyMessageEventArgs e)
         {
-            // Find the terminal by sender name using _terminalDocMap (more reliable than _dockPanel.Documents)
+            // Find the terminal by the sender's identity using _terminalDocMap (more reliable than
+            // _dockPanel.Documents). Never by TabText, which is display text (158d60ac).
             TerminalDocument targetTerminal = null;
             lock (_terminalDocMapLock)
             {
-                targetTerminal = _terminalDocMap.Values.FirstOrDefault(t =>
-                    (t.CustomTitle?.Equals(e.SenderName, StringComparison.OrdinalIgnoreCase) ?? false) ||
-                    t.TabText.Equals(e.SenderName, StringComparison.OrdinalIgnoreCase));
+                targetTerminal = TerminalDocument.FindByIdentity(_terminalDocMap.Values, e.SenderName);
             }
 
             if (targetTerminal != null)
@@ -1730,11 +1729,11 @@ namespace MultiTerminal
             // Strategy: try DocId first, then name match, then last active as final fallback
             TerminalDocument targetDoc = null;
 
-            // Local helper: case-insensitive match of a document by its displayed title
-            // (CustomTitle, falling back to TabText). Both are nullable, so null-safe.
+            // Local helper: case-insensitive match of a document by its CustomTitle (null-safe). Not
+            // TabText: that is display text, and a placeholder tab titled just "Proj" (GH #26) would
+            // bind a registering agent named "Proj" to the wrong pane (158d60ac).
             static bool MatchesByName(TerminalDocument t, string name) =>
-                (t.CustomTitle?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false) ||
-                (t.TabText?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false);
+                t.CustomTitle?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false;
 
             if (!string.IsNullOrEmpty(e.DocId))
             {
@@ -5123,12 +5122,19 @@ namespace MultiTerminal
             var doc = sender as TerminalDocument;
             if (doc == null) return;
 
-            string agentName = doc.CustomTitle ?? doc.TabText ?? "Terminal";
-            _debugLogService?.Info("MainForm", $"Task '{e.Title}' (ID: {e.TaskId}) dropped on terminal '{agentName}'");
+            // The terminal's identity, never its TabText: with no CustomTitle that is the shell's console
+            // title, and the task would be claimed for an agent that does not exist (158d60ac).
+            string agentName = !string.IsNullOrEmpty(doc.OriginalAgentName) ? doc.OriginalAgentName : doc.CustomTitle;
+            _debugLogService?.Info("MainForm", $"Task '{e.Title}' (ID: {e.TaskId}) dropped on terminal '{agentName ?? "(no identity)"}'");
 
-            // Auto-claim the task for this terminal's agent
+            // Auto-claim the task for this terminal's agent. A terminal with no identity yet is left to
+            // claim it itself: the prompt typed below tells it to.
             var broker = _mcpServer?.Broker;
-            if (broker != null)
+            if (broker != null && string.IsNullOrEmpty(agentName))
+            {
+                _debugLogService?.Warning("MainForm", $"Task {e.TaskId} dropped on a terminal with no agent identity; not auto-claiming");
+            }
+            else if (broker != null)
             {
                 var result = broker.ClaimTask(e.TaskId, agentName);
                 if (result.Success)
@@ -6709,7 +6715,11 @@ namespace MultiTerminal
         /// Used by both AgentProcess (piped I/O) and TranscriptTailer (native team watching).
         /// Always embeds in a terminal's EmbeddedAgentPanel (spawner → last active → first available).
         /// </summary>
-        private void CreateAgentPanel(IAgentMessageSource source, string agentName, string panelKey, string spawnerName = null, string taskDescription = null, string subagentType = null, bool isTeamAgent = false)
+        /// <param name="preferredTarget">The spawner's terminal when the caller has already identified the
+        /// document itself (the native-teammate cwd match). It then replaces the name lookup entirely:
+        /// re-deriving the document from its display title is how a placeholder tab, now titled just
+        /// "Proj" (GH #26), title-scanned into a sibling "Bob - Proj" terminal (158d60ac).</param>
+        private void CreateAgentPanel(IAgentMessageSource source, string agentName, string panelKey, string spawnerName = null, string taskDescription = null, string subagentType = null, bool isTeamAgent = false, TerminalDocument preferredTarget = null)
         {
             string layout = _settings?.GetAgentPanelLayout() ?? "SplitRight";
 
@@ -6718,10 +6728,22 @@ namespace MultiTerminal
                 return;
 
             // Always embed in a terminal's EmbeddedAgentPanel.
-            // Priority: exact name lookup → Text/TabText scan → last active → first available.
+            // Priority: caller's document → exact name lookup → fuzzy name → identity scan → last active → first available.
             TerminalDocument targetTerminal = null;
 
-            if (!string.IsNullOrEmpty(spawnerName))
+            if (preferredTarget != null)
+            {
+                lock (_terminalDocMapLock)
+                {
+                    // The match was made before a BeginInvoke, so the pane may have closed since.
+                    if (!preferredTarget.IsDisposed && _terminalDocMap.ContainsValue(preferredTarget))
+                        targetTerminal = preferredTarget;
+                }
+                _debugLogService?.Info("CreateAgentPanel", targetTerminal != null
+                    ? $"  Using caller's terminal for '{agentName}' (spawner='{spawnerName}')"
+                    : $"  Caller's terminal for '{agentName}' has closed; not falling back to a name lookup");
+            }
+            else if (!string.IsNullOrEmpty(spawnerName))
             {
                 _debugLogService?.Info("CreateAgentPanel", $"Looking for spawner '{spawnerName}' in _agentNameToTerminalDoc ({_agentNameToTerminalDoc.Count} entries)");
                 lock (_terminalDocMapLock)
@@ -6749,19 +6771,14 @@ namespace MultiTerminal
                         }
                     }
 
-                    // Fallback: scan terminal titles (handles unregistered or renamed terminals)
+                    // Fallback: match the spawner's identity across all terminals (handles unregistered
+                    // or renamed terminals). This used to be a Contains scan over Text/TabText, which
+                    // matched "Proj" inside "Bob - Proj" (158d60ac); display text is not an identity.
                     if (targetTerminal == null)
                     {
-                        foreach (var kvp in _terminalDocMap)
-                        {
-                            if (kvp.Value.Text?.Contains(spawnerName, StringComparison.OrdinalIgnoreCase) == true ||
-                                kvp.Value.TabText?.Contains(spawnerName, StringComparison.OrdinalIgnoreCase) == true)
-                            {
-                                targetTerminal = kvp.Value;
-                                _debugLogService?.Info("CreateAgentPanel", $"  MATCH FOUND via title scan: spawner='{kvp.Key}'");
-                                break;
-                            }
-                        }
+                        targetTerminal = TerminalDocument.FindByIdentity(_terminalDocMap.Values, spawnerName);
+                        if (targetTerminal != null)
+                            _debugLogService?.Info("CreateAgentPanel", $"  MATCH FOUND via identity: spawner='{spawnerName}'");
                     }
                 }
             }
@@ -6910,6 +6927,10 @@ namespace MultiTerminal
                     // Resolve spawner: if hook didn't provide it, try matching the team lead's
                     // cwd against registered terminal working directories.
                     string resolvedSpawner = e.SpawnerName;
+                    // When the cwd match finds the lead's terminal, hand that DOCUMENT on rather than a
+                    // name for CreateAgentPanel to look up again: a display title is not an identity, and
+                    // a placeholder tab titled just "Proj" title-scans into "Bob - Proj" (158d60ac).
+                    TerminalDocument spawnerDoc = null;
                     if (string.IsNullOrEmpty(resolvedSpawner) && !string.IsNullOrEmpty(e.LeadCwd))
                     {
                         lock (_terminalDocMapLock)
@@ -6920,7 +6941,8 @@ namespace MultiTerminal
                                 if (!string.IsNullOrEmpty(termCwd) &&
                                     termCwd.Equals(e.LeadCwd, StringComparison.OrdinalIgnoreCase))
                                 {
-                                    resolvedSpawner = kvp.Value.TabText ?? kvp.Key;
+                                    spawnerDoc = kvp.Value;
+                                    resolvedSpawner = kvp.Value.CustomTitle ?? kvp.Value.TabText ?? kvp.Key;
                                     _debugLogService?.Info("MainForm", $"Resolved spawner for team '{e.TeamName}' via cwd match: '{resolvedSpawner}' (cwd={e.LeadCwd})");
                                     break;
                                 }
@@ -6935,7 +6957,7 @@ namespace MultiTerminal
                     void DoCreate()
                     {
                         if (!_embeddedAgentMap.ContainsKey(panelKey))
-                            CreateAgentPanel(e.Tailer, $"{e.MemberName} ({e.TeamName})", panelKey, resolvedSpawner, e.TaskDescription, e.SubagentType, isTeamAgent: true);
+                            CreateAgentPanel(e.Tailer, $"{e.MemberName} ({e.TeamName})", panelKey, resolvedSpawner, e.TaskDescription, e.SubagentType, isTeamAgent: true, preferredTarget: spawnerDoc);
                     }
 
                     // Use BeginInvoke (async) instead of Invoke (sync) to prevent deadlocks
