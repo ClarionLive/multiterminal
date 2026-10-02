@@ -4404,7 +4404,9 @@ namespace MultiTerminal
                     {
                         sourceDoc.ClaudeCodeDetected -= newProjectHandler;
 
-                        // Wait for Claude Code to settle after standard "initializing..." injection
+                        // Give Claude Code time to settle: past the "initializing..." kick and the
+                        // session-start turn it starts, or, on a quiet-start project (GitHub #34), where
+                        // nothing is typed, simply until the prompt is ready.
                         await Task.Delay(3000);
                         _debugLogService?.Trace("MainForm", "New project flow: injecting /new-project");
 
@@ -5537,10 +5539,17 @@ namespace MultiTerminal
             // No --resume, so Claude still offers to resume a recent session.
             string autoRunCommand = LaunchCommandBuilder.BuildClaudeCommand(null, workingDirectory).AutoRunCommand;
 
+            // Quiet start (GitHub #34, pipeline run 1): "Launch as..." is not a project launch, so it passes
+            // no projectId (that would also set MULTITERMINAL_PROJECT_PM and the "(PM)" badge, which this
+            // route deliberately does not get). The project is passed for the quiet-start lookup only:
+            // the one registered for the launch folder, else the pane's last launch project.
+            string quietStartProjectId = _projectService?.DiscoverProject(workingDirectory)?.Id ?? doc.LaunchProjectId;
+
             // Stop current terminal and restart with new identity
             doc.Terminal.Stop();
             doc.CustomTitle = terminalName;
-            doc.StartTerminal(workingDirectory, terminalName, autoRunCommand, taskWorktreePath: taskWorktreePath);
+            doc.StartTerminal(workingDirectory, terminalName, autoRunCommand, taskWorktreePath: taskWorktreePath,
+                quietStartProjectId: quietStartProjectId);
 
             // Auto-initialization is handled by OnClaudeCodeDetected when Claude Code's output is detected.
             // This ensures injection happens AFTER Claude Code is ready, not just after WebView2 loads.

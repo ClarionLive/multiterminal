@@ -160,6 +160,10 @@ namespace MultiTerminal.Docking
         /// </summary>
         public bool IsQuietStart => _terminal?.QuietStart ?? false;
 
+        /// <summary>The project id this pane was last launched with (null for a non-project launch).
+        /// Read by "Launch as..." to keep the pane's Quiet start setting (GitHub #34).</summary>
+        public string LaunchProjectId => _launchProjectId;
+
         /// <summary>
         /// Event fired when the terminal process exits.
         /// </summary>
@@ -1255,7 +1259,8 @@ namespace MultiTerminal.Docking
         /// <param name="isTeamLead">Whether this terminal is a team lead (sets MULTITERMINAL_TEAM_LEAD env var)</param>
         /// <param name="gatewayProfile">MCP Gateway profile name (sets MCP_GATEWAY_PROFILE env var)</param>
         /// <param name="taskWorktreePath">Per-task worktree path resolved from the active task (sets MULTITERMINAL_TASK_WORKTREE env var). Empty when no task worktree is in play.</param>
-        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null)
+        /// <param name="quietStartProjectId">The project whose Quiet start setting applies when <paramref name="projectId"/> is null (GitHub #34). Used by "Launch as...", which is not a project launch and must not get a project's role or env, but still opens in a quiet project. Ignored when projectId is set.</param>
+        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string quietStartProjectId = null)
         {
             _debugLogService?.Info("TerminalDocument.StartTerminal", $"===== START =====");
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"workingDirectory: '{workingDirectory ?? "null"}'");
@@ -1321,15 +1326,16 @@ namespace MultiTerminal.Docking
             // keeps the last project's value. Read from the rich row because the setting is SQLite-only.
             // A failed lookup is a normal start: today's behaviour is the safe default.
             bool projectQuietStart = false;
-            if (!string.IsNullOrEmpty(projectId) && _messageBroker?.ProjectDatabase != null)
+            string quietProjectId = !string.IsNullOrEmpty(projectId) ? projectId : quietStartProjectId;
+            if (!string.IsNullOrEmpty(quietProjectId) && _messageBroker?.ProjectDatabase != null)
             {
                 try
                 {
-                    projectQuietStart = _messageBroker.ProjectDatabase.GetRichProject(projectId)?.IsQuietStart ?? false;
+                    projectQuietStart = _messageBroker.ProjectDatabase.GetRichProject(quietProjectId)?.IsQuietStart ?? false;
                 }
                 catch (Exception quietEx)
                 {
-                    _debugLogService?.Error("TerminalDocument", $"Quiet start lookup threw for project '{projectId}': {quietEx.Message}");
+                    _debugLogService?.Error("TerminalDocument", $"Quiet start lookup threw for project '{quietProjectId}': {quietEx.Message}");
                 }
             }
             _terminal.QuietStart = MultiTerminal.Terminal.TerminalRoles.IsQuietStart(projectQuietStart, spawnerName);

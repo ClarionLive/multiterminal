@@ -1678,8 +1678,8 @@
                                 <option value="codex"${project.defaultTerminal === 'codex' ? ' selected' : ''}>Codex</option>
                             </select>
                         </div>
-                        <div class="info-row" title="On: a new terminal opens straight to an idle prompt. No recap, no startup menu, nothing typed for you. Ask for /multiterminal:session-start when you want it. Applies to terminals opened after the change.">
-                            <span class="info-label">Quiet start</span>
+                        <div class="info-row" title="Claude Code terminals only; Codex terminals are not affected. On: a new terminal opens straight to an idle prompt. No recap, no startup menu, nothing typed for you. Ask for /multiterminal:session-start when you want it. Applies to terminals opened after the change.">
+                            <span class="info-label">Quiet start (Claude Code)</span>
                             <label class="toggle-switch">
                                 <input type="checkbox" data-field="quietStart" ${project.quietStart ? 'checked' : ''} onchange="saveToggleField(this)">
                                 <span class="toggle-track"></span>

@@ -147,6 +147,8 @@ namespace MultiTerminal.Models
         /// only gets into its folder and registers its identity. MT does not type "initializing...",
         /// and the SessionStart hook does not ask for /multiterminal:session-start, so the user gets
         /// an idle prompt instead of the recap and menu.
+        /// <para>Claude Code only: a Codex launch always passes its startup prompt, and the setting
+        /// does not change that (labelled as such in the UI).</para>
         /// <para>Nullable for the same reason as <see cref="Status"/>: it is a SQLite-only column
         /// that project.json does not carry, and the SaveRichProject UPSERT COALESCEs it, so a
         /// re-save from project.json leaves null and must not reset a project the user turned

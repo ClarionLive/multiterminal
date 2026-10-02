@@ -316,7 +316,8 @@
 
             <!-- QUIET START (GitHub #34): pre-filled with the last created project's value -->
             <CheckBox x:Name="QuietStartCheck"
-                      Content="Quiet start: open terminals straight to an idle prompt (no recap or startup menu)"
+                      Content="Quiet start (Claude Code): open straight to an idle prompt, no recap or menu"
+                      ToolTip="Applies to Claude Code terminals only. Codex terminals still get their startup prompt."
                       Foreground="#A0A0A0"
                       FontFamily="Segoe UI"
                       FontSize="12"
