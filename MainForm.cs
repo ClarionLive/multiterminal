@@ -1773,36 +1773,32 @@ namespace MultiTerminal
             }
             catch { /* diagnostic only */ }
 
-            // A proven binding whose launch has already ended (the pane rotated its nonce since the
-            // broker raised this) belongs to nobody now: it must not reroute the pane's terminal id
-            // or agent name either, or an inject meant for the old agent would be typed into the
-            // new one (pipeline Run 2, debugger). ApplyIdentity re-checks again on the UI thread.
-            if (targetDoc != null && binding.Route == PaneBindingRoute.ProvenOwnLaunch
-                && !string.Equals(e.LaunchNonce, targetDoc.LaunchNonce, StringComparison.Ordinal))
-            {
-                _debugLogService?.Info("MainForm", $"Registration '{e.Name}' proved docId={e.DocId} for a launch that has since ended; not mapping it. task 19a26090");
-                targetDoc = null;
-            }
-
             if (targetDoc != null)
             {
-                lock (_terminalDocMapLock)
-                {
-                    _terminalDocMap[e.Id] = targetDoc;
-                    // Maintain reverse lookup: agent name → terminal document
-                    if (!string.IsNullOrEmpty(e.Name))
-                        _agentNameToTerminalDoc[e.Name] = targetDoc;
-                }
-
                 bool provenOwnLaunch = binding.Route == PaneBindingRoute.ProvenOwnLaunch;
+
+                // Everything that commits this binding runs HERE, on the UI thread, as one step:
+                // the stale-launch check, the routing maps and the identity. The nonce only rotates
+                // on the UI thread (process exit, Home, "Launch as..."), so a check made here cannot
+                // be overtaken before the writes that depend on it. Checking on the broker thread and
+                // writing afterwards left exactly that window (pipeline Run 3, Codex adversary).
                 void ApplyIdentity()
                 {
                     if (provenOwnLaunch && !string.Equals(e.LaunchNonce, targetDoc.LaunchNonce, StringComparison.Ordinal))
                     {
-                        // Proven against a launch that has since ended (see below): it must not even
-                        // retitle the tab, which now belongs to whatever launched next.
-                        _debugLogService?.Info("MainForm", $"Registration '{e.Name}' proved docId={e.DocId} for a launch that has since ended (nonce rotated); leaving the pane's current identity untouched. task 19a26090");
+                        // Proven against a launch that has since ended: it belongs to nobody now. It
+                        // must not reroute the pane's terminal id or agent name (an inject meant for
+                        // the old agent would be typed into the new one) or even retitle the tab.
+                        _debugLogService?.Info("MainForm", $"Registration '{e.Name}' proved docId={e.DocId} for a launch that has since ended (nonce rotated); not mapping it and leaving the pane's identity untouched. task 19a26090");
                         return;
+                    }
+
+                    lock (_terminalDocMapLock)
+                    {
+                        _terminalDocMap[e.Id] = targetDoc;
+                        // Maintain reverse lookup: agent name → terminal document
+                        if (!string.IsNullOrEmpty(e.Name))
+                            _agentNameToTerminalDoc[e.Name] = targetDoc;
                     }
 
                     if (!string.IsNullOrEmpty(e.Name))
@@ -1813,11 +1809,6 @@ namespace MultiTerminal
                     // whatever identity the pane carried — a restored title or an earlier launch.
                     // Anything weaker only promotes first-wins (cycle-7 codex-adversary HIGH fix), and
                     // neither the "Unassigned" placeholder nor an empty name replaces a real identity.
-                    //
-                    // The proof was re-checked at the top of this method, on the UI thread, against
-                    // the pane's nonce as it is now: the binding decision was taken on the broker
-                    // thread, and if the launch ended in between, the nonce has rotated and the
-                    // registration belongs to a launch that is gone (pipeline Run 1).
                     if (provenOwnLaunch && !string.IsNullOrEmpty(e.Name) && !TerminalRegistrationBinder.IsUnassigned(e.Name))
                         targetDoc.AdoptLaunchIdentity(e.Name);
                     else
