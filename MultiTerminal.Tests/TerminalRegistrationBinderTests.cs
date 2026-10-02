@@ -19,7 +19,7 @@ namespace MultiTerminal.Tests
     public class TerminalRegistrationBinderTests
     {
         private static PaneIdentity Pane(string docId, string promoted, string title, string nonce) =>
-            new PaneIdentity(docId, promoted, title, title, nonce);
+            new PaneIdentity(docId, promoted, title, nonce);
 
         /// <summary>What MainForm does to a pane after a binding, so a replay can continue.</summary>
         private static void Apply(List<PaneIdentity> panes, PaneBinding binding, string name)
@@ -28,7 +28,7 @@ namespace MultiTerminal.Tests
             string promoted = binding.Route == PaneBindingRoute.ProvenOwnLaunch || string.IsNullOrEmpty(p.PromotedName)
                 ? name
                 : p.PromotedName;
-            panes[binding.Index] = p with { PromotedName = promoted, CustomTitle = name, TabText = name };
+            panes[binding.Index] = p with { PromotedName = promoted, CustomTitle = name };
         }
 
         [Fact]
@@ -150,6 +150,28 @@ namespace MultiTerminal.Tests
             var binding = TerminalRegistrationBinder.Resolve(panes, "bob", null, null);
 
             Assert.Equal(PaneBindingRoute.Matched, binding.Route);
+            Assert.Equal(1, binding.Index);
+        }
+
+        [Fact]
+        public void An_agent_named_like_a_project_does_not_bind_to_that_projects_placeholder_tab()
+        {
+            // GH #26 / 158d60ac: a placeholder in project "Proj" with no team lead displays just "Proj".
+            // An agent NAMED "Proj" registering without a docId must bind by identity, not display text.
+            //
+            // The guarantee is structural: PaneIdentity has no TabText, so this stays green however
+            // Resolve is written. It records the collision. Before the field was removed, with the
+            // placeholder's TabText set to "Proj", this went red as predicted (1 of 11), returning -1
+            // rather than the predicted 0: the placeholder matched by TabText and the nonce gate then
+            // refused it, so the agent bound to no pane at all.
+            var panes = new List<PaneIdentity>
+            {
+                Pane("aaaa1111", null, "Unassigned", "nonce-a"),
+                Pane("bbbb2222", null, "Proj", "nonce-b"),
+            };
+
+            var binding = TerminalRegistrationBinder.Resolve(panes, "Proj", null, null);
+
             Assert.Equal(1, binding.Index);
         }
 

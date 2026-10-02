@@ -1732,7 +1732,7 @@ namespace MultiTerminal
             // terminals registering in quick succession.
             var docs = _dockPanel.Documents.OfType<TerminalDocument>().ToList();
             var binding = TerminalRegistrationBinder.Resolve(
-                docs.Select(d => new PaneIdentity(d.DocId, d.OriginalAgentName, d.CustomTitle, d.TabText, d.LaunchNonce)).ToList(),
+                docs.Select(d => new PaneIdentity(d.DocId, d.OriginalAgentName, d.CustomTitle, d.LaunchNonce)).ToList(),
                 e.Name, e.DocId, e.LaunchNonce);
             TerminalDocument targetDoc = binding.Index >= 0 ? docs[binding.Index] : null;
 

@@ -7,12 +7,15 @@ namespace MultiTerminal.Docking
     /// What a terminal pane looks like to the registration binder: the fields
     /// <c>MainForm.OnMcpTerminalRegistered</c> used to read straight off each
     /// <see cref="TerminalDocument"/>. A plain value so the decision is testable without WinForms.
+    ///
+    /// <para>Deliberately no TabText: that is display text, and since GH #26 a placeholder in project
+    /// "Proj" displays just "Proj", so an agent named "Proj" would match it (158d60ac). Leaving the
+    /// field out means no binder change can match on it.</para>
     /// </summary>
     internal readonly record struct PaneIdentity(
         string DocId,
         string PromotedName,
         string CustomTitle,
-        string TabText,
         string LaunchNonce);
 
     /// <summary>How <see cref="TerminalRegistrationBinder.Resolve"/> reached its answer, for logging.</summary>
@@ -69,10 +72,9 @@ namespace MultiTerminal.Docking
         internal static bool IsUnassigned(string name) =>
             name != null && name.Equals(UnassignedPlaceholder, StringComparison.OrdinalIgnoreCase);
 
-        /// <summary>Case-insensitive match of a pane by its displayed title, falling back to TabText.</summary>
+        /// <summary>Case-insensitive match of a pane by its CustomTitle. Never TabText (158d60ac).</summary>
         internal static bool MatchesByName(PaneIdentity pane, string name) =>
-            (pane.CustomTitle?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false) ||
-            (pane.TabText?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false);
+            pane.CustomTitle?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false;
 
         /// <summary>
         /// The identity a pane is treated as bound to: its promoted name, else its displayed title
