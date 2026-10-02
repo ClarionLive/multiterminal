@@ -10,7 +10,9 @@ namespace MultiTerminal.Tests
     /// <para><see cref="The_2026_10_01_restore_replay_binds_every_agent_to_the_pane_it_launched_in"/>
     /// is the incident, step for step, with the docIds from that day's log. Falsified by removing the
     /// proven-origin return in <see cref="TerminalRegistrationBinder.Resolve"/> (predicted beforehand:
-    /// this fact and the reused-pane fact red, the other 12 green; observed exactly that). The replay
+    /// this fact and the reused-pane fact red, and every other test in that run green — 7 more here
+    /// plus the 5 in <c>StatusLineFilePickTests</c>, which shared the filter; observed exactly that,
+    /// 2 failed / 12 passed. The replay
     /// failed at the first launch with route <c>CollisionReResolved</c>: the guard re-resolving Alice
     /// away from her own pane, which is the production cross.</para>
     /// </summary>
@@ -72,6 +74,28 @@ namespace MultiTerminal.Tests
             Assert.Equal(PaneBindingRoute.ProvenOwnLaunch, binding.Route);
             Assert.Equal(0, binding.Index);
             Assert.Equal("Alice", binding.BoundIdentity);
+        }
+
+        [Fact]
+        public void A_late_registration_from_an_ended_launch_cannot_overwrite_the_next_one()
+        {
+            // Pipeline Run 1 (Codex security-auditor + cross-model adversary, same HIGH): launch A
+            // (Alice, nonce-A) ended, the pane rotated its nonce, and launch B (Bob, nonce-B) runs.
+            // A delayed registration carrying A's docId and A's nonce is no longer proof, so it falls
+            // through to the 1:1 guard, which refuses to clobber Bob.
+            //
+            // Falsified by making the proof accept ANY non-empty nonce: this fact went red. The
+            // prediction was 2 reds (this + the "nonce-guessed" case) and the run gave 3 — the
+            // unclaimed-placeholder fact also went red, correctly, because a wrong nonce then proves
+            // a placeholder too. The miss was in the prediction, not the tests. This covers the
+            // binder's half only; that the pane actually ROTATES its nonce when a launch ends lives
+            // in TerminalDocument (WinForms, no seam) and is unit-untested.
+            var panes = new List<PaneIdentity> { Pane("aaaa1111", "Bob", "Bob", "nonce-B") };
+
+            var binding = TerminalRegistrationBinder.Resolve(panes, "Alice", "aaaa1111", "nonce-A");
+
+            Assert.NotEqual(PaneBindingRoute.ProvenOwnLaunch, binding.Route);
+            Assert.Equal(-1, binding.Index);
         }
 
         [Theory]

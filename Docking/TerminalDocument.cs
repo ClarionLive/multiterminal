@@ -78,8 +78,10 @@ namespace MultiTerminal.Docking
         // adopt+promote an "Unassigned" placeholder. A foreign process that leaked only the
         // docId (env inheritance, task ab50355f residual) never learns this nonce, so it can no
         // longer claim the identity and lock out the real owner. Fresh per instance (incl.
-        // restore/re-adopt), so it tracks this terminal's own launch — same lifetime as _docId.
-        private readonly string _launchNonce = Guid.NewGuid().ToString("N");
+        // restore/re-adopt), and since task 19a26090 fresh per LAUNCH too: RotateLaunchNonce
+        // replaces it whenever a launch ends, so a process left over from an earlier launch in
+        // this reused pane no longer holds proof. Not readonly for that reason only.
+        private volatile string _launchNonce = Guid.NewGuid().ToString("N");
 
         // Wall-clock (Unix ms) this TerminalDocument instance was constructed. Used as
         // the freshness floor for the statusline name-glob fallback (task 1ba59334): a
@@ -124,6 +126,30 @@ namespace MultiTerminal.Docking
         /// an empty seed so session-restore / legacy / non-lockstep-deploy paths keep working.
         /// </summary>
         public string LaunchNonce => _launchNonce;
+
+        /// <summary>
+        /// Retires this pane's launch nonce and mints a new one. Called when a launch ENDS — the
+        /// child exited, the pane went home, or "Launch as…" is about to replace it — so the nonce
+        /// proves the CURRENT launch rather than any launch this pane has ever hosted (task
+        /// 19a26090, pipeline Run 1: Codex security-auditor and cross-model adversary, the same
+        /// HIGH found independently).
+        ///
+        /// <para>Why it matters now: a registration presenting this pane's docId and nonce is
+        /// trusted to REPLACE the pane's identity (<see cref="TerminalRegistrationBinder"/>). With a
+        /// pane-lifetime nonce, a delayed or leftover process from launch A could overwrite launch
+        /// B's identity and put A's status, task and folder back on B's header — the defect this
+        /// ticket exists to remove.</para>
+        ///
+        /// <para>Never call it between pre-registration and <see cref="StartTerminal"/>: the broker
+        /// row is seeded with the nonce at pre-registration and the child receives it at start, and
+        /// they must be the same value. Rotating at the END of a launch keeps both inside one
+        /// launch by construction.</para>
+        /// </summary>
+        internal void RotateLaunchNonce()
+        {
+            _launchNonce = Guid.NewGuid().ToString("N");
+            _debugLogService?.Trace("TerminalDocument", $"DocId='{_docId}' launch nonce rotated (launch ended; task 19a26090).");
+        }
 
         /// <summary>
         /// The broker-confirmed, stable agent identity for this terminal (set once via
@@ -2323,6 +2349,9 @@ namespace MultiTerminal.Docking
             // Reset terminal state so the tab can be reused for a new session
             _isTerminalStarted = false;
 
+            // The launch is over: its nonce must not prove anything about the next one.
+            RotateLaunchNonce();
+
             // Return to start screen on process exit so the tab can be reused
             ShowStartScreen();
 
@@ -2435,6 +2464,7 @@ namespace MultiTerminal.Docking
             {
                 _terminal.Stop();
                 _isTerminalStarted = false;
+                RotateLaunchNonce();   // the launch is over (task 19a26090)
 
                 // Notify MainForm — OnTerminalExited handles UnregisterTerminal + doc map cleanup
                 // (consistent with OnTerminalProcessExited pattern)
@@ -2755,6 +2785,11 @@ namespace MultiTerminal.Docking
             string taskId = null;
             string status = "idle";
 
+            // One snapshot of the task cache per refresh: GetTasks() copies and sorts the whole cache,
+            // and this runs on the UI thread on every activity update. Shared by the task-title lookup
+            // and the "working on" marker below.
+            List<MultiTerminal.MCPServer.Models.KanbanTask> tasks = null;
+
             // Get profile and activity data from MessageBroker
             if (_messageBroker != null)
             {
@@ -2776,7 +2811,8 @@ namespace MultiTerminal.Docking
                     // Get task title if task ID is set
                     if (!string.IsNullOrEmpty(taskId))
                     {
-                        var task = _messageBroker.GetTasks().FirstOrDefault(t => t.Id == taskId);
+                        tasks ??= _messageBroker.GetTasks();
+                        var task = tasks.FirstOrDefault(t => t.Id == taskId);
                         if (task != null)
                         {
                             taskTitle = task.Title;
@@ -2835,15 +2871,16 @@ namespace MultiTerminal.Docking
                     // The registry list fetched above (the same source GetProjectsList reads), so
                     // the header does not load the registry twice per refresh.
                     projects ??= _messageBroker.ProjectService?.GetAllRegisteredProjects();
-                    var projectNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                    foreach (var p in projects ?? new List<MultiTerminal.Models.ProjectRegistryEntry>())
-                    {
-                        if (p?.Id != null && !string.IsNullOrWhiteSpace(p.Name)) projectNames[p.Id] = p.Name;
-                    }
+                    tasks ??= _messageBroker.GetTasks();
                     workingOn = MultiTerminal.Services.WorkingOnProject.Resolve(
-                        _messageBroker.GetTasks(), _originalAgentName ?? terminalName, projectId, projectName, projectNames);
+                        tasks, _originalAgentName ?? terminalName, projectId, projectName,
+                        MultiTerminal.Services.WorkingOnProject.NameIndex(projects?.Select(p => (p?.Id, p?.Name))));
                 }
-                catch { /* Non-critical — the marker is simply omitted */ }
+                catch (Exception ex)
+                {
+                    // Non-critical — the marker is simply omitted, but say why.
+                    _debugLogService?.Trace("TerminalDocument", $"UpdateStatusBar: working-on marker skipped: {ex.GetType().Name}: {ex.Message}");
+                }
             }
             HeaderProjectName = projectName;
             HeaderWorkingOnProject = workingOn;

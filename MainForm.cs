@@ -1786,14 +1786,27 @@ namespace MultiTerminal
                 bool provenOwnLaunch = binding.Route == PaneBindingRoute.ProvenOwnLaunch;
                 void ApplyIdentity()
                 {
+                    if (provenOwnLaunch && !string.Equals(e.LaunchNonce, targetDoc.LaunchNonce, StringComparison.Ordinal))
+                    {
+                        // Proven against a launch that has since ended (see below): it must not even
+                        // retitle the tab, which now belongs to whatever launched next.
+                        _debugLogService?.Info("MainForm", $"Registration '{e.Name}' proved docId={e.DocId} for a launch that has since ended (nonce rotated); leaving the pane's current identity untouched. task 19a26090");
+                        return;
+                    }
+
                     targetDoc.CustomTitle = e.Name;  // Display the Claude name in the tab
                     // Broker-confirmed registration is an authoritative identity source for
                     // OnBrokerTaskActiveChanged filtering and statusline lookup. A registration that
                     // PROVED it is this pane's own process (docId + nonce, task 19a26090) replaces
                     // whatever identity the pane carried — a restored title or an earlier launch.
                     // Anything weaker only promotes first-wins (cycle-7 codex-adversary HIGH fix), and
-                    // the "Unassigned" placeholder never replaces a real identity.
-                    if (provenOwnLaunch && !TerminalRegistrationBinder.IsUnassigned(e.Name))
+                    // neither the "Unassigned" placeholder nor an empty name replaces a real identity.
+                    //
+                    // The proof was re-checked at the top of this method, on the UI thread, against
+                    // the pane's nonce as it is now: the binding decision was taken on the broker
+                    // thread, and if the launch ended in between, the nonce has rotated and the
+                    // registration belongs to a launch that is gone (pipeline Run 1).
+                    if (provenOwnLaunch && !string.IsNullOrEmpty(e.Name) && !TerminalRegistrationBinder.IsUnassigned(e.Name))
                         targetDoc.AdoptLaunchIdentity(e.Name);
                     else
                         targetDoc.PromoteOriginalAgentName(e.Name);
@@ -5397,6 +5410,11 @@ namespace MultiTerminal
             // Unregister the old terminal from MCP
             _mcpServer?.Broker?.UnregisterTerminal(doc.DocId);
 
+            // This replaces the running launch, so retire its nonce BEFORE the new identity is
+            // pre-registered with it (task 19a26090): the process being stopped below must not
+            // keep proof that could overwrite the new identity.
+            doc.RotateLaunchNonce();
+
             // Register with the new identity name
             // With the doc's launch nonce, as every other pane registration passes (ticket 9a731cda
             // run 1). doc.StartTerminal below injects that same nonce into the child env; without it
@@ -7476,10 +7494,7 @@ namespace MultiTerminal
                 var projectNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 try
                 {
-                    foreach (var p in broker.GetProjectsList())
-                    {
-                        if (p?.Id != null && !string.IsNullOrWhiteSpace(p.Name)) projectNames[p.Id] = p.Name;
-                    }
+                    projectNames = Services.WorkingOnProject.NameIndex(broker.GetProjectsList()?.Select(p => (p?.Id, p?.Name)));
                 }
                 catch (Exception projEx)
                 {
@@ -7493,7 +7508,9 @@ namespace MultiTerminal
                 // receive the notification that is the ONLY writer of entry.Project (task 42052f0c).
                 var agentProjects = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-                foreach (var task in broker.GetTasks())
+                // One snapshot for both the claims loop and the active-task projects below.
+                var allTasks = broker.GetTasks();
+                foreach (var task in allTasks)
                 {
                     if (task == null || string.IsNullOrWhiteSpace(task.Assignee)) continue;
                     if (!string.Equals(task.Status, "in_progress", StringComparison.OrdinalIgnoreCase)) continue;
@@ -7595,7 +7612,12 @@ namespace MultiTerminal
                 // header's last render rather than recomputed: two computations are two chances to
                 // disagree, which is the defect this ticket was opened for.
                 var paneProjects = new Dictionary<string, AttentionPanel.AttentionPaneProject>(StringComparer.OrdinalIgnoreCase);
-                foreach (var doc in _dockPanel.Documents.OfType<TerminalDocument>())
+                // Launched panes first: PaneAgentName falls back to the displayed title, and an
+                // unlaunched pane restored with an agent's old title must not claim that agent's
+                // card ahead of the pane the agent is actually running in (pipeline Run 1, debugger).
+                var panesLaunchedFirst = _dockPanel.Documents.OfType<TerminalDocument>()
+                    .OrderBy(d => string.IsNullOrEmpty(d.OriginalAgentName) ? 1 : 0);
+                foreach (var doc in panesLaunchedFirst)
                 {
                     string agent = doc.PaneAgentName;
                     if (string.IsNullOrWhiteSpace(agent) || string.IsNullOrWhiteSpace(doc.HeaderProjectName)) continue;
@@ -7610,7 +7632,6 @@ namespace MultiTerminal
                 // Agents with no pane (e.g. ClarionAssistant tabs) still get a marker from their
                 // active task, compared against whatever project their card ends up showing.
                 var activeTaskProjects = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                var allTasks = broker.GetTasks();
                 foreach (var entry in snapshot)
                 {
                     string agent = entry?.AgentName;

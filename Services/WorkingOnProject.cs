@@ -47,6 +47,21 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Project id → display name, skipping entries with no id or no name. The one builder for
+        /// the lookup both the header and the Attention refresh pass in.
+        /// </summary>
+        internal static Dictionary<string, string> NameIndex(IEnumerable<(string Id, string Name)> projects)
+        {
+            var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (projects == null) return names;
+            foreach (var (id, name) in projects)
+            {
+                if (id != null && !string.IsNullOrWhiteSpace(name)) names[id] = name;
+            }
+            return names;
+        }
+
+        /// <summary>
         /// The display name of the project the agent's ACTIVE task belongs to, or null when the
         /// agent has no active task or its project cannot be named.
         /// </summary>
