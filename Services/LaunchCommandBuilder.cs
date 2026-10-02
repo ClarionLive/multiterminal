@@ -595,18 +595,28 @@ namespace MultiTerminal.Services
                 "marketplaces", "multiterminal-marketplace", "plugins", "multiterminal");
 
         /// <summary>
-        /// Returns the path to the centralized MCP config file, recreating it first if it has gone
-        /// missing since startup. Null only when it cannot be created — and then every launch runs
-        /// without the core MCP servers, which is the silent failure GitHub #8 reported.
+        /// Returns the path to the centralized MCP config file, healing it first if it has gone
+        /// missing or broken since startup (a working file is left alone). Null only when it cannot be
+        /// created — and then every launch runs without the core MCP servers, which is the silent
+        /// failure GitHub #8 reported.
         /// Location: %APPDATA%\multiterminal\.mcp.json
         /// </summary>
         public static string GetMcpConfigPath()
         {
-            string mcpConfig = CentralMcpConfig.DefaultPath;
-            if (!File.Exists(mcpConfig))
-                CentralMcpConfig.EnsureDefault(log: null);
-            return File.Exists(mcpConfig) ? mcpConfig : null;
+            Action<string> log = _log == null ? null : msg => _log.Info("LaunchCommandBuilder", msg);
+            return CentralMcpConfig.PathForLaunch(
+                CentralMcpConfig.DefaultPath,
+                () => CentralMcpConfig.EnsureDefault(log),
+                log);
         }
+
+        private static DebugLogService _log;
+
+        /// <summary>
+        /// Wires the shared <see cref="DebugLogService"/> sink for the launch-time .mcp.json heal. Called
+        /// once by MainForm. Unwired (or in unit tests), heal outcomes are simply not logged.
+        /// </summary>
+        public static void SetLogger(DebugLogService logger) => _log = logger;
 
         /// <summary>
         /// Resolves the working directory for Claude Code to start in.

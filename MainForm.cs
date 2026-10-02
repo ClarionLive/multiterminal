@@ -546,6 +546,9 @@ namespace MultiTerminal
             // it in the same breath — an unwired gate still gates correctly, it just logs to Debug only.
             Services.SqliteWriteGate.SetLogger(_debugLogService);
 
+            // The launch-time .mcp.json heal (a796e5f9) logs what it did, so a repair at launch is traceable.
+            Services.LaunchCommandBuilder.SetLogger(_debugLogService);
+
             // Initialize McpConfigService — used by OnMcpJsonWriteRequested
             // Pass debug log callback so CLI errors are visible in the debug panel
             _mcpConfigService = new Services.McpConfigService(_sharedProjectDatabase,
