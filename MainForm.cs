@@ -1773,6 +1773,17 @@ namespace MultiTerminal
             }
             catch { /* diagnostic only */ }
 
+            // A proven binding whose launch has already ended (the pane rotated its nonce since the
+            // broker raised this) belongs to nobody now: it must not reroute the pane's terminal id
+            // or agent name either, or an inject meant for the old agent would be typed into the
+            // new one (pipeline Run 2, debugger). ApplyIdentity re-checks again on the UI thread.
+            if (targetDoc != null && binding.Route == PaneBindingRoute.ProvenOwnLaunch
+                && !string.Equals(e.LaunchNonce, targetDoc.LaunchNonce, StringComparison.Ordinal))
+            {
+                _debugLogService?.Info("MainForm", $"Registration '{e.Name}' proved docId={e.DocId} for a launch that has since ended; not mapping it. task 19a26090");
+                targetDoc = null;
+            }
+
             if (targetDoc != null)
             {
                 lock (_terminalDocMapLock)
@@ -1794,7 +1805,8 @@ namespace MultiTerminal
                         return;
                     }
 
-                    targetDoc.CustomTitle = e.Name;  // Display the Claude name in the tab
+                    if (!string.IsNullOrEmpty(e.Name))
+                        targetDoc.CustomTitle = e.Name;  // Display the Claude name in the tab
                     // Broker-confirmed registration is an authoritative identity source for
                     // OnBrokerTaskActiveChanged filtering and statusline lookup. A registration that
                     // PROVED it is this pane's own process (docId + nonce, task 19a26090) replaces
@@ -7615,8 +7627,11 @@ namespace MultiTerminal
                 // Launched panes first: PaneAgentName falls back to the displayed title, and an
                 // unlaunched pane restored with an agent's old title must not claim that agent's
                 // card ahead of the pane the agent is actually running in (pipeline Run 1, debugger).
+                // Running first, then panes with a launched identity: an exited pane keeps its
+                // OriginalAgentName, so "has a name" alone is not "is running" (Run 2, debugger LOW).
                 var panesLaunchedFirst = _dockPanel.Documents.OfType<TerminalDocument>()
-                    .OrderBy(d => string.IsNullOrEmpty(d.OriginalAgentName) ? 1 : 0);
+                    .OrderBy(d => d.IsTerminalStarted ? 0 : 1)
+                    .ThenBy(d => string.IsNullOrEmpty(d.OriginalAgentName) ? 1 : 0);
                 foreach (var doc in panesLaunchedFirst)
                 {
                     string agent = doc.PaneAgentName;
