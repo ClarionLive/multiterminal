@@ -156,6 +156,18 @@
 
             // Custom key handler for Windows-style shortcuts
             term.attachCustomKeyEventHandler((event) => {
+                // ESC while the host's Shift+Right-click menu is open dismisses the menu and is
+                // swallowed (GH #24: the reporter's Esc, meant for the menu, reached the app as an
+                // abort — the key landed here, not in the ContextMenuStrip). Every event type is
+                // swallowed, so neither keydown nor keyup leaks through.
+                if (contextMenuOpen && event.key === 'Escape') {
+                    if (event.type === 'keydown') {
+                        contextMenuOpen = false;
+                        sendToHost({ type: 'dismissContextMenu' });
+                    }
+                    return false;
+                }
+
                 // CTRL+C: Copy if text selected, otherwise let it pass as interrupt
                 if (event.ctrlKey && event.key === 'c' && event.type === 'keydown') {
                     const selection = term.getSelection();
@@ -170,17 +182,32 @@
                     return true;
                 }
 
-                // CTRL+V: Request paste from C# (avoids clipboard permission prompts)
-                if (event.ctrlKey && event.key === 'v' && event.type === 'keydown') {
+                // CTRL+V (any case: Caps Lock / Ctrl+Shift+V give 'V') and SHIFT+Insert: request
+                // the paste from C#, which strips control characters (GH #24). preventDefault here
+                // stops the browser's native paste event, which xterm would otherwise handle with
+                // the RAW clipboard text; the capture-phase 'paste' listener in initTerminal is the
+                // backstop for any paste keystroke this misses.
+                const isPasteKey =
+                    (event.ctrlKey && (event.key === 'v' || event.key === 'V')) ||
+                    (event.shiftKey && !event.ctrlKey && !event.altKey && event.key === 'Insert');
+                if (isPasteKey && event.type === 'keydown') {
                     event.preventDefault();
                     event.stopPropagation();
-                    sendToHost({ type: 'paste' });
+                    requestPaste();
                     return false; // Prevent xterm.js from processing
                 }
 
-                // CTRL+Enter: Send LF (newline) instead of CR (carriage return)
-                if (event.ctrlKey && event.key === 'Enter' && event.type === 'keydown') {
-                    sendToHost({ type: 'input', data: btoa('\n') });
+                // CTRL+Enter / SHIFT+Enter: Send LF (newline) instead of CR (carriage return).
+                // Shift+Enter is the chat-UI convention (GH #22). event.key is 'Enter' for the
+                // numpad Enter key too, so NumpadEnter behaves identically in every case.
+                // Ctrl+Shift+Enter also lands here and sends LF.
+                if ((event.ctrlKey || event.shiftKey) && event.key === 'Enter') {
+                    if (event.type === 'keydown') {
+                        sendToHost({ type: 'input', data: btoa('\n') });
+                    }
+                    // Swallow keypress/keyup too. xterm's _keyPress emits charCode 13 as CR unless
+                    // Ctrl/Alt/Meta is held, so for Shift+Enter returning true on keypress would
+                    // send LF then CR — a newline AND a submit (checked in xterm 6.0.0's source).
                     return false; // Prevent default Enter behavior
                 }
 
@@ -227,10 +254,7 @@
             // Handle user input - send to C#
             // Use TextEncoder to properly encode multi-byte (UTF-8) characters before Base64
             term.onData((data) => {
-                const encoder = new TextEncoder();
-                const bytes = encoder.encode(data);
-                const binary = String.fromCharCode(...bytes);
-                sendToHost({ type: 'input', data: btoa(binary) });
+                sendToHost({ type: 'input', data: utf8ToBase64(data) });
             });
 
             // Handle resize - notify C#
@@ -330,31 +354,83 @@
                 }
             }, { passive: false });
 
-            // Capture the selection on right mousedown in the CAPTURE phase, before
-            // xterm.js (whose listeners are on descendant elements, target/bubble phase)
-            // clears the selection. Without this, the contextmenu handler below sees an
-            // empty selection and right-click -> Copy has nothing to copy.
-            let lastMenuSelection = '';
+            // Right-click (GH #24): copy if there is a selection, otherwise paste — the Windows
+            // Terminal convention — and no menu. Shift+Right-click opens the host context menu
+            // (Copy / Paste / Save as Prompt / Clear / Rename Tab / Launch as).
+            //
+            // Right-button mousedown/mouseup are stopped in the CAPTURE phase, before xterm.js
+            // (whose listeners sit on descendant elements) sees them. That does two things:
+            //  - xterm does not clear the selection on right mousedown, so the contextmenu
+            //    handler below still has the text to copy or to hand to the menu;
+            //  - no right-button mouse report reaches an app that enabled mouse tracking, so a
+            //    right-click is one action (MT's) and never also the app's.
+            // Stopping propagation here also skips the bubble-phase 'terminalclick' listener
+            // further down, so the right mousedown sends it itself (it closes an open menu).
+            //
+            // rightButtonPressed marks a contextmenu as mouse-driven. The Apps/Menu key and
+            // Shift+F10 fire contextmenu with no mousedown before it; those open the menu and must
+            // never paste the clipboard unasked (in cmd.exe a multi-line paste executes).
+            let rightButtonPressed = false;
+            // A stale flag must not turn a later Apps-key/Shift+F10 contextmenu into a paste:
+            // clear it on any non-modifier keydown (modifiers are skipped because a held Ctrl or
+            // Shift auto-repeats keydown between the mousedown and its contextmenu) and on blur.
+            window.addEventListener('keydown', (e) => {
+                if (e.key !== 'Shift' && e.key !== 'Control' && e.key !== 'Alt' && e.key !== 'Meta') {
+                    rightButtonPressed = false;
+                }
+            }, true);
+            window.addEventListener('blur', () => {
+                rightButtonPressed = false;
+            });
             container.addEventListener('mousedown', (e) => {
-                if (e.button === 2 && term && term.hasSelection()) {
-                    lastMenuSelection = term.getSelection();
+                if (e.button === 2) {
+                    e.stopPropagation();
+                    rightButtonPressed = true;
+                    sendToHost({ type: 'terminalclick' });
+                }
+            }, true);
+            container.addEventListener('mouseup', (e) => {
+                if (e.button === 2) {
+                    e.stopPropagation();
                 }
             }, true);
 
-            // Handle right-click for context menu
             container.addEventListener('contextmenu', (e) => {
                 e.preventDefault();
-                const selectedText = (term && term.hasSelection())
-                    ? term.getSelection()
-                    : lastMenuSelection;
-                lastMenuSelection = '';
-                sendToHost({
-                    type: 'contextmenu',
-                    x: e.clientX,
-                    y: e.clientY,
-                    selectedText: selectedText
-                });
-            });
+                e.stopPropagation();
+                const selectedText = (term && term.hasSelection()) ? term.getSelection() : '';
+                const fromMouse = rightButtonPressed;
+                rightButtonPressed = false;
+
+                if (e.shiftKey || !fromMouse) {
+                    sendToHost({
+                        type: 'contextmenu',
+                        x: e.clientX,
+                        y: e.clientY,
+                        selectedText: selectedText
+                    });
+                    return;
+                }
+
+                if (selectedText.length > 0) {
+                    sendToHost({ type: 'copy', selectedText: selectedText });
+                    term.clearSelection();
+                } else {
+                    requestPaste();
+                }
+                term.focus();
+            }, true);
+
+            // Backstop for the native browser paste (GH #24 run 2): any 'paste' event — from a
+            // keystroke the key handler does not recognise, or anything else — would otherwise
+            // reach xterm's own listener on its textarea and be sent with the RAW clipboard text,
+            // skipping the host's control-character stripping. Caught in the CAPTURE phase on the
+            // container (the textarea is a descendant), cancelled, and re-routed to the host.
+            container.addEventListener('paste', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                requestPaste();
+            }, true);
 
             // Notify C# when terminal is clicked (for dropdown close)
             container.addEventListener('mousedown', () => {
@@ -372,6 +448,43 @@
             if (window.chrome && window.chrome.webview) {
                 window.chrome.webview.postMessage(message);
             }
+        }
+
+        // True while the host's Shift+Right-click menu is showing ("contextMenu:1"/"contextMenu:0").
+        let contextMenuOpen = false;
+
+        // Every user paste from the page starts here: Ctrl+V in any case, Ctrl+Shift+V,
+        // Shift+Insert, mouse right-click, and — via the capture-phase 'paste' listener — any
+        // native browser paste event. (The menu's Paste enters host-side, calling the same C#
+        // PasteFromClipboard this request reaches.) The host reads the clipboard (text
+        // with control characters stripped, or a bitmap saved to a temp PNG whose path is pasted)
+        // and answers with "paste:<base64 utf-8>", which handleHostMessage hands to term.paste().
+        function requestPaste() {
+            sendToHost({ type: 'paste' });
+        }
+
+        // UTF-8 encode then Base64, in slices. A paste arrives through onData as ONE string, and
+        // String.fromCharCode(...bytes) over the whole thing throws a RangeError once the byte
+        // count exceeds the engine's argument limit — the paste would silently vanish.
+        function utf8ToBase64(text) {
+            const bytes = new TextEncoder().encode(text);
+            const SLICE = 0x8000;
+            let binary = '';
+            for (let i = 0; i < bytes.length; i += SLICE) {
+                binary += String.fromCharCode.apply(null, bytes.subarray(i, i + SLICE));
+            }
+            return btoa(binary);
+        }
+
+        // Shared by terminal output ('data') and pastes ('paste'). The & 0xFF mask is needed for
+        // multi-byte UTF-8 (emoji).
+        function base64ToUtf8(b64) {
+            const binaryString = atob(b64);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i) & 0xFF;
+            }
+            return new TextDecoder('utf-8').decode(bytes);
         }
 
         // ── Typing queue ────────────────────────────────────────────────────────────────────
@@ -458,15 +571,8 @@
 
                     switch (command) {
                         case 'data':
-                            // Base64 encoded terminal data - decode as UTF-8
-                            // Note: Must mask with 0xFF to handle multi-byte UTF-8 chars (emojis)
-                            const binaryString = atob(data);
-                            const bytes = new Uint8Array(binaryString.length);
-                            for (let i = 0; i < binaryString.length; i++) {
-                                bytes[i] = binaryString.charCodeAt(i) & 0xFF;
-                            }
-                            const text = new TextDecoder('utf-8').decode(bytes);
-                            term.write(text);
+                            // Base64 encoded terminal data - decode as UTF-8 (see base64ToUtf8)
+                            term.write(base64ToUtf8(data));
                             break;
 
                         case 'theme':
@@ -487,6 +593,22 @@
 
                         case 'focus':
                             term.focus();
+                            break;
+
+                        case 'paste':
+                            // Clipboard text from the host (reply to requestPaste). term.paste()
+                            // normalises line endings to CR and, when the app has enabled
+                            // bracketed paste (DECSET 2004 — ConPTY passes the app's request
+                            // through to xterm), wraps it in ESC[200~ … ESC[201~, so the app sees
+                            // ONE paste rather than typed keys. Native terminals paste the same
+                            // way; the old path wrote raw text to ConPTY with no bracket (GH #24).
+                            if (data.length > 0) {
+                                term.paste(base64ToUtf8(data));
+                            }
+                            break;
+
+                        case 'contextMenu':
+                            contextMenuOpen = data === '1';
                             break;
 
                         case 'scrollToBottom':

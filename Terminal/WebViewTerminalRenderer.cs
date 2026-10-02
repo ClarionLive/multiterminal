@@ -142,6 +142,11 @@ namespace MultiTerminal.Terminal
         public event EventHandler<TerminalContextMenuEventArgs> ContextMenuRequested;
 
         /// <summary>
+        /// Event fired when Esc is pressed while the context menu is open; the host closes it.
+        /// </summary>
+        public event EventHandler ContextMenuDismissRequested;
+
+        /// <summary>
         /// Event fired when WebView2 initialization completes.
         /// </summary>
         public event EventHandler Initialized;
@@ -343,7 +348,12 @@ namespace MultiTerminal.Terminal
                         break;
 
                     case "paste":
-                        OnPasteRequested();
+                        PasteFromClipboard();
+                        break;
+
+                    case "dismissContextMenu":
+                        // Esc pressed while the Shift+Right-click menu was open (GH #24).
+                        ContextMenuDismissRequested?.Invoke(this, EventArgs.Empty);
                         break;
 
                     case "copy":
@@ -392,6 +402,18 @@ namespace MultiTerminal.Terminal
             TerminalResized?.Invoke(this, new TerminalSizeEventArgs(_cols, _rows));
         }
 
+        /// <summary>Inputs at least this long (a paste, not a keystroke) are logged with their size.</summary>
+        private const int LargeInputLogThreshold = 1024;
+
+        private static readonly byte[] BracketedPasteStart = Encoding.ASCII.GetBytes("\x1b[200~");
+        private static readonly byte[] BracketedPasteEnd = Encoding.ASCII.GetBytes("\x1b[201~");
+
+        private static bool StartsWith(byte[] data, byte[] prefix) =>
+            data.Length >= prefix.Length && data.AsSpan(0, prefix.Length).SequenceEqual(prefix);
+
+        private static bool EndsWith(byte[] data, byte[] suffix) =>
+            data.Length >= suffix.Length && data.AsSpan(data.Length - suffix.Length).SequenceEqual(suffix);
+
         private void OnTerminalInput(string base64Data)
         {
             if (string.IsNullOrEmpty(base64Data)) return;
@@ -418,6 +440,20 @@ namespace MultiTerminal.Terminal
                     // Alt+V
                     AltVKeyPressed?.Invoke(this, EventArgs.Empty);
                     return; // Don't send to terminal
+                }
+
+                bool bracketed = StartsWith(data, BracketedPasteStart);
+                if (bracketed || data.Length >= LargeInputLogThreshold)
+                {
+                    // A paste arrives as one input message. Logging its size lets a truncated
+                    // paste (GH #24.3) be told apart: was it short here, or lost after ConPTY?
+                    // For a bracketed paste, also whether the closing ESC[201~ is present — a
+                    // lost closer leaves the app stuck inside the paste. Sizes and flags only,
+                    // never content.
+                    string bracketInfo = bracketed
+                        ? $" (bracketed: starts=true, ends={EndsWith(data, BracketedPasteEnd).ToString().ToLowerInvariant()})"
+                        : string.Empty;
+                    DebugLogService?.Info("WebViewTerminalRenderer", $"Input: {data.Length} bytes forwarded to ConPTY{bracketInfo}");
                 }
 
                 DataReceived?.Invoke(data);
@@ -458,24 +494,59 @@ namespace MultiTerminal.Terminal
             ContextMenuRequested?.Invoke(this, new TerminalContextMenuEventArgs(location, selectedText));
         }
 
-        private void OnPasteRequested()
+        /// <summary>
+        /// Pastes the clipboard into the terminal (GH #24). The ONE paste path: Ctrl+V,
+        /// right-click and the context menu's Paste all end here. The text goes back to xterm.js
+        /// as <c>paste:&lt;base64&gt;</c> and through <c>term.paste()</c>, which applies bracketed
+        /// paste when the app enabled it — writing the text straight to ConPTY, as this used to,
+        /// made the app see it as typed keys. Must run on the UI thread (clipboard is STA).
+        /// </summary>
+        public void PasteFromClipboard()
         {
-            // Read clipboard on UI thread and send to terminal
-            if (System.Windows.Forms.Clipboard.ContainsText())
+            if (!_isInitialized || _webView?.CoreWebView2 == null)
             {
-                string text = System.Windows.Forms.Clipboard.GetText();
-                if (!string.IsNullOrEmpty(text))
-                {
-                    byte[] data = System.Text.Encoding.UTF8.GetBytes(text);
-                    DataReceived?.Invoke(data);
-                }
+                DebugLogService?.Info("WebViewTerminalRenderer", "Paste ignored: terminal view not ready");
+                return;
+            }
+
+            string text;
+            try
+            {
+                text = ClipboardPaste.ResolvePasteText(
+                    System.Windows.Forms.Clipboard.GetDataObject(),
+                    ClipboardPaste.DefaultImageDirectory,
+                    DateTime.Now);
+            }
+            catch (Exception ex)
+            {
+                // Clipboard locked by another process, or the bitmap could not be saved.
+                DebugLogService?.Error("WebViewTerminalRenderer", "Paste failed: " + ex.Message);
+                return;
+            }
+
+            if (string.IsNullOrEmpty(text)) return;
+
+            byte[] utf8 = Encoding.UTF8.GetBytes(text);
+            DebugLogService?.Info("WebViewTerminalRenderer", $"Paste: {text.Length} chars, {utf8.Length} UTF-8 bytes sent to xterm.js");
+            _webView.CoreWebView2.PostWebMessageAsString("paste:" + Convert.ToBase64String(utf8));
+        }
+
+        /// <summary>
+        /// Tells xterm.js whether the Shift+Right-click menu is showing, so an Esc meant for the
+        /// menu is swallowed there instead of reaching the app (GH #24).
+        /// </summary>
+        public void SetContextMenuOpen(bool open)
+        {
+            if (_isInitialized && _webView?.CoreWebView2 != null)
+            {
+                _webView.CoreWebView2.PostWebMessageAsString(open ? "contextMenu:1" : "contextMenu:0");
             }
         }
 
         private void OnCopyRequested(string text)
         {
             // Write the selection to the Windows clipboard on the UI thread.
-            // Mirrors OnPasteRequested: the WebView2 page is hosted from a file://
+            // Mirrors PasteFromClipboard: the WebView2 page is hosted from a file://
             // URL where navigator.clipboard.writeText silently fails, so Ctrl-C
             // (and right-click Copy) must route the copy through the host instead.
             if (!string.IsNullOrEmpty(text))
