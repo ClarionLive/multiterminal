@@ -2440,7 +2440,17 @@ namespace MultiTerminal.Docking
             // Paste — through the same path as Ctrl+V and right-click (bracketed paste via
             // xterm.js; a bitmap is pasted as a saved PNG's path). GH #24.
             var pasteItem = new ToolStripMenuItem("Paste");
-            pasteItem.Enabled = Clipboard.ContainsText() || Clipboard.ContainsImage();
+            try
+            {
+                pasteItem.Enabled = Clipboard.ContainsText() || Clipboard.ContainsImage();
+            }
+            catch (System.Runtime.InteropServices.ExternalException ex)
+            {
+                // Clipboard held by another process. Offer Paste anyway (the paste path reports its
+                // own failure) rather than throw and show no menu at all (11edbec4).
+                _debugLogService?.Trace("TerminalDocument", "Clipboard probe failed, Paste left enabled: " + ex.Message);
+                pasteItem.Enabled = true;
+            }
             pasteItem.Click += (s, args) => _terminal.PasteFromClipboard();
             menu.Items.Add(pasteItem);
 
@@ -2487,18 +2497,25 @@ namespace MultiTerminal.Docking
                 menu.Items.Add(launchAsMenu);
             }
 
-            // Tell xterm.js the menu is up, so an Esc pressed to dismiss it is swallowed rather
-            // than reaching the app as an abort (GH #24). Cleared however the menu closes.
+            // Tell the renderer and xterm.js the menu is up, so an Esc pressed to dismiss it closes
+            // it and is swallowed rather than reaching the app as an abort (GH #24, 11edbec4).
+            // Cleared however the menu closes — but only by the CURRENT menu, so a stale menu's
+            // Closed can never mark a newer menu closed while it is still up. (A menu still up when
+            // a new one is requested is closed below, before this one is stored and flagged.)
+            menu.Closing += (s, args) =>
+                _debugLogService?.Trace("TerminalDocument", "Terminal menu closing, reason: " + args.CloseReason);
             menu.Closed += (s, args) =>
             {
-                _terminal?.SetContextMenuOpen(false);
                 if (ReferenceEquals(_currentContextMenu, menu))
                 {
                     _currentContextMenu = null;
+                    _terminal?.SetContextMenuOpen(false);
                 }
             };
 
-            // Show menu (store reference so it can be closed on terminal click)
+            // Show menu (store reference so it can be closed on terminal click or Esc). A menu
+            // already up is closed first, so its Closed clears the flag before this one sets it.
+            _currentContextMenu?.Close();
             _currentContextMenu = menu;
             _terminal.SetContextMenuOpen(true);
             menu.Show(_terminal, e.Location);
@@ -2506,6 +2523,7 @@ namespace MultiTerminal.Docking
 
         private void OnTerminalContextMenuDismissRequested(object sender, EventArgs e)
         {
+            _debugLogService?.Trace("TerminalDocument", "Terminal menu dismiss requested (Esc), menu open: " + (_currentContextMenu != null));
             _currentContextMenu?.Close();
         }
 
