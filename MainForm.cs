@@ -3672,7 +3672,7 @@ namespace MultiTerminal
         /// registration wait and initial-prompt delivery) must key on this, not on the name they asked
         /// for. Existing callers ignore the value.
         /// </summary>
-        public (string Name, string DocId) AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, bool atomicIdentityUniqueness = false)
+        public (string Name, string DocId) AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, bool atomicIdentityUniqueness = false, bool failClosedIdentity = false)
         {
             _debugLogService?.Trace("AddNewTerminal", "===== START =====");
             _debugLogService?.Trace("AddNewTerminal", $"workingDirectory: '{workingDirectory ?? "null"}'");
@@ -3759,10 +3759,17 @@ namespace MultiTerminal
                 || !string.IsNullOrEmpty(autoRunCommand)
                 || !string.IsNullOrEmpty(projectId);
 
+            // Set when a fail-closed (project-derived) identity is refused: the pane shows its start
+            // screen instead of launching under some other name (6a8d029f).
+            string identityRefusal = null;
+
             // Register with MCP server AFTER adding to DockPanel so the
             // TerminalRegistered event handler can find this doc by DocId
             _debugLogService?.Trace("AddNewTerminal", "Registering terminal with MCP server...");
-            if (_mcpServer?.Broker != null)
+            // A project-derived identity enters even with no broker, so TryRegisterProjectIdentity can
+            // refuse it (Run 3); every other launch keeps the old broker-only behaviour.
+            bool projectDerivedIdentity = failClosedIdentity && !isTeamLead && !string.IsNullOrEmpty(identityName);
+            if (_mcpServer?.Broker != null || projectDerivedIdentity)
             {
                 if (!string.IsNullOrEmpty(identityName))
                 {
@@ -3779,8 +3786,17 @@ namespace MultiTerminal
                         _debugLogService?.Trace("AddNewTerminal", $"Team lead naming applied: '{identityName}'");
                     }
 
-                    terminalName = PreRegisterTerminalWithName(doc.DocId, identityName, isTeamLead, atomicIdentityUniqueness, doc.LaunchNonce);
-                    _debugLogService?.Trace("AddNewTerminal", $"PreRegisterTerminalWithName returned: '{terminalName}'");
+                    if (projectDerivedIdentity)
+                    {
+                        // A project-derived identity (6a8d029f): atomic, and no placeholder/pool fallback.
+                        if (!TryRegisterProjectIdentity(doc.DocId, identityName, doc.LaunchNonce, out terminalName, out identityRefusal))
+                            terminalName = null;
+                    }
+                    else
+                    {
+                        terminalName = PreRegisterTerminalWithName(doc.DocId, identityName, isTeamLead, atomicIdentityUniqueness, doc.LaunchNonce);
+                    }
+                    _debugLogService?.Trace("AddNewTerminal", $"Identity registration returned: '{terminalName ?? "(refused)"}'");
                 }
                 else if (hasLaunchParams)
                 {
@@ -3792,7 +3808,7 @@ namespace MultiTerminal
             }
             _debugLogService?.Trace("AddNewTerminal", $"Terminal registered as: '{terminalName ?? "null"}'");
 
-            if (hasLaunchParams)
+            if (hasLaunchParams && identityRefusal == null)
             {
                 // Start the terminal with specified or default directory and optional auto-run command
                 string dir = workingDirectory ?? _settings?.GetLastDirectory();
@@ -3839,6 +3855,8 @@ namespace MultiTerminal
                 doc.FocusTerminal();
             _lastActiveTerminal = doc;
             _debugLogService?.Trace("AddNewTerminal", "Completed");
+            if (identityRefusal != null)
+                ShowProjectIdentityRefused(identityName, identityRefusal);
             return (terminalName, doc.DocId);
         }
 
@@ -3951,11 +3969,22 @@ namespace MultiTerminal
                 _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] LaunchCommandBuilder: workingDir='{launchDir}' autoRun='{autoRunCommand}' for project name='{project.Name}' id='{project.Id}' kind='{kind}'");
 
                 // Register terminal before starting (start screen tabs are unregistered).
-                // Identity: team lead if set; else for Codex use the configured default agent
-                // name so headless Codex launches get a stable identity instead of "Unassigned".
+                // Identity: team lead if set; else the Codex default agent; else the project name,
+                // made unique by the broker (task 6a8d029f — see TryResolveProjectLaunchIdentity).
+                // Restored panes come back on the start screen, so they launch through here too.
                 bool isTeamLead = !string.IsNullOrEmpty(project.TeamLead);
-                string terminalName = ResolveCodexIdentityName(kind, project) ?? "Unassigned";
-                if (_mcpServer?.Broker != null)
+                if (!TryResolveProjectLaunchIdentity(kind, project, out var launchIdentity, out string censusError))
+                {
+                    doc.ShowStartScreen();
+                    ShowReservedCensusFailed(censusError);
+                    return;
+                }
+
+                string terminalName = launchIdentity.Name;
+                // A project-derived launch enters even with no broker so it is refused, not started
+                // under an unregistered name (Run 3). It never has a team lead, so the picker below,
+                // which needs the broker, is not reached for it.
+                if (_mcpServer?.Broker != null || launchIdentity.IsProjectDerived)
                 {
                     // Check if this identity is already active in another terminal
                     if (isTeamLead)
@@ -3999,12 +4028,30 @@ namespace MultiTerminal
                     // nothing logged. PreRegisterTerminalWithName is the one site that already handled
                     // this properly (check Success, else fall back to an unnamed pre-registration), so
                     // route through it rather than re-implementing the check three times.
-                    terminalName = PreRegisterTerminalWithName(
-                        doc.DocId,
-                        terminalName,
-                        isTeamLead,
-                        atomicUniqueness: kind == TerminalKind.Codex,
-                        launchNonce: doc.LaunchNonce);
+                    // 6a8d029f: a project-derived identity is the exception — it fails closed instead
+                    // of falling back (TryRegisterProjectIdentity).
+                    if (launchIdentity.IsProjectDerived)
+                    {
+                        if (!TryRegisterProjectIdentity(doc.DocId, terminalName, doc.LaunchNonce, out terminalName, out string refusal))
+                        {
+                            doc.ShowStartScreen();
+                            ShowProjectIdentityRefused(launchIdentity.Name, refusal);
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        // Unlike the other two project launch sites, atomicity here is not just the
+                        // rule's RegisterUnique: Codex also stays atomic after an IdentityPicker swap to
+                        // an alternative name, as it was before 6a8d029f.
+                        bool atomicUniqueness = launchIdentity.RegisterUnique || kind == TerminalKind.Codex;
+                        terminalName = PreRegisterTerminalWithName(
+                            doc.DocId,
+                            terminalName,
+                            isTeamLead,
+                            atomicUniqueness: atomicUniqueness,
+                            launchNonce: doc.LaunchNonce);
+                    }
                 }
 
                 // Sync MCP configs: gateway-aware path if available, else standard path.
@@ -4047,6 +4094,7 @@ namespace MultiTerminal
             catch (Exception ex)
             {
                 _debugLogService?.Error("StartScreen", $"OnStartScreenProjectLaunched error: {ex.Message}");
+                ReleaseGhostRegistration(doc.DocId, "StartScreen");
                 doc.ShowStartScreen(); // Restore start screen so the tab isn't blank
                 MessageBox.Show($"Failed to launch project: {ex.Message}", "Launch Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -4268,13 +4316,33 @@ namespace MultiTerminal
                 string launchDir = launchCmd.WorkingDirectory;
                 string autoRunCommand = launchCmd.AutoRunCommand;
 
-                // Identity: same shape as sibling launch sites. See ResolveCodexIdentityName.
-                // Codex non-team-lead launches use the atomic RegisterTerminalUnique path.
+                // Identity: same shape as sibling launch sites. See TryResolveProjectLaunchIdentity.
+                // Non-team-lead launches (project name or Codex default) use the atomic
+                // RegisterTerminalUnique path (6a8d029f).
                 bool isTeamLead = !string.IsNullOrEmpty(project.TeamLead);
-                string terminalName = ResolveCodexIdentityName(terminalKind, project) ?? "Unassigned";
-                if (_mcpServer?.Broker != null)
+                if (!TryResolveProjectLaunchIdentity(terminalKind, project, out var launchIdentity, out string censusError))
                 {
-                    if (!isTeamLead && terminalKind == Models.TerminalKind.Codex)
+                    sourceDoc.ShowStartScreen();
+                    ShowReservedCensusFailed(censusError, "\n\nThe project was created; you can launch it from its card.");
+                    return;
+                }
+
+                string terminalName = launchIdentity.Name;
+                // Project-derived launches enter even with no broker so they are refused (Run 3).
+                if (_mcpServer?.Broker != null || launchIdentity.IsProjectDerived)
+                {
+                    if (launchIdentity.IsProjectDerived)
+                    {
+                        // Fails closed, never a placeholder (6a8d029f). The project already exists, so
+                        // say so: the user can relaunch it from its card.
+                        if (!TryRegisterProjectIdentity(sourceDoc.DocId, terminalName, sourceDoc.LaunchNonce, out terminalName, out string refusal))
+                        {
+                            sourceDoc.ShowStartScreen();
+                            ShowProjectIdentityRefused(launchIdentity.Name, refusal + "\n\nThe project was created; you can launch it from its card.");
+                            return;
+                        }
+                    }
+                    else if (launchIdentity.RegisterUnique)
                     {
                         // Run 5: was discarding the RegisterResult on both arms — see the note at the
                         // project-launch site. Routed through the one site that checks Success.
@@ -4367,6 +4435,7 @@ namespace MultiTerminal
             catch (Exception ex)
             {
                 _debugLogService?.Error("StartScreen", $"OnStartScreenNewProject error: {ex.Message}");
+                ReleaseGhostRegistration(sourceDoc.DocId, "StartScreen");
                 sourceDoc.ShowStartScreen();
                 MessageBox.Show($"Failed to create project: {ex.Message}",
                     "New Project Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -4517,35 +4586,103 @@ namespace MultiTerminal
         }
 
         /// <summary>
-        /// Resolves the identity name for a terminal launch. For team-lead launches
-        /// returns the team-lead name directly. For Codex launches without a team
-        /// lead, reads the configured default agent name and applies
-        /// <see cref="MCPServer.Services.MessageBroker.GetUniqueNameFor"/> so two
-        /// concurrent Codex terminals sharing the same default don't alias to one
-        /// broker identity. Returns null when the caller should fall back to
-        /// "Unassigned" (or leave identity unset entirely, as OnProjectLaunchRequested does).
+        /// The identity a project launch requests. The rule lives in one place,
+        /// <see cref="Services.ProjectLaunchIdentity"/> (ticket 6a8d029f); this only gathers its inputs.
+        /// A project-derived identity needs the reserved-name census, and the census is ALL-OR-NOTHING:
+        /// if it cannot be taken this returns false with the reason and the caller FAILS THE LAUNCH CLOSED
+        /// (no registration, no StartTerminal). Team-lead and Codex-default launches never take the census,
+        /// so a database problem cannot block them.
+        /// <para>Suffixes are reused after a pane closes — PM decision overnight by Alice (2026-10-02),
+        /// Owner may overrule; see the class doc.</para>
         /// </summary>
-        private string ResolveCodexIdentityName(Models.TerminalKind kind, Models.Project project)
+        private bool TryResolveProjectLaunchIdentity(Models.TerminalKind kind, Models.Project project, out Services.ProjectLaunchIdentityRequest request, out string error)
         {
-            if (project != null && !string.IsNullOrEmpty(project.TeamLead))
-                return project.TeamLead;
-
-            if (kind != Models.TerminalKind.Codex)
-                return null;
-
             string codexDefault = _settings?.GetCodexDefaultAgentName();
-            if (string.IsNullOrWhiteSpace(codexDefault))
-                return null;
+            HashSet<string> reserved = null;
+            if (Services.ProjectLaunchIdentity.NeedsProjectDerivedIdentity(project?.TeamLead, kind, codexDefault))
+            {
+                var db = _sharedProjectDatabase;
+                var census = Services.ProjectLaunchIdentity.TryTakeCensus(
+                    project?.Id,
+                    db == null ? null : () => db.GetAllRichProjects().Select(p => (p.Id, p.Name, p.TeamLead)),
+                    db == null ? null : id => db.GetProjectAgents(id).Select(a => a.AgentName),
+                    new[] { Services.OracleService.OracleName, codexDefault });
+                if (!census.Succeeded)
+                {
+                    _debugLogService?.Warning("MainForm", $"Reserved-name census failed; project launch refused: {census.Error}");
+                    request = default;
+                    error = census.Error;
+                    return false;
+                }
 
-            // Skip uniqueness suffixing for the "Unassigned" sentinel — it's
-            // intentionally shared across multiple unnamed terminals.
-            if (codexDefault.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
-                return codexDefault;
+                reserved = census.Names;
+            }
 
-            return _mcpServer?.Broker != null
-                ? _mcpServer.Broker.GetUniqueNameFor(codexDefault)
-                : codexDefault;
+            request = Services.ProjectLaunchIdentity.Resolve(project?.TeamLead, kind, codexDefault, project?.Name, project?.Id, reserved);
+            error = null;
+            return true;
         }
+
+        private void ShowReservedCensusFailed(string error, string tail = null) =>
+            MessageBox.Show(
+                $"Could not check which terminal names are already taken by other agents and projects: {error}\n\nThe terminal has not been started. Try again in a moment.{tail}",
+                "Launch Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+
+        /// <summary>
+        /// Releases any broker row registered for <paramref name="docId"/> by a launch that is being
+        /// abandoned, so a retry does not make itself unique against its own ghost ("TestB-2" for the only
+        /// TestB pane — 6a8d029f, debugger). A no-op when nothing is bound.
+        /// </summary>
+        private void ReleaseGhostRegistration(string docId, string logSource)
+        {
+            try { _mcpServer?.Broker?.UnregisterTerminal(docId); }
+            catch (Exception ex) { _debugLogService?.Error(logSource, $"Ghost cleanup failed: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// Registers a project-derived identity atomically, FAILING CLOSED (6a8d029f): unlike
+        /// <see cref="PreRegisterTerminalWithName"/> it never falls back to a pool or placeholder name,
+        /// because a project pane under someone else's name is the defect this ticket removes. Returns
+        /// false with the broker's reason; the caller shows it and returns the pane to its start screen.
+        /// <para>Every project-derived launch must come through here, broker or not: a missing broker is
+        /// refused exactly like a registration refusal (Run 3), decided by
+        /// <see cref="Services.ProjectLaunchIdentity.StartRefusal"/>.</para>
+        /// </summary>
+        private bool TryRegisterProjectIdentity(string docId, string identityName, string launchNonce, out string resolvedName, out string error)
+        {
+            resolvedName = null;
+            var broker = _mcpServer?.Broker;
+            error = Services.ProjectLaunchIdentity.StartRefusal(isProjectDerived: true, brokerAvailable: broker != null);
+            if (error != null)
+            {
+                _debugLogService?.Warning("MainForm", $"Project identity '{identityName}' not registered; launch refused: {error}");
+                return false;
+            }
+
+            try
+            {
+                var result = broker.RegisterTerminalUnique(identityName, out string resolved, docId, nonce: launchNonce);
+                error = Services.ProjectLaunchIdentity.StartRefusal(isProjectDerived: true, brokerAvailable: true, result.Success, result.Error);
+                if (error == null)
+                {
+                    resolvedName = resolved;
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+            }
+
+            _debugLogService?.Warning("MainForm", $"Project identity '{identityName}' could not be registered; launch refused (no placeholder fallback). {error}");
+            ReleaseGhostRegistration(docId, "MainForm");
+            return false;
+        }
+
+        private void ShowProjectIdentityRefused(string identityName, string error) =>
+            MessageBox.Show(
+                $"Could not register the terminal identity '{identityName}': {error}\n\nThe terminal has not been started. Close the pane holding that name, or try again.",
+                "Launch Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
 
         private string PreRegisterTerminalWithName(string docId, string identityName, bool isTeamLead = false, bool atomicUniqueness = false, string launchNonce = null)
         {
@@ -8073,12 +8210,18 @@ namespace MultiTerminal
             if (HandleBootstrapErrorIfAny(launchCmd))
                 return;
 
-            // Identity: team-lead if set; for Codex, use configured default via
-            // ResolveCodexIdentityName (applies GetUniqueNameFor). For non-team-lead
-            // Claude the resolver returns null and we leave identityName null — the
-            // downstream AddNewTerminal handles that by defaulting to "Unassigned".
+            // Identity: team-lead if set; else the Codex default agent; else the project name,
+            // made unique by the broker (task 6a8d029f — see TryResolveProjectLaunchIdentity). It used
+            // to be null for non-team-lead Claude, which AddNewTerminal turned into "Unassigned".
             bool isTeamLead = !string.IsNullOrEmpty(e.Project.TeamLead);
-            string identityName = ResolveCodexIdentityName(kind, e.Project);
+            if (!TryResolveProjectLaunchIdentity(kind, e.Project, out var launchIdentity, out string censusError))
+            {
+                // Refused before any pane exists, so there is no start screen to return to.
+                ShowReservedCensusFailed(censusError);
+                return;
+            }
+
+            string identityName = launchIdentity.Name;
 
             // Resolve gateway profile for per-project MCP server filtering.
             string gatewayProfile = null;
@@ -8110,19 +8253,33 @@ namespace MultiTerminal
                 _debugLogService?.Warning("ProjectPanel", $"MCP config sync skipped — workingDir is the user-profile fallback, not a distinct project root.");
             }
 
-            // Atomic uniqueness for Codex non-team-lead launches so two concurrent
-            // launches with the same per-user default-agent name can't alias to
-            // one broker identity.
-            bool atomicIdentityUniqueness = kind == Models.TerminalKind.Codex && !isTeamLead;
+            // Atomic uniqueness for every non-team-lead launch so two concurrent launches of the
+            // same project (or the same per-user Codex default-agent name) can't alias to one
+            // broker identity.
+            bool atomicIdentityUniqueness = launchIdentity.RegisterUnique;
 
-            AddNewTerminal(
+            // No broker: a project-derived launch is refused before any pane is created (Run 3).
+            string brokerRefusal = Services.ProjectLaunchIdentity.StartRefusal(launchIdentity.IsProjectDerived, brokerAvailable: _mcpServer?.Broker != null);
+            if (brokerRefusal != null)
+            {
+                ShowProjectIdentityRefused(identityName, brokerRefusal);
+                return;
+            }
+
+            var launched = AddNewTerminal(
                 workingDirectory: workingDir,
                 identityName: identityName,
                 autoRunCommand: launchCmd.AutoRunCommand,
                 projectId: e.Project.Id,
                 isTeamLead: isTeamLead,
                 gatewayProfile: gatewayProfile,
-                atomicIdentityUniqueness: atomicIdentityUniqueness);
+                atomicIdentityUniqueness: atomicIdentityUniqueness,
+                failClosedIdentity: launchIdentity.IsProjectDerived);
+
+            // A refused project identity left the new pane on its start screen: nothing was opened. A
+            // project-derived launch only has a name once registered, so null is refusal, broker or not.
+            if (launchIdentity.IsProjectDerived && launched.Name == null)
+                return;
 
             _currentProject = e.Project;
             _projectService?.MarkProjectOpened(e.Project.Id);

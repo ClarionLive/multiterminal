@@ -539,6 +539,10 @@ namespace MultiTerminal.Docking
         /// project to show, so the tab reads <c>Project</c> rather than <c>Unassigned - Project</c>
         /// (GH #26). With no project it stays, since it is then the only text the tab has.</para>
         ///
+        /// <para>A no-lead project now launches under the project name itself ("TestB", "TestB-2", task
+        /// 6a8d029f), so when the agent name IS that project identity the project part is dropped too:
+        /// the tab reads <c>TestB-2</c>, not <c>TestB-2 - TestB</c>.</para>
+        ///
         /// <para>Pure and static so the composition is testable without a WinForms document.</para>
         /// </summary>
         internal static string ComposeTabTitle(string agentName, string projectName, MultiTerminal.Terminal.TerminalRole role)
@@ -548,7 +552,9 @@ namespace MultiTerminal.Docking
                 ? agentName
                 : isPlaceholder
                     ? projectName
-                    : $"{agentName} - {projectName}";
+                    : MultiTerminal.Services.ProjectLaunchIdentity.IsProjectIdentity(agentName, projectName)
+                        ? agentName
+                        : $"{agentName} - {projectName}";
 
             return title + MultiTerminal.Terminal.TerminalRoles.TabSuffix(role);
         }
@@ -3211,9 +3217,8 @@ namespace MultiTerminal.Docking
             if (string.IsNullOrEmpty(s)) return false;
             foreach (char c in s)
             {
-                bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-                    || (c >= '0' && c <= '9') || c == '-' || c == '_';
-                if (!ok) return false;
+                // The same alphabet a project-derived identity is built from (6a8d029f).
+                if (!MultiTerminal.Services.ProjectLaunchIdentity.IsIdentityChar(c)) return false;
             }
             return true;
         }
