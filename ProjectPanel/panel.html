@@ -3431,21 +3431,23 @@
         // A project's icon is either an emoji or a NAME ("code", "package", ...). No icon font is
         // loaded here, so a name must become an emoji or it prints as the word itself, which also
         // pushed every project name out of line (task 66f529bd). Unknown names get the folder.
-        // Keep the names in step with iconLabel() in StartScreen/start-screen.html.
+        // Keep the names in step with iconLabel() in StartScreen/start-screen.html
+        // (scripts/test/project-selector.test.mjs fails if the start screen maps any name here
+        // differently; a name only the start screen knows is not checked).
         const PROJECT_ICON_NAMES = {
-            'terminal': '⚡',                  // ⚡
+            'terminal': '⚡',
             'code': '{}',
-            'folder': '📁',              // 📁
-            'web': '🌐',                 // 🌐
-            'database': '🗄️',      // 🗄️
-            'cloud': '☁️',               // ☁️
-            'star': '⭐',                      // ⭐
-            'rocket': '🚀',              // 🚀
-            'gear': '⚙️',                // ⚙️
-            'bug': '🐛',                 // 🐛
-            'package': '📦',             // 📦
-            'extension': '🧩',           // 🧩
-            'smartphone': '📱'           // 📱
+            'folder': '📁',
+            'web': '🌐',
+            'database': '🗄️',
+            'cloud': '☁️',
+            'star': '⭐',
+            'rocket': '🚀',
+            'gear': '⚙️',
+            'bug': '🐛',
+            'package': '📦',
+            'extension': '🧩',
+            'smartphone': '📱'
         };
 
         function projectIconGlyph(icon) {
