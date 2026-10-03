@@ -307,6 +307,19 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Raises the same notifications as <see cref="UnregisterProject"/> for a project whose row was
+        /// already removed elsewhere (task 9f95ab0c Run 4: MessageBroker.UndoProjectCreate), so
+        /// CodeGraphWatcher and other registry listeners reconcile and stop watching its folder.
+        /// </summary>
+        public void NotifyProjectRemoved(Project project)
+        {
+            if (project == null)
+                return;
+            ProjectRemoved?.Invoke(this, new ProjectEventArgs(project));
+            RegistryChangedExternally?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>
         /// Updates the LastOpenedAt timestamp when a project is opened.
         /// </summary>
         public void MarkProjectOpened(string projectId)

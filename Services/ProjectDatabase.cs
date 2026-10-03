@@ -514,16 +514,43 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool DeleteProject(string projectId)
         {
+            // One transaction: the child rows, then the project row (task 9f95ab0c Run 4). The child tables
+            // declare ON DELETE CASCADE, but SQLite enforces foreign keys only with PRAGMA foreign_keys=ON,
+            // which MultiterminalDb.Open never sets, so the cascade never ran and every delete left orphans.
+            // Deleted explicitly rather than enabling foreign keys globally: existing data may already hold
+            // dangling references that enforcement would start rejecting elsewhere.
+            // GATE BEFORE _dbLock, the SqliteWriteGate lock-ordering rule.
+            using var writeGate = SqliteWriteGate.EnterWrite("ProjectDatabase.DeleteProject", projectId);
             lock (_dbLock)
             {
-                const string sql = "DELETE FROM projects WHERE id = @id";
+                using var tx = _connection.BeginTransaction();
+                foreach (var table in ProjectChildTables)
+                {
+#pragma warning disable CA2100 // table names come from the constant ProjectChildTables list; the id is a parameter
+                    using var child = new SQLiteCommand($"DELETE FROM {table} WHERE project_id = @id", _connection, tx);
+#pragma warning restore CA2100
+                    child.Parameters.AddWithValue("@id", projectId);
+                    child.ExecuteNonQuery();
+                }
 
-                using var command = new SQLiteCommand(sql, _connection);
+                using var command = new SQLiteCommand("DELETE FROM projects WHERE id = @id", _connection, tx);
                 command.Parameters.AddWithValue("@id", projectId);
-
-                return command.ExecuteNonQuery() > 0;
+                bool deleted = command.ExecuteNonQuery() > 0;
+                tx.Commit();
+                return deleted;
             }
         }
+
+        /// <summary>Every table whose rows belong to a project (project_id REFERENCES projects(id)).</summary>
+        internal static readonly string[] ProjectChildTables =
+        {
+            "project_agents",
+            "project_mcp_servers",
+            "project_specialist_agents",
+            "project_paths",
+            "project_prompts",
+            "project_skills",
+        };
 
         /// <summary>
         /// Get task count for a project.

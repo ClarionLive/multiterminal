@@ -6122,33 +6122,70 @@ namespace MultiTerminal.MCPServer.Services
             if (string.IsNullOrWhiteSpace(projectId))
                 return "There is no project id to roll back.";
 
+            // No-throw (Run 4): the caller is a dialog's button handler, where an escaping exception crashes
+            // the app. Every failure inside (database read or delete, mutex wait or release) becomes the
+            // returned error, and the dialog keeps the id so the user can retry the undo.
             string error = null;
-            bool removed = false;
-            lock (_projectCreateLock)
+            MultiTerminal.Models.Project removed = null;
+            try
             {
-                string lockError = RunUnderCrossSessionCreateMutex(() =>
+                lock (_projectCreateLock)
                 {
-                    var rich = _projectDb.GetRichProject(projectId);
-                    _projects.TryGetValue(projectId, out var cached);
-                    if (rich == null && cached == null)
-                        return;
-                    error = RollBackCreatedProject(projectId, rich?.Path ?? cached?.Path);
-                    removed = true;
-                });
-                if (lockError != null)
-                    return lockError;
+                    string lockError = RunUnderCrossSessionCreateMutex(() =>
+                    {
+                        TestHookBeforeUndo?.Invoke(projectId);
+                        var rich = _projectDb.GetRichProject(projectId);
+                        _projects.TryGetValue(projectId, out var cached);
+                        if (rich == null && cached == null)
+                            return;
+                        string path = rich?.Path ?? cached?.Path;
+                        error = RollBackCreatedProject(projectId, path);
+                        if (error == null)
+                            removed = rich ?? new MultiTerminal.Models.Project { Id = projectId, Name = cached?.Name, Path = path };
+                    });
+                    if (lockError != null)
+                        return lockError;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError($"UndoProjectCreate {projectId} failed: {ex.Message}");
+                return $"Rolling back project {projectId} failed: {ex.Message}";
             }
 
-            if (removed)
-                BroadcastProjectUpdate();
+            if (removed != null)
+            {
+                // The same notifications a normal removal raises (ProjectService.UnregisterProject), so
+                // CodeGraphWatcher stops watching the folder.
+                try
+                {
+                    ProjectService?.NotifyProjectRemoved(removed);
+                    BroadcastProjectUpdate();
+                }
+                catch (Exception ex)
+                {
+                    LogError($"UndoProjectCreate {projectId}: removal notifications failed: {ex.Message}");
+                }
+            }
             return error;
         }
+
+        /// <summary>Test seam (InternalsVisibleTo): runs first inside the undo's critical section.</summary>
+        internal Action<string> TestHookBeforeUndo { get; set; }
+
+        /// <summary>
+        /// Test seam (InternalsVisibleTo): replaces the database row delete in the create rollback, so a test
+        /// can make it fail.
+        /// </summary>
+        internal Func<string, bool> TestHookDeleteProjectRow { get; set; }
 
         /// <summary>
         /// Runs <paramref name="body"/> holding the per-user, cross-session project-create mutex (second
         /// layer of the create lock, see <see cref="_projectCreateLock"/>). Returns null when the body ran,
         /// or the refusal: any failure to open or acquire the mutex fails closed, because the body is a
         /// check-then-write that is only correct when no other MultiTerminal process runs it concurrently.
+        /// No explicit ACL: another local user who pre-creates this per-SID name with a hostile DACL can only
+        /// make creates refuse (an accepted, fail-closed denial of service; no data is touched).
         /// Called with _projectCreateLock held (lock order: in-process lock, then mutex, everywhere), and
         /// held only for the short critical section. A Mutex is thread-affine; the body is synchronous.
         /// </summary>
@@ -6881,13 +6918,20 @@ namespace MultiTerminal.MCPServer.Services
             var failures = new List<string>();
             try
             {
-                _projectDb.DeleteProject(projectId);
+                if (TestHookDeleteProjectRow != null)
+                    TestHookDeleteProjectRow(projectId);
+                else
+                    _projectDb.DeleteProject(projectId);
+                if (_projectDb.GetRichProject(projectId) != null)
+                    throw new InvalidOperationException("the row is still there after the delete");
                 _projects.TryRemove(projectId, out _);
             }
             catch (Exception ex)
             {
+                // The row is the record. With it still present, removing project.json would leave a row
+                // whose folder no longer names it, so the file is left alone (Run 4 ordering).
                 LogError($"Project create rollback: removing row {projectId} failed: {ex.Message}");
-                failures.Add($"database row {projectId}: {ex.Message}");
+                return $"database row {projectId}: {ex.Message}";
             }
 
             if (!string.IsNullOrEmpty(path))

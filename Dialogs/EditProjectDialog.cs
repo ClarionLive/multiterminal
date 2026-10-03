@@ -138,8 +138,9 @@ namespace MultiTerminal.Dialogs
         /// </summary>
         public Func<Project, string> CreateRollback { get; set; }
 
-        // Id of a project the guard created whose save failed AND whose rollback failed: the row is ours, so a
-        // retry skips the guard and finishes configuring it rather than being refused by it.
+        // Id of a project the guard created whose save failed AND whose rollback failed. A retry re-runs the
+        // undo first and only then creates afresh; it never saves under this id (Run 4: an upsert under a kept
+        // id would configure a project the folder check never re-approved).
         private string _uncommittedCreateId;
 
         private const string NoProjectServiceText = "Projects can't be created here right now (the project service is not available).";
@@ -147,9 +148,11 @@ namespace MultiTerminal.Dialogs
         /// <summary>
         /// The create-mode commit, outside the click handler so it can be tested with a failing save.
         /// Guard (broker create) -> save (rich columns). When the save throws, the create is rolled back
-        /// through <paramref name="rollback"/>; if that also fails the user is told plainly, and
-        /// <paramref name="uncommittedCreateId"/> keeps the id so a retry re-runs only the save. Returns null
-        /// on success, else the message to show.
+        /// through <paramref name="rollback"/>. If that also fails, the user is told plainly and
+        /// <paramref name="uncommittedCreateId"/> keeps the id: the next attempt re-runs the undo FIRST, and
+        /// only if it now succeeds does it create afresh through the guard; if it still fails, nothing else
+        /// happens. Never throws for a failing rollback (the caller is a button handler). Returns null on
+        /// success, else the message to show.
         /// </summary>
         internal static string CommitNewProject(
             Project project,
@@ -158,17 +161,24 @@ namespace MultiTerminal.Dialogs
             Func<Project, string> rollback,
             ref string uncommittedCreateId)
         {
-            if (uncommittedCreateId == null)
+            if (uncommittedCreateId != null)
             {
-                string refusal = guard == null ? NoProjectServiceText : guard(project);
-                if (refusal != null)
-                    return refusal;
-                uncommittedCreateId = project.Id;
+                string pendingId = uncommittedCreateId;
+                project.Id = pendingId;
+                string undoError = RunRollback(rollback, project);
+                if (undoError != null)
+                {
+                    return $"The project ({pendingId}) left by the earlier failed attempt still could not be removed: {undoError}\n"
+                        + "Nothing else was done. Try again, or delete it from the Project Manager.";
+                }
+                uncommittedCreateId = null;
+                project.Id = Guid.NewGuid().ToString(); // the guard assigns the real id
             }
-            else
-            {
-                project.Id = uncommittedCreateId;
-            }
+
+            string refusal = guard == null ? NoProjectServiceText : guard(project);
+            if (refusal != null)
+                return refusal;
+            uncommittedCreateId = project.Id;
 
             try
             {
@@ -179,7 +189,7 @@ namespace MultiTerminal.Dialogs
             catch (Exception ex)
             {
                 string message = "Failed to save project: " + ex.Message;
-                string rollbackError = rollback == null ? "no rollback is available" : rollback(project);
+                string rollbackError = RunRollback(rollback, project);
                 if (rollbackError == null)
                 {
                     uncommittedCreateId = null;
@@ -187,7 +197,22 @@ namespace MultiTerminal.Dialogs
                     return message + "\n\nThe new project was removed again, so you can try again.";
                 }
                 return message + $"\n\nThe new project ({uncommittedCreateId}) could not be removed: {rollbackError}\n"
-                    + "It exists but is only partly configured. Saving again finishes configuring it; or delete it from the Project Manager.";
+                    + "Saving again first retries removing it; or delete it from the Project Manager.";
+            }
+        }
+
+        // The rollback delegate's own failure becomes its error text: it must not escape the button handler.
+        private static string RunRollback(Func<Project, string> rollback, Project project)
+        {
+            if (rollback == null)
+                return "no rollback is available";
+            try
+            {
+                return rollback(project);
+            }
+            catch (Exception ex)
+            {
+                return ex.Message;
             }
         }
 

@@ -204,34 +204,67 @@ namespace MultiTerminal.Tests
             Assert.Equal(db.GetAllProjects()[0].Id, service.LoadProject(_folder).Id);
         }
 
-        // Rollback itself fails: the user is told, and the retry re-runs only the save on the SAME row
-        // (it does not call the guard, which would refuse the folder as occupied by our own project).
+        // Run 4 (replaces Run 3's "retry re-runs only the save under the kept id", which the debugger
+        // failed: an upsert under a kept id configures a project the folder check never re-approved).
+        // Rollback fails: the id is kept; while the undo keeps failing a retry does NOTHING else.
         [Fact]
-        public void Failed_rollback_keeps_the_id_and_the_retry_skips_the_guard()
+        public void Kept_id_retry_reruns_the_undo_and_does_nothing_else_while_it_fails()
         {
             using var db = new ProjectDatabase();
             using var service = new ProjectService(db);
             using var broker = NewBroker(service);
             var project = new FileProject { Id = "dialog-guid", Name = "Fresh", Path = _folder };
             string uncommitted = null;
-            int guardCalls = 0;
+            int guardCalls = 0, saveCalls = 0, rollbackCalls = 0;
             string Guard(FileProject p) { guardCalls++; return ProjectManagerDialog.CreateThroughBroker(broker, p); }
+            string FailingRollback(FileProject p) { rollbackCalls++; return "simulated rollback failure"; }
 
             string first = EditProjectDialog.CommitNewProject(project, Guard,
-                _ => throw new IOException("disk full"), _ => "simulated rollback failure", ref uncommitted);
-
+                _ => throw new IOException("disk full"), FailingRollback, ref uncommitted);
             Assert.Contains("could not be removed", first);
-            Assert.NotNull(uncommitted);
             string createdId = uncommitted;
+            Assert.NotNull(createdId);
 
             string retry = EditProjectDialog.CommitNewProject(project, Guard,
-                p => db.SaveRichProject(p), _ => null, ref uncommitted);
+                _ => saveCalls++, FailingRollback, ref uncommitted);
+
+            Assert.Contains("still could not be removed", retry);
+            Assert.Equal(1, guardCalls);
+            Assert.Equal(0, saveCalls);
+            Assert.Equal(2, rollbackCalls);
+            Assert.Equal(createdId, uncommitted);
+            Assert.Single(db.GetAllProjects());
+        }
+
+        // Once the undo succeeds, the retry creates afresh through the guard: a NEW id, one row.
+        [Fact]
+        public void Kept_id_retry_creates_afresh_once_the_undo_succeeds()
+        {
+            using var db = new ProjectDatabase();
+            using var service = new ProjectService(db);
+            using var broker = NewBroker(service);
+            var project = new FileProject { Id = "dialog-guid", Name = "Fresh", Path = _folder };
+            string uncommitted = null;
+
+            EditProjectDialog.CommitNewProject(project,
+                p => ProjectManagerDialog.CreateThroughBroker(broker, p),
+                _ => throw new IOException("disk full"), _ => "simulated rollback failure", ref uncommitted);
+            string leftover = uncommitted;
+            Assert.NotNull(leftover);
+
+            string retry = EditProjectDialog.CommitNewProject(project,
+                p => ProjectManagerDialog.CreateThroughBroker(broker, p),
+                p => db.SaveRichProject(p),
+                p => ProjectManagerDialog.RollBackThroughBroker(broker, p),
+                ref uncommitted);
 
             Assert.Null(retry);
-            Assert.Equal(1, guardCalls);
             Assert.Null(uncommitted);
-            Assert.Equal(createdId, project.Id);
-            Assert.Single(db.GetAllProjects());
+            Assert.NotEqual(leftover, project.Id);
+            var rows = db.GetAllProjects();
+            Assert.Single(rows);
+            Assert.Equal(project.Id, rows[0].Id);
+            Assert.Equal(project.Id, service.LoadProject(_folder).Id);
         }
 
         // The undo is ID-bound: a project.json that no longer carries the created id is left alone.
