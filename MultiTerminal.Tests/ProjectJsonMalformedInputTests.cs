@@ -100,8 +100,8 @@ namespace MultiTerminal.Tests
             Assert.Null(project);
         }
 
-        // The save path's own output, with every value shape it writes: escapes, control characters,
-        // a null, booleans, two prompts and a team.
+        // The save path's own output, covering these value shapes: escapes, control characters, a null,
+        // booleans, two prompts and a team. Version, terminal and the project's own dates are not asserted.
         [Fact]
         public async Task A_project_json_written_by_SaveProject_parses_back_unchanged()
         {
@@ -173,6 +173,26 @@ namespace MultiTerminal.Tests
             Assert.False(loaded.IsPinned);
             Assert.Empty(loaded.Prompts);
             Assert.Equal(new[] { "Alice", "Bob" }, loaded.TeamAgents);
+        }
+
+        // Valid JSON whose team.agents is not an array. The old parser loaded these with an empty team; the
+        // quoted-key check in ParseTeamObject must not turn them into "unreadable" (pipeline Run 8 debugger).
+        [Theory]
+        [InlineData("{\"id\":\"a\",\"team\":{\"agents\":null}}")]
+        [InlineData("{\"id\":\"a\",\"team\":{\"agents\":5}}")]
+        [InlineData("{\"id\":\"a\",\"team\":{\"agents\":{}}}")]
+        [InlineData("{\"id\":\"a\",\"team\":{\"agents\":true},\"name\":\"n\"}")]
+        public async Task A_non_array_team_agents_value_still_loads_the_project(string json)
+        {
+            using var db = new ProjectDatabase();
+            using var service = new ProjectService(db);
+            string folder = FolderWithProjectJson("agents-shape", json);
+
+            var loaded = await WithinDeadline(() => service.LoadProject(folder));
+
+            Assert.NotNull(loaded);
+            Assert.Equal("a", loaded.Id);
+            Assert.Empty(loaded.TeamAgents);
         }
 
         // The live path: New Project's existence check on a folder holding the exact garbage file.

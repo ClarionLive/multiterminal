@@ -743,9 +743,10 @@ namespace MultiTerminal.Services
             {
                 return ParseProjectObject(json);
             }
-            catch (FormatException)
+            catch (FormatException ex)
             {
                 // Malformed (task 9f95ab0c): null, never a half-filled Project carrying an id read from garbage.
+                System.Diagnostics.Debug.WriteLine($"[ProjectService] Malformed project.json: {ex.Message}");
                 return null;
             }
         }
@@ -988,7 +989,10 @@ namespace MultiTerminal.Services
 
                 SkipWhitespace(json, ref pos);
 
-                if (key != null && key.ToLowerInvariant() == "agents")
+                // ParseStringArray returns without advancing on anything but '[', which would leave the value
+                // to be read as the next key and trip the quoted-key check above. A non-array agents value
+                // (null, a number, an object) is valid JSON and loads as an empty team, as it always did.
+                if (key != null && key.ToLowerInvariant() == "agents" && pos < json.Length && json[pos] == '[')
                 {
                     agents = ParseStringArray(json, ref pos);
                 }
