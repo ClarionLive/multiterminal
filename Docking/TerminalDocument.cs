@@ -80,8 +80,9 @@ namespace MultiTerminal.Docking
         // longer claim the identity and lock out the real owner. Fresh per instance (incl.
         // restore/re-adopt), and since task 19a26090 fresh per LAUNCH too: RotateLaunchNonce
         // replaces it whenever a launch ends, so a process left over from an earlier launch in
-        // this reused pane no longer holds proof. Not readonly for that reason only.
-        private volatile string _launchNonce = Guid.NewGuid().ToString("N");
+        // this reused pane no longer holds proof. The nonce and its rotation live in
+        // PaneLaunchLifecycle so they are unit-testable (task 5e1dea4c).
+        private readonly PaneLaunchLifecycle _launch = new PaneLaunchLifecycle();
 
         // Wall-clock (Unix ms) this TerminalDocument instance was constructed. Used as
         // the freshness floor for the statusline name-glob fallback (task 1ba59334): a
@@ -125,7 +126,7 @@ namespace MultiTerminal.Docking
         /// Empty is never produced here (always a fresh GUID), but downstream gates fail-open on
         /// an empty seed so session-restore / legacy / non-lockstep-deploy paths keep working.
         /// </summary>
-        public string LaunchNonce => _launchNonce;
+        public string LaunchNonce => _launch.LaunchNonce;
 
         /// <summary>
         /// Retires this pane's launch nonce and mints a new one. Called when a launch ENDS — the
@@ -147,7 +148,7 @@ namespace MultiTerminal.Docking
         /// </summary>
         internal void RotateLaunchNonce()
         {
-            _launchNonce = Guid.NewGuid().ToString("N");
+            _launch.EndLaunch();
             _debugLogService?.Trace("TerminalDocument", $"DocId='{_docId}' launch nonce rotated (launch ended; task 19a26090).");
         }
 
@@ -1457,12 +1458,7 @@ namespace MultiTerminal.Docking
             WriteFallbackStatusline(terminalName, workingDirectory);
 
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"Calling _terminal.Start...");
-            // SWAPDIAG (task ab32897c): records which TerminalDocument (_docId/instance) sent
-            // which docId to its own child shell, plus the launch name/dir. Cross-reference with
-            // the SWAPDIAG REGISTER lines to detect a doc↔docId cross. Remove after root cause.
-            _debugLogService?.Info("SWAPDIAG",
-                $"LAUNCH inst={InstanceId} docId={_docId} name='{terminalName}' projectId='{projectId}' dir='{workingDirectory}'");
-            _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, _launchNonce);
+            _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, _launch.LaunchNonce);
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"_terminal.Start returned");
 
             // Update status bar after terminal starts

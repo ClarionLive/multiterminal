@@ -1734,12 +1734,44 @@ namespace MultiTerminal
             // there unconditionally. Otherwise name match, the 1:1 guard and the fd3437e6 nonce gate,
             // unchanged. No last-resort fallback: the old _lastActiveTerminal fallback misrouted two
             // terminals registering in quick succession.
-            var docs = _dockPanel.Documents.OfType<TerminalDocument>().ToList();
-            var binding = TerminalRegistrationBinder.Resolve(
-                docs.Select(d => new PaneIdentity(d.DocId, d.OriginalAgentName, d.CustomTitle, d.LaunchNonce)).ToList(),
-                e.Name, e.DocId, e.LaunchNonce);
-            TerminalDocument targetDoc = binding.Index >= 0 ? docs[binding.Index] : null;
+            //
+            // Snapshot, resolve and commit run as ONE step on the UI thread (task 5e1dea4c), for every
+            // route: the pane's nonce, title and identity only change on the UI thread, so a binding
+            // decided and committed there cannot be overtaken by the pane ending its launch and being
+            // relaunched. See TerminalRegistrationRouter for why this beat a per-route generation check.
+            // CRITICAL: this event fires on an MCP server background thread; Invoke keeps the old
+            // synchronous hand-off (the broker raises it outside _registrationLock).
+            TerminalRegistrationRouter.Route(
+                RunOnUiThreadSync,
+                () => _dockPanel.Documents.OfType<TerminalDocument>().ToList(),
+                d => new PaneIdentity(d.DocId, d.OriginalAgentName, d.CustomTitle, d.LaunchNonce),
+                e.Name, e.DocId, e.LaunchNonce,
+                (binding, targetDoc) => CommitRegistrationBinding(e, binding, targetDoc));
 
+            // Auto-seed activity data for new terminal so Activity Panel shows it immediately
+            _mcpServer?.Broker?.ActivityService?.UpdateActivity(
+                e.Name,
+                "idle",
+                "Just connected"
+            );
+            _debugLogService?.Info("MainForm", $"Terminal registered: {e.Name}, seeded initial activity");
+        }
+
+        private void RunOnUiThreadSync(Action action)
+        {
+            if (InvokeRequired)
+                Invoke(action);
+            else
+                action();
+        }
+
+        /// <summary>
+        /// Logs a registration's binding and, when it bound a pane, commits it: routing maps, tab
+        /// title, identity. Runs on the UI thread inside the same step that resolved the binding
+        /// (<see cref="TerminalRegistrationRouter"/>), so the pane cannot have changed launch since.
+        /// </summary>
+        private void CommitRegistrationBinding(TerminalInfo e, PaneBinding binding, TerminalDocument targetDoc)
+        {
             switch (binding.Route)
             {
                 case PaneBindingRoute.None:
@@ -1754,7 +1786,6 @@ namespace MultiTerminal
                 case PaneBindingRoute.NonceDenied:
                     // Log only WHETHER a nonce was presented — never the value (it's a live secret).
                     _debugLogService?.Warning("MainForm", $"Placeholder adoption DENIED (nonce mismatch): registration '{e.Name}' (id={e.Id}, docId={e.DocId}, noncePresented={!string.IsNullOrEmpty(e.LaunchNonce)}) does not prove origin for an unclaimed doc. Refusing to promote it onto this placeholder.");
-                    _debugLogService?.Warning("SWAPDIAG", $"NONCE-DENY name='{e.Name}' e.DocId='{e.DocId}' noncePresented={!string.IsNullOrEmpty(e.LaunchNonce)} => promote refused (task fd3437e6)");
                     break;
                 case PaneBindingRoute.ProvenOwnLaunch:
                     if (binding.BoundIdentity != null && !binding.BoundIdentity.Equals(e.Name, StringComparison.OrdinalIgnoreCase))
@@ -1762,79 +1793,32 @@ namespace MultiTerminal
                     break;
             }
 
-            // SWAPDIAG (task ab32897c): per registration, the broker-received (name,docId), the route,
-            // and which TerminalDocument it bound to, plus a snapshot of every live doc. Remove after
-            // root cause is confirmed.
-            try
+            if (targetDoc == null) return;
+
+            // No stale-launch re-check here any more (19a26090 had one for the proven route): the
+            // binding was resolved against the pane's CURRENT nonce in this same UI-thread step, so a
+            // registration proven against an ended launch no longer resolves as proven at all.
+            lock (_terminalDocMapLock)
             {
-                var allDocs = docs.Select(d => $"[inst={d.InstanceId} docId={d.DocId} title='{d.CustomTitle}' promoted='{d.OriginalAgentName}' dir='{d.GetWorkingDirectory()}']");
-                _debugLogService?.Info("SWAPDIAG",
-                    $"REGISTER name='{e.Name}' e.DocId='{e.DocId}' e.Id='{e.Id}' route={binding.Route} => BOUND " +
-                    (targetDoc == null
-                        ? "(none)"
-                        : $"inst={targetDoc.InstanceId} docId={targetDoc.DocId} title='{targetDoc.CustomTitle}' dir='{targetDoc.GetWorkingDirectory()}'") +
-                    " | ALL_DOCS: " + string.Join(" ", allDocs));
-            }
-            catch { /* diagnostic only */ }
-
-            if (targetDoc != null)
-            {
-                bool provenOwnLaunch = binding.Route == PaneBindingRoute.ProvenOwnLaunch;
-
-                // Everything that commits this binding runs HERE, on the UI thread, as one step:
-                // the stale-launch check, the routing maps and the identity. The nonce only rotates
-                // on the UI thread (process exit, Home, "Launch as..."), so a check made here cannot
-                // be overtaken before the writes that depend on it. Checking on the broker thread and
-                // writing afterwards left exactly that window (pipeline Run 3, Codex adversary).
-                void ApplyIdentity()
-                {
-                    if (provenOwnLaunch && !string.Equals(e.LaunchNonce, targetDoc.LaunchNonce, StringComparison.Ordinal))
-                    {
-                        // Proven against a launch that has since ended: it belongs to nobody now. It
-                        // must not reroute the pane's terminal id or agent name (an inject meant for
-                        // the old agent would be typed into the new one) or even retitle the tab.
-                        _debugLogService?.Info("MainForm", $"Registration '{e.Name}' proved docId={e.DocId} for a launch that has since ended (nonce rotated); not mapping it and leaving the pane's identity untouched. task 19a26090");
-                        return;
-                    }
-
-                    lock (_terminalDocMapLock)
-                    {
-                        _terminalDocMap[e.Id] = targetDoc;
-                        // Maintain reverse lookup: agent name → terminal document
-                        if (!string.IsNullOrEmpty(e.Name))
-                            _agentNameToTerminalDoc[e.Name] = targetDoc;
-                    }
-
-                    if (!string.IsNullOrEmpty(e.Name))
-                        targetDoc.CustomTitle = e.Name;  // Display the Claude name in the tab
-                    // Broker-confirmed registration is an authoritative identity source for
-                    // OnBrokerTaskActiveChanged filtering and statusline lookup. A registration that
-                    // PROVED it is this pane's own process (docId + nonce, task 19a26090) replaces
-                    // whatever identity the pane carried — a restored title or an earlier launch.
-                    // Anything weaker only promotes first-wins (cycle-7 codex-adversary HIGH fix), and
-                    // neither the "Unassigned" placeholder nor an empty name replaces a real identity.
-                    if (provenOwnLaunch && !string.IsNullOrEmpty(e.Name) && !TerminalRegistrationBinder.IsUnassigned(e.Name))
-                        targetDoc.AdoptLaunchIdentity(e.Name);
-                    else
-                        targetDoc.PromoteOriginalAgentName(e.Name);
-                    targetDoc.UpdateStatusBar();     // Update the terminal banner with name, avatar, and task
-                }
-
-                // CRITICAL: Must update UI controls on the UI thread!
-                // This event fires from MCP server background thread.
-                if (InvokeRequired)
-                    Invoke(new Action(ApplyIdentity));
-                else
-                    ApplyIdentity();
+                _terminalDocMap[e.Id] = targetDoc;
+                // Maintain reverse lookup: agent name → terminal document
+                if (!string.IsNullOrEmpty(e.Name))
+                    _agentNameToTerminalDoc[e.Name] = targetDoc;
             }
 
-            // Auto-seed activity data for new terminal so Activity Panel shows it immediately
-            _mcpServer?.Broker?.ActivityService?.UpdateActivity(
-                e.Name,
-                "idle",
-                "Just connected"
-            );
-            _debugLogService?.Info("MainForm", $"Terminal registered: {e.Name}, seeded initial activity");
+            if (!string.IsNullOrEmpty(e.Name))
+                targetDoc.CustomTitle = e.Name;  // Display the Claude name in the tab
+            // Broker-confirmed registration is an authoritative identity source for
+            // OnBrokerTaskActiveChanged filtering and statusline lookup. A registration that
+            // PROVED it is this pane's own process (docId + nonce, task 19a26090) replaces
+            // whatever identity the pane carried — a restored title or an earlier launch.
+            // Anything weaker only promotes first-wins (cycle-7 codex-adversary HIGH fix), and
+            // neither the "Unassigned" placeholder nor an empty name replaces a real identity.
+            if (binding.Route == PaneBindingRoute.ProvenOwnLaunch && !string.IsNullOrEmpty(e.Name) && !TerminalRegistrationBinder.IsUnassigned(e.Name))
+                targetDoc.AdoptLaunchIdentity(e.Name);
+            else
+                targetDoc.PromoteOriginalAgentName(e.Name);
+            targetDoc.UpdateStatusBar();     // Update the terminal banner with name, avatar, and task
         }
 
         /// <summary>
@@ -7662,15 +7646,17 @@ namespace MultiTerminal
                 // Project id -> display name, so a claimed task can name the project it belongs to.
                 // Built once per refresh rather than per agent: the registry read is the expensive
                 // half and every agent would otherwise repeat it.
-                var projectNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                Dictionary<string, string> projectNames;
                 try
                 {
                     projectNames = Services.WorkingOnProject.NameIndex(broker.GetProjectsList()?.Select(p => (p?.Id, p?.Name)));
                 }
                 catch (Exception projEx)
                 {
-                    // A registry hiccup costs the project LINE, not the rail. Cards still render.
+                    // A registry hiccup costs the project LINE, not the rail: an empty index, so the
+                    // cards still render, just without a project name.
                     _debugLogService?.Info("AttentionPanel", $"Project name lookup failed: {projEx.Message}");
+                    projectNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 }
 
                 var claims = new Dictionary<string, AttentionPanel.AttentionTicketClaim>(StringComparer.OrdinalIgnoreCase);

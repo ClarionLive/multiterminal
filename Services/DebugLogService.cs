@@ -41,7 +41,8 @@ namespace MultiTerminal.Services
         private readonly BlockingCollection<DebugLogEntry> _writeQueue;
         private readonly Thread _writerThread;
         private readonly bool _fileLoggingEnabled;
-        private const int WriterFlushIntervalMs = 1000;
+        private const int DefaultWriterFlushIntervalMs = 1000;
+        private readonly int _writerFlushIntervalMs;
         private const int WriteQueueCapacity = 50000;
 
         // Overload telemetry: entries dropped because _writeQueue was full. A silent drop is a log that
@@ -113,9 +114,20 @@ namespace MultiTerminal.Services
         }
 
         public DebugLogService()
+            : this(LogDirectory, DefaultWriterFlushIntervalMs)
         {
+        }
+
+        /// <summary>
+        /// Test seam (task 5e1dea4c): a log directory other than the live one, and a shorter writer
+        /// idle interval so an idle gap can be exercised in milliseconds. Production uses the
+        /// parameterless constructor.
+        /// </summary>
+        internal DebugLogService(string logDir, int writerFlushIntervalMs)
+        {
+            _writerFlushIntervalMs = writerFlushIntervalMs;
+
             // Create log file with session start timestamp
-            string logDir = LogDirectory;
             try
             {
                 Directory.CreateDirectory(logDir);
@@ -396,17 +408,28 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Background writer loop. Blocks up to <see cref="WriterFlushIntervalMs"/> for the next
+        /// Background writer loop. Blocks up to the writer interval (<see cref="DefaultWriterFlushIntervalMs"/>
+        /// in production) for the next
         /// entry, then drains every entry currently available and flushes ONCE per batch. This is
         /// what turns N synchronous per-line flushes into one flush per batch (the buffering win).
-        /// Exits when the queue is completed (Dispose) and fully drained.
+        /// Exits ONLY when the queue is completed (Dispose) and fully drained.
+        ///
+        /// <para><b>An idle interval is not the end (task 5e1dea4c).</b> <c>TryTake(out, timeout)</c>
+        /// returns false on a timeout as well as on completion. The loop used to be
+        /// <c>while (TryTake(out e, 1000))</c>, so the first second with nothing to log ended the
+        /// writer thread for the rest of the session: log files stopped a few seconds after
+        /// startup (2026-10-01's at 08:28:40, 15 KB) while the in-memory buffer, which does not go
+        /// through this thread, kept rolling. (The multi-MB files there are, presumably, sessions
+        /// that never went a full second without a log line.) A timeout now just goes round again.</para>
         /// </summary>
         private void WriterLoop()
         {
             try
             {
-                while (_writeQueue.TryTake(out var entry, WriterFlushIntervalMs))
+                while (!_writeQueue.IsCompleted)
                 {
+                    if (!_writeQueue.TryTake(out var entry, _writerFlushIntervalMs)) continue;
+
                     lock (_fileLock)
                     {
                         if (_logWriter == null) continue;
