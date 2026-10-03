@@ -154,6 +154,59 @@ namespace MultiTerminal.Tests
             Assert.Equal(1, registryChanged);
         }
 
+        // Run 5: a throwing ProjectRemoved subscriber cannot stop the later subscribers,
+        // RegistryChangedExternally, or ProjectsUpdated; the undo itself still succeeds (the data is removed).
+        [Fact]
+        public void A_throwing_removal_subscriber_cannot_suppress_the_other_notifications()
+        {
+            using var db = new ProjectDatabase();
+            using var service = new ProjectService(db);
+            using var broker = NewBroker(service);
+            var created = broker.CreateProject("A", null, "test", _folder);
+            Assert.True(created.Success, created.Error);
+            int laterRemoved = 0, registryChanged = 0, projectsUpdated = 0;
+            service.ProjectRemoved += (_, _) => throw new InvalidOperationException("bad subscriber");
+            service.ProjectRemoved += (_, _) => laterRemoved++;
+            service.RegistryChangedExternally += (_, _) => registryChanged++;
+            broker.ProjectsUpdated += (_, _) => projectsUpdated++;
+
+            Assert.Null(broker.UndoProjectCreate(created.ProjectId));
+
+            Assert.Equal(1, laterRemoved);
+            Assert.Equal(1, registryChanged);
+            Assert.True(projectsUpdated >= 1, "ProjectsUpdated was not raised");
+            Assert.Empty(db.GetAllProjects());
+        }
+
+        // Run 5: the first undo deletes the row but cannot delete project.json (held open without
+        // FILE_SHARE_DELETE). The retry, with the row gone, must still finish that delete through the
+        // folder the dialog passes, not report success over a project.json naming a nonexistent project.
+        [Fact]
+        public void Retry_finishes_a_project_json_delete_that_failed_after_the_row_was_removed()
+        {
+            using var db = new ProjectDatabase();
+            using var service = new ProjectService(db);
+            using var broker = NewBroker(service);
+            var created = broker.CreateProject("A", null, "test", _folder);
+            Assert.True(created.Success, created.Error);
+            var dialogProject = new Project { Id = created.ProjectId, Name = "A", Path = _folder };
+
+            using (new FileStream(JsonPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                string first = ProjectManagerDialog.RollBackThroughBroker(broker, dialogProject);
+
+                Assert.NotNull(first);
+                Assert.Contains("project.json", first);
+                Assert.Null(db.GetRichProject(created.ProjectId));
+                Assert.True(File.Exists(JsonPath));
+            }
+
+            string retry = ProjectManagerDialog.RollBackThroughBroker(broker, dialogProject);
+
+            Assert.Null(retry);
+            Assert.False(File.Exists(JsonPath));
+        }
+
         // ---- Child rows ----
 
         private int ChildRows(string table, string projectId)

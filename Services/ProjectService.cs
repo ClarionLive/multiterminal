@@ -309,14 +309,40 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Raises the same notifications as <see cref="UnregisterProject"/> for a project whose row was
         /// already removed elsewhere (task 9f95ab0c Run 4: MessageBroker.UndoProjectCreate), so
-        /// CodeGraphWatcher and other registry listeners reconcile and stop watching its folder.
+        /// CodeGraphWatcher and other registry listeners reconcile and stop watching its folder. Each handler
+        /// is invoked on its own (Run 5): one throwing subscriber cannot stop the others, or the
+        /// RegistryChangedExternally that follows. Returns the subscribers' exceptions for the caller to log.
         /// </summary>
-        public void NotifyProjectRemoved(Project project)
+        public IReadOnlyList<Exception> NotifyProjectRemoved(Project project)
         {
+            var failures = new List<Exception>();
             if (project == null)
-                return;
-            ProjectRemoved?.Invoke(this, new ProjectEventArgs(project));
-            RegistryChangedExternally?.Invoke(this, EventArgs.Empty);
+                return failures;
+
+            var args = new ProjectEventArgs(project);
+            foreach (var handler in ProjectRemoved?.GetInvocationList() ?? Array.Empty<Delegate>())
+            {
+                try
+                {
+                    ((EventHandler<ProjectEventArgs>)handler)(this, args);
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(ex);
+                }
+            }
+            foreach (var handler in RegistryChangedExternally?.GetInvocationList() ?? Array.Empty<Delegate>())
+            {
+                try
+                {
+                    ((EventHandler)handler)(this, EventArgs.Empty);
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(ex);
+                }
+            }
+            return failures;
         }
 
         /// <summary>

@@ -277,7 +277,7 @@ namespace MultiTerminal.Dialogs
         internal static string RollBackThroughBroker(MessageBroker broker, Project project)
             => broker == null
                 ? "the project service is not available"
-                : broker.UndoProjectCreate(project?.Id);
+                : broker.UndoProjectCreate(project?.Id, project?.Path);
 
         /// <summary>
         /// The guarded create used as EditProjectDialog.CreateGuard; <see cref="RollBackThroughBroker"/> (Run 3)

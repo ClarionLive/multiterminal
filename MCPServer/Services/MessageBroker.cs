@@ -6117,7 +6117,11 @@ namespace MultiTerminal.MCPServer.Services
         /// the row and cache entry with exactly this id, and the folder's project.json only if it carries
         /// this id. Returns null when done (or when there was nothing with that id), else why it could not.
         /// </summary>
-        public string UndoProjectCreate(string projectId)
+        /// <param name="projectId">The id the create returned.</param>
+        /// <param name="folder">The folder the create targeted (the dialog's project path). Used when the row
+        /// is already gone: a previous undo that deleted the row but failed to delete project.json is
+        /// finished here, instead of leaving a project.json naming a project that no longer exists.</param>
+        public string UndoProjectCreate(string projectId, string folder = null)
         {
             if (string.IsNullOrWhiteSpace(projectId))
                 return "There is no project id to roll back.";
@@ -6137,7 +6141,16 @@ namespace MultiTerminal.MCPServer.Services
                         var rich = _projectDb.GetRichProject(projectId);
                         _projects.TryGetValue(projectId, out var cached);
                         if (rich == null && cached == null)
+                        {
+                            // Row already gone (Run 5): finish a project.json delete an earlier undo could not
+                            // do. Same canonical folder SaveProject used (a worktree path is its repo root).
+                            if (!string.IsNullOrWhiteSpace(folder))
+                            {
+                                string stableFolder = WorktreeLayout.TryResolveStableProjectPath(folder, null, out var stable) ? stable : folder;
+                                error = DeleteProjectJsonIfOwned(projectId, stableFolder);
+                            }
                             return;
+                        }
                         string path = rich?.Path ?? cached?.Path;
                         error = RollBackCreatedProject(projectId, path);
                         if (error == null)
@@ -6156,15 +6169,24 @@ namespace MultiTerminal.MCPServer.Services
             if (removed != null)
             {
                 // The same notifications a normal removal raises (ProjectService.UnregisterProject), so
-                // CodeGraphWatcher stops watching the folder.
+                // CodeGraphWatcher stops watching the folder. Each step is attempted on its own (Run 5), and a
+                // notification failure does not turn the undo into a failure: the data IS removed.
                 try
                 {
-                    ProjectService?.NotifyProjectRemoved(removed);
-                    BroadcastProjectUpdate();
+                    foreach (var failure in ProjectService?.NotifyProjectRemoved(removed) ?? Array.Empty<Exception>())
+                        LogError($"UndoProjectCreate {projectId}: a removal subscriber failed: {failure.Message}");
                 }
                 catch (Exception ex)
                 {
                     LogError($"UndoProjectCreate {projectId}: removal notifications failed: {ex.Message}");
+                }
+                try
+                {
+                    BroadcastProjectUpdate();
+                }
+                catch (Exception ex)
+                {
+                    LogError($"UndoProjectCreate {projectId}: ProjectsUpdated broadcast failed: {ex.Message}");
                 }
             }
             return error;
@@ -6934,25 +6956,34 @@ namespace MultiTerminal.MCPServer.Services
                 return $"database row {projectId}: {ex.Message}";
             }
 
-            if (!string.IsNullOrEmpty(path))
-            {
-                try
-                {
-                    string json = System.IO.Path.Combine(path, ".claude", "project.json");
-                    // CA3003: the create's own folder (from the create, or the row it wrote).
-#pragma warning disable CA3003
-                    if (File.Exists(json) && ProjectService?.LoadProject(path)?.Id == projectId)
-                        File.Delete(json);
-#pragma warning restore CA3003
-                }
-                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException || ex is NotSupportedException)
-                {
-                    LogError($"Project create rollback: removing {path}/.claude/project.json failed: {ex.Message}");
-                    failures.Add($"{path}\\.claude\\project.json: {ex.Message}");
-                }
-            }
+            string jsonError = DeleteProjectJsonIfOwned(projectId, path);
+            if (jsonError != null)
+                failures.Add(jsonError);
 
             return failures.Count == 0 ? null : string.Join("; ", failures);
+        }
+
+        // Deletes <path>/.claude/project.json only when it parses with this id (a file with another id, or one
+        // that does not parse, is left: the folder then reads as occupied). Null on success or nothing to do.
+        private string DeleteProjectJsonIfOwned(string projectId, string path)
+        {
+            if (string.IsNullOrEmpty(path))
+                return null;
+            try
+            {
+                string json = System.IO.Path.Combine(path, ".claude", "project.json");
+                // CA3003: the create's own folder (from the create, the row it wrote, or the dialog that made it).
+#pragma warning disable CA3003
+                if (File.Exists(json) && ProjectService?.LoadProject(path)?.Id == projectId)
+                    File.Delete(json);
+#pragma warning restore CA3003
+                return null;
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException || ex is NotSupportedException)
+            {
+                LogError($"Project create rollback: removing {path}/.claude/project.json failed: {ex.Message}");
+                return $"{path}\\.claude\\project.json: {ex.Message}";
+            }
         }
 
         // Named census bypass: seeds ONE row FROM the database into the cache (the single-row form of
