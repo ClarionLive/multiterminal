@@ -122,6 +122,100 @@ namespace MultiTerminal.Dialogs
         /// <summary>Gets the resulting Project after OK is clicked (rich mode only).</summary>
         public Project ResultProject { get; private set; }
 
+        /// <summary>
+        /// Create mode (task 9f95ab0c, Run 2): creates the project through the guarded broker path BEFORE
+        /// this dialog writes anything. Returns null on success, having set the project's Id to the created
+        /// id (the dialog's own save then fills the rich columns of that row); returns the refusal text
+        /// when the folder already holds a project. Required in rich create mode: with no guard the
+        /// dialog refuses to create rather than write an unchecked row.
+        /// </summary>
+        public Func<Project, string> CreateGuard { get; set; }
+
+        /// <summary>
+        /// Create mode (task 9f95ab0c, Run 3): undoes a <see cref="CreateGuard"/> create when this dialog's
+        /// own save then fails, so a retry starts clean instead of being refused as "occupied" by its own
+        /// half-configured project. Returns null when undone, else why not.
+        /// </summary>
+        public Func<Project, string> CreateRollback { get; set; }
+
+        // Id of a project the guard created whose save failed AND whose rollback failed. A retry re-runs the
+        // undo first and only then creates afresh; it never saves under this id (Run 4: an upsert under a kept
+        // id would configure a project the folder check never re-approved).
+        private string _uncommittedCreateId;
+
+        private const string NoProjectServiceText = "Projects can't be created here right now (the project service is not available).";
+
+        /// <summary>
+        /// The create-mode commit, outside the click handler so it can be tested with a failing save.
+        /// Guard (broker create) -> save (rich columns). When the save throws, the create is rolled back
+        /// through <paramref name="rollback"/>. If that also fails, the user is told plainly and
+        /// <paramref name="uncommittedCreateId"/> keeps the id: the next attempt re-runs the undo FIRST, and
+        /// only if it now succeeds does it create afresh through the guard; if it still fails, nothing else
+        /// happens. Never throws for a failing rollback (the caller is a button handler). Returns null on
+        /// success, else the message to show.
+        /// </summary>
+        internal static string CommitNewProject(
+            Project project,
+            Func<Project, string> guard,
+            Action<Project> save,
+            Func<Project, string> rollback,
+            ref string uncommittedCreateId)
+        {
+            if (uncommittedCreateId != null)
+            {
+                string pendingId = uncommittedCreateId;
+                project.Id = pendingId;
+                string undoError = RunRollback(rollback, project);
+                if (undoError != null)
+                {
+                    return $"The project ({pendingId}) left by the earlier failed attempt still could not be removed: {undoError}\n"
+                        + "Nothing else was done. Try again, or delete it from the Project Manager.";
+                }
+                uncommittedCreateId = null;
+                project.Id = Guid.NewGuid().ToString(); // the guard assigns the real id
+            }
+
+            string refusal = guard == null ? NoProjectServiceText : guard(project);
+            if (refusal != null)
+                return refusal;
+            uncommittedCreateId = project.Id;
+
+            try
+            {
+                save(project);
+                uncommittedCreateId = null;
+                return null;
+            }
+            catch (Exception ex)
+            {
+                string message = "Failed to save project: " + ex.Message;
+                string rollbackError = RunRollback(rollback, project);
+                if (rollbackError == null)
+                {
+                    uncommittedCreateId = null;
+                    project.Id = Guid.NewGuid().ToString(); // a retry creates afresh
+                    return message + "\n\nThe new project was removed again, so you can try again.";
+                }
+                return message + $"\n\nThe new project ({uncommittedCreateId}) could not be removed: {rollbackError}\n"
+                    + "Saving again first retries removing it; or delete it from the Project Manager.";
+            }
+        }
+
+        // The rollback delegate's own failure becomes its error text: it must not escape the button handler.
+        private static string RunRollback(Func<Project, string> rollback, Project project)
+        {
+            if (rollback == null)
+                return "no rollback is available";
+            try
+            {
+                return rollback(project);
+            }
+            catch (Exception ex)
+            {
+                return ex.Message;
+            }
+        }
+
         // ── Legacy constructor: create new project ────────────────────────────
         public EditProjectDialog(TerminalTheme theme)
         {
@@ -440,7 +534,18 @@ namespace MultiTerminal.Dialogs
 
             BuildResultProject();
 
-            if (_projectDb != null)
+            if (_projectDb != null && !_isEditMode)
+            {
+                // The folder check and the row insert happen in the broker, under its create lock; on a
+                // refusal nothing has been written and the dialog stays open.
+                string error = CommitNewProject(ResultProject, CreateGuard, _ => SaveToDatabase(), CreateRollback, ref _uncommittedCreateId);
+                if (error != null)
+                {
+                    MessageBox.Show(error, "New Project", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+            }
+            else if (_projectDb != null)
             {
                 try { SaveToDatabase(); }
                 catch (Exception ex)

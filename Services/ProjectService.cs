@@ -227,7 +227,35 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Registers a new project (creates .claude/project.json, upserts to SQLite).
+        /// Auto-registers a project discovered in a terminal's working directory by re-saving the folder's
+        /// OWN project.json under its own id. Skipped (returns false) when the file has no id, or when that
+        /// id is already registered at a different folder: the folder is then a copy, clone or move of
+        /// another project, and the re-save would rebind that project's row to this folder
+        /// (task 9f95ab0c Run 2). Returns true when it registered.
+        /// </summary>
+        public bool AutoRegisterDiscoveredProject(string directory, Project discovered)
+        {
+            if (discovered == null || string.IsNullOrEmpty(directory) || string.IsNullOrWhiteSpace(discovered.Id))
+                return false;
+
+            var registered = _projectDb.GetRichProject(discovered.Id);
+            if (registered != null)
+            {
+                // SaveProject stores a worktree folder as its repo root, so compare against that.
+                string folder = WorktreeLayout.TryResolveStableProjectPath(directory, discovered.SourcePath, out var stable) ? stable : directory;
+                if (!ExistingProjectDetector.PathsEqual(registered.Path, folder))
+                    return false;
+            }
+
+            SaveProject(discovered);
+            return true;
+        }
+
+        /// <summary>
+        /// Registers a new project (creates .claude/project.json, upserts to SQLite). Unguarded: it writes a
+        /// fresh project.json (new id) over whatever the folder holds, so nothing in the app calls it any
+        /// more (task 9f95ab0c Run 2 moved the Project Manager to MessageBroker.CreateProject). Create
+        /// projects through the broker, which checks the folder under its create lock.
         /// </summary>
         public Project RegisterProject(string path, string name, string description = null)
         {
@@ -276,6 +304,45 @@ namespace MultiTerminal.Services
 
             ProjectRemoved?.Invoke(this, new ProjectEventArgs(richProject));
             RegistryChangedExternally?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// Raises the same notifications as <see cref="UnregisterProject"/> for a project whose row was
+        /// already removed elsewhere (task 9f95ab0c Run 4: MessageBroker.UndoProjectCreate), so
+        /// CodeGraphWatcher and other registry listeners reconcile and stop watching its folder. Each handler
+        /// is invoked on its own (Run 5): one throwing subscriber cannot stop the others, or the
+        /// RegistryChangedExternally that follows. Returns the subscribers' exceptions for the caller to log.
+        /// </summary>
+        public IReadOnlyList<Exception> NotifyProjectRemoved(Project project)
+        {
+            var failures = new List<Exception>();
+            if (project == null)
+                return failures;
+
+            var args = new ProjectEventArgs(project);
+            foreach (var handler in ProjectRemoved?.GetInvocationList() ?? Array.Empty<Delegate>())
+            {
+                try
+                {
+                    ((EventHandler<ProjectEventArgs>)handler)(this, args);
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(ex);
+                }
+            }
+            foreach (var handler in RegistryChangedExternally?.GetInvocationList() ?? Array.Empty<Delegate>())
+            {
+                try
+                {
+                    ((EventHandler)handler)(this, EventArgs.Empty);
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(ex);
+                }
+            }
+            return failures;
         }
 
         /// <summary>
@@ -363,6 +430,32 @@ namespace MultiTerminal.Services
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Rewrites the name and/or description in a folder's .claude/project.json, and nothing else
+        /// (task 9f95ab0c: a rename must reach the file as well as the database row). Writes the file
+        /// only, like <see cref="ToggleProjectPinned"/> — NOT through <see cref="SaveProject"/>, whose
+        /// SaveRichProject upsert would push the file's stale isPinned and its unserialized
+        /// gitAutoCommit back over the database. Returns false, writing nothing, when the folder has
+        /// no project.json or the file answers to a different id.
+        /// </summary>
+        public bool UpdateProjectJsonNameAndDescription(string projectPath, string projectId, string name, string description)
+        {
+            var fileProject = LoadProject(projectPath);
+            if (fileProject == null || !string.Equals(fileProject.Id, projectId, StringComparison.Ordinal))
+                return false;
+
+            if (!string.IsNullOrWhiteSpace(name))
+                fileProject.Name = name;
+            if (description != null)
+                fileProject.Description = description;
+
+            // CA3003: projectPath is an app-managed project root from the database, not web input.
+#pragma warning disable CA3003
+            File.WriteAllText(GetProjectConfigPath(projectPath), SerializeProjectJson(fileProject));
+#pragma warning restore CA3003
+            return true;
         }
 
         /// <summary>

@@ -4232,10 +4232,19 @@ namespace MultiTerminal
                             ?? new List<(string, string, string)>();
 
             var wpfDialog = new Dialogs.NewProjectWpfDialog(_currentTheme.IsDark, teamLeads,
-                initialQuietStart: _settings?.GetLastNewProjectQuietStart() ?? false);
+                initialQuietStart: _settings?.GetLastNewProjectQuietStart() ?? false,
+                findExistingProject: folder => _mcpServer?.Broker?.FindExistingProjectAtPath(folder)
+                                               ?? Services.ExistingProjectMatch.None);
             var helper = new System.Windows.Interop.WindowInteropHelper(wpfDialog);
             helper.Owner = this.Handle;
             if (wpfDialog.ShowDialog() != true) return;
+
+            // The folder already had a project and the user chose Open or Rename (task 9f95ab0c).
+            if (wpfDialog.Decision != Services.NewProjectFolderDecision.CreateNew)
+            {
+                LaunchExistingFromNewProject(sourceDoc, wpfDialog);
+                return;
+            }
 
             try
             {
@@ -4259,24 +4268,19 @@ namespace MultiTerminal
                         path: projectFolder,
                         teamLead: wpfDialog.SelectedTeamLead,
                         defaultTerminal: wpfDialog.SelectedDefaultTerminal,
-                        // The UI permits creating a project on an existing folder that
-                        // happens to have a .claude/project.json from a prior session —
-                        // that's a "register existing" intent, not a duplicate-create.
-                        allowReuseExisting: true);
+                        // Never reuse (task 9f95ab0c): reuse once wrote this dialog's name, an empty
+                        // description and a fresh createdAt over the folder's existing project. An
+                        // occupied folder is caught by the dialog; this refusal is the backstop.
+                        allowReuseExisting: false);
                     if (!createResult.Success || createResult.CreatedFileProject == null)
                         throw new InvalidOperationException(createResult.Error ?? "Failed to create project");
                     project = createResult.CreatedFileProject;
                 }
                 else
                 {
-                    project = Models.Project.Create(wpfDialog.ProjectName, projectFolder);
-                    project.TeamLead = wpfDialog.SelectedTeamLead;
-                    project.DefaultTerminal = wpfDialog.SelectedDefaultTerminal;
-                    project.CreatedBy = "new-project-dialog";
-                    if (_projectService != null)
-                        _projectService.SaveProject(project);
-                    else
-                        _sharedProjectDatabase?.SaveRichProject(project);
+                    // No broker, so no folder check: refuse rather than write an unchecked project.json over
+                    // whatever the folder holds (task 9f95ab0c Run 2; was an unguarded SaveProject fallback).
+                    throw new InvalidOperationException("The project service is not available; the project was not created.");
                 }
 
                 // Quiet start (GitHub #34). Written out-of-band rather than through CreateProject, so
@@ -4422,6 +4426,44 @@ namespace MultiTerminal
                 ReleaseGhostRegistration(sourceDoc.DocId, "StartScreen");
                 sourceDoc.ShowStartScreen();
                 MessageBox.Show($"Failed to create project: {ex.Message}",
+                    "New Project Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        /// <summary>
+        /// New Project picked a folder that already had a project, and the user chose "Open existing"
+        /// or "Rename existing" (task 9f95ab0c). Registers a project.json-only folder (the card launch
+        /// reads the database row) without changing it, renames it on request — database row and
+        /// project.json both — and then launches it exactly as its start-screen card would.
+        /// </summary>
+        private void LaunchExistingFromNewProject(TerminalDocument sourceDoc, Dialogs.NewProjectWpfDialog dialog)
+        {
+            var existing = dialog.ExistingProject;
+            var broker = _mcpServer?.Broker;
+            try
+            {
+                if (existing == null || broker == null)
+                    throw new InvalidOperationException("The existing project could not be resolved.");
+
+                var adopt = broker.RegisterExistingProject(existing.ProjectPath, "new-project-dialog");
+                if (!adopt.Success)
+                    throw new InvalidOperationException(adopt.Error ?? "Failed to open the existing project");
+
+                if (dialog.Decision == Services.NewProjectFolderDecision.RenameExisting
+                    && !string.Equals(existing.ProjectName, dialog.ProjectName, StringComparison.Ordinal))
+                {
+                    var rename = broker.UpdateProject(adopt.ProjectId, dialog.ProjectName, null, "new-project-dialog");
+                    if (!rename.Success)
+                        throw new InvalidOperationException(rename.Error ?? "Failed to rename the existing project");
+                }
+
+                OnStartScreenProjectLaunched(sourceDoc, new StartScreenLaunchEventArgs(adopt.ProjectId));
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("StartScreen", $"LaunchExistingFromNewProject error: {ex.Message}");
+                sourceDoc.ShowStartScreen();
+                MessageBox.Show($"Failed to open the existing project: {ex.Message}",
                     "New Project Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
@@ -5074,8 +5116,8 @@ namespace MultiTerminal
             // automatically add them to the registry
             if (!_projectService.IsProjectRegistered(directory))
             {
-                // Auto-register the discovered project
-                _projectService.SaveProject(discoveredProject);
+                // Auto-register the discovered project (skipped when its id belongs to another folder)
+                _projectService.AutoRegisterDiscoveredProject(directory, discoveredProject);
                 _currentProject = discoveredProject;
                 _projectPanel?.RefreshForProject(discoveredProject);
             }
@@ -8122,10 +8164,10 @@ namespace MultiTerminal
                 var project = _projectService?.DiscoverProject(workingDir);
                 if (project != null)
                 {
-                    // Auto-register if not already registered
+                    // Auto-register if not already registered (skipped when its id belongs to another folder)
                     if (!_projectService.IsProjectRegistered(workingDir))
                     {
-                        _projectService.SaveProject(project);
+                        _projectService.AutoRegisterDiscoveredProject(workingDir, project);
                     }
                     _currentProject = project;
                     _projectPanel?.RefreshForProject(project);
@@ -8336,7 +8378,7 @@ namespace MultiTerminal
         private void ShowProjectManagerDialog()
         {
             using var projectDb = new MultiTerminal.Services.ProjectDatabase();
-            using (var dialog = new ProjectManagerDialog(_projectService, projectDb, _currentTheme))
+            using (var dialog = new ProjectManagerDialog(_projectService, projectDb, _currentTheme, _mcpServer?.Broker))
             {
                 dialog.ProjectOpened += (s, args) =>
                 {

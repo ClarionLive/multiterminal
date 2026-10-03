@@ -1408,7 +1408,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "create_project",
-        description: "Register a new project with MultiTerminal. Same effect as the Home page 'New Project' button: writes the SQLite row, creates .claude/project.json in the target folder, fires the dashboard refresh event, and records an activity feed entry. Returns the 8-char projectId. Duplicate paths (existing .claude/project.json) are rejected with a clean error.",
+        description: "Register a new project with MultiTerminal. Same effect as the Home page 'New Project' button: writes the SQLite row, creates .claude/project.json in the target folder, fires the dashboard refresh event, and records an activity feed entry. Returns the 8-char projectId. A folder that already holds a project (a .claude/project.json, even an unreadable one, or a registered project at the same path) is refused with HTTP 409 whose message names the existing project's id; nothing is reused or overwritten. Use update_project to change an existing project.",
         inputSchema: {
           type: "object",
           properties: {

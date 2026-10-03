@@ -52,6 +52,7 @@ const TARGETS = ['MCPServer/Services/MessageBroker.cs', 'MCPServer/Services/Task
 const WRITE_PATH_HELPERS = new Set([
   'MutateTaskInternal', 'TryMutateTask', 'InsertTaskInternal', 'DeleteTaskInternal', 'SaveTask',
   'MutateProjectInternal', 'InsertProjectInternal',
+  'RollBackCreatedProject',   // 9f95ab0c Run 2: undoes InsertProjectInternal when the create's project.json write fails
   'MutateProfile', 'InsertProfile', 'DeleteProfileInternal',   // public since e1643ccc (registration write path)
 ]);
 
@@ -62,6 +63,7 @@ const WRITE_PATH_HELPERS = new Set([
 const NAMED_BYPASSES = new Set([
   'LoadPersistedTasks',      // startup bootstrap seed FROM the DB (not a mutation)
   'LoadPersistedProjects',   // startup bootstrap seed
+  'CacheProjectRowFromDb',   // 9f95ab0c Run 2: single-row form of LoadPersistedProjects (seed FROM the DB, not a mutation)
   'LoadPersistedProfiles',   // startup bootstrap seed
   'ReorderTask',             // sort_order via dedicated column writers + bulk rebalance + cache refresh FROM db
   'DeleteProject',           // canonical unregister via ProjectService + coherent cache-restore-on-failure
