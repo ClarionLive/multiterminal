@@ -11,10 +11,20 @@ namespace MultiTerminal.Services
     /// <param name="Name">The requested name.</param>
     /// <param name="RegisterUnique">Register through the atomic <c>MessageBroker.RegisterTerminalUnique</c>,
     /// which hands back the first free <c>-N</c> suffix.</param>
-    /// <param name="IsProjectIdentity">The name was derived from the project (not a lead, not the Codex
+    /// <param name="IsProjectDerived">The name was derived from the project (not a lead, not the Codex
     /// default). Such a launch FAILS CLOSED when registration is refused: it must never fall back to a
     /// placeholder or pool name.</param>
-    internal readonly record struct ProjectLaunchIdentityRequest(string Name, bool RegisterUnique, bool IsProjectIdentity);
+    internal readonly record struct ProjectLaunchIdentityRequest(string Name, bool RegisterUnique, bool IsProjectDerived);
+
+    /// <summary>
+    /// The reserved-name census, or why it could not be taken. ALL-OR-NOTHING (6a8d029f Run 2): a
+    /// partial set would let a project take exactly the name a missing row would have reserved, so
+    /// <see cref="Names"/> is null whenever <see cref="Error"/> is set.
+    /// </summary>
+    internal readonly record struct ReservedNamesCensus(HashSet<string> Names, string Error)
+    {
+        internal bool Succeeded => Error == null;
+    }
 
     /// <summary>One registered project, as the reserved-name census needs it.</summary>
     internal readonly record struct ProjectIdentitySource(string Id, string Name, string TeamLead, IReadOnlyCollection<string> AgentNames);
@@ -89,16 +99,14 @@ namespace MultiTerminal.Services
             IReadOnlyCollection<string> reserved)
         {
             if (!string.IsNullOrEmpty(teamLead))
-                return new ProjectLaunchIdentityRequest(teamLead, RegisterUnique: false, IsProjectIdentity: false);
+                return new ProjectLaunchIdentityRequest(teamLead, RegisterUnique: false, IsProjectDerived: false);
 
-            // An explicit Codex default keeps precedence over the project. "Unassigned" as that setting
-            // used to mean "behave like Claude Code", so it falls through to the project identity.
-            if (kind == TerminalKind.Codex
-                && !string.IsNullOrWhiteSpace(codexDefaultAgentName)
-                && !IsUnassigned(codexDefaultAgentName))
-            {
-                return new ProjectLaunchIdentityRequest(codexDefaultAgentName, RegisterUnique: true, IsProjectIdentity: false);
-            }
+            if (!NeedsProjectDerivedIdentity(teamLead, kind, codexDefaultAgentName))
+                return new ProjectLaunchIdentityRequest(codexDefaultAgentName, RegisterUnique: true, IsProjectDerived: false);
+
+            // No census, no project-derived name: a null set must never read as "nothing reserved".
+            if (reserved == null)
+                throw new ArgumentNullException(nameof(reserved), "A project-derived identity needs the reserved-name census (6a8d029f).");
 
             string name = FromProjectName(projectName) ?? FallbackBase(projectId);
             if (Contains(reserved, name))
@@ -107,7 +115,61 @@ namespace MultiTerminal.Services
                 if (qualifier.Length > 0) name = $"{name}-{qualifier}";
             }
 
-            return new ProjectLaunchIdentityRequest(name, RegisterUnique: true, IsProjectIdentity: true);
+            return new ProjectLaunchIdentityRequest(name, RegisterUnique: true, IsProjectDerived: true);
+        }
+
+        /// <summary>
+        /// True when this launch will take a project-derived identity, and therefore needs the
+        /// reserved-name census: no team lead, and not a Codex launch with a configured default agent
+        /// ("Unassigned" as that setting used to mean "behave like Claude Code", so it falls through).
+        /// Team-lead and Codex-default launches never wait on, or fail because of, the census.
+        /// </summary>
+        internal static bool NeedsProjectDerivedIdentity(string teamLead, TerminalKind kind, string codexDefaultAgentName) =>
+            string.IsNullOrEmpty(teamLead)
+            && !(kind == TerminalKind.Codex
+                 && !string.IsNullOrWhiteSpace(codexDefaultAgentName)
+                 && !IsUnassigned(codexDefaultAgentName));
+
+        /// <summary>
+        /// Takes the reserved-name census from the two project-database queries, ALL-OR-NOTHING: a missing
+        /// database (null delegate), a failing project query, a null result, or ANY failing roster query
+        /// is a failure with no names at all, never a partial set. Pure apart from the delegates, so the
+        /// decision is testable without WinForms; <c>MainForm</c> fails the launch closed on failure.
+        /// </summary>
+        /// <param name="thisProjectId">The project being launched (its own name is not reserved).</param>
+        /// <param name="listProjects">Every registered project; null when there is no database.</param>
+        /// <param name="listAgentNames">A project's roster agent names; null when there is no database.</param>
+        /// <param name="extraNames">Fixed names (Oracle, the Codex default agent).</param>
+        internal static ReservedNamesCensus TryTakeCensus(
+            string thisProjectId,
+            Func<IEnumerable<(string Id, string Name, string TeamLead)>> listProjects,
+            Func<string, IEnumerable<string>> listAgentNames,
+            IEnumerable<string> extraNames)
+        {
+            if (listProjects == null || listAgentNames == null)
+                return new ReservedNamesCensus(null, "the project database is not available");
+
+            var sources = new List<ProjectIdentitySource>();
+            try
+            {
+                var projects = listProjects();
+                if (projects == null)
+                    return new ReservedNamesCensus(null, "the project list could not be read");
+
+                foreach (var (id, name, teamLead) in projects)
+                {
+                    var agents = listAgentNames(id);
+                    if (agents == null)
+                        return new ReservedNamesCensus(null, $"the agent roster of project '{name}' could not be read");
+                    sources.Add(new ProjectIdentitySource(id, name, teamLead, new List<string>(agents)));
+                }
+            }
+            catch (Exception ex)
+            {
+                return new ReservedNamesCensus(null, ex.Message);
+            }
+
+            return new ReservedNamesCensus(ReservedNames(thisProjectId, sources, extraNames), null);
         }
 
         /// <summary>

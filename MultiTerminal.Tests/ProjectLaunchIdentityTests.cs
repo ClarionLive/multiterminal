@@ -24,7 +24,7 @@ namespace MultiTerminal.Tests
     /// reserved set from the project database, and FAILS CLOSED (error + start screen, no placeholder)
     /// when registration is refused. Those are private WinForms handlers with no seam; the fail-closed
     /// branch is checked only by the Owner's live test. The facts here pin the input that branch keys
-    /// on (<see cref="ProjectLaunchIdentityRequest.IsProjectIdentity"/>).</para>
+    /// on (<see cref="ProjectLaunchIdentityRequest.IsProjectDerived"/>).</para>
     /// </summary>
     public sealed class ProjectLaunchIdentityTests : IDisposable
     {
@@ -100,7 +100,7 @@ namespace MultiTerminal.Tests
         [Fact]
         public void A_no_lead_project_requests_its_name_uniquely_for_both_terminal_kinds()
         {
-            var expected = new ProjectLaunchIdentityRequest("TestB", RegisterUnique: true, IsProjectIdentity: true);
+            var expected = new ProjectLaunchIdentityRequest("TestB", RegisterUnique: true, IsProjectDerived: true);
             Assert.Equal(expected, ProjectLaunchIdentity.Resolve(null, TerminalKind.ClaudeCode, null, "TestB", "p1aaaaaa", NoneReserved));
             Assert.Equal(expected, ProjectLaunchIdentity.Resolve("", TerminalKind.Codex, null, "TestB", "p1aaaaaa", NoneReserved));
         }
@@ -109,7 +109,7 @@ namespace MultiTerminal.Tests
         public void A_team_lead_project_is_unchanged_its_lead_registered_plainly()
         {
             // RegisterUnique=false keeps the second launch on the IdentityPicker rather than a silent "-2".
-            var expected = new ProjectLaunchIdentityRequest("Alice", RegisterUnique: false, IsProjectIdentity: false);
+            var expected = new ProjectLaunchIdentityRequest("Alice", RegisterUnique: false, IsProjectDerived: false);
             Assert.Equal(expected, ProjectLaunchIdentity.Resolve("Alice", TerminalKind.ClaudeCode, "CodexBot", "TestB", "p1aaaaaa", NoneReserved));
             Assert.Equal(expected, ProjectLaunchIdentity.Resolve("Alice", TerminalKind.Codex, "CodexBot", "TestB", "p1aaaaaa", NoneReserved));
         }
@@ -273,13 +273,121 @@ namespace MultiTerminal.Tests
         [InlineData("Diana")]
         public void Every_no_lead_project_launch_is_a_fail_closed_project_identity_and_never_the_placeholder(string projectName)
         {
-            // MainForm keys "no placeholder fallback on refusal" on IsProjectIdentity. The branch itself has
+            // MainForm keys "no placeholder fallback on refusal" on IsProjectDerived. The branch itself has
             // no seam (private WinForms handler); this pins the input it decides on.
             var request = NoLead(projectName, "p1aaaaaa", new[] { "Diana" });
 
-            Assert.True(request.IsProjectIdentity);
+            Assert.True(request.IsProjectDerived);
             Assert.True(request.RegisterUnique);
             Assert.NotEqual(ProjectLaunchIdentity.Unassigned, request.Name, StringComparer.OrdinalIgnoreCase);
+        }
+
+        // ---- Run 2 blocking: the census is all-or-nothing --------------------------------------------
+
+        private static readonly (string Id, string Name, string TeamLead)[] ThreeProjects =
+        {
+            ("this0001", "Mine", null),
+            ("othr0002", "Other", "Lena"),
+            ("thrd0003", "Third", null),
+        };
+
+        private static IEnumerable<string> Rosters(string id) => id switch
+        {
+            "this0001" => new[] { "Rosa" },
+            "othr0002" => new[] { "Sam" },
+            _ => new[] { "Tom" },
+        };
+
+        [Fact]
+        public void A_census_with_no_database_is_a_failure_not_an_empty_set()
+        {
+            var both = ProjectLaunchIdentity.TryTakeCensus("this0001", null, null, new[] { "Oracle" });
+            var noRoster = ProjectLaunchIdentity.TryTakeCensus("this0001", () => ThreeProjects, null, new[] { "Oracle" });
+
+            Assert.False(both.Succeeded);
+            Assert.Null(both.Names);
+            Assert.False(noRoster.Succeeded);
+            Assert.Null(noRoster.Names);
+        }
+
+        [Fact]
+        public void A_census_whose_project_query_throws_or_returns_null_fails()
+        {
+            var threw = ProjectLaunchIdentity.TryTakeCensus("this0001", () => throw new InvalidOperationException("database is locked"), Rosters, null);
+            var nulled = ProjectLaunchIdentity.TryTakeCensus("this0001", () => null, Rosters, null);
+
+            Assert.False(threw.Succeeded);
+            Assert.Null(threw.Names);
+            Assert.Contains("database is locked", threw.Error, StringComparison.Ordinal);
+            Assert.False(nulled.Succeeded);
+            Assert.Null(nulled.Names);
+        }
+
+        [Fact]
+        public void A_census_whose_roster_query_fails_on_the_second_project_publishes_nothing()
+        {
+            int calls = 0;
+            IEnumerable<string> FailSecond(string id)
+            {
+                calls++;
+                if (calls == 2) throw new InvalidOperationException("database is locked");
+                return Rosters(id);
+            }
+
+            var census = ProjectLaunchIdentity.TryTakeCensus("this0001", () => ThreeProjects, FailSecond, new[] { "Oracle" });
+
+            Assert.Equal(2, calls); // the failure really happened midway, after one roster succeeded
+            Assert.False(census.Succeeded);
+            Assert.Null(census.Names); // no partial set
+        }
+
+        [Fact]
+        public void A_census_whose_roster_query_returns_null_fails()
+        {
+            var census = ProjectLaunchIdentity.TryTakeCensus("this0001", () => ThreeProjects, id => id == "thrd0003" ? null : Rosters(id), null);
+
+            Assert.False(census.Succeeded);
+            Assert.Null(census.Names);
+        }
+
+        [Fact]
+        public void A_census_where_every_query_succeeds_is_the_full_set()
+        {
+            var census = ProjectLaunchIdentity.TryTakeCensus("this0001", () => ThreeProjects, Rosters, new[] { "Oracle", "CodexBot" });
+
+            Assert.True(census.Succeeded);
+            Assert.Null(census.Error);
+            Assert.Equal(
+                new[] { "CodexBot", "Lena", "Oracle", "Other", "Rosa", "Sam", "Third", "Tom" },
+                census.Names.OrderBy(n => n, StringComparer.Ordinal));
+        }
+
+        [Fact]
+        public void A_project_derived_identity_cannot_be_resolved_without_a_census()
+        {
+            // A null reserved set must never read as "nothing reserved".
+            Assert.Throws<ArgumentNullException>(() =>
+                ProjectLaunchIdentity.Resolve(null, TerminalKind.ClaudeCode, null, "TestB", "p1aaaaaa", null));
+
+            // Team-lead and Codex-default launches do not need it, so a census failure cannot block them.
+            Assert.Equal("Alice", ProjectLaunchIdentity.Resolve("Alice", TerminalKind.ClaudeCode, null, "TestB", "p1aaaaaa", null).Name);
+            Assert.Equal("CodexBot", ProjectLaunchIdentity.Resolve(null, TerminalKind.Codex, "CodexBot", "TestB", "p1aaaaaa", null).Name);
+        }
+
+        [Theory]
+        [InlineData("Alice", TerminalKind.ClaudeCode, null, false)]
+        [InlineData("Alice", TerminalKind.Codex, "CodexBot", false)]
+        [InlineData(null, TerminalKind.Codex, "CodexBot", false)]
+        [InlineData(null, TerminalKind.Codex, "Unassigned", true)]
+        [InlineData(null, TerminalKind.Codex, "  ", true)]
+        [InlineData(null, TerminalKind.ClaudeCode, "CodexBot", true)]
+        [InlineData("", TerminalKind.ClaudeCode, null, true)]
+        public void Only_a_project_derived_launch_needs_the_census(string teamLead, TerminalKind kind, string codexDefault, bool expected)
+        {
+            Assert.Equal(expected, ProjectLaunchIdentity.NeedsProjectDerivedIdentity(teamLead, kind, codexDefault));
+            // And it agrees with what Resolve actually produces.
+            var request = ProjectLaunchIdentity.Resolve(teamLead, kind, codexDefault, "TestB", "p1aaaaaa", NoneReserved);
+            Assert.Equal(expected, request.IsProjectDerived);
         }
 
         // ---- sanitization ----------------------------------------------------------------------------
