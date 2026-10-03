@@ -131,6 +131,66 @@ namespace MultiTerminal.Dialogs
         /// </summary>
         public Func<Project, string> CreateGuard { get; set; }
 
+        /// <summary>
+        /// Create mode (task 9f95ab0c, Run 3): undoes a <see cref="CreateGuard"/> create when this dialog's
+        /// own save then fails, so a retry starts clean instead of being refused as "occupied" by its own
+        /// half-configured project. Returns null when undone, else why not.
+        /// </summary>
+        public Func<Project, string> CreateRollback { get; set; }
+
+        // Id of a project the guard created whose save failed AND whose rollback failed: the row is ours, so a
+        // retry skips the guard and finishes configuring it rather than being refused by it.
+        private string _uncommittedCreateId;
+
+        private const string NoProjectServiceText = "Projects can't be created here right now (the project service is not available).";
+
+        /// <summary>
+        /// The create-mode commit, outside the click handler so it can be tested with a failing save.
+        /// Guard (broker create) -> save (rich columns). When the save throws, the create is rolled back
+        /// through <paramref name="rollback"/>; if that also fails the user is told plainly, and
+        /// <paramref name="uncommittedCreateId"/> keeps the id so a retry re-runs only the save. Returns null
+        /// on success, else the message to show.
+        /// </summary>
+        internal static string CommitNewProject(
+            Project project,
+            Func<Project, string> guard,
+            Action<Project> save,
+            Func<Project, string> rollback,
+            ref string uncommittedCreateId)
+        {
+            if (uncommittedCreateId == null)
+            {
+                string refusal = guard == null ? NoProjectServiceText : guard(project);
+                if (refusal != null)
+                    return refusal;
+                uncommittedCreateId = project.Id;
+            }
+            else
+            {
+                project.Id = uncommittedCreateId;
+            }
+
+            try
+            {
+                save(project);
+                uncommittedCreateId = null;
+                return null;
+            }
+            catch (Exception ex)
+            {
+                string message = "Failed to save project: " + ex.Message;
+                string rollbackError = rollback == null ? "no rollback is available" : rollback(project);
+                if (rollbackError == null)
+                {
+                    uncommittedCreateId = null;
+                    project.Id = Guid.NewGuid().ToString(); // a retry creates afresh
+                    return message + "\n\nThe new project was removed again, so you can try again.";
+                }
+                return message + $"\n\nThe new project ({uncommittedCreateId}) could not be removed: {rollbackError}\n"
+                    + "It exists but is only partly configured. Saving again finishes configuring it; or delete it from the Project Manager.";
+            }
+        }
+
         // ── Legacy constructor: create new project ────────────────────────────
         public EditProjectDialog(TerminalTheme theme)
         {
@@ -453,17 +513,14 @@ namespace MultiTerminal.Dialogs
             {
                 // The folder check and the row insert happen in the broker, under its create lock; on a
                 // refusal nothing has been written and the dialog stays open.
-                string refusal = CreateGuard == null
-                    ? "Projects can't be created here right now (the project service is not available)."
-                    : CreateGuard(ResultProject);
-                if (refusal != null)
+                string error = CommitNewProject(ResultProject, CreateGuard, _ => SaveToDatabase(), CreateRollback, ref _uncommittedCreateId);
+                if (error != null)
                 {
-                    MessageBox.Show(refusal, "New Project", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageBox.Show(error, "New Project", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
             }
-
-            if (_projectDb != null)
+            else if (_projectDb != null)
             {
                 try { SaveToDatabase(); }
                 catch (Exception ex)

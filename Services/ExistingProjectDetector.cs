@@ -174,24 +174,15 @@ namespace MultiTerminal.Services
         /// </summary>
         public static string NormalizePath(string path)
         {
-            if (string.IsNullOrWhiteSpace(path))
+            string full = FullPath(path);
+            if (full == null)
                 return null;
-
-            string full;
-            try
-            {
-                full = Path.GetFullPath(path.Trim());
-            }
-            catch (Exception ex) when (ex is ArgumentException || ex is NotSupportedException || ex is PathTooLongException)
-            {
-                full = path.Trim();
-            }
 
             try
             {
                 // CA3003: resolving (not opening for read/write) a local folder path.
 #pragma warning disable CA3003
-                if (Directory.Exists(full))
+                if (DirectoryExistsProbe(full))
 #pragma warning restore CA3003
                 {
                     string resolved = FinalPathResolver?.Invoke(full);
@@ -204,6 +195,32 @@ namespace MultiTerminal.Services
                 // Keep the unresolved path.
             }
 
+            return TrimSeparators(full);
+        }
+
+        /// <summary>
+        /// Test seam (InternalsVisibleTo): the existence check that gates <see cref="FinalPathResolver"/>.
+        /// It is the first disk touch for a path, so counting its calls counts disk work per path.
+        /// </summary>
+        internal static Func<string, bool> DirectoryExistsProbe { get; set; } = Directory.Exists;
+
+        // Full path without touching the disk; null for a blank path.
+        private static string FullPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return null;
+            try
+            {
+                return Path.GetFullPath(path.Trim());
+            }
+            catch (Exception ex) when (ex is ArgumentException || ex is NotSupportedException || ex is PathTooLongException)
+            {
+                return path.Trim();
+            }
+        }
+
+        private static string TrimSeparators(string full)
+        {
             string trimmed = full.TrimEnd(Separators);
 
             // "C:\" trims to "C:", which means "the current directory on C:", not the root.
@@ -211,6 +228,82 @@ namespace MultiTerminal.Services
                 return full;
 
             return trimmed;
+        }
+
+        // The lexical (no disk) comparable form: full path, trailing separators trimmed.
+        private static string LexicalPath(string path)
+        {
+            string full = FullPath(path);
+            return full == null ? null : TrimSeparators(full);
+        }
+
+        /// <summary>
+        /// Matches database rows against ONE target folder (Run 3). The target is normalized once (disk
+        /// work: existence check + final-path resolution). A row is compared lexically first; it costs disk
+        /// work only when it sits on the same LOCAL FIXED drive as the target. Without that limit every
+        /// registered row was resolved on each check, under the create lock and on the UI thread, and a row
+        /// on an offline network share stalled the create for the SMB timeout. Cost of the limit: a row
+        /// reaching the target through a junction on ANOTHER drive, or through a network path, is not
+        /// recognised as the same folder.
+        /// </summary>
+        private sealed class FolderMatcher
+        {
+            private readonly string _lexical;
+            private readonly string _resolved;
+            private readonly HashSet<string> _localFixedRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            public FolderMatcher(string folder)
+            {
+                _lexical = LexicalPath(folder);
+                _resolved = NormalizePath(folder);
+                foreach (var candidate in new[] { _lexical, _resolved })
+                {
+                    string root = RootOf(candidate);
+                    if (root != null && IsLocalFixedRoot(root))
+                        _localFixedRoots.Add(root);
+                }
+            }
+
+            public bool Matches(string rowPath)
+            {
+                string rowLexical = LexicalPath(rowPath);
+                if (rowLexical == null)
+                    return false;
+                if (string.Equals(rowLexical, _lexical, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(rowLexical, _resolved, StringComparison.OrdinalIgnoreCase))
+                    return true;
+
+                string rowRoot = RootOf(rowLexical);
+                if (rowRoot == null || !_localFixedRoots.Contains(rowRoot))
+                    return false;
+                return string.Equals(NormalizePath(rowPath), _resolved, StringComparison.OrdinalIgnoreCase);
+            }
+
+            private static string RootOf(string path)
+            {
+                try
+                {
+                    return string.IsNullOrEmpty(path) ? null : Path.GetPathRoot(path);
+                }
+                catch (ArgumentException)
+                {
+                    return null;
+                }
+            }
+
+            private static bool IsLocalFixedRoot(string root)
+            {
+                if (root.StartsWith(@"\\", StringComparison.Ordinal))
+                    return false; // UNC / device paths: network, never resolved per row
+                try
+                {
+                    return new DriveInfo(root).DriveType == DriveType.Fixed;
+                }
+                catch (Exception ex) when (ex is ArgumentException || ex is IOException || ex is UnauthorizedAccessException)
+                {
+                    return false;
+                }
+            }
         }
 
         /// <summary>Whether two folder paths name the same folder (Windows: case-insensitive).</summary>
@@ -297,10 +390,11 @@ namespace MultiTerminal.Services
             var allRows = (databaseRows ?? Enumerable.Empty<(string Id, string Name, string Path)>())
                 .Where(r => !string.IsNullOrEmpty(r.Id))
                 .ToList();
+            var matcher = new FolderMatcher(folder);
 
             // Ordinal-by-id so a same-folder pair resolves the same way every time.
             var rows = allRows
-                .Where(r => PathsEqual(r.Path, folder))
+                .Where(r => matcher.Matches(r.Path))
                 .OrderBy(r => r.Id, StringComparer.Ordinal)
                 .ToList();
             var rowIds = rows.Select(r => r.Id).ToList();
@@ -335,7 +429,7 @@ namespace MultiTerminal.Services
             // project.json names the folder's identity, but only if that id is registered HERE (or nowhere).
             string id = projectJson.Id;
             var byId = allRows.Where(r => string.Equals(r.Id, id, StringComparison.Ordinal)).ToList();
-            if (byId.Count > 0 && !byId.Any(r => PathsEqual(r.Path, folder)))
+            if (byId.Count > 0 && !byId.Any(r => matcher.Matches(r.Path)))
             {
                 var other = byId[0];
                 return new ExistingProjectMatch(source, id,

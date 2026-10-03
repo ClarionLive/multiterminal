@@ -247,6 +247,7 @@ namespace MultiTerminal.Dialogs
                 // its rich columns. This replaced a ProjectService.RegisterProject call made AFTER the dialog
                 // closed, which wrote a fresh project.json with a new id over whatever the folder held.
                 dialog.CreateGuard = project => CreateThroughBroker(_broker, project);
+                dialog.CreateRollback = project => RollBackThroughBroker(_broker, project);
                 if (dialog.ShowDialog(this) == DialogResult.OK)
                 {
                     try
@@ -272,6 +273,15 @@ namespace MultiTerminal.Dialogs
         /// broker's create lock, and an occupied folder (project.json, unreadable or not, or a registered
         /// row) is refused with the detector's text. Returns null on success, with the project's Id set to
         /// the created id; otherwise the refusal. Nothing is written on a refusal.
+        /// </summary>
+        internal static string RollBackThroughBroker(MessageBroker broker, Project project)
+            => broker == null
+                ? "the project service is not available"
+                : broker.UndoProjectCreate(project?.Id);
+
+        /// <summary>
+        /// The guarded create used as EditProjectDialog.CreateGuard; <see cref="RollBackThroughBroker"/> (Run 3)
+        /// is its ID-bound undo, run when the dialog's own rich save fails afterwards.
         /// </summary>
         internal static string CreateThroughBroker(MessageBroker broker, Project project)
         {

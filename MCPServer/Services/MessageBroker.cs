@@ -6034,34 +6034,40 @@ namespace MultiTerminal.MCPServer.Services
                 return new CreateProjectResult { Success = false, Error = "Project name is required" };
             }
 
-            CreateProjectResult result;
+            CreateProjectResult result = null;
             ActivityEvent activity = null;
             lock (_projectCreateLock)
             {
-                var existing = FindExistingProjectAtPath(path);
-                TestHookAfterFolderCheck?.Invoke();
+                string lockError = RunUnderCrossSessionCreateMutex(() =>
+                {
+                    var existing = FindExistingProjectAtPath(path);
+                    TestHookAfterFolderCheck?.Invoke();
 
-                if (existing.Exists)
-                {
-                    if (!allowReuseExisting)
+                    if (existing.Exists)
                     {
-                        string reason = ExistingProjectDetector.DescribeProblem(existing)
-                            ?? $"A project already exists at path '{path}' (id: {existing.ProjectId}, name: '{existing.ProjectName}'). Use update_project to modify it.";
-                        return new CreateProjectResult
+                        if (!allowReuseExisting)
                         {
-                            Success = false,
-                            FolderOccupied = true,
-                            ExistingProjectId = existing.ProjectId,
-                            Error = reason,
-                        };
+                            string reason = ExistingProjectDetector.DescribeProblem(existing)
+                                ?? $"A project already exists at path '{path}' (id: {existing.ProjectId}, name: '{existing.ProjectName}'). Use update_project to modify it.";
+                            result = new CreateProjectResult
+                            {
+                                Success = false,
+                                FolderOccupied = true,
+                                ExistingProjectId = existing.ProjectId,
+                                Error = reason,
+                            };
+                            return;
+                        }
+                        result = AdoptExistingProjectLocked(existing, createdBy, out activity);
                     }
-                    result = AdoptExistingProjectLocked(existing, createdBy, out activity);
-                }
-                else
-                {
-                    result = CreateNewProjectLocked(name, description, createdBy, path, teamLead, defaultTerminal,
-                        projectType, currentVersion, out activity);
-                }
+                    else
+                    {
+                        result = CreateNewProjectLocked(name, description, createdBy, path, teamLead, defaultTerminal,
+                            projectType, currentVersion, out activity);
+                    }
+                });
+                if (lockError != null)
+                    return new CreateProjectResult { Success = false, Error = lockError };
             }
 
             // Events are raised outside the lock: a subscriber that calls back into the broker must not
@@ -6078,14 +6084,19 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public CreateProjectResult RegisterExistingProject(string path, string createdBy)
         {
-            CreateProjectResult result;
+            CreateProjectResult result = null;
             ActivityEvent activity = null;
             lock (_projectCreateLock)
             {
-                var existing = FindExistingProjectAtPath(path);
-                if (!existing.Exists)
-                    return new CreateProjectResult { Success = false, Error = $"There is no project at '{path}'." };
-                result = AdoptExistingProjectLocked(existing, createdBy, out activity);
+                string lockError = RunUnderCrossSessionCreateMutex(() =>
+                {
+                    var existing = FindExistingProjectAtPath(path);
+                    result = existing.Exists
+                        ? AdoptExistingProjectLocked(existing, createdBy, out activity)
+                        : new CreateProjectResult { Success = false, Error = $"There is no project at '{path}'." };
+                });
+                if (lockError != null)
+                    return new CreateProjectResult { Success = false, Error = lockError };
             }
 
             RaiseProjectChangeEvents(activity);
@@ -6098,6 +6109,119 @@ namespace MultiTerminal.MCPServer.Services
                 return;
             BroadcastProjectUpdate();
             RecordActivity(activity);
+        }
+
+        /// <summary>
+        /// Compensating delete for a create whose caller failed AFTER <see cref="CreateProject"/> succeeded
+        /// (the Project Manager's rich save, task 9f95ab0c Run 3), so a retry starts clean. ID-bound: removes
+        /// the row and cache entry with exactly this id, and the folder's project.json only if it carries
+        /// this id. Returns null when done (or when there was nothing with that id), else why it could not.
+        /// </summary>
+        public string UndoProjectCreate(string projectId)
+        {
+            if (string.IsNullOrWhiteSpace(projectId))
+                return "There is no project id to roll back.";
+
+            string error = null;
+            bool removed = false;
+            lock (_projectCreateLock)
+            {
+                string lockError = RunUnderCrossSessionCreateMutex(() =>
+                {
+                    var rich = _projectDb.GetRichProject(projectId);
+                    _projects.TryGetValue(projectId, out var cached);
+                    if (rich == null && cached == null)
+                        return;
+                    error = RollBackCreatedProject(projectId, rich?.Path ?? cached?.Path);
+                    removed = true;
+                });
+                if (lockError != null)
+                    return lockError;
+            }
+
+            if (removed)
+                BroadcastProjectUpdate();
+            return error;
+        }
+
+        /// <summary>
+        /// Runs <paramref name="body"/> holding the per-user, cross-session project-create mutex (second
+        /// layer of the create lock, see <see cref="_projectCreateLock"/>). Returns null when the body ran,
+        /// or the refusal: any failure to open or acquire the mutex fails closed, because the body is a
+        /// check-then-write that is only correct when no other MultiTerminal process runs it concurrently.
+        /// Called with _projectCreateLock held (lock order: in-process lock, then mutex, everywhere), and
+        /// held only for the short critical section. A Mutex is thread-affine; the body is synchronous.
+        /// </summary>
+        private string RunUnderCrossSessionCreateMutex(Action body)
+        {
+            const string busy = "Another MultiTerminal instance is creating a project; try again.";
+            System.Threading.Mutex mutex = null;
+            try
+            {
+                try
+                {
+                    mutex = new System.Threading.Mutex(false, ProjectCreateMutexName);
+                }
+                catch (Exception ex) when (ex is UnauthorizedAccessException || ex is IOException
+                                           || ex is System.Threading.WaitHandleCannotBeOpenedException || ex is ArgumentException)
+                {
+                    LogError($"Project create: opening mutex '{ProjectCreateMutexName}' failed: {ex.Message}");
+                    return $"{busy} (The cross-session project lock could not be opened: {ex.Message})";
+                }
+
+                bool acquired;
+                try
+                {
+                    acquired = mutex.WaitOne(ProjectCreateMutexTimeout);
+                }
+                catch (System.Threading.AbandonedMutexException)
+                {
+                    // The previous holder died mid-create. This thread owns the mutex now, and the body's folder
+                    // check runs regardless, so whatever that create left behind is seen as occupied.
+                    DebugLogService?.Warning("MessageBroker", $"Project create: mutex '{ProjectCreateMutexName}' was abandoned by its previous holder; continuing");
+                    acquired = true;
+                }
+
+                if (!acquired)
+                    return busy;
+
+                try
+                {
+                    body();
+                }
+                finally
+                {
+                    mutex.ReleaseMutex();
+                }
+                return null;
+            }
+            finally
+            {
+                mutex?.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Name of the cross-session create mutex: Global (spans console and RDP sessions) and per user
+        /// (the database and %APPDATA% are per user). Test seam (InternalsVisibleTo): tests use a unique name.
+        /// </summary>
+        internal string ProjectCreateMutexName { get; set; } = DefaultProjectCreateMutexName();
+
+        /// <summary>Bounded wait for the create mutex; a timeout refuses the create. Test seam.</summary>
+        internal TimeSpan ProjectCreateMutexTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+        private static string DefaultProjectCreateMutexName()
+        {
+            string sid = null;
+            try
+            {
+                sid = System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value;
+            }
+            catch (System.Security.SecurityException)
+            {
+                // Fall through to the user-name form below.
+            }
+            return @"Global\MultiTerminal.ProjectCreate." + (sid ?? Environment.UserDomainName + "." + Environment.UserName);
         }
 
         /// <summary>
@@ -6117,11 +6241,16 @@ namespace MultiTerminal.MCPServer.Services
         /// discovered folder re-saves that folder's OWN project.json, and since Run 2 skips it when the id
         /// is registered at another folder (ProjectService.AutoRegisterDiscoveredProject).
         ///
-        /// Across processes: MultiTerminal runs one instance per Windows session
-        /// (SingleInstanceGuard, mutex Local\MultiTerminal.SingleInstance, acquired in Program.Main) and the
-        /// database is per user, so one process owns these writes. Not a cross-process lock and NOT a
-        /// unique index on projects.path: the live database already holds a same-path pair ("Testing"
-        /// d08313df and "mt-stress-fixture" 25760f44), so that migration would fail on existing data.
+        /// Two layers. This object serializes creates within one process. Across processes it is NOT
+        /// enough: SingleInstanceGuard (Local\MultiTerminal.SingleInstance) allows one MultiTerminal per
+        /// Windows SESSION, and one user can run a console and an RDP session at once, sharing the per-user
+        /// database and the same folders (Run 3 corrected Run 2's claim that single-instance made this
+        /// safe). So the critical section also holds a per-user, cross-session named mutex
+        /// (Global\MultiTerminal.ProjectCreate.&lt;user SID&gt;, see
+        /// <see cref="RunUnderCrossSessionCreateMutex"/>); failing to get it refuses the create. Lock order
+        /// is always this object, then the mutex. NOT a unique index on projects.path: the live database
+        /// already holds a same-path pair ("Testing" d08313df and "mt-stress-fixture" 25760f44), so that
+        /// migration would fail on existing data.
         /// </summary>
         private readonly object _projectCreateLock = new object();
 
@@ -6191,11 +6320,19 @@ namespace MultiTerminal.MCPServer.Services
                 catch (Exception ex)
                 {
                     // No half-made project (Run 2): a database row whose folder has no project.json would be
-                    // a second identity for the folder the next time anyone writes one. The folder was
-                    // confirmed free under the create lock, so any project.json there now is ours to remove.
+                    // a second identity for the folder the next time anyone writes one. The rollback removes
+                    // the row and cache entry, and a project.json only if it parses with this create's id.
+                    // A half-written file that does not parse is LEFT in place: the folder then reads as
+                    // occupied (unreadable project.json), which is the safe direction. fileProject.Path is
+                    // the folder SaveProject actually wrote (a worktree path becomes its repo root).
                     LogError($"CreateProject: writing {path}/.claude/project.json failed, rolling back {project.Id}: {ex.Message}");
-                    RollBackCreatedProject(project.Id, path);
-                    return new CreateProjectResult { Success = false, Error = $"Failed to write .claude/project.json: {ex.Message}. The project was not created." };
+                    string rollbackError = RollBackCreatedProject(project.Id, fileProject?.Path ?? path);
+                    return new CreateProjectResult
+                    {
+                        Success = false,
+                        Error = $"Failed to write .claude/project.json: {ex.Message}. The project was not created."
+                            + (rollbackError == null ? "" : $" Rolling it back also failed: {rollbackError}"),
+                    };
                 }
             }
 
@@ -6735,11 +6872,13 @@ namespace MultiTerminal.MCPServer.Services
             }
         }
 
-        // Write-path helper: undoes InsertProjectInternal for a create whose project.json write failed. Also
-        // removes a project.json the failed write may have left; only called for a folder confirmed free
-        // under _projectCreateLock, so that file can only be the failed create's own.
-        private void RollBackCreatedProject(string projectId, string path)
+        // Write-path helper: undoes a create, ID-bound. Removes the row and cache entry with this id, and the
+        // folder's project.json only when it parses with this id (a file with another id, or one that does not
+        // parse, is left in place: the folder then reads as occupied, the safe direction). Called with the
+        // create lock held. Returns null on success, else what could not be removed.
+        private string RollBackCreatedProject(string projectId, string path)
         {
+            var failures = new List<string>();
             try
             {
                 _projectDb.DeleteProject(projectId);
@@ -6747,22 +6886,29 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                LogError($"CreateProject rollback: removing row {projectId} failed: {ex.Message}");
+                LogError($"Project create rollback: removing row {projectId} failed: {ex.Message}");
+                failures.Add($"database row {projectId}: {ex.Message}");
             }
 
-            try
+            if (!string.IsNullOrEmpty(path))
             {
-                string json = System.IO.Path.Combine(path, ".claude", "project.json");
-                // CA3003: the create's own folder, confirmed free under the create lock.
+                try
+                {
+                    string json = System.IO.Path.Combine(path, ".claude", "project.json");
+                    // CA3003: the create's own folder (from the create, or the row it wrote).
 #pragma warning disable CA3003
-                if (File.Exists(json) && ProjectService?.LoadProject(path)?.Id == projectId)
-                    File.Delete(json);
+                    if (File.Exists(json) && ProjectService?.LoadProject(path)?.Id == projectId)
+                        File.Delete(json);
 #pragma warning restore CA3003
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException || ex is NotSupportedException)
+                {
+                    LogError($"Project create rollback: removing {path}/.claude/project.json failed: {ex.Message}");
+                    failures.Add($"{path}\\.claude\\project.json: {ex.Message}");
+                }
             }
-            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException || ex is NotSupportedException)
-            {
-                LogError($"CreateProject rollback: removing {path}/.claude/project.json failed: {ex.Message}");
-            }
+
+            return failures.Count == 0 ? null : string.Join("; ", failures);
         }
 
         // Named census bypass: seeds ONE row FROM the database into the cache (the single-row form of
