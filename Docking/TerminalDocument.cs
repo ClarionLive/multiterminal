@@ -2440,7 +2440,17 @@ namespace MultiTerminal.Docking
             // Paste — through the same path as Ctrl+V and right-click (bracketed paste via
             // xterm.js; a bitmap is pasted as a saved PNG's path). GH #24.
             var pasteItem = new ToolStripMenuItem("Paste");
-            pasteItem.Enabled = Clipboard.ContainsText() || Clipboard.ContainsImage();
+            try
+            {
+                pasteItem.Enabled = Clipboard.ContainsText() || Clipboard.ContainsImage();
+            }
+            catch (System.Runtime.InteropServices.ExternalException ex)
+            {
+                // Clipboard held by another process. Offer Paste anyway (the paste path reports its
+                // own failure) rather than throw and show no menu at all (11edbec4).
+                _debugLogService?.Trace("TerminalDocument", "Clipboard probe failed, Paste left enabled: " + ex.Message);
+                pasteItem.Enabled = true;
+            }
             pasteItem.Click += (s, args) => _terminal.PasteFromClipboard();
             menu.Items.Add(pasteItem);
 
@@ -2489,9 +2499,9 @@ namespace MultiTerminal.Docking
 
             // Tell the renderer and xterm.js the menu is up, so an Esc pressed to dismiss it closes
             // it and is swallowed rather than reaching the app as an abort (GH #24, 11edbec4).
-            // Cleared however the menu closes — but only by the CURRENT menu: one replaced by a
-            // newer request closes during the new Show, and clearing then would mark the new menu
-            // closed while it is still up.
+            // Cleared however the menu closes — but only by the CURRENT menu, so a stale menu's
+            // Closed can never mark a newer menu closed while it is still up. (A menu still up when
+            // a new one is requested is closed below, before this one is stored and flagged.)
             menu.Closing += (s, args) =>
                 _debugLogService?.Trace("TerminalDocument", "Terminal menu closing, reason: " + args.CloseReason);
             menu.Closed += (s, args) =>

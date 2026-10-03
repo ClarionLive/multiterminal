@@ -35,7 +35,7 @@ function makeTarget() {
   return {
     listeners,
     addEventListener(type, fn, capture) {
-      listeners.push({ type, fn, capture: capture === true || (capture && capture.capture === true) });
+      listeners.push({ type, fn, capture: capture === true || (!!capture && capture.capture === true) });
     },
     dispatch(type, ev) {
       ev.type = type;
@@ -160,6 +160,7 @@ function boot() {
       container.dispatch('contextmenu', { clientX: 111, clientY: 222, ...mods(m) });
     },
     host(msg) { hostMessage({ data: msg }); },
+    blur() { win.dispatch('blur', {}); },
     types() { return sent.filter((m) => m.type !== 'log').map((m) => m.type); },
     clear() { sent.length = 0; },
   };
@@ -262,4 +263,34 @@ test('with no menu, Esc goes to the app', () => {
   const page = boot();
   assert.equal(page.key('keydown', 'Escape', {}).verdict, true);
   assert.deepEqual(page.types(), []);
+});
+
+test('a menu request the host never showed (no subscriber, or the handler threw) does not leave Esc swallowed', () => {
+  const page = boot();
+  page.press('F10', { shift: true });
+  // WebViewTerminalRenderer.OnContextMenuRequested answers contextMenu:0 when no menu came up.
+  page.host('contextMenu:0');
+  page.clear();
+  assert.equal(page.key('keydown', 'Escape', {}).verdict, true, 'Esc swallowed with no menu showing');
+  assert.deepEqual(page.types(), []);
+});
+
+test('a lost keyup does not eat the next Esc: a fresh (non-repeat) press reaches the app', () => {
+  const page = boot();
+  page.rightClick({ shift: true });
+  page.host('contextMenu:1');
+  assert.equal(page.key('keydown', 'Escape', {}).verdict, false);
+  page.host('contextMenu:0');
+  // No keyup: it landed somewhere else.
+  assert.equal(page.key('keydown', 'Escape', {}).verdict, true, 'fresh Esc after a lost keyup was swallowed');
+});
+
+test('window blur ends the swallow: after a lost keyup and blur, even a repeat-flagged Esc reaches the app', () => {
+  const page = boot();
+  page.rightClick({ shift: true });
+  page.host('contextMenu:1');
+  assert.equal(page.key('keydown', 'Escape', {}).verdict, false);
+  page.host('contextMenu:0');
+  page.blur();
+  assert.equal(page.key('keydown', 'Escape', { repeat: true }).verdict, true, 'Esc after blur was swallowed');
 });

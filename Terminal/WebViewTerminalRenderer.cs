@@ -67,11 +67,19 @@ namespace MultiTerminal.Terminal
 
         // Host-side copy of the terminal menu's open state (SetContextMenuOpen), read by the Esc
         // handler below on the UI thread, so it needs no round trip to the page (11edbec4).
+        // terminal.html keeps its own mirror of both fields (contextMenuOpen, swallowEscapeUntilKeyUp).
         private bool _contextMenuOpen;
 
         // Set when OnWebViewKeyDown dismissed the menu: that Esc's auto-repeats and keyup are
-        // handled too, so none of them reaches the page once the menu is gone.
+        // handled too, so none of them reaches the page once the menu is gone. KeyEventArgs
+        // carries no repeat flag, so a lost keyup is recovered by focus loss or staleness
+        // (EscapeLatchStaleMs) rather than by recognising a fresh press.
         private bool _swallowEscapeUntilKeyUp;
+        private long _lastSwallowedEscapeTick;
+
+        // Longer than the slowest Windows auto-repeat delay (Keyboard delay 3 = 1000 ms), so a held
+        // Esc keeps the latch alive; a keyup lost to a focus change stops eating Esc after this.
+        private const long EscapeLatchStaleMs = 1200;
         private TerminalTheme _theme = TerminalTheme.Dark;
         private float _fontSize = 10f;
         private int _cols = 80;
@@ -214,6 +222,7 @@ namespace MultiTerminal.Terminal
             // 1.0.3800.47). Escape is always an accelerator, so this sees Esc before the page.
             _webView.KeyDown += OnWebViewKeyDown;
             _webView.KeyUp += OnWebViewKeyUp;
+            _webView.LostFocus += OnWebViewLostFocus;
 
             Controls.Add(_webView);
 
@@ -365,6 +374,10 @@ namespace MultiTerminal.Terminal
                         PasteFromClipboard();
                         break;
 
+                    case "log":
+                        OnPageLog(message.Level, message.Message);
+                        break;
+
                     case "dismissContextMenu":
                         // Esc pressed while the Shift+Right-click menu was open (GH #24). The page's
                         // path: normally OnWebViewKeyDown has already taken the Esc (11edbec4).
@@ -507,7 +520,42 @@ namespace MultiTerminal.Terminal
         private void OnContextMenuRequested(int x, int y, string selectedText)
         {
             var location = new Point(x, y);
-            ContextMenuRequested?.Invoke(this, new TerminalContextMenuEventArgs(location, selectedText));
+            try
+            {
+                ContextMenuRequested?.Invoke(this, new TerminalContextMenuEventArgs(location, selectedText));
+            }
+            finally
+            {
+                // The page marked its menu open when it asked (terminal.html requestContextMenu). Only
+                // a shown menu ever clears that (Closed -> contextMenu:0), so a host with no
+                // subscriber (the Oracle pane) or a handler that threw before showing would leave
+                // every later Esc swallowed. ContextMenuStrip.Show does not block, so the flag is
+                // set here only if a menu really is up. An exception still reaches the caller's
+                // catch and is logged there.
+                if (!_contextMenuOpen && _isInitialized && _webView?.CoreWebView2 != null)
+                {
+                    DebugLogService?.Trace("WebViewTerminalRenderer", "Menu requested but none shown; clearing the page's menu flag");
+                    _webView.CoreWebView2.PostWebMessageAsString("contextMenu:0");
+                }
+            }
+        }
+
+        /// <summary>Longest page log message written to the debug log; the text comes from the page.</summary>
+        private const int MaxPageLogLength = 500;
+
+        private void OnPageLog(string level, string text)
+        {
+            if (DebugLogService == null) return;
+            text ??= string.Empty;
+            if (text.Length > MaxPageLogLength) text = text.Substring(0, MaxPageLogLength) + "...";
+
+            switch (level)
+            {
+                case "info": DebugLogService.Info("terminal.html", text); break;
+                case "warning": DebugLogService.Warning("terminal.html", text); break;
+                case "error": DebugLogService.Error("terminal.html", text); break;
+                default: DebugLogService.Trace("terminal.html", text); break;
+            }
         }
 
         /// <summary>
@@ -570,9 +618,23 @@ namespace MultiTerminal.Terminal
         /// </summary>
         private void OnWebViewKeyDown(object sender, KeyEventArgs e)
         {
-            if (e.KeyCode != Keys.Escape || !(_contextMenuOpen || _swallowEscapeUntilKeyUp)) return;
+            if (e.KeyCode != Keys.Escape)
+            {
+                _swallowEscapeUntilKeyUp = false; // another key: the dismissing press is over
+                return;
+            }
+
+            long now = Environment.TickCount64;
+            if (_swallowEscapeUntilKeyUp && now - _lastSwallowedEscapeTick > EscapeLatchStaleMs)
+            {
+                DebugLogService?.Trace("WebViewTerminalRenderer", "Esc swallow latch was stale (keyup lost); cleared");
+                _swallowEscapeUntilKeyUp = false;
+            }
+
+            if (!(_contextMenuOpen || _swallowEscapeUntilKeyUp)) return;
 
             e.Handled = true;
+            _lastSwallowedEscapeTick = now;
             if (_contextMenuOpen)
             {
                 _swallowEscapeUntilKeyUp = true;
@@ -586,6 +648,12 @@ namespace MultiTerminal.Terminal
             if (e.KeyCode != Keys.Escape || !_swallowEscapeUntilKeyUp) return;
 
             e.Handled = true;
+            _swallowEscapeUntilKeyUp = false;
+        }
+
+        // A keyup that lands elsewhere (focus moved, app deactivated) must not leave the latch set.
+        private void OnWebViewLostFocus(object sender, EventArgs e)
+        {
             _swallowEscapeUntilKeyUp = false;
         }
 
@@ -1161,6 +1229,7 @@ namespace MultiTerminal.Terminal
                     }
                     _webView.KeyDown -= OnWebViewKeyDown;
                     _webView.KeyUp -= OnWebViewKeyUp;
+                    _webView.LostFocus -= OnWebViewLostFocus;
                     _webView.Dispose();
                     _webView = null;
                 }
@@ -1188,6 +1257,11 @@ namespace MultiTerminal.Terminal
             /// counter would parse as garbage. A string round-trips whatever the counter produces.
             /// </summary>
             public string EnterJobId { get; set; }
+
+            /// <summary>Level and text of a <c>log</c> message from the page.</summary>
+            public string Level { get; set; }
+
+            public string Message { get; set; }
         }
 
         /// <summary>
@@ -1293,6 +1367,8 @@ namespace MultiTerminal.Terminal
                 case "title": msg.Title = value; break;
                 case "selectedtext": msg.SelectedText = value; break;
                 case "enterjobid": msg.EnterJobId = value; break;
+                case "level": msg.Level = value; break;
+                case "message": msg.Message = value; break;
             }
         }
 

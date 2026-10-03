@@ -162,7 +162,13 @@
                 // type is swallowed, and so is auto-repeat until the key is released, so neither
                 // keydown, a repeat nor keyup leaks through. This is the SECOND line: the host
                 // normally handles Esc first (WebViewTerminalRenderer.OnWebViewKeyDown) and this
-                // page never sees it (11edbec4).
+                // page never sees it (11edbec4). A non-repeat keydown with the menu closed is a NEW
+                // press: the dismissing press's keyup was lost, so it ends the swallow and reaches
+                // the app (so does window blur, below).
+                if (event.key === 'Escape' && swallowEscapeUntilKeyUp && !contextMenuOpen &&
+                        event.type === 'keydown' && !event.repeat) {
+                    swallowEscapeUntilKeyUp = false;
+                }
                 if (event.key === 'Escape' && (contextMenuOpen || swallowEscapeUntilKeyUp)) {
                     if (event.type === 'keydown' && contextMenuOpen) {
                         contextMenuOpen = false;
@@ -404,6 +410,7 @@
             }, true);
             window.addEventListener('blur', () => {
                 rightButtonPressed = false;
+                swallowEscapeUntilKeyUp = false; // the dismissing Esc's keyup will land elsewhere
             });
             container.addEventListener('mousedown', (e) => {
                 if (e.button === 2) {
@@ -480,6 +487,7 @@
         // the host's "contextMenu:1"/"contextMenu:0" then keep it in step however the menu closes.
         let contextMenuOpen = false;
         // Set when an Esc dismissed the menu: its auto-repeats and its keyup are swallowed too.
+        // (Both flags are mirrored host-side in WebViewTerminalRenderer.)
         let swallowEscapeUntilKeyUp = false;
         // When the key handler last opened the menu from the keyboard (performance.now()).
         let keyboardMenuRequestedAt = -Infinity;
