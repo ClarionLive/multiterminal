@@ -6117,11 +6117,11 @@ namespace MultiTerminal.MCPServer.Services
         /// the row and cache entry with exactly this id, and the folder's project.json only if it carries
         /// this id. Returns null when done (or when there was nothing with that id), else why it could not.
         /// </summary>
-        /// <param name="projectId">The id the create returned.</param>
-        /// <param name="folder">The folder the create targeted (the dialog's project path). Used when the row
-        /// is already gone: a previous undo that deleted the row but failed to delete project.json is
-        /// finished here, instead of leaving a project.json naming a project that no longer exists.</param>
-        public string UndoProjectCreate(string projectId, string folder = null)
+        /// <param name="projectId">The id the create returned. The folder is never taken from the caller: it is
+        /// the one the create recorded (<see cref="_createdProjectFolders"/>), else the row's. When the row is
+        /// already gone (an earlier undo removed it but failed to delete project.json), the recorded folder is
+        /// how this undo finishes that delete.</param>
+        public string UndoProjectCreate(string projectId)
         {
             if (string.IsNullOrWhiteSpace(projectId))
                 return "There is no project id to roll back.";
@@ -6140,21 +6140,23 @@ namespace MultiTerminal.MCPServer.Services
                         TestHookBeforeUndo?.Invoke(projectId);
                         var rich = _projectDb.GetRichProject(projectId);
                         _projects.TryGetValue(projectId, out var cached);
+                        _createdProjectFolders.TryGetValue(projectId, out var createdFolder);
                         if (rich == null && cached == null)
                         {
                             // Row already gone (Run 5): finish a project.json delete an earlier undo could not
-                            // do. Same canonical folder SaveProject used (a worktree path is its repo root).
-                            if (!string.IsNullOrWhiteSpace(folder))
-                            {
-                                string stableFolder = WorktreeLayout.TryResolveStableProjectPath(folder, null, out var stable) ? stable : folder;
-                                error = DeleteProjectJsonIfOwned(projectId, stableFolder);
-                            }
+                            // do, in the folder the create wrote (Run 6: never a caller-supplied folder).
+                            error = DeleteProjectJsonIfOwned(projectId, createdFolder);
+                            if (error == null)
+                                _createdProjectFolders.TryRemove(projectId, out _);
                             return;
                         }
-                        string path = rich?.Path ?? cached?.Path;
+                        string path = createdFolder ?? rich?.Path ?? cached?.Path;
                         error = RollBackCreatedProject(projectId, path);
                         if (error == null)
+                        {
+                            _createdProjectFolders.TryRemove(projectId, out _);
                             removed = rich ?? new MultiTerminal.Models.Project { Id = projectId, Name = cached?.Name, Path = path };
+                        }
                     });
                     if (lockError != null)
                         return lockError;
@@ -6314,6 +6316,16 @@ namespace MultiTerminal.MCPServer.Services
         private readonly object _projectCreateLock = new object();
 
         /// <summary>
+        /// Project id -> the folder <see cref="CreateProject"/> actually wrote that project's project.json to
+        /// (canonical: a worktree path is stored as its repo root). <see cref="UndoProjectCreate"/> takes its
+        /// folder ONLY from here or the row (Run 6): never from a caller, whose dialog fields stay editable
+        /// after a failed save, so a caller-supplied folder could name a different folder holding a copied
+        /// project.json with the same id. In memory: an entry is removed when its undo completes; the rest are
+        /// one short string per project created this session.
+        /// </summary>
+        private readonly ConcurrentDictionary<string, string> _createdProjectFolders = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
+
+        /// <summary>
         /// Test seam (InternalsVisibleTo): runs inside <see cref="_projectCreateLock"/> between the folder
         /// check and the first write, so a test can hold two creates at exactly the racy point.
         /// </summary>
@@ -6375,6 +6387,7 @@ namespace MultiTerminal.MCPServer.Services
                     if (!string.IsNullOrEmpty(createdBy)) fileProject.CreatedBy = createdBy;
                     ProjectService.SaveProject(fileProject);
                     LogInfo($"Created/updated project file at {path}/.claude/project.json");
+                    _createdProjectFolders[project.Id] = fileProject.Path; // canonical (repo root for a worktree)
                 }
                 catch (Exception ex)
                 {

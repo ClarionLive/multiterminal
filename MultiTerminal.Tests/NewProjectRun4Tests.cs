@@ -207,6 +207,39 @@ namespace MultiTerminal.Tests
             Assert.False(File.Exists(JsonPath));
         }
 
+        // Run 6: after a partial undo the dialog's folder field is still editable. The user points it at a
+        // second folder holding a COPY of the project.json (same id). The retry must finish the delete in the
+        // folder the create wrote, and must not touch the second folder.
+        [Fact]
+        public void Retry_deletes_only_the_folder_the_create_wrote_not_the_dialogs_current_folder()
+        {
+            using var db = new ProjectDatabase();
+            using var service = new ProjectService(db);
+            using var broker = NewBroker(service);
+            var created = broker.CreateProject("A", null, "test", _folder);
+            Assert.True(created.Success, created.Error);
+            var dialogProject = new Project { Id = created.ProjectId, Name = "A", Path = _folder };
+
+            using (new FileStream(JsonPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                Assert.NotNull(ProjectManagerDialog.RollBackThroughBroker(broker, dialogProject));
+            }
+
+            string second = Path.Combine(_root, "Second");
+            string secondJson = Path.Combine(second, ".claude", "project.json");
+            Directory.CreateDirectory(Path.GetDirectoryName(secondJson));
+            File.Copy(JsonPath, secondJson);
+            byte[] secondBefore = File.ReadAllBytes(secondJson);
+            dialogProject.Path = second; // the user edited the folder field before retrying
+
+            string retry = ProjectManagerDialog.RollBackThroughBroker(broker, dialogProject);
+
+            Assert.Null(retry);
+            Assert.False(File.Exists(JsonPath), "the folder the create wrote still has its project.json");
+            Assert.True(File.Exists(secondJson), "the second folder's project.json was deleted");
+            Assert.Equal(secondBefore, File.ReadAllBytes(secondJson));
+        }
+
         // ---- Child rows ----
 
         private int ChildRows(string table, string projectId)
