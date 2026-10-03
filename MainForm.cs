@@ -3951,10 +3951,12 @@ namespace MultiTerminal
                 _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] LaunchCommandBuilder: workingDir='{launchDir}' autoRun='{autoRunCommand}' for project name='{project.Name}' id='{project.Id}' kind='{kind}'");
 
                 // Register terminal before starting (start screen tabs are unregistered).
-                // Identity: team lead if set; else for Codex use the configured default agent
-                // name so headless Codex launches get a stable identity instead of "Unassigned".
+                // Identity: team lead if set; else the Codex default agent; else the project name,
+                // made unique by the broker (task 6a8d029f — see ResolveProjectLaunchIdentity).
+                // Restored panes come back on the start screen, so they launch through here too.
                 bool isTeamLead = !string.IsNullOrEmpty(project.TeamLead);
-                string terminalName = ResolveCodexIdentityName(kind, project) ?? "Unassigned";
+                var launchIdentity = ResolveProjectLaunchIdentity(kind, project);
+                string terminalName = launchIdentity.Name;
                 if (_mcpServer?.Broker != null)
                 {
                     // Check if this identity is already active in another terminal
@@ -4003,7 +4005,9 @@ namespace MultiTerminal
                         doc.DocId,
                         terminalName,
                         isTeamLead,
-                        atomicUniqueness: kind == TerminalKind.Codex,
+                        // Codex keeps its old atomic path (it also covers an IdentityPicker alternative);
+                        // a no-lead project name is now atomic for every kind (6a8d029f).
+                        atomicUniqueness: launchIdentity.Unique || kind == TerminalKind.Codex,
                         launchNonce: doc.LaunchNonce);
                 }
 
@@ -4268,13 +4272,15 @@ namespace MultiTerminal
                 string launchDir = launchCmd.WorkingDirectory;
                 string autoRunCommand = launchCmd.AutoRunCommand;
 
-                // Identity: same shape as sibling launch sites. See ResolveCodexIdentityName.
-                // Codex non-team-lead launches use the atomic RegisterTerminalUnique path.
+                // Identity: same shape as sibling launch sites. See ResolveProjectLaunchIdentity.
+                // Non-team-lead launches (project name or Codex default) use the atomic
+                // RegisterTerminalUnique path (6a8d029f).
                 bool isTeamLead = !string.IsNullOrEmpty(project.TeamLead);
-                string terminalName = ResolveCodexIdentityName(terminalKind, project) ?? "Unassigned";
+                var launchIdentity = ResolveProjectLaunchIdentity(terminalKind, project);
+                string terminalName = launchIdentity.Name;
                 if (_mcpServer?.Broker != null)
                 {
-                    if (!isTeamLead && terminalKind == Models.TerminalKind.Codex)
+                    if (launchIdentity.Unique)
                     {
                         // Run 5: was discarding the RegisterResult on both arms — see the note at the
                         // project-launch site. Routed through the one site that checks Success.
@@ -4517,35 +4523,19 @@ namespace MultiTerminal
         }
 
         /// <summary>
-        /// Resolves the identity name for a terminal launch. For team-lead launches
-        /// returns the team-lead name directly. For Codex launches without a team
-        /// lead, reads the configured default agent name and applies
-        /// <see cref="MCPServer.Services.MessageBroker.GetUniqueNameFor"/> so two
-        /// concurrent Codex terminals sharing the same default don't alias to one
-        /// broker identity. Returns null when the caller should fall back to
-        /// "Unassigned" (or leave identity unset entirely, as OnProjectLaunchRequested does).
+        /// The identity a project launch requests — see <see cref="Services.ProjectLaunchIdentity"/>
+        /// for the rule (task 6a8d029f): team lead, else the Codex default agent (Codex only), else the
+        /// project name. When <c>Unique</c> is set the caller registers through
+        /// <c>RegisterTerminalUnique</c> (via <see cref="PreRegisterTerminalWithName"/>'s
+        /// <c>atomicUniqueness</c>), which suffixes a held name: "TestB", then "TestB-2", "TestB-3"…
+        ///
+        /// <para>DECIDED OVERNIGHT by Alice (2026-10-02) — Owner may overrule: suffixes are REUSED. The
+        /// broker counts connected terminals only, so once "TestB-2" closes the next second pane is
+        /// "TestB-2" again and inherits that name's profile, active task and inbox. That continuity is
+        /// intended; nothing is persisted to avoid it.</para>
         /// </summary>
-        private string ResolveCodexIdentityName(Models.TerminalKind kind, Models.Project project)
-        {
-            if (project != null && !string.IsNullOrEmpty(project.TeamLead))
-                return project.TeamLead;
-
-            if (kind != Models.TerminalKind.Codex)
-                return null;
-
-            string codexDefault = _settings?.GetCodexDefaultAgentName();
-            if (string.IsNullOrWhiteSpace(codexDefault))
-                return null;
-
-            // Skip uniqueness suffixing for the "Unassigned" sentinel — it's
-            // intentionally shared across multiple unnamed terminals.
-            if (codexDefault.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
-                return codexDefault;
-
-            return _mcpServer?.Broker != null
-                ? _mcpServer.Broker.GetUniqueNameFor(codexDefault)
-                : codexDefault;
-        }
+        private Services.ProjectLaunchIdentityRequest ResolveProjectLaunchIdentity(Models.TerminalKind kind, Models.Project project)
+            => Services.ProjectLaunchIdentity.Resolve(project?.TeamLead, kind, _settings?.GetCodexDefaultAgentName(), project?.Name);
 
         private string PreRegisterTerminalWithName(string docId, string identityName, bool isTeamLead = false, bool atomicUniqueness = false, string launchNonce = null)
         {
@@ -8073,12 +8063,12 @@ namespace MultiTerminal
             if (HandleBootstrapErrorIfAny(launchCmd))
                 return;
 
-            // Identity: team-lead if set; for Codex, use configured default via
-            // ResolveCodexIdentityName (applies GetUniqueNameFor). For non-team-lead
-            // Claude the resolver returns null and we leave identityName null — the
-            // downstream AddNewTerminal handles that by defaulting to "Unassigned".
+            // Identity: team-lead if set; else the Codex default agent; else the project name,
+            // made unique by the broker (task 6a8d029f — see ResolveProjectLaunchIdentity). It used
+            // to be null for non-team-lead Claude, which AddNewTerminal turned into "Unassigned".
             bool isTeamLead = !string.IsNullOrEmpty(e.Project.TeamLead);
-            string identityName = ResolveCodexIdentityName(kind, e.Project);
+            var launchIdentity = ResolveProjectLaunchIdentity(kind, e.Project);
+            string identityName = launchIdentity.Name;
 
             // Resolve gateway profile for per-project MCP server filtering.
             string gatewayProfile = null;
@@ -8110,10 +8100,10 @@ namespace MultiTerminal
                 _debugLogService?.Warning("ProjectPanel", $"MCP config sync skipped — workingDir is the user-profile fallback, not a distinct project root.");
             }
 
-            // Atomic uniqueness for Codex non-team-lead launches so two concurrent
-            // launches with the same per-user default-agent name can't alias to
-            // one broker identity.
-            bool atomicIdentityUniqueness = kind == Models.TerminalKind.Codex && !isTeamLead;
+            // Atomic uniqueness for every non-team-lead launch so two concurrent launches of the
+            // same project (or the same per-user Codex default-agent name) can't alias to one
+            // broker identity.
+            bool atomicIdentityUniqueness = launchIdentity.Unique;
 
             AddNewTerminal(
                 workingDirectory: workingDir,
