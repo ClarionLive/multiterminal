@@ -3766,7 +3766,10 @@ namespace MultiTerminal
             // Register with MCP server AFTER adding to DockPanel so the
             // TerminalRegistered event handler can find this doc by DocId
             _debugLogService?.Trace("AddNewTerminal", "Registering terminal with MCP server...");
-            if (_mcpServer?.Broker != null)
+            // A project-derived identity enters even with no broker, so TryRegisterProjectIdentity can
+            // refuse it (Run 3); every other launch keeps the old broker-only behaviour.
+            bool projectDerivedIdentity = failClosedIdentity && !isTeamLead && !string.IsNullOrEmpty(identityName);
+            if (_mcpServer?.Broker != null || projectDerivedIdentity)
             {
                 if (!string.IsNullOrEmpty(identityName))
                 {
@@ -3783,7 +3786,7 @@ namespace MultiTerminal
                         _debugLogService?.Trace("AddNewTerminal", $"Team lead naming applied: '{identityName}'");
                     }
 
-                    if (failClosedIdentity && !isTeamLead)
+                    if (projectDerivedIdentity)
                     {
                         // A project-derived identity (6a8d029f): atomic, and no placeholder/pool fallback.
                         if (!TryRegisterProjectIdentity(doc.DocId, identityName, doc.LaunchNonce, out terminalName, out identityRefusal))
@@ -3978,7 +3981,10 @@ namespace MultiTerminal
                 }
 
                 string terminalName = launchIdentity.Name;
-                if (_mcpServer?.Broker != null)
+                // A project-derived launch enters even with no broker so it is refused, not started
+                // under an unregistered name (Run 3). It never has a team lead, so the picker below,
+                // which needs the broker, is not reached for it.
+                if (_mcpServer?.Broker != null || launchIdentity.IsProjectDerived)
                 {
                     // Check if this identity is already active in another terminal
                     if (isTeamLead)
@@ -4322,7 +4328,8 @@ namespace MultiTerminal
                 }
 
                 string terminalName = launchIdentity.Name;
-                if (_mcpServer?.Broker != null)
+                // Project-derived launches enter even with no broker so they are refused (Run 3).
+                if (_mcpServer?.Broker != null || launchIdentity.IsProjectDerived)
                 {
                     if (launchIdentity.IsProjectDerived)
                     {
@@ -4637,21 +4644,30 @@ namespace MultiTerminal
         /// <see cref="PreRegisterTerminalWithName"/> it never falls back to a pool or placeholder name,
         /// because a project pane under someone else's name is the defect this ticket removes. Returns
         /// false with the broker's reason; the caller shows it and returns the pane to its start screen.
+        /// <para>Every project-derived launch must come through here, broker or not: a missing broker is
+        /// refused exactly like a registration refusal (Run 3), decided by
+        /// <see cref="Services.ProjectLaunchIdentity.StartRefusal"/>.</para>
         /// </summary>
         private bool TryRegisterProjectIdentity(string docId, string identityName, string launchNonce, out string resolvedName, out string error)
         {
             resolvedName = null;
+            var broker = _mcpServer?.Broker;
+            error = Services.ProjectLaunchIdentity.StartRefusal(isProjectDerived: true, brokerAvailable: broker != null);
+            if (error != null)
+            {
+                _debugLogService?.Warning("MainForm", $"Project identity '{identityName}' not registered; launch refused: {error}");
+                return false;
+            }
+
             try
             {
-                var result = _mcpServer.Broker.RegisterTerminalUnique(identityName, out string resolved, docId, nonce: launchNonce);
-                if (result.Success)
+                var result = broker.RegisterTerminalUnique(identityName, out string resolved, docId, nonce: launchNonce);
+                error = Services.ProjectLaunchIdentity.StartRefusal(isProjectDerived: true, brokerAvailable: true, result.Success, result.Error);
+                if (error == null)
                 {
                     resolvedName = resolved;
-                    error = null;
                     return true;
                 }
-
-                error = result.Error ?? "the broker refused the registration without a reason";
             }
             catch (Exception ex)
             {
@@ -8242,6 +8258,14 @@ namespace MultiTerminal
             // broker identity.
             bool atomicIdentityUniqueness = launchIdentity.RegisterUnique;
 
+            // No broker: a project-derived launch is refused before any pane is created (Run 3).
+            string brokerRefusal = Services.ProjectLaunchIdentity.StartRefusal(launchIdentity.IsProjectDerived, brokerAvailable: _mcpServer?.Broker != null);
+            if (brokerRefusal != null)
+            {
+                ShowProjectIdentityRefused(identityName, brokerRefusal);
+                return;
+            }
+
             var launched = AddNewTerminal(
                 workingDirectory: workingDir,
                 identityName: identityName,
@@ -8252,8 +8276,9 @@ namespace MultiTerminal
                 atomicIdentityUniqueness: atomicIdentityUniqueness,
                 failClosedIdentity: launchIdentity.IsProjectDerived);
 
-            // A refused project identity left the new pane on its start screen: nothing was opened.
-            if (launchIdentity.IsProjectDerived && launched.Name == null && _mcpServer?.Broker != null)
+            // A refused project identity left the new pane on its start screen: nothing was opened. A
+            // project-derived launch only has a name once registered, so null is refusal, broker or not.
+            if (launchIdentity.IsProjectDerived && launched.Name == null)
                 return;
 
             _currentProject = e.Project;

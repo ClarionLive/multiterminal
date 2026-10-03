@@ -390,6 +390,50 @@ namespace MultiTerminal.Tests
             Assert.Equal(expected, request.IsProjectDerived);
         }
 
+        // ---- Run 3 blocking: a project-derived launch requires the broker -----------------------------
+
+        [Theory]
+        [InlineData("TestB", null, TerminalKind.ClaudeCode, null)]      // no lead, Claude: project-derived
+        [InlineData("TestB", null, TerminalKind.Codex, null)]           // no lead, Codex, no default: project-derived
+        [InlineData("🚀", null, TerminalKind.ClaudeCode, null)]          // Project-<id6> fallback: project-derived
+        public void A_project_derived_launch_with_no_broker_is_refused_whatever_the_registration_says(string projectName, string teamLead, TerminalKind kind, string codexDefault)
+        {
+            var request = ProjectLaunchIdentity.Resolve(teamLead, kind, codexDefault, projectName, "p1aaaaaa", NoneReserved);
+            Assert.True(request.IsProjectDerived);
+
+            // Pre-check (before registering) and post-registration both refuse: no broker means no real name.
+            Assert.Equal(ProjectLaunchIdentity.BrokerUnavailableMessage,
+                ProjectLaunchIdentity.StartRefusal(request.IsProjectDerived, brokerAvailable: false));
+            Assert.Equal(ProjectLaunchIdentity.BrokerUnavailableMessage,
+                ProjectLaunchIdentity.StartRefusal(request.IsProjectDerived, brokerAvailable: false, registered: false, registrationError: "x"));
+        }
+
+        [Theory]
+        [InlineData("Alice", TerminalKind.ClaudeCode, null)]     // team lead
+        [InlineData(null, TerminalKind.Codex, "CodexBot")]       // Codex default agent
+        public void A_launch_that_is_not_project_derived_is_never_refused_by_this_gate(string teamLead, TerminalKind kind, string codexDefault)
+        {
+            // Unchanged behaviour: team-lead and Codex-default launches keep their own broker handling, and
+            // Open PowerShell never asks this gate (no project, so never project-derived).
+            var request = ProjectLaunchIdentity.Resolve(teamLead, kind, codexDefault, "TestB", "p1aaaaaa", null);
+            Assert.False(request.IsProjectDerived);
+
+            Assert.Null(ProjectLaunchIdentity.StartRefusal(request.IsProjectDerived, brokerAvailable: false));
+            Assert.Null(ProjectLaunchIdentity.StartRefusal(request.IsProjectDerived, brokerAvailable: true, registered: false, registrationError: "x"));
+        }
+
+        [Fact]
+        public void A_project_derived_launch_starts_only_once_registered()
+        {
+            Assert.Null(ProjectLaunchIdentity.StartRefusal(isProjectDerived: true, brokerAvailable: true));
+            Assert.Null(ProjectLaunchIdentity.StartRefusal(isProjectDerived: true, brokerAvailable: true, registered: true));
+            Assert.Equal("name held",
+                ProjectLaunchIdentity.StartRefusal(isProjectDerived: true, brokerAvailable: true, registered: false, registrationError: "name held"));
+            // A refusal with no reason is still a refusal, never a silent start.
+            Assert.False(string.IsNullOrWhiteSpace(
+                ProjectLaunchIdentity.StartRefusal(isProjectDerived: true, brokerAvailable: true, registered: false, registrationError: null)));
+        }
+
         // ---- sanitization ----------------------------------------------------------------------------
 
         [Theory]

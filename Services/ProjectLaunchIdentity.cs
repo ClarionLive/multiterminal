@@ -118,6 +118,29 @@ namespace MultiTerminal.Services
             return new ProjectLaunchIdentityRequest(name, RegisterUnique: true, IsProjectDerived: true);
         }
 
+        /// <summary>Shown when a project-derived launch is refused because there is no broker (Run 3).</summary>
+        internal const string BrokerUnavailableMessage = "MultiTerminal's broker isn't available; restart MultiTerminal and try again";
+
+        /// <summary>
+        /// May this launch start? Returns null when it may, otherwise the refusal to show (6a8d029f Run 3).
+        /// A project-derived identity is only real once the broker has registered it, so such a launch
+        /// FAILS CLOSED both when there is no broker and when registration was refused; it never starts
+        /// under a name nobody registered. Every other launch (team lead, Codex default, Open PowerShell)
+        /// is unaffected and always gets null here — their existing broker handling is unchanged.
+        /// </summary>
+        /// <param name="isProjectDerived">The launch's identity was derived from the project.</param>
+        /// <param name="brokerAvailable">A broker exists to register with.</param>
+        /// <param name="registered">Registration succeeded. Pass true for a pre-check made before registering.</param>
+        /// <param name="registrationError">The broker's reason when <paramref name="registered"/> is false.</param>
+        internal static string StartRefusal(bool isProjectDerived, bool brokerAvailable, bool registered = true, string registrationError = null)
+        {
+            if (!isProjectDerived) return null;
+            if (!brokerAvailable) return BrokerUnavailableMessage;
+            if (!registered)
+                return string.IsNullOrWhiteSpace(registrationError) ? "the broker refused the registration without a reason" : registrationError;
+            return null;
+        }
+
         /// <summary>
         /// True when this launch will take a project-derived identity, and therefore needs the
         /// reserved-name census: no team lead, and not a Codex launch with a configured default agent
