@@ -3620,7 +3620,8 @@
                             cachedCurrentProjectId = plData.currentProjectId || '';
                             _projectListLoading = false; // reply arrived — loading row becomes real content (or true empty-state)
                             // An open selector refreshes its list once, with whatever is typed in the box
-                            // (re-rendering it unfiltered first flashed the whole list, task 66f529bd).
+                            // (it used to render unfiltered first, a wasted render the filtered one
+                            // overwrote in the same task, so nothing was painted; task 66f529bd).
                             // Otherwise, if it was waiting for data, open it now.
                             const existingSelector = document.querySelector('.picker-overlay.project-selector');
                             if (existingSelector) {
