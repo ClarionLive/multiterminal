@@ -49,8 +49,9 @@ function makeElement(tag) {
     className: '',
     value: '',
     removed: false,
+    renders: [], // every innerHTML assignment, in order
     get innerHTML() { return html; },
-    set innerHTML(v) { html = v; children = new Map(); },
+    set innerHTML(v) { html = v; children = new Map(); this.renders.push(v); },
     querySelector(sel) {
       if (!children.has(sel)) children.set(sel, makeElement(sel));
       return children.get(sel);
@@ -76,6 +77,9 @@ function boot(projects) {
     'let cachedProjectList = [];',
     "let cachedCurrentProjectId = '';",
     'let _projectListLoading = false;',
+    'let _projectSelectorPendingOpen = false;',
+    // The host's 'projectList' reply, as written in handleHostMessage's switch.
+    'function onProjectListReply(data) { switch (1) { default: ' + extract(PANEL, "case 'projectList': {") + ' } }',
     extract(PANEL, 'function escapeHtml('),
     extract(PANEL, 'function escapeJs('),
     extract(PANEL, 'function showProjectSelectorPopup('),
@@ -84,8 +88,9 @@ function boot(projects) {
     extract(PANEL, 'function projectIconGlyph('),
     extract(PANEL, 'function onProjectSearchInput('),
     extract(PANEL, 'function closeProjectSelector('),
-    'out = { showProjectSelectorPopup, onProjectSearchInput, projectIconGlyph, PROJECT_ICON_NAMES,',
-    '        setProjects(list) { cachedProjectList = list; } };',
+    'out = { showProjectSelectorPopup, onProjectSearchInput, projectIconGlyph, PROJECT_ICON_NAMES, onProjectListReply,',
+    '        setProjects(list) { cachedProjectList = list; },',
+    '        setPendingOpen(v) { _projectSelectorPendingOpen = v; } };',
   ].join('\n');
   vm.runInNewContext(code, sandbox);
   sandbox.out.setProjects(projects);
@@ -137,6 +142,34 @@ test('a refresh while open (the projectList reply) re-renders the list but keeps
   assert.doesNotMatch(overlay.querySelector('.picker-list').innerHTML, /TestB/);
 });
 
+test('a projectList reply while open renders the list once, already filtered by the typed text', () => {
+  const { api, document } = boot([]);
+  api.setPendingOpen(true); // opened while loading, as openProjectSelector does with an empty cache
+  api.showProjectSelectorPopup();
+  const overlay = document.querySelector('.picker-overlay.project-selector');
+  overlay.querySelector('.project-selector-search').value = 'tra';
+  const list = overlay.querySelector('.picker-list');
+  const before = list.renders.length;
+
+  api.onProjectListReply(JSON.stringify({ projects: PROJECTS, currentProjectId: '' }));
+
+  const after = list.renders.slice(before);
+  assert.equal(after.length, 1, `expected one render on reply, got ${after.length}`);
+  assert.match(after[0], /TravelRemote/);
+  assert.doesNotMatch(after[0], /TestB/, 'the reply rendered an unfiltered list');
+});
+
+test('a projectList reply opens the popup only when one was pending and none is open', () => {
+  const pending = boot([]);
+  pending.api.setPendingOpen(true);
+  pending.api.onProjectListReply(JSON.stringify({ projects: PROJECTS }));
+  assert.ok(pending.document.querySelector('.picker-overlay.project-selector'), 'a pending open did not open');
+
+  const idle = boot([]);
+  idle.api.onProjectListReply(JSON.stringify({ projects: PROJECTS }));
+  assert.equal(idle.document.querySelector('.picker-overlay.project-selector'), null, 'opened with nothing pending');
+});
+
 test('icon names become emoji; unknown or empty names get the folder; emoji pass through', () => {
   const { api } = boot([]);
   assert.equal(api.projectIconGlyph('package'), '\u{1F4E6}');
@@ -165,6 +198,8 @@ test('the start screen maps every icon name the Project pane knows to the same e
   const names = Object.keys(api.PROJECT_ICON_NAMES);
   assert.ok(names.length >= 13, `expected the full name map, got ${names.length}`);
   for (const name of names) {
-    assert.equal(sandbox.out({ icon: name, name: 'X' }), api.PROJECT_ICON_NAMES[name], `start screen disagrees on "${name}"`);
+    for (const spelling of [name, name.toUpperCase(), ` ${name} `]) {
+      assert.equal(sandbox.out({ icon: spelling, name: 'X' }), api.projectIconGlyph(spelling), `start screen disagrees on "${spelling}"`);
+    }
   }
 });

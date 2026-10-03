@@ -1177,7 +1177,7 @@
         // Check if icon is an emoji (non-ASCII or multi-char)
         if (icon && icon.trim().length > 0) {
             // Simple check: if codepoint > 127, likely emoji
-            if (icon.codePointAt(0) > 127) return icon;
+            if (icon.trim().codePointAt(0) > 127) return icon.trim();
             // Named icons we map to emoji
             var iconMap = {
                 'terminal': '⚡',
@@ -1194,7 +1194,9 @@
                 'extension': '🧩',
                 'smartphone': '📱'
             };
-            if (iconMap[icon]) return iconMap[icon];
+            // Same normalisation as the Project pane's projectIconGlyph: 'Code ' and 'code' are one icon.
+            var named = iconMap[icon.trim().toLowerCase()];
+            if (named) return named;
         }
         // Fall back to first letter of name
         return (project.name || '?').charAt(0).toUpperCase();

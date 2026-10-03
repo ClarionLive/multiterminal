@@ -3619,17 +3619,17 @@
                             cachedProjectList = plData.projects || [];
                             cachedCurrentProjectId = plData.currentProjectId || '';
                             _projectListLoading = false; // reply arrived — loading row becomes real content (or true empty-state)
-                            // If the selector was waiting for data, open it now
-                            if (_projectSelectorPendingOpen) {
-                                _projectSelectorPendingOpen = false;
-                                showProjectSelectorPopup();
-                            }
-                            // If the selector popup is already open, refresh it
+                            // An open selector refreshes its list once, with whatever is typed in the box
+                            // (re-rendering it unfiltered first flashed the whole list, task 66f529bd).
+                            // Otherwise, if it was waiting for data, open it now.
                             const existingSelector = document.querySelector('.picker-overlay.project-selector');
                             if (existingSelector) {
                                 const searchInput = existingSelector.querySelector('.project-selector-search');
                                 showProjectSelectorPopup(searchInput ? searchInput.value : '');
+                            } else if (_projectSelectorPendingOpen) {
+                                showProjectSelectorPopup();
                             }
+                            _projectSelectorPendingOpen = false;
                             break;
                         }
                         case 'newProjectHint': {
