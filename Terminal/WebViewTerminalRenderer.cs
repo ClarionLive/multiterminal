@@ -67,19 +67,12 @@ namespace MultiTerminal.Terminal
 
         // Host-side copy of the terminal menu's open state (SetContextMenuOpen), read by the Esc
         // handler below on the UI thread, so it needs no round trip to the page (11edbec4).
-        // terminal.html keeps its own mirror of both fields (contextMenuOpen, swallowEscapeUntilKeyUp).
+        // terminal.html keeps its own mirror of both (contextMenuOpen, swallowEscapeUntilKeyUp).
         private bool _contextMenuOpen;
 
-        // Set when OnWebViewKeyDown dismissed the menu: that Esc's auto-repeats and keyup are
-        // handled too, so none of them reaches the page once the menu is gone. KeyEventArgs
-        // carries no repeat flag, so a lost keyup is recovered by focus loss or staleness
-        // (EscapeLatchStaleMs) rather than by recognising a fresh press.
-        private bool _swallowEscapeUntilKeyUp;
-        private long _lastSwallowedEscapeTick;
-
-        // Longer than the slowest Windows auto-repeat delay (Keyboard delay 3 = 1000 ms), so a held
-        // Esc keeps the latch alive; a keyup lost to a focus change stops eating Esc after this.
-        private const long EscapeLatchStaleMs = 1200;
+        // Which Esc events are taken from the page once the menu is dismissed: the dismissing
+        // press's auto-repeats and keyup too, with no time-based expiry (see EscapeMenuLatch).
+        private readonly EscapeMenuLatch _escapeLatch = new EscapeMenuLatch();
         private TerminalTheme _theme = TerminalTheme.Dark;
         private float _fontSize = 10f;
         private int _cols = 80;
@@ -618,26 +611,13 @@ namespace MultiTerminal.Terminal
         /// </summary>
         private void OnWebViewKeyDown(object sender, KeyEventArgs e)
         {
-            if (e.KeyCode != Keys.Escape)
+            if (_escapeLatch.OnKeyDown(e.KeyCode == Keys.Escape, _contextMenuOpen, out bool dismiss))
             {
-                _swallowEscapeUntilKeyUp = false; // another key: the dismissing press is over
-                return;
+                e.Handled = true;
             }
 
-            long now = Environment.TickCount64;
-            if (_swallowEscapeUntilKeyUp && now - _lastSwallowedEscapeTick > EscapeLatchStaleMs)
+            if (dismiss)
             {
-                DebugLogService?.Trace("WebViewTerminalRenderer", "Esc swallow latch was stale (keyup lost); cleared");
-                _swallowEscapeUntilKeyUp = false;
-            }
-
-            if (!(_contextMenuOpen || _swallowEscapeUntilKeyUp)) return;
-
-            e.Handled = true;
-            _lastSwallowedEscapeTick = now;
-            if (_contextMenuOpen)
-            {
-                _swallowEscapeUntilKeyUp = true;
                 DebugLogService?.Trace("WebViewTerminalRenderer", "Esc with the terminal menu open: handled host-side, dismissing");
                 ContextMenuDismissRequested?.Invoke(this, EventArgs.Empty);
             }
@@ -645,16 +625,16 @@ namespace MultiTerminal.Terminal
 
         private void OnWebViewKeyUp(object sender, KeyEventArgs e)
         {
-            if (e.KeyCode != Keys.Escape || !_swallowEscapeUntilKeyUp) return;
-
-            e.Handled = true;
-            _swallowEscapeUntilKeyUp = false;
+            if (_escapeLatch.OnKeyUp(e.KeyCode == Keys.Escape))
+            {
+                e.Handled = true;
+            }
         }
 
         // A keyup that lands elsewhere (focus moved, app deactivated) must not leave the latch set.
         private void OnWebViewLostFocus(object sender, EventArgs e)
         {
-            _swallowEscapeUntilKeyUp = false;
+            _escapeLatch.OnLostFocus();
         }
 
         private void OnCopyRequested(string text)
