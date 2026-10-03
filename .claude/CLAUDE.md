@@ -2,7 +2,7 @@
 
 A multi-agent coordination system for Claude Code. WinForms desktop app (C#/.NET) with integrated REST API (port 5050), MCP server, and WebView2-based UI panels.
 
-> Agent behavioral instructions (kanban workflow, MCP tools, messaging, task terminology) are in the MultiTerminal plugin CLAUDE.md. This file is only the codebase reference for working on MT source code.
+> Agent behavioral instructions (kanban workflow, messaging, task terminology, MT events) are the MultiTerminal plugin's `agent-rules.md`, which the plugin's `agent-rules-hook.js` prints into every session (Claude Code does not load a plugin's CLAUDE.md). MT-repo-only working rules (build/deploy, this machine, license) are in `.claude/rules/mt-dev-rules.md`. This file is only the codebase reference for working on MT source code.
 > Detailed reference tables (database schema, folder map, task guides, events) are in `.claude/rules/` and load on demand.
 
 ## ⛔ YOU ARE RUNNING INSIDE MULTITERMINAL — READ FIRST
