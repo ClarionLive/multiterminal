@@ -41,7 +41,7 @@ namespace MultiTerminal.Services
         private readonly BlockingCollection<DebugLogEntry> _writeQueue;
         private readonly Thread _writerThread;
         private readonly bool _fileLoggingEnabled;
-        private const int WriterFlushIntervalMs = 1000;
+        private const int DefaultWriterFlushIntervalMs = 1000;
         private readonly int _writerFlushIntervalMs;
         private const int WriteQueueCapacity = 50000;
 
@@ -114,7 +114,7 @@ namespace MultiTerminal.Services
         }
 
         public DebugLogService()
-            : this(LogDirectory, WriterFlushIntervalMs)
+            : this(LogDirectory, DefaultWriterFlushIntervalMs)
         {
         }
 
@@ -408,7 +408,8 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Background writer loop. Blocks up to <see cref="WriterFlushIntervalMs"/> for the next
+        /// Background writer loop. Blocks up to the writer interval (<see cref="DefaultWriterFlushIntervalMs"/>
+        /// in production) for the next
         /// entry, then drains every entry currently available and flushes ONCE per batch. This is
         /// what turns N synchronous per-line flushes into one flush per batch (the buffering win).
         /// Exits ONLY when the queue is completed (Dispose) and fully drained.

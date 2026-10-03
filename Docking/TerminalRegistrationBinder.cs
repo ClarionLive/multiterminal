@@ -79,6 +79,10 @@ namespace MultiTerminal.Docking
         internal static bool MatchesByName(PaneIdentity pane, string name) =>
             pane.CustomTitle?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false;
 
+        /// <summary>Case-insensitive match of a pane by its broker-confirmed (promoted) agent name.</summary>
+        internal static bool MatchesByPromotedName(PaneIdentity pane, string name) =>
+            pane.PromotedName?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false;
+
         /// <summary>
         /// The identity a pane is treated as bound to: its promoted name, else its CustomTitle
         /// (the pre-promotion window, ab50355f). Placeholders and empty titles count as unbound.
@@ -120,7 +124,7 @@ namespace MultiTerminal.Docking
             // Owner cosmetically renamed still answers to its agent name. Never TabText (158d60ac).
             if (target < 0 && !string.IsNullOrEmpty(name))
             {
-                target = IndexOf(panes, p => p.PromotedName?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false);
+                target = IndexOf(panes, p => MatchesByPromotedName(p, name));
                 if (target < 0)
                     target = IndexOf(panes, p => MatchesByName(p, name));
             }
@@ -135,7 +139,7 @@ namespace MultiTerminal.Docking
             string bound = BoundIdentityOf(panes[target]);
             if (!string.IsNullOrEmpty(name) && bound != null && !bound.Equals(name, StringComparison.OrdinalIgnoreCase))
             {
-                int reResolved = IndexOf(panes, p => p.PromotedName?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false);
+                int reResolved = IndexOf(panes, p => MatchesByPromotedName(p, name));
                 if (reResolved < 0)
                     reResolved = IndexOf(panes, p => string.IsNullOrEmpty(p.PromotedName) && MatchesByName(p, name));
 
@@ -153,7 +157,7 @@ namespace MultiTerminal.Docking
                     && (string.IsNullOrEmpty(pane.CustomTitle) || IsUnassigned(pane.CustomTitle));
                 if (unclaimed && !string.Equals(launchNonce, pane.LaunchNonce, StringComparison.Ordinal))
                 {
-                    int owned = IndexOf(panes, p => p.PromotedName?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false);
+                    int owned = IndexOf(panes, p => MatchesByPromotedName(p, name));
                     return new PaneBinding(owned, PaneBindingRoute.NonceDenied, bound);
                 }
             }
@@ -166,59 +170,6 @@ namespace MultiTerminal.Docking
             for (int i = 0; i < panes.Count; i++)
                 if (predicate(panes[i])) return i;
             return -1;
-        }
-    }
-
-    /// <summary>
-    /// Runs a broker registration's snapshot, <see cref="TerminalRegistrationBinder.Resolve"/> and
-    /// commit as ONE step on the UI thread (task 5e1dea4c).
-    ///
-    /// <para><b>Why one step.</b> The registration event is raised on a broker thread. Resolving there
-    /// and committing after the marshal left a window in which the pane could end its launch and be
-    /// relaunched as someone else: the queued commit then wrote the old registration's terminal id,
-    /// agent name, title and identity onto the new launch. 19a26090 re-checked only the
-    /// <see cref="PaneBindingRoute.ProvenOwnLaunch"/> route; Matched / CollisionReResolved /
-    /// NonceDenied were committed unchecked (19a26090 Run 5, Codex security). A pane's nonce,
-    /// title and identity change only on the UI thread, so a decision read and acted on inside a
-    /// single UI-thread callback cannot be overtaken, whatever the route.</para>
-    ///
-    /// <para>Chosen over capturing a per-pane launch generation and re-checking it before the commit:
-    /// that needs a generation per route and a re-resolve when it moved, which is the same resolve
-    /// on the UI thread with more ways to get it wrong. Resolving here also stops the snapshot
-    /// reading WinForms controls' properties from a background thread.</para>
-    ///
-    /// <para>Generic and free of WinForms so the ordering is testable: MainForm passes
-    /// <c>Control.Invoke</c> as <paramref name="runOnUiThread"/>, a test passes a queue.</para>
-    /// </summary>
-    internal static class TerminalRegistrationRouter
-    {
-        /// <param name="runOnUiThread">Runs the action on the thread that owns the panes. May defer it.</param>
-        /// <param name="livePanes">Reads the panes as they are NOW. Called only inside the UI-thread step.</param>
-        /// <param name="identityOf">What the binder sees of a pane.</param>
-        /// <param name="onResolved">
-        /// Called inside the same UI-thread step with the binding and its pane (null when nothing
-        /// bound). Every write a binding causes belongs here, and nowhere that runs later.
-        /// </param>
-        internal static void Route<TPane>(
-            Action<Action> runOnUiThread,
-            Func<IReadOnlyList<TPane>> livePanes,
-            Func<TPane, PaneIdentity> identityOf,
-            string name,
-            string docId,
-            string launchNonce,
-            Action<PaneBinding, TPane> onResolved)
-            where TPane : class
-        {
-            runOnUiThread(() =>
-            {
-                var panes = livePanes() ?? Array.Empty<TPane>();
-                var identities = new PaneIdentity[panes.Count];
-                for (int i = 0; i < panes.Count; i++)
-                    identities[i] = identityOf(panes[i]);
-
-                var binding = TerminalRegistrationBinder.Resolve(identities, name, docId, launchNonce);
-                onResolved(binding, binding.Index >= 0 ? panes[binding.Index] : null);
-            });
         }
     }
 }

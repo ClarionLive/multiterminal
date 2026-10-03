@@ -10,14 +10,18 @@ namespace MultiTerminal.Tests
     /// and <c>TerminalControl</c> (exit acceptance) delegate to. Both build WebView2 renderers, so the
     /// orderings are replayed here against the same rules with a queue standing in for BeginInvoke.
     ///
-    /// <para>What this does NOT cover: that TerminalDocument calls <c>EndLaunch</c> at every launch end
-    /// (process exit, Home, "Launch as...") and that TerminalControl passes its live ConPtyTerminal.
-    /// Those call sites are one line each and remain build + review only.</para>
+    /// <para>The ordering facts (suffix <c>_model</c>) exercise <see cref="PaneLaunchLifecycle.AcceptsExit"/>
+    /// and <see cref="PaneLaunchLifecycle.EndLaunch"/> for real; the Stop / EndLaunch / Start sequence
+    /// around them is this file's <c>ModelPane</c>, written to mirror TerminalControl and
+    /// TerminalDocument. They do NOT cover the real wiring: that TerminalDocument calls
+    /// <c>EndLaunch</c> at every launch end (process exit, Home, "Launch as..."), that TerminalControl
+    /// passes its live ConPtyTerminal, or that the real exit is marshalled the way the queue here is.
+    /// Those call sites remain build + review only.</para>
     /// </summary>
     public class PaneLaunchLifecycleTests
     {
         [Fact]
-        public void Ending_a_launch_mints_a_fresh_unguessable_nonce()
+        public void Ending_a_launch_mints_a_fresh_32_hex_nonce()
         {
             var launch = new PaneLaunchLifecycle();
             string first = launch.LaunchNonce;
@@ -42,7 +46,7 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
-        /// The ordering 19a26090 Run 2 found: launch A's process exits, its exit is queued
+        /// MODEL: the ordering 19a26090 Run 2 found, replayed on <c>ModelPane</c>: launch A's process exits, its exit is queued
         /// (BeginInvoke), and before the queue drains "Launch as..." stops A, rotates the nonce and
         /// starts B in one UI-thread pass. The queued exit must not send B home or rotate B's nonce
         /// away from the one B's broker row and child already hold.
@@ -52,7 +56,7 @@ namespace MultiTerminal.Tests
         /// red, as predicted; the Only_the_current fact also went red on its "previous" lines.</para>
         /// </summary>
         [Fact]
-        public void A_queued_exit_from_the_previous_launch_does_not_end_the_relaunched_session()
+        public void A_queued_exit_from_the_previous_launch_does_not_end_the_relaunched_session_model()
         {
             var pane = new ModelPane();
             var ui = new Queue<Action>();
@@ -80,9 +84,9 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
-        public void A_queued_exit_after_Home_does_not_rotate_the_nonce_a_second_time()
+        public void A_queued_exit_after_Home_does_not_rotate_the_nonce_a_second_time_model()
         {
-            // Home stops the process and rotates the nonce itself. The stopped process's exit, if
+            // MODEL. Home stops the process and rotates the nonce itself. The stopped process's exit, if
             // already queued, arrives with nothing current and must be dropped.
             var pane = new ModelPane();
             var ui = new Queue<Action>();
@@ -100,7 +104,10 @@ namespace MultiTerminal.Tests
             Assert.False(pane.WentHome);
         }
 
-        /// <summary>TerminalControl + TerminalDocument reduced to the lifecycle calls they make.</summary>
+        /// <summary>
+        /// TerminalControl + TerminalDocument reduced to the lifecycle calls they make. Written by
+        /// hand to mirror them; nothing checks that it still does.
+        /// </summary>
         private sealed class ModelPane
         {
             public PaneLaunchLifecycle Launch { get; } = new PaneLaunchLifecycle();
