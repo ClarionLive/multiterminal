@@ -739,11 +739,36 @@ namespace MultiTerminal.Services
             if (!json.StartsWith("{"))
                 return null;
 
+            try
+            {
+                return ParseProjectObject(json);
+            }
+            catch (FormatException ex)
+            {
+                // Malformed (task 9f95ab0c): null, never a half-filled Project carrying an id read from garbage.
+                System.Diagnostics.Debug.WriteLine($"[ProjectService] Malformed project.json: {ex.Message}");
+                return null;
+            }
+        }
+
+        // Every loop in this parser family must advance pos on each iteration. One that cannot (a token it
+        // has no rule for) throws instead of spinning: `{ this is not json ]]` hung the UI thread forever
+        // (task 9f95ab0c). Throwing rather than returning stops an outer loop from resuming at the bad
+        // token: `{"prompts":[{{}}]}` would otherwise be accepted as a half-read project.
+        private static void RequireProgress(int before, int pos)
+        {
+            if (pos == before)
+                throw new FormatException("project.json is malformed at offset " + pos);
+        }
+
+        private Project ParseProjectObject(string json)
+        {
             var project = new Project();
             int pos = 1;
 
             while (pos < json.Length && json[pos] != '}')
             {
+                int iterationStart = pos;
                 SkipWhitespace(json, ref pos);
                 if (pos >= json.Length || json[pos] == '}')
                     break;
@@ -820,7 +845,12 @@ namespace MultiTerminal.Services
                 SkipWhitespace(json, ref pos);
                 if (pos < json.Length && json[pos] == ',')
                     pos++;
+                RequireProgress(iterationStart, pos);
             }
+
+            // Ran off the end without the closing brace: truncated, e.g. `{"id":"abc"`.
+            if (pos >= json.Length)
+                throw new FormatException("project.json has no closing brace");
 
             return project;
         }
@@ -837,6 +867,7 @@ namespace MultiTerminal.Services
 
             while (pos < json.Length)
             {
+                int iterationStart = pos;
                 SkipWhitespace(json, ref pos);
                 if (pos >= json.Length || json[pos] == ']')
                     break;
@@ -851,6 +882,7 @@ namespace MultiTerminal.Services
                 SkipWhitespace(json, ref pos);
                 if (pos < json.Length && json[pos] == ',')
                     pos++;
+                RequireProgress(iterationStart, pos);
             }
 
             if (pos < json.Length && json[pos] == ']')
@@ -869,6 +901,7 @@ namespace MultiTerminal.Services
 
             while (pos < json.Length && json[pos] != '}')
             {
+                int iterationStart = pos;
                 SkipWhitespace(json, ref pos);
                 if (pos >= json.Length || json[pos] == '}')
                     break;
@@ -914,6 +947,7 @@ namespace MultiTerminal.Services
                 SkipWhitespace(json, ref pos);
                 if (pos < json.Length && json[pos] == ',')
                     pos++;
+                RequireProgress(iterationStart, pos);
             }
 
             if (pos < json.Length && json[pos] == '}')
@@ -937,9 +971,15 @@ namespace MultiTerminal.Services
 
             while (pos < json.Length && json[pos] != '}')
             {
+                int iterationStart = pos;
                 SkipWhitespace(json, ref pos);
                 if (pos >= json.Length || json[pos] == '}')
                     break;
+
+                // Unlike the other object loops, the else-branch below skips whatever follows a missing
+                // key, so `{"team":{x}}` advanced past the garbage and parsed as valid. Demand a real key.
+                if (json[pos] != '"')
+                    throw new FormatException("project.json team object has a non-string key at offset " + pos);
 
                 string key = ParseJsonString(json, ref pos);
                 SkipWhitespace(json, ref pos);
@@ -949,7 +989,10 @@ namespace MultiTerminal.Services
 
                 SkipWhitespace(json, ref pos);
 
-                if (key != null && key.ToLowerInvariant() == "agents")
+                // ParseStringArray returns without advancing on anything but '[', which would leave the value
+                // to be read as the next key and trip the quoted-key check above. A non-array agents value
+                // (null, a number, an object) is valid JSON and loads as an empty team, as it always did.
+                if (key != null && key.ToLowerInvariant() == "agents" && pos < json.Length && json[pos] == '[')
                 {
                     agents = ParseStringArray(json, ref pos);
                 }
@@ -961,6 +1004,7 @@ namespace MultiTerminal.Services
                 SkipWhitespace(json, ref pos);
                 if (pos < json.Length && json[pos] == ',')
                     pos++;
+                RequireProgress(iterationStart, pos);
             }
 
             if (pos < json.Length && json[pos] == '}')
@@ -981,6 +1025,7 @@ namespace MultiTerminal.Services
 
             while (pos < json.Length)
             {
+                int iterationStart = pos;
                 SkipWhitespace(json, ref pos);
                 if (pos >= json.Length || json[pos] == ']')
                     break;
@@ -1001,6 +1046,7 @@ namespace MultiTerminal.Services
                 SkipWhitespace(json, ref pos);
                 if (pos < json.Length && json[pos] == ',')
                     pos++;
+                RequireProgress(iterationStart, pos);
             }
 
             if (pos < json.Length && json[pos] == ']')
@@ -1103,49 +1149,29 @@ namespace MultiTerminal.Services
             {
                 ParseJsonString(json, ref pos);
             }
-            else if (c == '{')
+            else if (c == '{' || c == '[')
             {
-                int depth = 1;
-                pos++;
-                while (pos < json.Length && depth > 0)
+                // One stack of expected closers, not a depth count per bracket kind: counting only '['
+                // walked `[{]` as balanced and let `{"hooks":[{]}` parse as a valid project (task 9f95ab0c).
+                var closers = new Stack<char>();
+                while (pos < json.Length)
                 {
-                    if (json[pos] == '{')
+                    char ch = json[pos];
+                    if (ch == '{' || ch == '[')
                     {
-                        depth++;
+                        closers.Push(ch == '{' ? '}' : ']');
                         pos++;
                     }
-                    else if (json[pos] == '}')
+                    else if (ch == '}' || ch == ']')
                     {
-                        depth--;
+                        if (ch != closers.Peek())
+                            throw new FormatException("project.json has mismatched brackets at offset " + pos);
+                        closers.Pop();
                         pos++;
+                        if (closers.Count == 0)
+                            break;
                     }
-                    else if (json[pos] == '"')
-                    {
-                        ParseJsonString(json, ref pos);
-                    }
-                    else
-                    {
-                        pos++;
-                    }
-                }
-            }
-            else if (c == '[')
-            {
-                int depth = 1;
-                pos++;
-                while (pos < json.Length && depth > 0)
-                {
-                    if (json[pos] == '[')
-                    {
-                        depth++;
-                        pos++;
-                    }
-                    else if (json[pos] == ']')
-                    {
-                        depth--;
-                        pos++;
-                    }
-                    else if (json[pos] == '"')
+                    else if (ch == '"')
                     {
                         ParseJsonString(json, ref pos);
                     }
