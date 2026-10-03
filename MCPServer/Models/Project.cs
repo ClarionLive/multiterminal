@@ -65,6 +65,12 @@ namespace MultiTerminal.MCPServer.Models
         public string Error { get; set; }
 
         /// <summary>
+        /// The id of the project already at the requested folder (task 9f95ab0c): set on the refusal
+        /// when a create targets an occupied folder, and on the adopt result of allowReuseExisting.
+        /// </summary>
+        public string ExistingProjectId { get; set; }
+
+        /// <summary>
         /// The rich app-level Project (with all enhanced columns: TeamLead, DefaultTerminal,
         /// ProjectType, etc.) populated when CreateProject succeeds. Used by callers that
         /// need the full Project object for downstream work (e.g., MainForm terminal launch

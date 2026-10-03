@@ -6008,9 +6008,15 @@ namespace MultiTerminal.MCPServer.Services
         /// ProjectService.SaveProject) AND the portable .claude/project.json, fires
         /// ProjectsUpdated, and records a "project created" activity event.
         ///
-        /// Duplicate detection: if allowReuseExisting=false (the default for CREATE
-        /// intent), an existing .claude/project.json at the path returns a clean error.
-        /// Set allowReuseExisting=true to preserve the legacy sync-existing-by-ID behavior.
+        /// Duplicate detection (task 9f95ab0c): a folder already holds a project when it has a
+        /// .claude/project.json OR a database row points at it (normalized path, see
+        /// <see cref="FindExistingProjectAtPath"/>). With allowReuseExisting=false (the default, and what
+        /// the New Project dialog and POST /api/projects use) that is a clean error carrying
+        /// <see cref="CreateProjectResult.ExistingProjectId"/>. With allowReuseExisting=true the existing
+        /// project is ADOPTED — registered with the broker under its own id — and its name, description,
+        /// createdAt and team lead are never overwritten; <paramref name="name"/> and
+        /// <paramref name="description"/> are ignored for it. Renaming is a separate, explicit
+        /// <see cref="UpdateProject"/>.
         /// </summary>
         public CreateProjectResult CreateProject(
             string name,
@@ -6028,36 +6034,24 @@ namespace MultiTerminal.MCPServer.Services
                 return new CreateProjectResult { Success = false, Error = "Project name is required" };
             }
 
-            // Check if a .claude/project.json already exists at the path
-            string existingProjectId = null;
-            if (!string.IsNullOrEmpty(path) && ProjectService != null)
+            var existing = FindExistingProjectAtPath(path);
+            if (existing.Exists)
             {
-                try
+                if (!allowReuseExisting)
                 {
-                    var existing = ProjectService.LoadProject(path);
-                    if (existing != null)
+                    return new CreateProjectResult
                     {
-                        if (!allowReuseExisting)
-                        {
-                            return new CreateProjectResult
-                            {
-                                Success = false,
-                                Error = $"A project already exists at path '{path}' (id: {existing.Id}). Use update_project to modify it.",
-                            };
-                        }
-                        existingProjectId = existing.Id;
-                        LogInfo($"Found existing project at {path}, syncing to database (ID: {existingProjectId})");
-                    }
+                        Success = false,
+                        ExistingProjectId = existing.ProjectId,
+                        Error = $"A project already exists at path '{path}' (id: {existing.ProjectId}, name: '{existing.ProjectName}'). Use update_project to modify it.",
+                    };
                 }
-                catch
-                {
-                    // No existing project, will create new
-                }
+                return AdoptExistingProject(existing, createdBy);
             }
 
             var project = new Project
             {
-                Id = existingProjectId ?? Guid.NewGuid().ToString("N").Substring(0, 8),
+                Id = Guid.NewGuid().ToString("N").Substring(0, 8),
                 Name = name,
                 Description = description,
                 CreatedBy = createdBy,
@@ -6114,6 +6108,114 @@ namespace MultiTerminal.MCPServer.Services
                 Success = true,
                 ProjectId = project.Id,
                 CreatedFileProject = fileProject,
+            };
+        }
+
+        /// <summary>
+        /// The project already living at <paramref name="path"/>, if any (task 9f95ab0c): a
+        /// .claude/project.json in the folder, or a database row whose path is the same folder
+        /// (full path, trailing separators ignored, case-insensitive). A worktree folder is checked
+        /// as its repo root, because that is where <see cref="Services.ProjectService.SaveProject"/>
+        /// would actually put the project (task 19d0d867).
+        /// </summary>
+        public ExistingProjectMatch FindExistingProjectAtPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return ExistingProjectMatch.None;
+
+            string folder = WorktreeLayout.TryResolveStableProjectPath(path, null, out var stable) ? stable : path;
+
+            MultiTerminal.Models.Project projectJson = null;
+            try
+            {
+                projectJson = ProjectService?.LoadProject(folder);
+            }
+            catch (Exception ex)
+            {
+                LogError($"FindExistingProjectAtPath: reading project.json at '{folder}' failed: {ex.Message}");
+            }
+
+            List<(string Id, string Name, string Path)> rows;
+            try
+            {
+                rows = _projectDb.GetAllProjects().Select(p => (p.Id, p.Name, p.Path)).ToList();
+            }
+            catch (Exception ex)
+            {
+                LogError($"FindExistingProjectAtPath: database read failed, using the cache: {ex.Message}");
+                rows = _projects.Values.Select(p => (p.Id, p.Name, p.Path)).ToList();
+            }
+
+            return ExistingProjectDetector.Detect(folder, projectJson, rows);
+        }
+
+        /// <summary>
+        /// The allowReuseExisting arm of <see cref="CreateProject"/>: make sure the broker and the
+        /// database know the project already at the folder, under its own id, WITHOUT writing over
+        /// any of its fields. A folder with only a project.json gets a database row copied from the
+        /// file; a folder that already has a row is left exactly as it is.
+        /// </summary>
+        private CreateProjectResult AdoptExistingProject(ExistingProjectMatch existing, string createdBy)
+        {
+            string id = existing.ProjectId;
+
+            MultiTerminal.Models.Project fileProject = null;
+            try
+            {
+                fileProject = ProjectService?.LoadProject(existing.ProjectPath);
+            }
+            catch (Exception ex)
+            {
+                LogError($"AdoptExistingProject: reading project.json at '{existing.ProjectPath}' failed: {ex.Message}");
+            }
+            if (fileProject != null && !string.Equals(fileProject.Id, id, StringComparison.Ordinal))
+                fileProject = null;
+
+            var rich = _projectDb.GetRichProject(id);
+            if (rich == null && !_projects.ContainsKey(id))
+            {
+                if (fileProject == null)
+                    return new CreateProjectResult { Success = false, ExistingProjectId = id, Error = $"Project {id} at '{existing.ProjectPath}' could not be read." };
+
+                var row = new Project
+                {
+                    Id = id,
+                    Name = string.IsNullOrWhiteSpace(fileProject.Name) ? System.IO.Path.GetFileName(existing.ProjectPath) : fileProject.Name,
+                    Description = fileProject.Description,
+                    CreatedBy = string.IsNullOrEmpty(fileProject.CreatedBy) ? createdBy : fileProject.CreatedBy,
+                    CreatedAt = fileProject.CreatedAt == default ? DateTime.UtcNow : fileProject.CreatedAt,
+                    Path = fileProject.Path,
+                };
+                try
+                {
+                    InsertProjectInternal(row);
+                    _projectDb.SaveRichProject(fileProject); // brand-new row: fills the rich columns from the file
+                }
+                catch (Exception ex)
+                {
+                    LogError($"AdoptExistingProject: failed to register {id}: {ex.Message}");
+                    return new CreateProjectResult { Success = false, ExistingProjectId = id, Error = $"Failed to persist project: {ex.Message}" };
+                }
+
+                BroadcastProjectUpdate();
+                RecordActivity(new ActivityEvent
+                {
+                    Terminal = createdBy ?? "System",
+                    Type = "project",
+                    Action = "registered",
+                    Content = $"Registered existing project: {row.Name}",
+                    RelatedId = id
+                });
+                LogInfo($"Registered existing project at {existing.ProjectPath} (ID: {id}) without changing it");
+                rich = _projectDb.GetRichProject(id);
+            }
+
+            return new CreateProjectResult
+            {
+                Success = true,
+                ProjectId = id,
+                ExistingProjectId = id,
+                CreatedFileProject = rich ?? fileProject,
             };
         }
 
@@ -6285,6 +6387,10 @@ namespace MultiTerminal.MCPServer.Services
                 LogError($"UpdateProject: persist failed for {projectId}: {ex.Message}");
                 return new UpdateProjectResult { Success = false, Error = $"Failed to persist project update: {ex.Message}" };
             }
+
+            // The folder's project.json carries the name and description too; a DB-only rename left the
+            // two disagreeing (task 9f95ab0c — Alice had to hand-edit the file after restoring TestB).
+            SyncProjectJsonNameAndDescription(projectId, name, description);
 
             BroadcastProjectUpdate();
 
@@ -6470,6 +6576,24 @@ namespace MultiTerminal.MCPServer.Services
             _projectDb.SaveProject(updated);   // persist FIRST — if this throws, the cache stays coherent
             _projects[projectId] = updated;    // swap into cache only after the DB write succeeded
             return updated;
+        }
+
+        // Best-effort: the database row is the record, so a file write failure is logged, not returned.
+        private void SyncProjectJsonNameAndDescription(string projectId, string name, string description)
+        {
+            if (ProjectService == null || (string.IsNullOrWhiteSpace(name) && description == null))
+                return;
+            if (!_projects.TryGetValue(projectId, out var cached) || string.IsNullOrEmpty(cached.Path))
+                return;
+
+            try
+            {
+                ProjectService.UpdateProjectJsonNameAndDescription(cached.Path, projectId, name, description);
+            }
+            catch (Exception ex)
+            {
+                LogError($"UpdateProject: project.json sync failed for {projectId} at '{cached.Path}': {ex.Message}");
+            }
         }
 
         private Project InsertProjectInternal(Project project)

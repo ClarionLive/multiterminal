@@ -4,6 +4,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Interop;
 using MultiTerminal.Models;
+using MultiTerminal.Services;
 
 
 namespace MultiTerminal.Dialogs
@@ -17,6 +18,7 @@ namespace MultiTerminal.Dialogs
     public partial class NewProjectWpfDialog : Window
     {
         private readonly List<(string Id, string DisplayName, string AvatarUrl)> _teamLeadProfiles;
+        private readonly Func<string, ExistingProjectMatch> _findExistingProject;
 
         /// <summary>Project name entered by the user.</summary>
         public string ProjectName { get; private set; }
@@ -38,14 +40,27 @@ namespace MultiTerminal.Dialogs
         /// <summary>The Quiet start choice for the new project (GitHub #34).</summary>
         public bool SelectedQuietStart { get; private set; }
 
+        /// <summary>
+        /// What to do once the dialog closes with true (task 9f95ab0c): create a new project, or —
+        /// when the folder already held one — open it or rename it. Never CreateNew for an occupied folder.
+        /// </summary>
+        public NewProjectFolderDecision Decision { get; private set; } = NewProjectFolderDecision.CreateNew;
+
+        /// <summary>The project already at <see cref="ProjectFolder"/>, or null when the folder was free.</summary>
+        public ExistingProjectMatch ExistingProject { get; private set; }
+
         /// <param name="initialQuietStart">Pre-fills Quiet start. The caller passes the value chosen
         /// for the last project created here (Owner decision, task e0fa9d90).</param>
+        /// <param name="findExistingProject">Reports the project already at a folder (task 9f95ab0c).
+        /// When it finds one, Create asks what to do instead of creating.</param>
         public NewProjectWpfDialog(
             bool isDark,
             List<(string Id, string DisplayName, string AvatarUrl)> teamLeadProfiles,
-            bool initialQuietStart = false)
+            bool initialQuietStart = false,
+            Func<string, ExistingProjectMatch> findExistingProject = null)
         {
             _teamLeadProfiles = teamLeadProfiles ?? new List<(string, string, string)>();
+            _findExistingProject = findExistingProject;
 
             InitializeComponent();
 
@@ -181,6 +196,25 @@ namespace MultiTerminal.Dialogs
                 return;
             }
 
+            // A folder that already holds a project is never created over (task 9f95ab0c, Owner
+            // decision 2026-10-02): ask, offering exactly open / rename / different folder / cancel.
+            var existing = _findExistingProject?.Invoke(folder) ?? ExistingProjectMatch.None;
+            var decision = ExistingProjectDetector.Decide(existing, m => AskAboutExistingProject(m, name));
+            if (decision == NewProjectFolderDecision.ChooseDifferentFolder)
+            {
+                ShowError($"That folder already has the project '{existing.ProjectName}'. Choose a different folder.");
+                FolderBox.Focus();
+                FolderBox.SelectAll();
+                return;
+            }
+            if (decision == NewProjectFolderDecision.Cancel)
+            {
+                DialogResult = false;
+                return;
+            }
+
+            Decision = decision;
+            ExistingProject = existing.Exists ? existing : null;
             ProjectName = name;
             ProjectFolder = folder;
 
@@ -198,6 +232,46 @@ namespace MultiTerminal.Dialogs
             SelectedQuietStart = QuietStartCheck.IsChecked == true;
 
             DialogResult = true;
+        }
+
+        private NewProjectFolderDecision AskAboutExistingProject(ExistingProjectMatch existing, string newName)
+        {
+            // Native TaskDialog, the same confirm style as TaskHudRenderer's re-assign prompt.
+            var open = new System.Windows.Forms.TaskDialogCommandLinkButton(
+                "Open existing project",
+                $"Launch '{existing.ProjectName}' as it is.");
+            var rename = new System.Windows.Forms.TaskDialogCommandLinkButton(
+                "Rename existing",
+                $"Rename '{existing.ProjectName}' to '{newName}', then launch it. Its id, tasks, team lead, description and creation date are kept.");
+            var differentFolder = new System.Windows.Forms.TaskDialogCommandLinkButton(
+                "Choose a different folder",
+                "Go back to New Project and pick another folder.");
+            var cancel = System.Windows.Forms.TaskDialogButton.Cancel;
+
+            string text = $"{existing.ProjectPath}\nProject id: {existing.ProjectId}";
+            if (existing.DatabaseIds.Count > 1)
+                text += $"\n\n{existing.DatabaseIds.Count} projects in MultiTerminal point at this folder ({string.Join(", ", existing.DatabaseIds)}). Open and Rename act on {existing.ProjectId}.";
+            text += "\n\nA second project on the same folder is not supported.";
+
+            var page = new System.Windows.Forms.TaskDialogPage
+            {
+                Caption = "Project already exists",
+                Heading = $"This folder already has a project: {existing.ProjectName}",
+                Text = text,
+                Icon = System.Windows.Forms.TaskDialogIcon.Warning,
+                AllowCancel = true,
+                DefaultButton = cancel,
+            };
+            page.Buttons.Add(open);
+            page.Buttons.Add(rename);
+            page.Buttons.Add(differentFolder);
+            page.Buttons.Add(cancel);
+
+            var clicked = System.Windows.Forms.TaskDialog.ShowDialog(new WindowInteropHelper(this).Handle, page);
+            if (clicked == open) return NewProjectFolderDecision.OpenExisting;
+            if (clicked == rename) return NewProjectFolderDecision.RenameExisting;
+            if (clicked == differentFolder) return NewProjectFolderDecision.ChooseDifferentFolder;
+            return NewProjectFolderDecision.Cancel;
         }
 
         private void ShowError(string message)

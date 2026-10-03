@@ -366,6 +366,32 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Rewrites the name and/or description in a folder's .claude/project.json, and nothing else
+        /// (task 9f95ab0c: a rename must reach the file as well as the database row). Writes the file
+        /// only, like <see cref="ToggleProjectPinned"/> — NOT through <see cref="SaveProject"/>, whose
+        /// SaveRichProject upsert would push the file's stale isPinned and its unserialized
+        /// gitAutoCommit back over the database. Returns false, writing nothing, when the folder has
+        /// no project.json or the file answers to a different id.
+        /// </summary>
+        public bool UpdateProjectJsonNameAndDescription(string projectPath, string projectId, string name, string description)
+        {
+            var fileProject = LoadProject(projectPath);
+            if (fileProject == null || !string.Equals(fileProject.Id, projectId, StringComparison.Ordinal))
+                return false;
+
+            if (!string.IsNullOrWhiteSpace(name))
+                fileProject.Name = name;
+            if (description != null)
+                fileProject.Description = description;
+
+            // CA3003: projectPath is an app-managed project root from the database, not web input.
+#pragma warning disable CA3003
+            File.WriteAllText(GetProjectConfigPath(projectPath), SerializeProjectJson(fileProject));
+#pragma warning restore CA3003
+            return true;
+        }
+
+        /// <summary>
         /// Sets a project's default terminal CLI. Writes SQLite AND the portable
         /// project.json, mirroring <see cref="ToggleProjectPinned"/>. DefaultTerminal is
         /// serialized to project.json (unlike Status), so a DB-only write would be silently
