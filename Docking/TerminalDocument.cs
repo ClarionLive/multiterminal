@@ -80,8 +80,9 @@ namespace MultiTerminal.Docking
         // longer claim the identity and lock out the real owner. Fresh per instance (incl.
         // restore/re-adopt), and since task 19a26090 fresh per LAUNCH too: RotateLaunchNonce
         // replaces it whenever a launch ends, so a process left over from an earlier launch in
-        // this reused pane no longer holds proof. Not readonly for that reason only.
-        private volatile string _launchNonce = Guid.NewGuid().ToString("N");
+        // this reused pane no longer holds proof. The nonce and its rotation live in
+        // PaneLaunchLifecycle so they are unit-testable (task 5e1dea4c).
+        private readonly PaneLaunchLifecycle _launch = new PaneLaunchLifecycle();
 
         // Wall-clock (Unix ms) this TerminalDocument instance was constructed. Used as
         // the freshness floor for the statusline name-glob fallback (task 1ba59334): a
@@ -125,7 +126,7 @@ namespace MultiTerminal.Docking
         /// Empty is never produced here (always a fresh GUID), but downstream gates fail-open on
         /// an empty seed so session-restore / legacy / non-lockstep-deploy paths keep working.
         /// </summary>
-        public string LaunchNonce => _launchNonce;
+        public string LaunchNonce => _launch.LaunchNonce;
 
         /// <summary>
         /// Retires this pane's launch nonce and mints a new one. Called when a launch ENDS — the
@@ -147,7 +148,7 @@ namespace MultiTerminal.Docking
         /// </summary>
         internal void RotateLaunchNonce()
         {
-            _launchNonce = Guid.NewGuid().ToString("N");
+            _launch.EndLaunch();
             _debugLogService?.Trace("TerminalDocument", $"DocId='{_docId}' launch nonce rotated (launch ended; task 19a26090).");
         }
 
@@ -539,6 +540,10 @@ namespace MultiTerminal.Docking
         /// project to show, so the tab reads <c>Project</c> rather than <c>Unassigned - Project</c>
         /// (GH #26). With no project it stays, since it is then the only text the tab has.</para>
         ///
+        /// <para>A no-lead project now launches under the project name itself ("TestB", "TestB-2", task
+        /// 6a8d029f), so when the agent name IS that project identity the project part is dropped too:
+        /// the tab reads <c>TestB-2</c>, not <c>TestB-2 - TestB</c>.</para>
+        ///
         /// <para>Pure and static so the composition is testable without a WinForms document.</para>
         /// </summary>
         internal static string ComposeTabTitle(string agentName, string projectName, MultiTerminal.Terminal.TerminalRole role)
@@ -548,7 +553,9 @@ namespace MultiTerminal.Docking
                 ? agentName
                 : isPlaceholder
                     ? projectName
-                    : $"{agentName} - {projectName}";
+                    : MultiTerminal.Services.ProjectLaunchIdentity.IsProjectIdentity(agentName, projectName)
+                        ? agentName
+                        : $"{agentName} - {projectName}";
 
             return title + MultiTerminal.Terminal.TerminalRoles.TabSuffix(role);
         }
@@ -1451,12 +1458,7 @@ namespace MultiTerminal.Docking
             WriteFallbackStatusline(terminalName, workingDirectory);
 
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"Calling _terminal.Start...");
-            // SWAPDIAG (task ab32897c): records which TerminalDocument (_docId/instance) sent
-            // which docId to its own child shell, plus the launch name/dir. Cross-reference with
-            // the SWAPDIAG REGISTER lines to detect a doc↔docId cross. Remove after root cause.
-            _debugLogService?.Info("SWAPDIAG",
-                $"LAUNCH inst={InstanceId} docId={_docId} name='{terminalName}' projectId='{projectId}' dir='{workingDirectory}'");
-            _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, _launchNonce);
+            _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, _launch.LaunchNonce);
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"_terminal.Start returned");
 
             // Update status bar after terminal starts
@@ -2440,7 +2442,17 @@ namespace MultiTerminal.Docking
             // Paste — through the same path as Ctrl+V and right-click (bracketed paste via
             // xterm.js; a bitmap is pasted as a saved PNG's path). GH #24.
             var pasteItem = new ToolStripMenuItem("Paste");
-            pasteItem.Enabled = Clipboard.ContainsText() || Clipboard.ContainsImage();
+            try
+            {
+                pasteItem.Enabled = Clipboard.ContainsText() || Clipboard.ContainsImage();
+            }
+            catch (System.Runtime.InteropServices.ExternalException ex)
+            {
+                // Clipboard held by another process. Offer Paste anyway (the paste path reports its
+                // own failure) rather than throw and show no menu at all (11edbec4).
+                _debugLogService?.Trace("TerminalDocument", "Clipboard probe failed, Paste left enabled: " + ex.Message);
+                pasteItem.Enabled = true;
+            }
             pasteItem.Click += (s, args) => _terminal.PasteFromClipboard();
             menu.Items.Add(pasteItem);
 
@@ -2487,18 +2499,25 @@ namespace MultiTerminal.Docking
                 menu.Items.Add(launchAsMenu);
             }
 
-            // Tell xterm.js the menu is up, so an Esc pressed to dismiss it is swallowed rather
-            // than reaching the app as an abort (GH #24). Cleared however the menu closes.
+            // Tell the renderer and xterm.js the menu is up, so an Esc pressed to dismiss it closes
+            // it and is swallowed rather than reaching the app as an abort (GH #24, 11edbec4).
+            // Cleared however the menu closes — but only by the CURRENT menu, so a stale menu's
+            // Closed can never mark a newer menu closed while it is still up. (A menu still up when
+            // a new one is requested is closed below, before this one is stored and flagged.)
+            menu.Closing += (s, args) =>
+                _debugLogService?.Trace("TerminalDocument", "Terminal menu closing, reason: " + args.CloseReason);
             menu.Closed += (s, args) =>
             {
-                _terminal?.SetContextMenuOpen(false);
                 if (ReferenceEquals(_currentContextMenu, menu))
                 {
                     _currentContextMenu = null;
+                    _terminal?.SetContextMenuOpen(false);
                 }
             };
 
-            // Show menu (store reference so it can be closed on terminal click)
+            // Show menu (store reference so it can be closed on terminal click or Esc). A menu
+            // already up is closed first, so its Closed clears the flag before this one sets it.
+            _currentContextMenu?.Close();
             _currentContextMenu = menu;
             _terminal.SetContextMenuOpen(true);
             menu.Show(_terminal, e.Location);
@@ -2506,6 +2525,7 @@ namespace MultiTerminal.Docking
 
         private void OnTerminalContextMenuDismissRequested(object sender, EventArgs e)
         {
+            _debugLogService?.Trace("TerminalDocument", "Terminal menu dismiss requested (Esc), menu open: " + (_currentContextMenu != null));
             _currentContextMenu?.Close();
         }
 
@@ -3193,9 +3213,8 @@ namespace MultiTerminal.Docking
             if (string.IsNullOrEmpty(s)) return false;
             foreach (char c in s)
             {
-                bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-                    || (c >= '0' && c <= '9') || c == '-' || c == '_';
-                if (!ok) return false;
+                // The same alphabet a project-derived identity is built from (6a8d029f).
+                if (!MultiTerminal.Services.ProjectLaunchIdentity.IsIdentityChar(c)) return false;
             }
             return true;
         }

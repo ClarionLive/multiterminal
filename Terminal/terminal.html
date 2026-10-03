@@ -158,12 +158,38 @@
             term.attachCustomKeyEventHandler((event) => {
                 // ESC while the host's Shift+Right-click menu is open dismisses the menu and is
                 // swallowed (GH #24: the reporter's Esc, meant for the menu, reached the app as an
-                // abort — the key landed here, not in the ContextMenuStrip). Every event type is
-                // swallowed, so neither keydown nor keyup leaks through.
-                if (contextMenuOpen && event.key === 'Escape') {
-                    if (event.type === 'keydown') {
+                // abort — the key lands in WebView2, never in the ContextMenuStrip). Every event
+                // type is swallowed, and so is auto-repeat until the key is released, so neither
+                // keydown, a repeat nor keyup leaks through. This is the SECOND line: the host
+                // normally handles Esc first (WebViewTerminalRenderer.OnWebViewKeyDown) and this
+                // page never sees it (11edbec4). A non-repeat keydown with the menu closed is a NEW
+                // press: the dismissing press's keyup was lost, so it ends the swallow and reaches
+                // the app (so does window blur, below).
+                if (event.key === 'Escape' && swallowEscapeUntilKeyUp && !contextMenuOpen &&
+                        event.type === 'keydown' && !event.repeat) {
+                    swallowEscapeUntilKeyUp = false;
+                }
+                if (event.key === 'Escape' && (contextMenuOpen || swallowEscapeUntilKeyUp)) {
+                    if (event.type === 'keydown' && contextMenuOpen) {
                         contextMenuOpen = false;
+                        swallowEscapeUntilKeyUp = true;
                         sendToHost({ type: 'dismissContextMenu' });
+                    } else if (event.type === 'keyup') {
+                        swallowEscapeUntilKeyUp = false;
+                    }
+                    return false;
+                }
+
+                // Shift+F10 and the Apps/Menu key open the host menu from the keyboard (11edbec4).
+                // They must be taken here, before xterm: xterm 6.0.0 maps Shift+F10 to ESC[21;2~
+                // (Keyboard.ts, keyCode 121), sends that to the app and preventDefaults the keydown,
+                // so Chromium never raised 'contextmenu' for it. Every event type is swallowed and
+                // default-prevented, so nothing reaches the app and the browser's own keyboard
+                // 'contextmenu' is suppressed (the listener below also dedupes it). Never pastes.
+                if (isKeyboardMenuKey(event)) {
+                    event.preventDefault();
+                    if (event.type === 'keydown' && !event.repeat) {
+                        openContextMenuFromKeyboard();
                     }
                     return false;
                 }
@@ -367,13 +393,16 @@
             // Stopping propagation here also skips the bubble-phase 'terminalclick' listener
             // further down, so the right mousedown sends it itself (it closes an open menu).
             //
-            // rightButtonPressed marks a contextmenu as mouse-driven. The Apps/Menu key and
-            // Shift+F10 fire contextmenu with no mousedown before it; those open the menu and must
-            // never paste the clipboard unasked (in cmd.exe a multi-line paste executes).
+            // rightButtonPressed marks a contextmenu as mouse-driven. A contextmenu with no right
+            // mousedown before it (a touch long-press, or a keyboard contextmenu the key handler
+            // did not take) opens the menu and must never paste the clipboard unasked (in cmd.exe
+            // a multi-line paste executes). Shift+F10 and the Apps key do NOT come through here:
+            // the custom key handler above opens the menu for them and suppresses the browser's
+            // own contextmenu, and a keyboard contextmenu that still arrives is dropped below.
             let rightButtonPressed = false;
-            // A stale flag must not turn a later Apps-key/Shift+F10 contextmenu into a paste:
-            // clear it on any non-modifier keydown (modifiers are skipped because a held Ctrl or
-            // Shift auto-repeats keydown between the mousedown and its contextmenu) and on blur.
+            // A stale flag must not turn a later non-mouse contextmenu into a paste: clear it on
+            // any non-modifier keydown (modifiers are skipped because a held Ctrl or Shift
+            // auto-repeats keydown between the mousedown and its contextmenu) and on blur.
             window.addEventListener('keydown', (e) => {
                 if (e.key !== 'Shift' && e.key !== 'Control' && e.key !== 'Alt' && e.key !== 'Meta') {
                     rightButtonPressed = false;
@@ -381,6 +410,7 @@
             }, true);
             window.addEventListener('blur', () => {
                 rightButtonPressed = false;
+                swallowEscapeUntilKeyUp = false; // the dismissing Esc's keyup will land elsewhere
             });
             container.addEventListener('mousedown', (e) => {
                 if (e.button === 2) {
@@ -402,13 +432,15 @@
                 const fromMouse = rightButtonPressed;
                 rightButtonPressed = false;
 
+                if (!fromMouse && (contextMenuOpen ||
+                        performance.now() - keyboardMenuRequestedAt < KEYBOARD_MENU_DEDUPE_MS)) {
+                    // The browser's own contextmenu for a menu key the key handler already
+                    // acted on: opening again would show a second menu.
+                    return;
+                }
+
                 if (e.shiftKey || !fromMouse) {
-                    sendToHost({
-                        type: 'contextmenu',
-                        x: e.clientX,
-                        y: e.clientY,
-                        selectedText: selectedText
-                    });
+                    requestContextMenu(e.clientX, e.clientY, selectedText);
                     return;
                 }
 
@@ -450,8 +482,62 @@
             }
         }
 
-        // True while the host's Shift+Right-click menu is showing ("contextMenu:1"/"contextMenu:0").
+        // True while the host's terminal menu is showing. Set here as soon as the page asks for a
+        // menu, so an Esc pressed before the host's "contextMenu:1" arrives is still swallowed;
+        // the host's "contextMenu:1"/"contextMenu:0" then keep it in step however the menu closes.
         let contextMenuOpen = false;
+        // Set when an Esc dismissed the menu: its auto-repeats and its keyup are swallowed too.
+        // (Both flags are mirrored host-side in WebViewTerminalRenderer.)
+        let swallowEscapeUntilKeyUp = false;
+        // When the key handler last opened the menu from the keyboard (performance.now()).
+        let keyboardMenuRequestedAt = -Infinity;
+        const KEYBOARD_MENU_DEDUPE_MS = 1000;
+
+        // Shift+F10, or the Apps/Menu key (event.key 'ContextMenu'), with no Ctrl/Alt/Meta.
+        function isKeyboardMenuKey(event) {
+            if (event.ctrlKey || event.altKey || event.metaKey) return false;
+            return event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey);
+        }
+
+        // Every menu request goes through here — mouse (Shift+Right-click) and keyboard alike.
+        function requestContextMenu(x, y, selectedText) {
+            contextMenuOpen = true;
+            sendToHost({ type: 'contextmenu', x: x, y: y, selectedText: selectedText });
+        }
+
+        function openContextMenuFromKeyboard() {
+            const pos = keyboardMenuPosition();
+            keyboardMenuRequestedAt = performance.now();
+            requestContextMenu(pos.x, pos.y, (term && term.hasSelection()) ? term.getSelection() : '');
+        }
+
+        // Just below and right of the cursor cell when the cursor is on screen, else the centre
+        // of the terminal. Whole CSS pixels, like the mouse path's clientX/clientY (the host's
+        // message parser reads unsigned integers only).
+        function keyboardMenuPosition() {
+            const el = document.querySelector('#terminal-container .xterm-screen') ||
+                document.getElementById('terminal-container');
+            const rect = el.getBoundingClientRect();
+            const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(v)));
+            const left = Math.max(0, rect.left);
+            const top = Math.max(0, rect.top);
+            if (term && term.cols > 0 && term.rows > 0) {
+                const buf = term.buffer.active;
+                const row = buf.baseY + buf.cursorY - buf.viewportY;
+                if (row >= 0 && row < term.rows) {
+                    const cellW = rect.width / term.cols;
+                    const cellH = rect.height / term.rows;
+                    return {
+                        x: clamp(rect.left + Math.min(buf.cursorX + 1, term.cols) * cellW, left, left + rect.width),
+                        y: clamp(rect.top + (row + 1) * cellH, top, top + rect.height)
+                    };
+                }
+            }
+            return {
+                x: clamp(rect.left + rect.width / 2, left, left + rect.width),
+                y: clamp(rect.top + rect.height / 2, top, top + rect.height)
+            };
+        }
 
         // Every user paste from the page starts here: Ctrl+V in any case, Ctrl+Shift+V,
         // Shift+Insert, mouse right-click, and — via the capture-phase 'paste' listener — any
@@ -609,6 +695,7 @@
 
                         case 'contextMenu':
                             contextMenuOpen = data === '1';
+                            sendToHost({ type: 'log', level: 'trace', message: 'contextMenu flag from host: ' + data });
                             break;
 
                         case 'scrollToBottom':

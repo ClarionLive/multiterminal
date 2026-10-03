@@ -41,7 +41,8 @@ namespace MultiTerminal.API.Controllers
         /// POST /api/projects — Create a new project.
         /// Body: { name (required), path (required), description, teamLead, defaultTerminal,
         ///         projectType, currentVersion, createdBy }
-        /// Returns: { projectId, name, path } on success, 400 on duplicate path / missing required.
+        /// Returns: { projectId, name, path } on success, 409 when the folder already holds a project
+        /// (.claude/project.json or a database row; the detail names its id), 400 on missing required.
         /// Same shared creation path as the UI "New Project" dialog (MessageBroker.CreateProject).
         /// </summary>
         [HttpPost]
@@ -73,6 +74,10 @@ namespace MultiTerminal.API.Controllers
                 projectType: request.ProjectType,
                 currentVersion: request.CurrentVersion);
 
+            // An occupied folder is a conflict, not a malformed request (task 9f95ab0c). The detail
+            // names the existing id (or says the project.json is unreadable); nothing is reused or overwritten.
+            if (!result.Success && result.FolderOccupied)
+                return Problem(detail: result.Error, statusCode: 409);
             if (!result.Success)
                 return Problem(detail: result.Error ?? "Failed to create project", statusCode: 400);
 

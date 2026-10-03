@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
+using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Models;
 using MultiTerminal.Services;
 using MultiTerminal.Terminal;
@@ -16,6 +17,7 @@ namespace MultiTerminal.Dialogs
     {
         private readonly ProjectService _projectService;
         private readonly ProjectDatabase _projectDatabase;
+        private readonly MessageBroker _broker;
         private readonly TerminalTheme _theme;
         private List<MultiTerminal.Models.Project> _allProjects;
         private List<MultiTerminal.Models.Project> _filteredProjects;
@@ -82,8 +84,11 @@ namespace MultiTerminal.Dialogs
         /// <param name="projectService">The project service for CRUD operations.</param>
         /// <param name="projectDatabase">The project database for rich project data.</param>
         /// <param name="theme">The terminal theme to apply.</param>
-        public ProjectManagerDialog(ProjectService projectService, ProjectDatabase projectDatabase, TerminalTheme theme)
+        /// <param name="broker">Creates new projects through the guarded path (task 9f95ab0c). Without it,
+        /// New Project refuses rather than write an unchecked project.</param>
+        public ProjectManagerDialog(ProjectService projectService, ProjectDatabase projectDatabase, TerminalTheme theme, MessageBroker broker = null)
         {
+            _broker = broker;
             _projectService = projectService ?? throw new ArgumentNullException(nameof(projectService));
             _projectDatabase = projectDatabase ?? throw new ArgumentNullException(nameof(projectDatabase));
             _theme = theme ?? TerminalTheme.Dark;
@@ -238,21 +243,15 @@ namespace MultiTerminal.Dialogs
         {
             using (var dialog = new EditProjectDialog(_projectDatabase))
             {
+                // The project is created (row + .claude/project.json) by the broker before the dialog saves
+                // its rich columns. This replaced a ProjectService.RegisterProject call made AFTER the dialog
+                // closed, which wrote a fresh project.json with a new id over whatever the folder held.
+                dialog.CreateGuard = project => CreateThroughBroker(_broker, project);
+                dialog.CreateRollback = project => RollBackThroughBroker(_broker, project);
                 if (dialog.ShowDialog(this) == DialogResult.OK)
                 {
                     try
                     {
-                        var resultProject = dialog.ResultProject;
-                        if (resultProject != null)
-                        {
-                            // Also register with JSON service for backward compatibility
-                            _projectService.RegisterProject(
-                                resultProject.Path,
-                                resultProject.Name,
-                                resultProject.Description
-                            );
-                        }
-
                         LoadProjects();
                     }
                     catch (Exception ex)
@@ -266,6 +265,40 @@ namespace MultiTerminal.Dialogs
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Creates the Project Manager's new project through <see cref="MessageBroker.CreateProject"/>
+        /// (task 9f95ab0c Run 2, folding in 2e297688): the folder check and the writes run under the
+        /// broker's create lock, and an occupied folder (project.json, unreadable or not, or a registered
+        /// row) is refused with the detector's text. Returns null on success, with the project's Id set to
+        /// the created id; otherwise the refusal. Nothing is written on a refusal.
+        /// </summary>
+        internal static string RollBackThroughBroker(MessageBroker broker, Project project)
+            => broker == null
+                ? "the project service is not available"
+                : broker.UndoProjectCreate(project?.Id);
+
+        /// <summary>
+        /// The guarded create used as EditProjectDialog.CreateGuard; <see cref="RollBackThroughBroker"/> (Run 3)
+        /// is its ID-bound undo, run when the dialog's own rich save fails afterwards.
+        /// </summary>
+        internal static string CreateThroughBroker(MessageBroker broker, Project project)
+        {
+            if (broker == null)
+                return "Projects can't be created here right now (the project service is not available).";
+            if (project == null || string.IsNullOrWhiteSpace(project.Name))
+                return "Please enter a project name.";
+
+            var result = broker.CreateProject(project.Name, project.Description, "project-manager",
+                path: string.IsNullOrWhiteSpace(project.Path) ? null : project.Path,
+                projectType: project.ProjectType,
+                currentVersion: project.CurrentVersion);
+            if (!result.Success)
+                return result.Error ?? "Failed to create project.";
+
+            project.Id = result.ProjectId;
+            return null;
         }
 
         private void OpenButton_Click(object sender, EventArgs e)

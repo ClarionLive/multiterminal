@@ -227,7 +227,35 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Registers a new project (creates .claude/project.json, upserts to SQLite).
+        /// Auto-registers a project discovered in a terminal's working directory by re-saving the folder's
+        /// OWN project.json under its own id. Skipped (returns false) when the file has no id, or when that
+        /// id is already registered at a different folder: the folder is then a copy, clone or move of
+        /// another project, and the re-save would rebind that project's row to this folder
+        /// (task 9f95ab0c Run 2). Returns true when it registered.
+        /// </summary>
+        public bool AutoRegisterDiscoveredProject(string directory, Project discovered)
+        {
+            if (discovered == null || string.IsNullOrEmpty(directory) || string.IsNullOrWhiteSpace(discovered.Id))
+                return false;
+
+            var registered = _projectDb.GetRichProject(discovered.Id);
+            if (registered != null)
+            {
+                // SaveProject stores a worktree folder as its repo root, so compare against that.
+                string folder = WorktreeLayout.TryResolveStableProjectPath(directory, discovered.SourcePath, out var stable) ? stable : directory;
+                if (!ExistingProjectDetector.PathsEqual(registered.Path, folder))
+                    return false;
+            }
+
+            SaveProject(discovered);
+            return true;
+        }
+
+        /// <summary>
+        /// Registers a new project (creates .claude/project.json, upserts to SQLite). Unguarded: it writes a
+        /// fresh project.json (new id) over whatever the folder holds, so nothing in the app calls it any
+        /// more (task 9f95ab0c Run 2 moved the Project Manager to MessageBroker.CreateProject). Create
+        /// projects through the broker, which checks the folder under its create lock.
         /// </summary>
         public Project RegisterProject(string path, string name, string description = null)
         {
@@ -276,6 +304,45 @@ namespace MultiTerminal.Services
 
             ProjectRemoved?.Invoke(this, new ProjectEventArgs(richProject));
             RegistryChangedExternally?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// Raises the same notifications as <see cref="UnregisterProject"/> for a project whose row was
+        /// already removed elsewhere (task 9f95ab0c Run 4: MessageBroker.UndoProjectCreate), so
+        /// CodeGraphWatcher and other registry listeners reconcile and stop watching its folder. Each handler
+        /// is invoked on its own (Run 5): one throwing subscriber cannot stop the others, or the
+        /// RegistryChangedExternally that follows. Returns the subscribers' exceptions for the caller to log.
+        /// </summary>
+        public IReadOnlyList<Exception> NotifyProjectRemoved(Project project)
+        {
+            var failures = new List<Exception>();
+            if (project == null)
+                return failures;
+
+            var args = new ProjectEventArgs(project);
+            foreach (var handler in ProjectRemoved?.GetInvocationList() ?? Array.Empty<Delegate>())
+            {
+                try
+                {
+                    ((EventHandler<ProjectEventArgs>)handler)(this, args);
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(ex);
+                }
+            }
+            foreach (var handler in RegistryChangedExternally?.GetInvocationList() ?? Array.Empty<Delegate>())
+            {
+                try
+                {
+                    ((EventHandler)handler)(this, EventArgs.Empty);
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(ex);
+                }
+            }
+            return failures;
         }
 
         /// <summary>
@@ -363,6 +430,32 @@ namespace MultiTerminal.Services
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Rewrites the name and/or description in a folder's .claude/project.json, and nothing else
+        /// (task 9f95ab0c: a rename must reach the file as well as the database row). Writes the file
+        /// only, like <see cref="ToggleProjectPinned"/> — NOT through <see cref="SaveProject"/>, whose
+        /// SaveRichProject upsert would push the file's stale isPinned and its unserialized
+        /// gitAutoCommit back over the database. Returns false, writing nothing, when the folder has
+        /// no project.json or the file answers to a different id.
+        /// </summary>
+        public bool UpdateProjectJsonNameAndDescription(string projectPath, string projectId, string name, string description)
+        {
+            var fileProject = LoadProject(projectPath);
+            if (fileProject == null || !string.Equals(fileProject.Id, projectId, StringComparison.Ordinal))
+                return false;
+
+            if (!string.IsNullOrWhiteSpace(name))
+                fileProject.Name = name;
+            if (description != null)
+                fileProject.Description = description;
+
+            // CA3003: projectPath is an app-managed project root from the database, not web input.
+#pragma warning disable CA3003
+            File.WriteAllText(GetProjectConfigPath(projectPath), SerializeProjectJson(fileProject));
+#pragma warning restore CA3003
+            return true;
         }
 
         /// <summary>
@@ -646,11 +739,36 @@ namespace MultiTerminal.Services
             if (!json.StartsWith("{"))
                 return null;
 
+            try
+            {
+                return ParseProjectObject(json);
+            }
+            catch (FormatException ex)
+            {
+                // Malformed (task 9f95ab0c): null, never a half-filled Project carrying an id read from garbage.
+                System.Diagnostics.Debug.WriteLine($"[ProjectService] Malformed project.json: {ex.Message}");
+                return null;
+            }
+        }
+
+        // Every loop in this parser family must advance pos on each iteration. One that cannot (a token it
+        // has no rule for) throws instead of spinning: `{ this is not json ]]` hung the UI thread forever
+        // (task 9f95ab0c). Throwing rather than returning stops an outer loop from resuming at the bad
+        // token: `{"prompts":[{{}}]}` would otherwise be accepted as a half-read project.
+        private static void RequireProgress(int before, int pos)
+        {
+            if (pos == before)
+                throw new FormatException("project.json is malformed at offset " + pos);
+        }
+
+        private Project ParseProjectObject(string json)
+        {
             var project = new Project();
             int pos = 1;
 
             while (pos < json.Length && json[pos] != '}')
             {
+                int iterationStart = pos;
                 SkipWhitespace(json, ref pos);
                 if (pos >= json.Length || json[pos] == '}')
                     break;
@@ -727,7 +845,12 @@ namespace MultiTerminal.Services
                 SkipWhitespace(json, ref pos);
                 if (pos < json.Length && json[pos] == ',')
                     pos++;
+                RequireProgress(iterationStart, pos);
             }
+
+            // Ran off the end without the closing brace: truncated, e.g. `{"id":"abc"`.
+            if (pos >= json.Length)
+                throw new FormatException("project.json has no closing brace");
 
             return project;
         }
@@ -744,6 +867,7 @@ namespace MultiTerminal.Services
 
             while (pos < json.Length)
             {
+                int iterationStart = pos;
                 SkipWhitespace(json, ref pos);
                 if (pos >= json.Length || json[pos] == ']')
                     break;
@@ -758,6 +882,7 @@ namespace MultiTerminal.Services
                 SkipWhitespace(json, ref pos);
                 if (pos < json.Length && json[pos] == ',')
                     pos++;
+                RequireProgress(iterationStart, pos);
             }
 
             if (pos < json.Length && json[pos] == ']')
@@ -776,6 +901,7 @@ namespace MultiTerminal.Services
 
             while (pos < json.Length && json[pos] != '}')
             {
+                int iterationStart = pos;
                 SkipWhitespace(json, ref pos);
                 if (pos >= json.Length || json[pos] == '}')
                     break;
@@ -821,6 +947,7 @@ namespace MultiTerminal.Services
                 SkipWhitespace(json, ref pos);
                 if (pos < json.Length && json[pos] == ',')
                     pos++;
+                RequireProgress(iterationStart, pos);
             }
 
             if (pos < json.Length && json[pos] == '}')
@@ -844,9 +971,15 @@ namespace MultiTerminal.Services
 
             while (pos < json.Length && json[pos] != '}')
             {
+                int iterationStart = pos;
                 SkipWhitespace(json, ref pos);
                 if (pos >= json.Length || json[pos] == '}')
                     break;
+
+                // Unlike the other object loops, the else-branch below skips whatever follows a missing
+                // key, so `{"team":{x}}` advanced past the garbage and parsed as valid. Demand a real key.
+                if (json[pos] != '"')
+                    throw new FormatException("project.json team object has a non-string key at offset " + pos);
 
                 string key = ParseJsonString(json, ref pos);
                 SkipWhitespace(json, ref pos);
@@ -856,7 +989,10 @@ namespace MultiTerminal.Services
 
                 SkipWhitespace(json, ref pos);
 
-                if (key != null && key.ToLowerInvariant() == "agents")
+                // ParseStringArray returns without advancing on anything but '[', which would leave the value
+                // to be read as the next key and trip the quoted-key check above. A non-array agents value
+                // (null, a number, an object) is valid JSON and loads as an empty team, as it always did.
+                if (key != null && key.ToLowerInvariant() == "agents" && pos < json.Length && json[pos] == '[')
                 {
                     agents = ParseStringArray(json, ref pos);
                 }
@@ -868,6 +1004,7 @@ namespace MultiTerminal.Services
                 SkipWhitespace(json, ref pos);
                 if (pos < json.Length && json[pos] == ',')
                     pos++;
+                RequireProgress(iterationStart, pos);
             }
 
             if (pos < json.Length && json[pos] == '}')
@@ -888,6 +1025,7 @@ namespace MultiTerminal.Services
 
             while (pos < json.Length)
             {
+                int iterationStart = pos;
                 SkipWhitespace(json, ref pos);
                 if (pos >= json.Length || json[pos] == ']')
                     break;
@@ -908,6 +1046,7 @@ namespace MultiTerminal.Services
                 SkipWhitespace(json, ref pos);
                 if (pos < json.Length && json[pos] == ',')
                     pos++;
+                RequireProgress(iterationStart, pos);
             }
 
             if (pos < json.Length && json[pos] == ']')
@@ -1010,49 +1149,29 @@ namespace MultiTerminal.Services
             {
                 ParseJsonString(json, ref pos);
             }
-            else if (c == '{')
+            else if (c == '{' || c == '[')
             {
-                int depth = 1;
-                pos++;
-                while (pos < json.Length && depth > 0)
+                // One stack of expected closers, not a depth count per bracket kind: counting only '['
+                // walked `[{]` as balanced and let `{"hooks":[{]}` parse as a valid project (task 9f95ab0c).
+                var closers = new Stack<char>();
+                while (pos < json.Length)
                 {
-                    if (json[pos] == '{')
+                    char ch = json[pos];
+                    if (ch == '{' || ch == '[')
                     {
-                        depth++;
+                        closers.Push(ch == '{' ? '}' : ']');
                         pos++;
                     }
-                    else if (json[pos] == '}')
+                    else if (ch == '}' || ch == ']')
                     {
-                        depth--;
+                        if (ch != closers.Peek())
+                            throw new FormatException("project.json has mismatched brackets at offset " + pos);
+                        closers.Pop();
                         pos++;
+                        if (closers.Count == 0)
+                            break;
                     }
-                    else if (json[pos] == '"')
-                    {
-                        ParseJsonString(json, ref pos);
-                    }
-                    else
-                    {
-                        pos++;
-                    }
-                }
-            }
-            else if (c == '[')
-            {
-                int depth = 1;
-                pos++;
-                while (pos < json.Length && depth > 0)
-                {
-                    if (json[pos] == '[')
-                    {
-                        depth++;
-                        pos++;
-                    }
-                    else if (json[pos] == ']')
-                    {
-                        depth--;
-                        pos++;
-                    }
-                    else if (json[pos] == '"')
+                    else if (ch == '"')
                     {
                         ParseJsonString(json, ref pos);
                     }

@@ -2,7 +2,7 @@
 
 A multi-agent coordination system for Claude Code. WinForms desktop app (C#/.NET) with integrated REST API (port 5050), MCP server, and WebView2-based UI panels.
 
-> Agent behavioral instructions (kanban workflow, MCP tools, messaging, task terminology) are in the MultiTerminal plugin CLAUDE.md. This file is only the codebase reference for working on MT source code.
+> Agent behavioral instructions (kanban workflow, messaging, task terminology, MT events) are the MultiTerminal plugin's `agent-rules.md`, which the plugin's `agent-rules-hook.js` prints into every session (Claude Code does not load a plugin's CLAUDE.md). MT-repo-only working rules (build/deploy, this machine, license) are in `.claude/rules/mt-dev-rules.md`. This file is only the codebase reference for working on MT source code.
 > Detailed reference tables (database schema, folder map, task guides, events) are in `.claude/rules/` and load on demand.
 
 ## ⛔ YOU ARE RUNNING INSIDE MULTITERMINAL — READ FIRST
@@ -11,7 +11,7 @@ A multi-agent coordination system for Claude Code. WinForms desktop app (C#/.NET
 
 - **NEVER end/kill the running MultiTerminal process.** No `taskkill`, no `Stop-Process MultiTerminal`, nothing that ends MT. Killing it ends your own host (and every sibling terminal). There is no scenario where you do this.
 - **NEVER launch `MultiTerminal.exe` yourself.** Don't start a second instance (from `staged`, `Deploy`, or anywhere). The human owns MT's lifecycle. If MT needs (re)starting, ask the human to do it.
-- **Build = safe, and does NOT affect the running app.** `dotnet build MultiTerminal.csproj -c Debug` compiles and the csproj `CopyToStaged` target mirrors output into the **shared staged folder** `H:\DevLaptop\ClarionPowerShell\staged` (this machine's default; env var `MULTITERMINAL_STAGED_PATH` overrides, stamped via `.build-info.json`). **Staged is NOT where MT runs from**, so building never disturbs the live app. Build freely to check for errors.
+- **Build = safe, and does NOT affect the running app.** `dotnet build MultiTerminal.csproj -c Debug` compiles and the csproj `CopyToStaged` target mirrors output into the **shared staged folder** `H:\DevLaptop\ClarionPowerShell\staged` (this machine's default; env var `MULTITERMINAL_STAGED_PATH` overrides, stamped via `.build-info.json`). **Staged is not where MT is supposed to run from**, so normally building never disturbs the live app. But the human sometimes launches MT from staged: check the running process's path and read the stamp before assuming. If MT is running from staged, point the build's mirror elsewhere with `-p:SharedStagedPath=<a scratch folder>` so it cannot collide with the running binaries. Otherwise, build freely to check for errors.
 - **The live app runs from the Deploy folder** `H:\DevLaptop\ClarionPowerShell\Deploy` (this machine's default; env var `MULTITERMINAL_DEPLOY_PATH` overrides). It is populated only by `deploy.ps1`, which copies `staged → Deploy`.
 - **You CANNOT deploy.** `deploy.ps1` hard-refuses while `MultiTerminal.exe` is running (locked files) — and it's always running because you're in it. **Only the human** can: exit MT → run `deploy.ps1` → relaunch from `Deploy`. So the path to make your code changes go live is: *you build (→ staged); the human deploys + restarts.*
 - **Live-testing your changes** therefore means asking the human to deploy+restart first, then exercising the new behavior. You cannot self-serve a "rebuild + restart MT" loop.

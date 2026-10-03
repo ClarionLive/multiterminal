@@ -72,9 +72,16 @@ namespace MultiTerminal.Docking
         internal static bool IsUnassigned(string name) =>
             name != null && name.Equals(UnassignedPlaceholder, StringComparison.OrdinalIgnoreCase);
 
-        /// <summary>Case-insensitive match of a pane by its CustomTitle. Never TabText (158d60ac).</summary>
+        /// <summary>
+        /// Case-insensitive match of a pane by its CustomTitle. Never TabText (158d60ac). The name
+        /// fallback in <see cref="Resolve"/> tries PromotedName before this.
+        /// </summary>
         internal static bool MatchesByName(PaneIdentity pane, string name) =>
             pane.CustomTitle?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false;
+
+        /// <summary>Case-insensitive match of a pane by its broker-confirmed (promoted) agent name.</summary>
+        internal static bool MatchesByPromotedName(PaneIdentity pane, string name) =>
+            pane.PromotedName?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false;
 
         /// <summary>
         /// The identity a pane is treated as bound to: its promoted name, else its CustomTitle
@@ -112,9 +119,15 @@ namespace MultiTerminal.Docking
             }
 
             // Fall back to name match (re-registration where Claude passes a wrong docId but
-            // pre-registration already set the title).
+            // pre-registration already set the title). Identity first, then title, exactly as
+            // TerminalDocument.FindByIdentity resolves a name (task 5e1dea4c): a promoted pane the
+            // Owner cosmetically renamed still answers to its agent name. Never TabText (158d60ac).
             if (target < 0 && !string.IsNullOrEmpty(name))
-                target = IndexOf(panes, p => MatchesByName(p, name));
+            {
+                target = IndexOf(panes, p => MatchesByPromotedName(p, name));
+                if (target < 0)
+                    target = IndexOf(panes, p => MatchesByName(p, name));
+            }
 
             if (target < 0) return new PaneBinding(-1, PaneBindingRoute.None, null);
 
@@ -126,7 +139,7 @@ namespace MultiTerminal.Docking
             string bound = BoundIdentityOf(panes[target]);
             if (!string.IsNullOrEmpty(name) && bound != null && !bound.Equals(name, StringComparison.OrdinalIgnoreCase))
             {
-                int reResolved = IndexOf(panes, p => p.PromotedName?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false);
+                int reResolved = IndexOf(panes, p => MatchesByPromotedName(p, name));
                 if (reResolved < 0)
                     reResolved = IndexOf(panes, p => string.IsNullOrEmpty(p.PromotedName) && MatchesByName(p, name));
 
@@ -144,7 +157,7 @@ namespace MultiTerminal.Docking
                     && (string.IsNullOrEmpty(pane.CustomTitle) || IsUnassigned(pane.CustomTitle));
                 if (unclaimed && !string.Equals(launchNonce, pane.LaunchNonce, StringComparison.Ordinal))
                 {
-                    int owned = IndexOf(panes, p => p.PromotedName?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false);
+                    int owned = IndexOf(panes, p => MatchesByPromotedName(p, name));
                     return new PaneBinding(owned, PaneBindingRoute.NonceDenied, bound);
                 }
             }

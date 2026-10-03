@@ -154,6 +154,49 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void A_cosmetically_renamed_pane_still_binds_by_its_agent_name()
+        {
+            // Task 5e1dea4c (19a26090 Run 5, Codex adversary). DECIDED: cosmetic rename is supported
+            // for MCP panes, so the name fallback resolves identity before title, as
+            // TerminalDocument.FindByIdentity does. Before, it matched CustomTitle only and this
+            // re-registration bound nowhere (route None), leaving the terminal-id maps stale.
+            //
+            // Falsified by deleting the PromotedName pass from the name fallback: red, route None,
+            // as predicted (the ordering fact below went red with it, index 0: without the identity
+            // pass the restored title wins).
+            var panes = new List<PaneIdentity>
+            {
+                Pane("aaaa1111", "Bob", "Bob", "nonce-a"),
+                Pane("bbbb2222", "Alice", "My renamed tab", "nonce-b"),
+            };
+
+            var binding = TerminalRegistrationBinder.Resolve(panes, "Alice", null, null);
+
+            Assert.Equal(PaneBindingRoute.Matched, binding.Route);
+            Assert.Equal(1, binding.Index);
+        }
+
+        [Fact]
+        public void The_name_fallback_prefers_the_promoted_pane_over_a_pane_merely_titled_that_name()
+        {
+            // Identity first, then title, across ALL panes (FindByIdentity's two passes): a restored,
+            // unpromoted tab still titled "Alice" from yesterday must not win over the pane Alice is
+            // actually promoted in, even though it comes first in dock order.
+            //
+            // Falsified by running the CustomTitle pass before the PromotedName pass: red, index 0,
+            // as predicted.
+            var panes = new List<PaneIdentity>
+            {
+                Pane("aaaa1111", null, "Alice", "nonce-a"),
+                Pane("bbbb2222", "Alice", "My renamed tab", "nonce-b"),
+            };
+
+            var binding = TerminalRegistrationBinder.Resolve(panes, "Alice", null, null);
+
+            Assert.Equal(1, binding.Index);
+        }
+
+        [Fact]
         public void An_agent_named_like_a_project_does_not_bind_to_that_projects_placeholder_tab()
         {
             // GH #26 / 158d60ac: a placeholder in project "Proj" with no team lead displays just "Proj".

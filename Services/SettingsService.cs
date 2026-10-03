@@ -300,8 +300,9 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Default agent name used when launching a Codex terminal without an explicit
-        /// identity (e.g. from a project card launch with no team lead). Null/empty
-        /// falls back to the Claude Code behavior ("Unassigned").
+        /// identity (e.g. from a project card launch with no team lead). Null/empty (or
+        /// "Unassigned") falls back to the Claude Code behavior: the project name, made unique
+        /// (task 6a8d029f, <see cref="ProjectLaunchIdentity"/>).
         /// </summary>
         public string GetCodexDefaultAgentName() => Get(CodexDefaultAgentNameKey);
         public void SetCodexDefaultAgentName(string name) => Set(CodexDefaultAgentNameKey, name);
