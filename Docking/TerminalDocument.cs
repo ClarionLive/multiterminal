@@ -3199,9 +3199,8 @@ namespace MultiTerminal.Docking
             if (string.IsNullOrEmpty(s)) return false;
             foreach (char c in s)
             {
-                bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-                    || (c >= '0' && c <= '9') || c == '-' || c == '_';
-                if (!ok) return false;
+                // The same alphabet a project-derived identity is built from (6a8d029f).
+                if (!MultiTerminal.Services.ProjectLaunchIdentity.IsIdentityChar(c)) return false;
             }
             return true;
         }

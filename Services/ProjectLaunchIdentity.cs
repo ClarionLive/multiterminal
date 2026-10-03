@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text;
 using MultiTerminal.Models;
 
@@ -6,21 +7,45 @@ namespace MultiTerminal.Services
 {
     /// <summary>
     /// The identity a project launch REQUESTS, before the broker makes it unique (task 6a8d029f).
-    /// <see cref="Unique"/> says whether the caller must register it through the atomic
-    /// <c>MessageBroker.RegisterTerminalUnique</c>, which hands back the first free <c>-N</c> suffix.
     /// </summary>
-    internal readonly record struct ProjectLaunchIdentityRequest(string Name, bool Unique);
+    /// <param name="Name">The requested name.</param>
+    /// <param name="RegisterUnique">Register through the atomic <c>MessageBroker.RegisterTerminalUnique</c>,
+    /// which hands back the first free <c>-N</c> suffix.</param>
+    /// <param name="IsProjectIdentity">The name was derived from the project (not a lead, not the Codex
+    /// default). Such a launch FAILS CLOSED when registration is refused: it must never fall back to a
+    /// placeholder or pool name.</param>
+    internal readonly record struct ProjectLaunchIdentityRequest(string Name, bool RegisterUnique, bool IsProjectIdentity);
+
+    /// <summary>One registered project, as the reserved-name census needs it.</summary>
+    internal readonly record struct ProjectIdentitySource(string Id, string Name, string TeamLead, IReadOnlyCollection<string> AgentNames);
 
     /// <summary>
-    /// Which identity a terminal launched on a project gets (task 6a8d029f). Pure and static so the
+    /// Which identity a terminal launched on a project gets — ticket 6a8d029f. Pure and static so the
     /// rule is testable without WinForms; every project launch site in <c>MainForm</c> asks here.
     ///
-    /// <para>Owner decision 2026-10-02: a project with NO team lead launches under its PROJECT NAME,
-    /// made unique by the broker ("TestB", then "TestB-2", "TestB-3"…) with no prompt. It used to be the
-    /// shared "Unassigned" sentinel, so two panes of one project shared an active task, a worktree and an
-    /// inbox file, and could not be messaged apart. Team-lead projects are unchanged (the lead's name, and
-    /// a second launch still shows the IdentityPicker). "Open PowerShell" has no project and stays
-    /// "Unassigned" — it never reaches this class.</para>
+    /// <para><b>The rule.</b> A project with a team lead launches as that lead, unchanged (a second
+    /// launch still shows the IdentityPicker). A Codex launch with a configured default agent name uses
+    /// that name. EVERY OTHER project-backed launch gets a unique, non-placeholder identity derived from
+    /// the project, whatever its name contains:</para>
+    /// <list type="number">
+    /// <item>the sanitized project name ("TestB", "My Project" → "My-Project");</item>
+    /// <item>if that is empty or the placeholder ("Unassigned", emoji, non-Latin-only, punctuation-only):
+    /// <c>Project-&lt;first 6 of the project id&gt;</c>;</item>
+    /// <item>if the result is RESERVED — another project's sanitized name, any project's team lead or
+    /// roster agent, Oracle, or the Codex default agent — it is qualified with
+    /// <c>-&lt;first 4 of the project id&gt;</c>, so it can never land on another project's or a known
+    /// agent's name even while that agent is offline;</item>
+    /// <item>the broker then makes it unique among connected terminals ("TestB", "TestB-2"…).</item>
+    /// </list>
+    /// <para>"Unassigned" is only for project-less launches (Open PowerShell), which never reach here.</para>
+    ///
+    /// <para>Suffix reuse is intended (PM decision overnight by Alice, 2026-10-02; Owner may overrule):
+    /// the broker counts connected terminals only, so after "TestB-2" closes the next second pane is
+    /// "TestB-2" again and inherits that name's profile, active task and inbox.</para>
+    ///
+    /// <para>Residual: an agent who is never a team lead or roster member of any project is not in the
+    /// reserved set (nothing records which profiles are agents), so a project named like such an agent
+    /// can take that name while the agent is offline.</para>
     /// </summary>
     internal static class ProjectLaunchIdentity
     {
@@ -28,89 +53,111 @@ namespace MultiTerminal.Services
         internal const string Unassigned = "Unassigned";
 
         /// <summary>
-        /// Cap on the base name, leaving room for a <c>-N</c> suffix well inside
+        /// Cap on the sanitized name, leaving room for the id qualifier and a <c>-N</c> suffix well inside
         /// <c>ConPtyTerminal.MaxSessionNameLength</c> (which skips <c>-n</c> rather than truncate).
         /// </summary>
         internal const int MaxBaseLength = 64;
 
+        internal const string FallbackPrefix = "Project";
+        internal const int FallbackIdChars = 6;
+        internal const int QualifierIdChars = 4;
+
         /// <summary>
-        /// Decides the requested identity for a project launch.
-        /// Order: team lead → configured Codex default agent (Codex only) → project name → "Unassigned".
+        /// The one identity alphabet: ASCII letters, digits, <c>-</c> and <c>_</c>. Shared with
+        /// <c>TerminalDocument.IsSafeStatusLineSegment</c>, so every file named after an identity
+        /// (inbox <c>&lt;name&gt;.json</c>, <c>mt-statusline-&lt;name&gt;-&lt;docId&gt;.json</c>) is a plain
+        /// segment and the statusline glob fallback accepts it.
+        /// </summary>
+        internal static bool IsIdentityChar(char c) =>
+            (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+
+        /// <summary>
+        /// Decides the requested identity for a project launch. See the class doc for the rule.
         /// </summary>
         /// <param name="teamLead">The project's team lead, or null/empty for none.</param>
         /// <param name="kind">The terminal kind being launched.</param>
         /// <param name="codexDefaultAgentName">The per-user Codex default agent setting, if any.</param>
         /// <param name="projectName">The project's display name.</param>
-        internal static ProjectLaunchIdentityRequest Resolve(string teamLead, TerminalKind kind, string codexDefaultAgentName, string projectName)
+        /// <param name="projectId">The project's id; source of the fallback and qualifier.</param>
+        /// <param name="reserved">Names this project must not take (see <see cref="ReservedNames"/>).</param>
+        internal static ProjectLaunchIdentityRequest Resolve(
+            string teamLead,
+            TerminalKind kind,
+            string codexDefaultAgentName,
+            string projectName,
+            string projectId,
+            IReadOnlyCollection<string> reserved)
         {
-            // Team lead: the lead's own name, registered plainly. A held name is the IdentityPicker's job
-            // at the call site, never a silent suffix.
             if (!string.IsNullOrEmpty(teamLead))
-                return new ProjectLaunchIdentityRequest(teamLead, Unique: false);
+                return new ProjectLaunchIdentityRequest(teamLead, RegisterUnique: false, IsProjectIdentity: false);
 
-            // An explicit Codex default is the user's chosen name for headless Codex launches and keeps
-            // precedence over the project name. "Unassigned" as that setting used to mean "behave like
-            // Claude Code", so it now falls through to the project name with everything else.
+            // An explicit Codex default keeps precedence over the project. "Unassigned" as that setting
+            // used to mean "behave like Claude Code", so it falls through to the project identity.
             if (kind == TerminalKind.Codex
                 && !string.IsNullOrWhiteSpace(codexDefaultAgentName)
                 && !IsUnassigned(codexDefaultAgentName))
             {
-                return new ProjectLaunchIdentityRequest(codexDefaultAgentName, Unique: true);
+                return new ProjectLaunchIdentityRequest(codexDefaultAgentName, RegisterUnique: true, IsProjectIdentity: false);
             }
 
-            string fromProject = FromProjectName(projectName);
-            return fromProject != null
-                ? new ProjectLaunchIdentityRequest(fromProject, Unique: true)
-                : new ProjectLaunchIdentityRequest(Unassigned, Unique: false);
+            string name = FromProjectName(projectName) ?? FallbackBase(projectId);
+            if (Contains(reserved, name))
+            {
+                string qualifier = IdPrefix(projectId, QualifierIdChars);
+                if (qualifier.Length > 0) name = $"{name}-{qualifier}";
+            }
+
+            return new ProjectLaunchIdentityRequest(name, RegisterUnique: true, IsProjectIdentity: true);
+        }
+
+        /// <summary>
+        /// The reserved-name census for launching <paramref name="thisProjectId"/>: every project's team
+        /// lead and roster agents, the sanitized name of every OTHER project, and
+        /// <paramref name="extraNames"/> (Oracle, the Codex default agent). Case-insensitive.
+        /// </summary>
+        internal static HashSet<string> ReservedNames(string thisProjectId, IEnumerable<ProjectIdentitySource> projects, IEnumerable<string> extraNames)
+        {
+            var reserved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            void Add(string n)
+            {
+                if (!string.IsNullOrWhiteSpace(n)) reserved.Add(n);
+            }
+
+            foreach (var p in projects ?? Array.Empty<ProjectIdentitySource>())
+            {
+                Add(p.TeamLead);
+                foreach (var agent in p.AgentNames ?? Array.Empty<string>()) Add(agent);
+                if (!string.Equals(p.Id, thisProjectId, StringComparison.OrdinalIgnoreCase))
+                    Add(FromProjectName(p.Name) ?? FallbackBase(p.Id));
+            }
+
+            foreach (var n in extraNames ?? Array.Empty<string>()) Add(n);
+            return reserved;
         }
 
         /// <summary>
         /// Turns a project name into an identity base, or null when nothing usable is left.
-        ///
-        /// <para>An identity is a file-name segment (<c>&lt;name&gt;.json</c> inbox fallback,
-        /// <c>mt-statusline-&lt;name&gt;-&lt;docId&gt;.json</c>), an env var value and a <c>-n</c> session
-        /// name. PowerShell quoting is already escaped at <c>ConPtyTerminal.StartProcess</c>, but a path
-        /// separator or <c>:*?"&lt;&gt;|</c> would break the files. So the base keeps only the characters
-        /// <c>TerminalDocument.IsSafeStatusLineSegment</c> accepts (ASCII letters, digits, <c>-</c>,
-        /// <c>_</c>); each run of anything else becomes one <c>-</c>, and <c>-</c> is trimmed from both
-        /// ends. "My Project" → "My-Project", "TestB" → "TestB". Turning spaces into <c>-</c> also means a
-        /// project called "Agent Smith" cannot produce the temporary-subagent shape "Agent …".</para>
-        ///
-        /// <para>A project literally named "Unassigned" maps to null: that name is the shared sentinel
-        /// the broker refuses to make unique, so claiming it would reproduce the sharing this replaces.
-        /// The caller falls back to the sentinel, which is today's behaviour for that one name.</para>
+        /// Keeps only <see cref="IsIdentityChar"/> characters; each run of anything else (and each run
+        /// of <c>-</c>) becomes one <c>-</c>, trimmed from both ends, capped at <see cref="MaxBaseLength"/>.
+        /// Turning spaces into <c>-</c> also means "Agent Smith" cannot produce the temporary-subagent
+        /// shape "Agent …". Null for empty and for the placeholder itself.
         /// </summary>
         internal static string FromProjectName(string projectName)
         {
             if (string.IsNullOrWhiteSpace(projectName)) return null;
 
-            var sb = new StringBuilder(projectName.Length);
-            bool pendingSeparator = false;
-            foreach (char c in projectName)
-            {
-                bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-                    || (c >= '0' && c <= '9') || c == '_' || c == '-';
-                if (!ok || c == '-')
-                {
-                    pendingSeparator = true;
-                    continue;
-                }
-
-                if (pendingSeparator && sb.Length > 0) sb.Append('-');
-                pendingSeparator = false;
-                sb.Append(c);
-            }
-
-            string name = sb.ToString();
+            string name = Collapse(projectName);
             if (name.Length > MaxBaseLength) name = name.Substring(0, MaxBaseLength).TrimEnd('-');
             if (name.Length == 0 || IsUnassigned(name)) return null;
             return name;
         }
 
         /// <summary>
-        /// True when <paramref name="agentName"/> is the identity a no-lead launch of
-        /// <paramref name="projectName"/> produces: the base itself, or the base with the broker's numeric
-        /// <c>-N</c> suffix. Lets the tab read "TestB-2" instead of "TestB-2 - TestB" (GH #26 follow-on).
+        /// True when <paramref name="agentName"/> is an identity a no-lead launch of
+        /// <paramref name="projectName"/> produces from its NAME: the base itself, or the base with the
+        /// broker's numeric <c>-N</c> suffix. Lets the tab read "TestB-2" instead of "TestB-2 - TestB".
+        /// (An id-qualified or <c>Project-…</c> identity keeps the project in the tab, which is useful
+        /// precisely because the name alone no longer says which project it is.)
         /// </summary>
         internal static bool IsProjectIdentity(string agentName, string projectName)
         {
@@ -127,6 +174,49 @@ namespace MultiTerminal.Services
             }
 
             return true;
+        }
+
+        private static string FallbackBase(string projectId)
+        {
+            string id = IdPrefix(projectId, FallbackIdChars);
+            return id.Length > 0 ? $"{FallbackPrefix}-{id}" : FallbackPrefix;
+        }
+
+        private static string IdPrefix(string projectId, int length)
+        {
+            string id = Collapse(projectId ?? string.Empty).Replace("-", string.Empty, StringComparison.Ordinal);
+            return id.Length > length ? id.Substring(0, length) : id;
+        }
+
+        private static string Collapse(string value)
+        {
+            var sb = new StringBuilder(value.Length);
+            bool pendingSeparator = false;
+            foreach (char c in value)
+            {
+                if (!IsIdentityChar(c) || c == '-')
+                {
+                    pendingSeparator = true;
+                    continue;
+                }
+
+                if (pendingSeparator && sb.Length > 0) sb.Append('-');
+                pendingSeparator = false;
+                sb.Append(c);
+            }
+
+            return sb.ToString();
+        }
+
+        private static bool Contains(IReadOnlyCollection<string> reserved, string name)
+        {
+            if (reserved == null) return false;
+            foreach (var r in reserved)
+            {
+                if (string.Equals(r, name, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+
+            return false;
         }
 
         private static bool IsUnassigned(string name) =>

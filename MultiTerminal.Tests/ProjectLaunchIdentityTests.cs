@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Data.SQLite;
 using System.IO;
 using System.Linq;
@@ -12,18 +13,23 @@ using Xunit;
 namespace MultiTerminal.Tests
 {
     /// <summary>
-    /// Task 6a8d029f: a project with no team lead launches under its project name, made unique by the
-    /// broker ("TestB", "TestB-2"…), instead of the shared "Unassigned".
+    /// Ticket 6a8d029f: every project-backed launch with no team lead gets a unique, non-placeholder
+    /// identity derived from the project ("TestB", "TestB-2"…), which never lands on another project's
+    /// or a known agent's name.
     ///
     /// <para>What these facts cover: the pure rule (<see cref="ProjectLaunchIdentity"/>), the rule fed
-    /// into the REAL broker's <see cref="MessageBroker.RegisterTerminalUnique"/> exactly as
-    /// <c>MainForm.PreRegisterTerminalWithName</c> does with <c>atomicUniqueness</c>, and the tab title.
-    /// What they do NOT cover: that each <c>MainForm</c> launch site passes <c>Unique</c> through to
-    /// <c>atomicUniqueness</c>. Those sites are private WinForms handlers; that wiring is checked by the
-    /// Owner's live test, not here.</para>
+    /// into the REAL broker's <see cref="MessageBroker.RegisterTerminalUnique"/> as
+    /// <c>MainForm.TryRegisterProjectIdentity</c> does, and the tab title. What they do NOT cover: the
+    /// <c>MainForm</c> launch sites themselves — that each passes the rule's flags through, builds the
+    /// reserved set from the project database, and FAILS CLOSED (error + start screen, no placeholder)
+    /// when registration is refused. Those are private WinForms handlers with no seam; the fail-closed
+    /// branch is checked only by the Owner's live test. The facts here pin the input that branch keys
+    /// on (<see cref="ProjectLaunchIdentityRequest.IsProjectIdentity"/>).</para>
     /// </summary>
     public sealed class ProjectLaunchIdentityTests : IDisposable
     {
+        private static readonly IReadOnlyCollection<string> NoneReserved = Array.Empty<string>();
+
         private readonly string _dbPath;
         private readonly string _msgDbPath;
 
@@ -51,11 +57,17 @@ namespace MultiTerminal.Tests
             GC.SuppressFinalize(this);
         }
 
+        private static ProjectLaunchIdentityRequest NoLead(string projectName, string projectId, IReadOnlyCollection<string> reserved = null) =>
+            ProjectLaunchIdentity.Resolve(null, TerminalKind.ClaudeCode, null, projectName, projectId, reserved ?? NoneReserved);
+
+        private static ProjectIdentitySource Proj(string id, string name, string teamLead = null, params string[] agents) =>
+            new ProjectIdentitySource(id, name, teamLead, agents);
+
         /// <summary>What a launch site does with the rule: resolve, then register atomically when asked.</summary>
-        private static string Launch(MessageBroker broker, string docId, string teamLead, string projectName, TerminalKind kind = TerminalKind.ClaudeCode)
+        private static string Launch(MessageBroker broker, string docId, string teamLead, string projectName, string projectId = "p1aaaaaa", IReadOnlyCollection<string> reserved = null)
         {
-            var request = ProjectLaunchIdentity.Resolve(teamLead, kind, null, projectName);
-            if (request.Unique)
+            var request = ProjectLaunchIdentity.Resolve(teamLead, TerminalKind.ClaudeCode, null, projectName, projectId, reserved ?? NoneReserved);
+            if (request.RegisterUnique)
             {
                 var unique = broker.RegisterTerminalUnique(request.Name, out string resolved, docId, nonce: "N-" + docId);
                 Assert.True(unique.Success, unique.Error);
@@ -66,6 +78,8 @@ namespace MultiTerminal.Tests
             Assert.True(plain.Success, plain.Error);
             return request.Name;
         }
+
+        // ---- the basic rule -------------------------------------------------------------------------
 
         [Fact]
         public void Opening_a_no_lead_project_three_times_gives_TestB_then_TestB_2_then_TestB_3()
@@ -86,33 +100,31 @@ namespace MultiTerminal.Tests
         [Fact]
         public void A_no_lead_project_requests_its_name_uniquely_for_both_terminal_kinds()
         {
-            Assert.Equal(new ProjectLaunchIdentityRequest("TestB", true),
-                ProjectLaunchIdentity.Resolve(null, TerminalKind.ClaudeCode, null, "TestB"));
-            Assert.Equal(new ProjectLaunchIdentityRequest("TestB", true),
-                ProjectLaunchIdentity.Resolve("", TerminalKind.Codex, null, "TestB"));
+            var expected = new ProjectLaunchIdentityRequest("TestB", RegisterUnique: true, IsProjectIdentity: true);
+            Assert.Equal(expected, ProjectLaunchIdentity.Resolve(null, TerminalKind.ClaudeCode, null, "TestB", "p1aaaaaa", NoneReserved));
+            Assert.Equal(expected, ProjectLaunchIdentity.Resolve("", TerminalKind.Codex, null, "TestB", "p1aaaaaa", NoneReserved));
         }
 
         [Fact]
         public void A_team_lead_project_is_unchanged_its_lead_registered_plainly()
         {
-            // Unique=false is what keeps the second launch on the IdentityPicker rather than a silent "-2".
-            Assert.Equal(new ProjectLaunchIdentityRequest("Alice", false),
-                ProjectLaunchIdentity.Resolve("Alice", TerminalKind.ClaudeCode, "CodexBot", "TestB"));
-            Assert.Equal(new ProjectLaunchIdentityRequest("Alice", false),
-                ProjectLaunchIdentity.Resolve("Alice", TerminalKind.Codex, "CodexBot", "TestB"));
+            // RegisterUnique=false keeps the second launch on the IdentityPicker rather than a silent "-2".
+            var expected = new ProjectLaunchIdentityRequest("Alice", RegisterUnique: false, IsProjectIdentity: false);
+            Assert.Equal(expected, ProjectLaunchIdentity.Resolve("Alice", TerminalKind.ClaudeCode, "CodexBot", "TestB", "p1aaaaaa", NoneReserved));
+            Assert.Equal(expected, ProjectLaunchIdentity.Resolve("Alice", TerminalKind.Codex, "CodexBot", "TestB", "p1aaaaaa", NoneReserved));
         }
 
         [Fact]
         public void A_configured_Codex_default_keeps_precedence_for_Codex_only()
         {
-            Assert.Equal(new ProjectLaunchIdentityRequest("CodexBot", true),
-                ProjectLaunchIdentity.Resolve(null, TerminalKind.Codex, "CodexBot", "TestB"));
+            Assert.Equal(new ProjectLaunchIdentityRequest("CodexBot", true, false),
+                ProjectLaunchIdentity.Resolve(null, TerminalKind.Codex, "CodexBot", "TestB", "p1aaaaaa", NoneReserved));
             // The setting is Codex's; a Claude launch of the same project ignores it.
-            Assert.Equal(new ProjectLaunchIdentityRequest("TestB", true),
-                ProjectLaunchIdentity.Resolve(null, TerminalKind.ClaudeCode, "CodexBot", "TestB"));
-            // "Unassigned" as the setting meant "behave like Claude Code", which is now the project name.
-            Assert.Equal(new ProjectLaunchIdentityRequest("TestB", true),
-                ProjectLaunchIdentity.Resolve(null, TerminalKind.Codex, "unassigned", "TestB"));
+            Assert.Equal(new ProjectLaunchIdentityRequest("TestB", true, true),
+                ProjectLaunchIdentity.Resolve(null, TerminalKind.ClaudeCode, "CodexBot", "TestB", "p1aaaaaa", NoneReserved));
+            // "Unassigned" as the setting meant "behave like Claude Code", which is now the project identity.
+            Assert.Equal(new ProjectLaunchIdentityRequest("TestB", true, true),
+                ProjectLaunchIdentity.Resolve(null, TerminalKind.Codex, "unassigned", "TestB", "p1aaaaaa", NoneReserved));
         }
 
         [Fact]
@@ -121,9 +133,9 @@ namespace MultiTerminal.Tests
             using var broker = new MessageBroker();
             broker.RegisterTerminal("Alice", docId: "DA", channelPort: 8801, nonce: "NA");
 
+            // Even with an empty census the broker refuses to share a CONNECTED name.
             Assert.Equal("Alice-2", Launch(broker, "DP", teamLead: null, projectName: "Alice"));
 
-            // The real Alice's row is untouched: same pane, same port.
             var alice = Assert.Single(broker.GetAllConnectedTerminals(), t => t.Name == "Alice");
             Assert.Equal("DA", alice.DocId);
             Assert.Equal(8801, alice.ChannelPort);
@@ -132,7 +144,7 @@ namespace MultiTerminal.Tests
         [Fact]
         public void A_closed_suffix_is_reused_by_the_next_launch()
         {
-            // DECIDED OVERNIGHT (Alice, 2026-10-02): reuse is intended — the next "TestB-2" inherits
+            // PM decision overnight (Alice, 2026-10-02): reuse is intended — the next "TestB-2" inherits
             // that name's profile, active task and inbox. This pins the decision, not an accident.
             using var broker = new MessageBroker();
             Launch(broker, "D1", teamLead: null, projectName: "TestB");
@@ -142,6 +154,135 @@ namespace MultiTerminal.Tests
 
             Assert.Equal("TestB-2", Launch(broker, "D3", teamLead: null, projectName: "TestB"));
         }
+
+        // ---- Run 1 blocking #1: never the placeholder for a project-backed launch ------------------
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("   ")]
+        [InlineData("Проект")]
+        [InlineData("项目")]
+        [InlineData("🚀🔥")]
+        [InlineData("!!!")]
+        [InlineData("Unassigned")]
+        [InlineData(" UNASSIGNED ")]
+        public void A_project_name_with_nothing_usable_gets_a_project_id_identity_not_the_placeholder(string projectName)
+        {
+            var a = NoLead(projectName, "a1b2c3d4");
+            var b = NoLead(projectName, "e5f6a7b8");
+
+            Assert.Equal(new ProjectLaunchIdentityRequest("Project-a1b2c3", true, true), a);
+            Assert.Equal(new ProjectLaunchIdentityRequest("Project-e5f6a7", true, true), b);
+        }
+
+        [Fact]
+        public void Only_the_exact_placeholder_name_is_refused()
+        {
+            // Control: the check is an exact match on the sanitized name, not a substring.
+            Assert.Equal(new ProjectLaunchIdentityRequest("Unassigned-Work", true, true), NoLead("Unassigned Work", "a1b2c3d4"));
+        }
+
+        // ---- Run 1 blocking #2: reserved names ------------------------------------------------------
+
+        [Fact]
+        public void Projects_whose_names_sanitize_alike_get_different_identities()
+        {
+            var projects = new[] { Proj("aaaa1111", "Foo Bar"), Proj("bbbb2222", "Foo-Bar"), Proj("cccc3333", "Foo@Bar") };
+            string For(ProjectIdentitySource p) =>
+                NoLead(p.Name, p.Id, ProjectLaunchIdentity.ReservedNames(p.Id, projects, null)).Name;
+
+            Assert.Equal("Foo-Bar-aaaa", For(projects[0]));
+            Assert.Equal("Foo-Bar-bbbb", For(projects[1]));
+            Assert.Equal("Foo-Bar-cccc", For(projects[2]));
+        }
+
+        [Fact]
+        public void A_project_alone_keeps_its_plain_name()
+        {
+            // Its own name is not reserved against itself; only OTHER projects' names are.
+            var projects = new[] { Proj("aaaa1111", "TestB"), Proj("bbbb2222", "Other") };
+            Assert.Equal("TestB", NoLead("TestB", "aaaa1111", ProjectLaunchIdentity.ReservedNames("aaaa1111", projects, null)).Name);
+        }
+
+        [Fact]
+        public void A_project_named_like_another_projects_team_lead_is_id_qualified_while_that_agent_is_offline()
+        {
+            var projects = new[] { Proj("lead0001", "MultiTerminal", teamLead: "Diana"), Proj("dian0002", "Diana") };
+            var reserved = ProjectLaunchIdentity.ReservedNames("dian0002", projects, null);
+
+            // No broker row for Diana at all: the census, not liveness, protects her.
+            Assert.Equal(new ProjectLaunchIdentityRequest("Diana-dian", true, true), NoLead("Diana", "dian0002", reserved));
+        }
+
+        [Fact]
+        public void A_project_named_like_a_roster_agent_is_id_qualified()
+        {
+            var projects = new[] { Proj("prj00001", "Shop", null, "Nadia", "Bob"), Proj("bob00002", "Bob") };
+            var reserved = ProjectLaunchIdentity.ReservedNames("bob00002", projects, null);
+
+            Assert.Equal("Bob-bob0", NoLead("Bob", "bob00002", reserved).Name);
+        }
+
+        [Fact]
+        public void A_project_named_Oracle_or_the_Codex_default_is_id_qualified()
+        {
+            var projects = new[] { Proj("orac0001", "Oracle"), Proj("code0002", "CodexBot") };
+            var extra = new[] { OracleService.OracleName, "CodexBot" };
+
+            Assert.Equal("Oracle-orac", NoLead("Oracle", "orac0001", ProjectLaunchIdentity.ReservedNames("orac0001", projects, extra)).Name);
+            Assert.Equal("CodexBot-code", NoLead("CodexBot", "code0002", ProjectLaunchIdentity.ReservedNames("code0002", projects, extra)).Name);
+        }
+
+        [Fact]
+        public void Two_projects_sharing_a_64_char_prefix_get_different_identities()
+        {
+            string prefix = new string('x', 64);
+            var projects = new[] { Proj("aaaa1111", prefix + "-one"), Proj("bbbb2222", prefix + "-two") };
+
+            string a = NoLead(projects[0].Name, projects[0].Id, ProjectLaunchIdentity.ReservedNames(projects[0].Id, projects, null)).Name;
+            string b = NoLead(projects[1].Name, projects[1].Id, ProjectLaunchIdentity.ReservedNames(projects[1].Id, projects, null)).Name;
+
+            Assert.NotEqual(a, b, StringComparer.OrdinalIgnoreCase);
+            Assert.Equal(prefix + "-aaaa", a);
+        }
+
+        [Fact]
+        public void The_census_reserves_leads_rosters_other_projects_and_extras_but_not_this_project()
+        {
+            var projects = new[]
+            {
+                Proj("this0001", "Mine", null, "Rosa"),
+                Proj("othr0002", "Other Thing", "Lena", "Sam"),
+                Proj("emoj0003", "🚀"),
+            };
+            var reserved = ProjectLaunchIdentity.ReservedNames("this0001", projects, new[] { "Oracle", null, "" });
+
+            Assert.Equal(
+                new[] { "Lena", "Oracle", "Other-Thing", "Project-emoj00", "Rosa", "Sam" },
+                reserved.OrderBy(n => n, StringComparer.Ordinal));
+            Assert.Contains("lena", reserved); // case-insensitive
+        }
+
+        // ---- Run 1 blocking #3: the fail-closed switch ----------------------------------------------
+
+        [Theory]
+        [InlineData("TestB")]
+        [InlineData("🚀")]
+        [InlineData("Unassigned")]
+        [InlineData("Diana")]
+        public void Every_no_lead_project_launch_is_a_fail_closed_project_identity_and_never_the_placeholder(string projectName)
+        {
+            // MainForm keys "no placeholder fallback on refusal" on IsProjectIdentity. The branch itself has
+            // no seam (private WinForms handler); this pins the input it decides on.
+            var request = NoLead(projectName, "p1aaaaaa", new[] { "Diana" });
+
+            Assert.True(request.IsProjectIdentity);
+            Assert.True(request.RegisterUnique);
+            Assert.NotEqual(ProjectLaunchIdentity.Unassigned, request.Name, StringComparer.OrdinalIgnoreCase);
+        }
+
+        // ---- sanitization ----------------------------------------------------------------------------
 
         [Theory]
         [InlineData("TestB", "TestB")]
@@ -158,37 +299,20 @@ namespace MultiTerminal.Tests
             string identity = ProjectLaunchIdentity.FromProjectName(projectName);
 
             Assert.Equal(expected, identity);
-            // The alphabet TerminalDocument.IsSafeStatusLineSegment accepts, so every file named after
-            // the identity (inbox <name>.json, mt-statusline-<name>-<docId>.json) is a plain segment.
-            Assert.All(identity, c => Assert.True(
-                (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_',
-                $"unsafe character '{c}' in '{identity}'"));
-            // Never the temporary-subagent shape the broker ignores.
+            // The shared alphabet TerminalDocument.IsSafeStatusLineSegment also uses.
+            Assert.All(identity, c => Assert.True(ProjectLaunchIdentity.IsIdentityChar(c), $"unsafe character '{c}' in '{identity}'"));
             Assert.False(identity.StartsWith("Agent ", StringComparison.OrdinalIgnoreCase));
         }
 
         [Theory]
-        [InlineData(null)]
-        [InlineData("")]
-        [InlineData("   ")]
-        [InlineData("!!!")]
-        [InlineData("Unassigned")]
-        [InlineData(" UNASSIGNED ")]
-        public void A_project_name_with_nothing_usable_falls_back_to_the_shared_placeholder(string projectName)
+        [InlineData('/')]
+        [InlineData(' ')]
+        [InlineData('.')]
+        [InlineData('*')]
+        [InlineData('é')]
+        public void The_identity_alphabet_excludes_path_glob_and_non_ASCII_characters(char c)
         {
-            // Unique=false: the broker exempts the placeholder from suffixing anyway, and this is exactly
-            // what these launches did before 6a8d029f (also what a project-less call gets).
-            Assert.Equal(new ProjectLaunchIdentityRequest(ProjectLaunchIdentity.Unassigned, false),
-                ProjectLaunchIdentity.Resolve(null, TerminalKind.ClaudeCode, null, projectName));
-        }
-
-        [Fact]
-        public void Only_the_exact_placeholder_name_is_refused()
-        {
-            // Control for the fallback above: the check is an exact match on the sanitized name, not a
-            // substring, so a project merely containing the word still gets its own identity.
-            Assert.Equal(new ProjectLaunchIdentityRequest("Unassigned-Work", true),
-                ProjectLaunchIdentity.Resolve(null, TerminalKind.ClaudeCode, null, "Unassigned Work"));
+            Assert.False(ProjectLaunchIdentity.IsIdentityChar(c));
         }
 
         [Fact]
@@ -200,6 +324,8 @@ namespace MultiTerminal.Tests
             Assert.Equal(new string('a', 63), identity);
             Assert.True(identity.Length <= ProjectLaunchIdentity.MaxBaseLength);
         }
+
+        // ---- tab title -------------------------------------------------------------------------------
 
         [Theory]
         [InlineData("TestB", "TestB", false, "TestB")]
@@ -217,6 +343,7 @@ namespace MultiTerminal.Tests
         [InlineData("TestBob", "TestB", "TestBob - TestB")]
         [InlineData("TestB-x", "TestB", "TestB-x - TestB")]
         [InlineData("TestB-", "TestB", "TestB- - TestB")]
+        [InlineData("Project-a1b2c3", "🚀", "Project-a1b2c3 - 🚀")]
         public void A_tab_whose_identity_is_not_the_project_keeps_both(string agent, string project, string expected)
         {
             Assert.Equal(expected, TerminalDocument.ComposeTabTitle(agent, project, TerminalRole.None));
