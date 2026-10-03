@@ -1421,9 +1421,13 @@
             background: rgba(0, 120, 212, 0.08);
         }
 
+        /* Fixed width so every project's name, description and path start at the same x,
+           whatever the icon is (task 66f529bd). */
         .project-selector-icon {
             font-size: 16px;
-            flex-shrink: 0;
+            flex: 0 0 22px;
+            width: 22px;
+            text-align: center;
             margin-top: 1px;
         }
 
@@ -1540,7 +1544,7 @@
 
             // Determine icon to display (use custom icon/color if set, else default)
             const iconDisplay = project.icon
-                ? `<span class="icon" style="${project.iconColor ? 'color:' + escapeHtml(project.iconColor) : ''}">${escapeHtml(project.icon)}</span>`
+                ? `<span class="icon" style="${project.iconColor ? 'color:' + escapeHtml(project.iconColor) : ''}">${escapeHtml(projectIconGlyph(project.icon))}</span>`
                 : `<span class="icon">📁</span>`;
 
             const pathsSectionHtml = renderPaths(project);
@@ -3352,7 +3356,42 @@
             }
         }
 
+        // Opens the popup, or re-renders the list of one already open. The search box is built
+        // once per open and never replaced: rebuilding it on every keystroke put the caret back at
+        // position 0, so "tes" came out as "set" (task 66f529bd).
         function showProjectSelectorPopup(filterText) {
+            const existing = document.querySelector('.picker-overlay.project-selector');
+            if (existing) {
+                renderProjectSelectorList(existing, filterText);
+                return;
+            }
+
+            const overlay = document.createElement('div');
+            overlay.className = 'picker-overlay project-selector';
+            overlay.innerHTML = `
+                <div class="picker-dialog" style="width:440px;">
+                    <div class="picker-header">Switch Project</div>
+                    <input class="project-selector-search" type="text" placeholder="Search projects..."
+                           value="${escapeHtml(filterText || '')}" oninput="onProjectSearchInput(this.value)">
+                    <div class="picker-list" style="max-height:55vh; padding: 4px 0;"></div>
+                    <div class="project-selector-footer">
+                        <button class="picker-btn" onclick="closeProjectSelector()">Close</button>
+                    </div>
+                </div>`;
+            overlay.addEventListener('click', (e) => {
+                if (e.target === overlay) closeProjectSelector();
+            });
+            document.body.appendChild(overlay);
+            renderProjectSelectorList(overlay, filterText);
+
+            // Focus search
+            const searchInput = overlay.querySelector('.project-selector-search');
+            if (searchInput) setTimeout(() => searchInput.focus(), 50);
+        }
+
+        function renderProjectSelectorList(overlay, filterText) {
+            const list = overlay.querySelector('.picker-list');
+            if (!list) return;
             filterText = (filterText || '').toLowerCase();
             const filtered = filterText
                 ? cachedProjectList.filter(p =>
@@ -3372,7 +3411,7 @@
             } else {
                 filtered.forEach(p => {
                     const isCurrent = p.id === cachedCurrentProjectId;
-                    const icon = p.icon || '\uD83D\uDCC1'; // 📁
+                    const icon = projectIconGlyph(p.icon);
                     const iconStyle = p.iconColor ? `style="color:${escapeHtml(p.iconColor)}"` : '';
                     itemsHtml += `
                         <div class="project-selector-item${isCurrent ? ' current' : ''}"
@@ -3386,33 +3425,34 @@
                         </div>`;
                 });
             }
+            list.innerHTML = itemsHtml;
+        }
 
-            // Remove existing overlay if any
-            const existing = document.querySelector('.picker-overlay.project-selector');
-            if (existing) existing.remove();
+        // A project's icon is either an emoji or a NAME ("code", "package", ...). No icon font is
+        // loaded here, so a name must become an emoji or it prints as the word itself, which also
+        // pushed every project name out of line (task 66f529bd). Unknown names get the folder.
+        // Keep the names in step with iconLabel() in StartScreen/start-screen.html.
+        const PROJECT_ICON_NAMES = {
+            'terminal': '⚡',                  // ⚡
+            'code': '{}',
+            'folder': '📁',              // 📁
+            'web': '🌐',                 // 🌐
+            'database': '🗄️',      // 🗄️
+            'cloud': '☁️',               // ☁️
+            'star': '⭐',                      // ⭐
+            'rocket': '🚀',              // 🚀
+            'gear': '⚙️',                // ⚙️
+            'bug': '🐛',                 // 🐛
+            'package': '📦',             // 📦
+            'extension': '🧩',           // 🧩
+            'smartphone': '📱'           // 📱
+        };
 
-            const overlay = document.createElement('div');
-            overlay.className = 'picker-overlay project-selector';
-            overlay.innerHTML = `
-                <div class="picker-dialog" style="width:440px;">
-                    <div class="picker-header">Switch Project</div>
-                    <input class="project-selector-search" type="text" placeholder="Search projects..."
-                           value="${escapeHtml(filterText)}" oninput="onProjectSearchInput(this.value)">
-                    <div class="picker-list" style="max-height:55vh; padding: 4px 0;">
-                        ${itemsHtml}
-                    </div>
-                    <div class="project-selector-footer">
-                        <button class="picker-btn" onclick="closeProjectSelector()">Close</button>
-                    </div>
-                </div>`;
-            overlay.addEventListener('click', (e) => {
-                if (e.target === overlay) closeProjectSelector();
-            });
-            document.body.appendChild(overlay);
-
-            // Focus search
-            const searchInput = overlay.querySelector('.project-selector-search');
-            if (searchInput) setTimeout(() => searchInput.focus(), 50);
+        function projectIconGlyph(icon) {
+            const value = (icon || '').trim();
+            if (!value) return '📁';
+            if (value.codePointAt(0) > 127) return value;
+            return PROJECT_ICON_NAMES[value.toLowerCase()] || '📁';
         }
 
         function onProjectSearchInput(value) {
