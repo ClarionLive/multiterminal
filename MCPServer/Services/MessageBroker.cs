@@ -2536,12 +2536,11 @@ namespace MultiTerminal.MCPServer.Services
                     if (!isUnassignedPlaceholder)
                     {
                         DebugLogService?.Warning("MessageBroker", $"DocId collision rejected: '{name}' tried to claim DocId '{docId}' owned by '{existingByDocId.Name}'. Issuing fresh registration.");
-                        LogInfo($"SWAPDIAG REGISTER-OUTCOME=hijack-reject incoming name='{name}' docId='{docId}' wasOwnedBy='{existingByDocId.Name}' => docId cleared, fresh registration"); // task ab32897c diag; remove after root cause
                     }
                     else
                     {
                         DebugLogService?.Warning("MessageBroker", $"Placeholder adoption rejected: '{name}' presented a non-matching launch nonce for DocId '{docId}'. A foreign registration cannot claim this placeholder. Issuing fresh registration.");
-                        LogInfo($"SWAPDIAG REGISTER-OUTCOME=nonce-reject incoming name='{name}' docId='{docId}' placeholder='{existingByDocId.Name}' noncePresented={!string.IsNullOrEmpty(nonce)} => docId cleared, fresh registration"); // task fd3437e6
+                        LogInfo($"REGISTER-OUTCOME=nonce-reject incoming name='{name}' docId='{docId}' placeholder='{existingByDocId.Name}' noncePresented={!string.IsNullOrEmpty(nonce)} => docId cleared, fresh registration"); // task fd3437e6
                     }
                     docId = null; // Clear the stolen docId so it falls through to fresh registration below
                     existingByDocId = null;
@@ -2553,7 +2552,6 @@ namespace MultiTerminal.MCPServer.Services
                 string newName = name;
 
                 DebugLogService?.Info("MessageBroker", $"Terminal renaming: {oldName} → {newName} (DocId: {docId})");
-                LogInfo($"SWAPDIAG REGISTER-OUTCOME=rename '{oldName}'→'{newName}' on DocId='{docId}' (placeholder adopted incoming name). This is the prime swap suspect if DocId belongs to the OTHER doc. task ab32897c"); // remove after root cause
 
                 // Update terminal name and channel port
                 existingByDocId.Name = newName;
@@ -2642,7 +2640,7 @@ namespace MultiTerminal.MCPServer.Services
                 && !string.Equals(nonce, existingByName.LaunchNonce, StringComparison.Ordinal))
             {
                 DebugLogService?.Warning("MessageBroker", $"Placeholder same-name attach rejected: '{name}' presented a non-matching launch nonce for seeded DocId '{existingByName.DocId}'. Issuing fresh registration.");
-                LogInfo($"SWAPDIAG REGISTER-OUTCOME=nonce-reject-samename incoming name='{name}' docId='{docId ?? "null"}' noncePresented={!string.IsNullOrEmpty(nonce)} => docId cleared, fresh registration"); // task fd3437e6
+                LogInfo($"REGISTER-OUTCOME=nonce-reject-samename incoming name='{name}' docId='{docId ?? "null"}' noncePresented={!string.IsNullOrEmpty(nonce)} => docId cleared, fresh registration"); // task fd3437e6
                 docId = null;
                 existingByName = null;
             }
@@ -2779,7 +2777,7 @@ namespace MultiTerminal.MCPServer.Services
                         DebugLogService?.Info("MessageBroker", $"Channel port report for '{name}' (port {channelPort.Value}) refused, refusal {corroborated} of {ChannelPortRefusalCorroborationThreshold} needed before this counts as a dead channel. Not attributed to '{name}' yet — a single refusal cannot distinguish this terminal's own stale channel server from someone else claiming its name. task c9285d2a");
                     }
                 }
-                LogInfo($"SWAPDIAG REGISTER-OUTCOME=duplicate-name-reject incoming name='{name}' docId='{docId ?? "null"}' noncePresented={!string.IsNullOrEmpty(nonce)} ownerPidPresented={ownerPid.HasValue} rowHeldBy={(heldByNonce ? "nonce" : "livePid")} => refused"); // task c9285d2a
+                LogInfo($"REGISTER-OUTCOME=duplicate-name-reject incoming name='{name}' docId='{docId ?? "null"}' noncePresented={!string.IsNullOrEmpty(nonce)} ownerPidPresented={ownerPid.HasValue} rowHeldBy={(heldByNonce ? "nonce" : "livePid")} => refused"); // task c9285d2a
 
                 // No side effects on the refusal path — nothing was registered, so nothing to raise or
                 // profile. The counter increment above is a plain field write on a row we hold the lock
@@ -2878,7 +2876,7 @@ namespace MultiTerminal.MCPServer.Services
                     }
                     else
                     {
-                        LogInfo($"SWAPDIAG REGISTER-OUTCOME=nonce-seed-refused name='{name}' — the caller proved nothing about this row, so its nonce is not seeded. A seeded nonce is never liveness-checked and never expires, so seeding here would hold the name permanently against its real owner. task c9285d2a");
+                        LogInfo($"REGISTER-OUTCOME=nonce-seed-refused name='{name}' — the caller proved nothing about this row, so its nonce is not seeded. A seeded nonce is never liveness-checked and never expires, so seeding here would hold the name permanently against its real owner. task c9285d2a");
                     }
                 }
 
@@ -2983,7 +2981,6 @@ namespace MultiTerminal.MCPServer.Services
                         existingByName.IsReady = false;   // the handshake belonged to the old session
                     }
                 }
-                LogInfo($"SWAPDIAG REGISTER-OUTCOME=name-match '{name}' incomingDocId='{docId ?? "null"}' deliveredDocId='{existingByName.DocId ?? "null"}' (existing row reused; delivered docId is what MainForm binds on). task ab32897c"); // remove after root cause
                 // The TerminalRegistered re-raise, the profile auto-create/online work and the message
                 // queue are DEFERRED to ApplyRegistrationSideEffects — none of them may run under
                 // _registrationLock. The row mutation above is finished, so releasing here is safe.

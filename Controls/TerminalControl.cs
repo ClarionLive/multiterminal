@@ -915,8 +915,8 @@ namespace MultiTerminal.Controls
             // the replacement. Delivering it would send the NEW session home, unregister it, and
             // rotate its launch nonce away from the one its broker row and child already hold.
             // After Stop() _terminal is null or a newer instance, so an exit from any other instance
-            // is stale and dropped.
-            if (!ReferenceEquals(sender, _terminal))
+            // is stale and dropped. The rule lives in PaneLaunchLifecycle so it is tested (5e1dea4c).
+            if (!MultiTerminal.Docking.PaneLaunchLifecycle.AcceptsExit(sender, _terminal))
             {
                 _debugLogService?.Info("TerminalControl", "Dropped a queued exit from a terminal instance that has since been stopped or replaced (task 19a26090).");
                 return;
