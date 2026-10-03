@@ -75,8 +75,8 @@ namespace MultiTerminal.API.Controllers
                 currentVersion: request.CurrentVersion);
 
             // An occupied folder is a conflict, not a malformed request (task 9f95ab0c). The detail
-            // names the existing id; nothing is reused or overwritten.
-            if (!result.Success && !string.IsNullOrEmpty(result.ExistingProjectId))
+            // names the existing id (or says the project.json is unreadable); nothing is reused or overwritten.
+            if (!result.Success && result.FolderOccupied)
                 return Problem(detail: result.Error, statusCode: 409);
             if (!result.Success)
                 return Problem(detail: result.Error ?? "Failed to create project", statusCode: 400);

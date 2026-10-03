@@ -202,7 +202,9 @@ namespace MultiTerminal.Dialogs
             var decision = ExistingProjectDetector.Decide(existing, m => AskAboutExistingProject(m, name));
             if (decision == NewProjectFolderDecision.ChooseDifferentFolder)
             {
-                ShowError($"That folder already has the project '{existing.ProjectName}'. Choose a different folder.");
+                ShowError(existing.CanOpenOrRename
+                    ? $"That folder already has the project '{existing.ProjectName}'. Choose a different folder."
+                    : ExistingProjectDetector.DescribeProblem(existing));
                 FolderBox.Focus();
                 FolderBox.SelectAll();
                 return;
@@ -247,6 +249,25 @@ namespace MultiTerminal.Dialogs
                 "Choose a different folder",
                 "Go back to New Project and pick another folder.");
             var cancel = System.Windows.Forms.TaskDialogButton.Cancel;
+
+            // Open/Rename would act on another folder's project or on an unreadable file: offer only a
+            // different folder and Cancel, and say why (pipeline Run 1 on 9f95ab0c).
+            if (!existing.CanOpenOrRename)
+            {
+                var blocked = new System.Windows.Forms.TaskDialogPage
+                {
+                    Caption = "Project already exists",
+                    Heading = "This folder already has a project that cannot be opened from here",
+                    Text = ExistingProjectDetector.DescribeProblem(existing),
+                    Icon = System.Windows.Forms.TaskDialogIcon.Warning,
+                    AllowCancel = true,
+                    DefaultButton = cancel,
+                };
+                blocked.Buttons.Add(differentFolder);
+                blocked.Buttons.Add(cancel);
+                var choice = System.Windows.Forms.TaskDialog.ShowDialog(new WindowInteropHelper(this).Handle, blocked);
+                return choice == differentFolder ? NewProjectFolderDecision.ChooseDifferentFolder : NewProjectFolderDecision.Cancel;
+            }
 
             string text = $"{existing.ProjectPath}\nProject id: {existing.ProjectId}";
             if (existing.DatabaseIds.Count > 1)

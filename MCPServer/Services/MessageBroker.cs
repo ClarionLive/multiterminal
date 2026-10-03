@@ -6034,21 +6034,104 @@ namespace MultiTerminal.MCPServer.Services
                 return new CreateProjectResult { Success = false, Error = "Project name is required" };
             }
 
-            var existing = FindExistingProjectAtPath(path);
-            if (existing.Exists)
+            CreateProjectResult result;
+            ActivityEvent activity = null;
+            lock (_projectCreateLock)
             {
-                if (!allowReuseExisting)
+                var existing = FindExistingProjectAtPath(path);
+                TestHookAfterFolderCheck?.Invoke();
+
+                if (existing.Exists)
                 {
-                    return new CreateProjectResult
+                    if (!allowReuseExisting)
                     {
-                        Success = false,
-                        ExistingProjectId = existing.ProjectId,
-                        Error = $"A project already exists at path '{path}' (id: {existing.ProjectId}, name: '{existing.ProjectName}'). Use update_project to modify it.",
-                    };
+                        string reason = ExistingProjectDetector.DescribeProblem(existing)
+                            ?? $"A project already exists at path '{path}' (id: {existing.ProjectId}, name: '{existing.ProjectName}'). Use update_project to modify it.";
+                        return new CreateProjectResult
+                        {
+                            Success = false,
+                            FolderOccupied = true,
+                            ExistingProjectId = existing.ProjectId,
+                            Error = reason,
+                        };
+                    }
+                    result = AdoptExistingProjectLocked(existing, createdBy, out activity);
                 }
-                return AdoptExistingProject(existing, createdBy);
+                else
+                {
+                    result = CreateNewProjectLocked(name, description, createdBy, path, teamLead, defaultTerminal,
+                        projectType, currentVersion, out activity);
+                }
             }
 
+            // Events are raised outside the lock: a subscriber that calls back into the broker must not
+            // be able to deadlock against a create on another thread.
+            if (activity != null)
+            {
+                BroadcastProjectUpdate();
+                RecordActivity(activity);
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// "Open existing" from New Project (task 9f95ab0c): make sure the broker and the database know
+        /// the project already at <paramref name="path"/>, under its own id, without changing it. Refuses
+        /// a free folder, and any folder whose project cannot safely be opened
+        /// (<see cref="ExistingProjectMatch.Problem"/>).
+        /// </summary>
+        public CreateProjectResult RegisterExistingProject(string path, string createdBy)
+        {
+            CreateProjectResult result;
+            ActivityEvent activity = null;
+            lock (_projectCreateLock)
+            {
+                var existing = FindExistingProjectAtPath(path);
+                if (!existing.Exists)
+                    return new CreateProjectResult { Success = false, Error = $"There is no project at '{path}'." };
+                result = AdoptExistingProjectLocked(existing, createdBy, out activity);
+            }
+
+            if (activity != null)
+            {
+                BroadcastProjectUpdate();
+                RecordActivity(activity);
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Serializes every check-then-write on project folders: <see cref="CreateProject"/> and
+        /// <see cref="RegisterExistingProject"/> hold it from <see cref="FindExistingProjectAtPath"/> to the
+        /// last write, so two creates on one folder cannot both see it free (pipeline Run 1 on 9f95ab0c).
+        /// One global lock is fine: creates are rare and human-paced.
+        ///
+        /// Deliberately NOT a unique index on projects.path: the live database already holds a same-path
+        /// pair ("Testing" d08313df and "mt-stress-fixture" 25760f44), so that migration would fail on
+        /// existing data. Every create path (New Project dialog, POST /api/projects and so the
+        /// create_project MCP tool, the ProjectRegistered sync hook) goes through this broker in-process,
+        /// so an in-process lock covers them all.
+        /// </summary>
+        private readonly object _projectCreateLock = new object();
+
+        /// <summary>
+        /// Test seam (InternalsVisibleTo): runs inside <see cref="_projectCreateLock"/> between the folder
+        /// check and the first write, so a test can hold two creates at exactly the racy point.
+        /// </summary>
+        internal Action TestHookAfterFolderCheck { get; set; }
+
+        private CreateProjectResult CreateNewProjectLocked(
+            string name,
+            string description,
+            string createdBy,
+            string path,
+            string teamLead,
+            string defaultTerminal,
+            string projectType,
+            string currentVersion,
+            out ActivityEvent activity)
+        {
+            activity = null;
             var project = new Project
             {
                 Id = Guid.NewGuid().ToString("N").Substring(0, 8),
@@ -6091,17 +6174,14 @@ namespace MultiTerminal.MCPServer.Services
                 catch (Exception ex) { LogError($"Failed to save project file: {ex.Message}"); }
             }
 
-            BroadcastProjectUpdate();
-
-            // Record activity for the feed
-            RecordActivity(new ActivityEvent
+            activity = new ActivityEvent
             {
                 Terminal = createdBy ?? "System",
                 Type = "project",
                 Action = "created",
                 Content = $"Created project: {name}",
                 RelatedId = project.Id
-            });
+            };
 
             return new CreateProjectResult
             {
@@ -6113,10 +6193,10 @@ namespace MultiTerminal.MCPServer.Services
 
         /// <summary>
         /// The project already living at <paramref name="path"/>, if any (task 9f95ab0c): a
-        /// .claude/project.json in the folder, or a database row whose path is the same folder
-        /// (full path, trailing separators ignored, case-insensitive). A worktree folder is checked
-        /// as its repo root, because that is where <see cref="Services.ProjectService.SaveProject"/>
-        /// would actually put the project (task 19d0d867).
+        /// .claude/project.json in the folder (its EXISTENCE, parsed or not), or a database row whose
+        /// path is the same folder (full path, trailing separators ignored, case-insensitive). A worktree
+        /// folder is checked as its repo root, because that is where
+        /// <see cref="Services.ProjectService.SaveProject"/> would actually put the project (task 19d0d867).
         /// </summary>
         public ExistingProjectMatch FindExistingProjectAtPath(string path)
         {
@@ -6125,16 +6205,28 @@ namespace MultiTerminal.MCPServer.Services
 
             string folder = WorktreeLayout.TryResolveStableProjectPath(path, null, out var stable) ? stable : path;
 
+            // Occupancy is the file's existence. LoadProject returns null for a damaged, empty, id-less or
+            // locked file, and that must not read as "empty folder" (pipeline Run 1: fail closed).
+            bool fileExists;
             MultiTerminal.Models.Project projectJson = null;
             try
             {
-                projectJson = ProjectService?.LoadProject(folder);
+                // CA3003: an existence probe on a local caller's project folder (the same trust as
+                // ProjectService.LoadProject, which reads this file); nothing is opened or written here.
+#pragma warning disable CA3003
+                fileExists = File.Exists(System.IO.Path.Combine(folder, ".claude", "project.json"));
+#pragma warning restore CA3003
+                if (fileExists)
+                    projectJson = ProjectService?.LoadProject(folder);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is ArgumentException || ex is NotSupportedException || ex is IOException || ex is UnauthorizedAccessException)
             {
-                LogError($"FindExistingProjectAtPath: reading project.json at '{folder}' failed: {ex.Message}");
+                LogError($"FindExistingProjectAtPath: checking project.json at '{folder}' failed: {ex.Message}");
+                fileExists = false;
             }
 
+            // The database, not the _projects cache, is read first: rows written behind the broker's back
+            // (ProjectService.RegisterProject's SaveRichProject upsert) reach the cache only on restart.
             List<(string Id, string Name, string Path)> rows;
             try
             {
@@ -6146,36 +6238,55 @@ namespace MultiTerminal.MCPServer.Services
                 rows = _projects.Values.Select(p => (p.Id, p.Name, p.Path)).ToList();
             }
 
-            return ExistingProjectDetector.Detect(folder, projectJson, rows);
+            return ExistingProjectDetector.Detect(folder, fileExists, projectJson, rows);
         }
 
         /// <summary>
-        /// The allowReuseExisting arm of <see cref="CreateProject"/>: make sure the broker and the
-        /// database know the project already at the folder, under its own id, WITHOUT writing over
-        /// any of its fields. A folder with only a project.json gets a database row copied from the
-        /// file; a folder that already has a row is left exactly as it is.
+        /// Shared by the allowReuseExisting arm of <see cref="CreateProject"/> and
+        /// <see cref="RegisterExistingProject"/>; the caller holds <see cref="_projectCreateLock"/>. Makes
+        /// sure the broker and the database know the project already at the folder, under its own id,
+        /// WITHOUT writing over any of its fields: a folder with only a project.json gets a database row
+        /// copied from the file; a folder that already has a row is left exactly as it is. Refuses
+        /// whenever the id and the folder do not belong together, so it can never register, open or hand
+        /// a rename target that lives somewhere else.
         /// </summary>
-        private CreateProjectResult AdoptExistingProject(ExistingProjectMatch existing, string createdBy)
+        private CreateProjectResult AdoptExistingProjectLocked(ExistingProjectMatch existing, string createdBy, out ActivityEvent activity)
         {
+            activity = null;
             string id = existing.ProjectId;
 
-            MultiTerminal.Models.Project fileProject = null;
-            try
+            CreateProjectResult Refuse(string error) => new CreateProjectResult
             {
-                fileProject = ProjectService?.LoadProject(existing.ProjectPath);
-            }
-            catch (Exception ex)
-            {
-                LogError($"AdoptExistingProject: reading project.json at '{existing.ProjectPath}' failed: {ex.Message}");
-            }
+                Success = false,
+                FolderOccupied = true,
+                ExistingProjectId = id,
+                Error = error,
+            };
+
+            string problem = ExistingProjectDetector.DescribeProblem(existing);
+            if (problem != null)
+                return Refuse(problem);
+
+            // Defence in depth for the cases Detect already reports: the id must be one of this folder's
+            // rows when the folder has rows, and an existing row for the id must live at this folder.
+            if (existing.DatabaseIds.Count > 0 && !existing.DatabaseIds.Contains(id, StringComparer.Ordinal))
+                return Refuse($"This folder's .claude/project.json says project {id}, but MultiTerminal has {string.Join(", ", existing.DatabaseIds)} registered at this folder.");
+
+            var rich = _projectDb.GetRichProject(id);
+            Project cachedRow = null;
+            bool registered = rich != null || _projects.TryGetValue(id, out cachedRow);
+            string registeredPath = rich != null ? rich.Path : cachedRow?.Path;
+            if (registered && !ExistingProjectDetector.PathsEqual(registeredPath, existing.ProjectPath))
+                return Refuse($"Project {id} is registered at '{registeredPath}', not at '{existing.ProjectPath}'.");
+
+            var fileProject = existing.ProjectJson;
             if (fileProject != null && !string.Equals(fileProject.Id, id, StringComparison.Ordinal))
                 fileProject = null;
 
-            var rich = _projectDb.GetRichProject(id);
-            if (rich == null && !_projects.ContainsKey(id))
+            if (!registered)
             {
                 if (fileProject == null)
-                    return new CreateProjectResult { Success = false, ExistingProjectId = id, Error = $"Project {id} at '{existing.ProjectPath}' could not be read." };
+                    return Refuse($"Project {id} at '{existing.ProjectPath}' could not be read.");
 
                 var row = new Project
                 {
@@ -6184,7 +6295,7 @@ namespace MultiTerminal.MCPServer.Services
                     Description = fileProject.Description,
                     CreatedBy = string.IsNullOrEmpty(fileProject.CreatedBy) ? createdBy : fileProject.CreatedBy,
                     CreatedAt = fileProject.CreatedAt == default ? DateTime.UtcNow : fileProject.CreatedAt,
-                    Path = fileProject.Path,
+                    Path = existing.ProjectPath,
                 };
                 try
                 {
@@ -6197,15 +6308,14 @@ namespace MultiTerminal.MCPServer.Services
                     return new CreateProjectResult { Success = false, ExistingProjectId = id, Error = $"Failed to persist project: {ex.Message}" };
                 }
 
-                BroadcastProjectUpdate();
-                RecordActivity(new ActivityEvent
+                activity = new ActivityEvent
                 {
                     Terminal = createdBy ?? "System",
                     Type = "project",
                     Action = "registered",
                     Content = $"Registered existing project: {row.Name}",
                     RelatedId = id
-                });
+                };
                 LogInfo($"Registered existing project at {existing.ProjectPath} (ID: {id}) without changing it");
                 rich = _projectDb.GetRichProject(id);
             }
@@ -6588,7 +6698,8 @@ namespace MultiTerminal.MCPServer.Services
 
             try
             {
-                ProjectService.UpdateProjectJsonNameAndDescription(cached.Path, projectId, name, description);
+                if (!ProjectService.UpdateProjectJsonNameAndDescription(cached.Path, projectId, name, description))
+                    LogInfo($"UpdateProject: no project.json for {projectId} at '{cached.Path}' (absent or another id); renamed in the database only");
             }
             catch (Exception ex)
             {

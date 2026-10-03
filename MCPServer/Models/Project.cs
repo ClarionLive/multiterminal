@@ -71,6 +71,12 @@ namespace MultiTerminal.MCPServer.Models
         public string ExistingProjectId { get; set; }
 
         /// <summary>
+        /// The create was refused because the folder already holds a project (task 9f95ab0c), including
+        /// one whose project.json is unreadable and so has no id to report in <see cref="ExistingProjectId"/>.
+        /// </summary>
+        public bool FolderOccupied { get; set; }
+
+        /// <summary>
         /// The rich app-level Project (with all enhanced columns: TeamLead, DefaultTerminal,
         /// ProjectType, etc.) populated when CreateProject succeeds. Used by callers that
         /// need the full Project object for downstream work (e.g., MainForm terminal launch

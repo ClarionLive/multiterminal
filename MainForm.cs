@@ -4397,8 +4397,7 @@ namespace MultiTerminal
                 if (existing == null || broker == null)
                     throw new InvalidOperationException("The existing project could not be resolved.");
 
-                var adopt = broker.CreateProject(dialog.ProjectName, null, "new-project-dialog",
-                    path: existing.ProjectPath, allowReuseExisting: true);
+                var adopt = broker.RegisterExistingProject(existing.ProjectPath, "new-project-dialog");
                 if (!adopt.Success)
                     throw new InvalidOperationException(adopt.Error ?? "Failed to open the existing project");
 

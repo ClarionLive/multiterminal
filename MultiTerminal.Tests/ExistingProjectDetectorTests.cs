@@ -112,5 +112,73 @@ namespace MultiTerminal.Tests
             Assert.True(asked);
             Assert.Equal(expected, decision);
         }
+
+        // Pipeline Run 1: a copied/cloned/moved folder (or a hostile file) whose project.json carries the
+        // id of a project registered at ANOTHER folder. Open would launch that folder; Rename would rename it.
+        [Fact]
+        public void Json_id_registered_at_another_folder_is_reported_and_not_openable()
+        {
+            var rows = new List<(string, string, string)> { ("ac8a793b", "TestB", @"H:\Projects\Original") };
+
+            var match = ExistingProjectDetector.Detect(Folder, Json("ac8a793b", "TestB"), rows);
+
+            Assert.True(match.Exists);
+            Assert.Equal(ExistingProjectProblem.IdRegisteredElsewhere, match.Problem);
+            Assert.Equal(@"H:\Projects\Original", match.OtherPath);
+            Assert.False(match.CanOpenOrRename);
+            Assert.Contains("copy of project 'TestB'", ExistingProjectDetector.DescribeProblem(match));
+        }
+
+        [Fact]
+        public void Json_id_registered_at_this_folder_via_a_variant_path_is_openable()
+        {
+            var rows = new List<(string, string, string)> { ("ac8a793b", "TestB", @"h:\projects\testb\") };
+
+            var match = ExistingProjectDetector.Detect(Folder, Json("ac8a793b", "TestB"), rows);
+
+            Assert.Equal(ExistingProjectProblem.None, match.Problem);
+            Assert.True(match.CanOpenOrRename);
+        }
+
+        // A project.json that exists but does not parse (or has no id) still occupies the folder.
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        public void Unreadable_project_json_occupies_the_folder(string id)
+        {
+            var parsed = id == null ? null : Json(id, "NoId");
+
+            var match = ExistingProjectDetector.Detect(Folder, projectFileExists: true, parsed, new List<(string, string, string)>());
+
+            Assert.True(match.Exists);
+            Assert.Equal(ExistingProjectProblem.UnreadableProjectFile, match.Problem);
+            Assert.False(match.CanOpenOrRename);
+        }
+
+        [Fact]
+        public void Json_id_differing_from_this_folders_row_is_a_conflict()
+        {
+            var rows = new List<(string, string, string)> { ("d08313df", "Testing", Folder) };
+
+            var match = ExistingProjectDetector.Detect(Folder, Json("ac8a793b", "TestB"), rows);
+
+            Assert.Equal(ExistingProjectProblem.IdConflict, match.Problem);
+            Assert.Equal(new[] { "d08313df" }, match.DatabaseIds);
+            Assert.False(match.CanOpenOrRename);
+        }
+
+        // Whatever the prompt answers, a problem folder never yields Open or Rename.
+        [Theory]
+        [InlineData(NewProjectFolderDecision.OpenExisting, NewProjectFolderDecision.Cancel)]
+        [InlineData(NewProjectFolderDecision.RenameExisting, NewProjectFolderDecision.Cancel)]
+        [InlineData(NewProjectFolderDecision.ChooseDifferentFolder, NewProjectFolderDecision.ChooseDifferentFolder)]
+        [InlineData(NewProjectFolderDecision.Cancel, NewProjectFolderDecision.Cancel)]
+        public void Problem_folder_never_opens_or_renames(NewProjectFolderDecision answer, NewProjectFolderDecision expected)
+        {
+            var rows = new List<(string, string, string)> { ("ac8a793b", "TestB", @"H:\Projects\Original") };
+            var copied = ExistingProjectDetector.Detect(Folder, Json("ac8a793b", "TestB"), rows);
+
+            Assert.Equal(expected, ExistingProjectDetector.Decide(copied, _ => answer));
+        }
     }
 }

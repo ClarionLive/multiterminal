@@ -1,6 +1,10 @@
 using System;
 using System.Data.SQLite;
 using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using MultiTerminal.MCPServer.Models;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
 using Xunit;
@@ -171,6 +175,115 @@ namespace MultiTerminal.Tests
             Assert.Equal("TestC", file.Name);
             Assert.Equal("The original description", file.Description);
             Assert.Equal(OriginalCreatedAt, file.CreatedAt.ToUniversalTime());
+        }
+
+        // ---- Pipeline Run 1 ----
+
+        // A copy of TestB's folder carries TestB's id. Every create/register path must refuse, and neither
+        // TestB (row + its own project.json) nor the copy's file may change.
+        [Fact]
+        public void Copied_project_json_is_refused_by_every_path_and_nothing_changes()
+        {
+            using var db = new ProjectDatabase();
+            using var service = new ProjectService(db);
+            SeedTestB(service, _folder);
+            string copy = Path.Combine(Path.GetDirectoryName(_folder), "TestB-copy");
+            Directory.CreateDirectory(Path.Combine(copy, ".claude"));
+            string copyJson = Path.Combine(copy, ".claude", "project.json");
+            File.Copy(Path.Combine(_folder, ".claude", "project.json"), copyJson);
+            byte[] copyBytes = File.ReadAllBytes(copyJson);
+            using var broker = new MessageBroker { ProjectService = service };
+
+            Assert.Equal(ExistingProjectProblem.IdRegisteredElsewhere, broker.FindExistingProjectAtPath(copy).Problem);
+            var create = broker.CreateProject("TestC", null, "new-project-dialog", copy);
+            var reuse = broker.CreateProject("TestC", null, "new-project-dialog", copy, allowReuseExisting: true);
+            var open = broker.RegisterExistingProject(copy, "new-project-dialog");
+
+            Assert.False(create.Success);
+            Assert.True(create.FolderOccupied);
+            Assert.False(reuse.Success);
+            Assert.False(open.Success);
+            AssertUnchanged(service, db, _folder);
+            Assert.True(ExistingProjectDetector.PathsEqual(_folder, db.GetRichProject("ac8a793b").Path));
+            Assert.Single(db.GetAllProjects());
+            Assert.Equal(copyBytes, File.ReadAllBytes(copyJson));
+        }
+
+        // A project.json that exists but is damaged, empty or id-less is somebody's project: refuse, keep
+        // its bytes, add no row.
+        [Theory]
+        [InlineData("")]
+        [InlineData("   ")]
+        [InlineData("this is not json")]
+        [InlineData("{\"name\": \"NoId\", \"description\": \"lost its id\"}")]
+        public void Unreadable_project_json_is_refused_and_left_byte_for_byte(string contents)
+        {
+            using var db = new ProjectDatabase();
+            using var service = new ProjectService(db);
+            Directory.CreateDirectory(Path.Combine(_folder, ".claude"));
+            string jsonPath = Path.Combine(_folder, ".claude", "project.json");
+            File.WriteAllText(jsonPath, contents);
+            byte[] before = File.ReadAllBytes(jsonPath);
+            using var broker = new MessageBroker { ProjectService = service };
+
+            var create = broker.CreateProject("TestC", null, "new-project-dialog", _folder);
+            var reuse = broker.CreateProject("TestC", null, "new-project-dialog", _folder, allowReuseExisting: true);
+            var open = broker.RegisterExistingProject(_folder, "new-project-dialog");
+
+            Assert.False(create.Success);
+            Assert.True(create.FolderOccupied);
+            Assert.False(reuse.Success);
+            Assert.False(open.Success);
+            Assert.Equal(before, File.ReadAllBytes(jsonPath));
+            Assert.Empty(db.GetAllProjects());
+        }
+
+        // project.json says one id, the folder's only row is another: refuse, never insert a second row.
+        [Fact]
+        public void Json_id_differing_from_the_folders_row_is_refused_without_a_second_row()
+        {
+            using var db = new ProjectDatabase();
+            using var service = new ProjectService(db);
+            using var broker = new MessageBroker { ProjectService = service };
+            var first = broker.CreateProject("Testing", "fixture", "test", _folder);
+            Assert.True(first.Success, first.Error);
+            string jsonPath = Path.Combine(_folder, ".claude", "project.json");
+            string json = File.ReadAllText(jsonPath);
+            Assert.Contains(first.ProjectId, json);
+            File.WriteAllText(jsonPath, json.Replace(first.ProjectId, "deadbeef"));
+
+            var reuse = broker.CreateProject("TestC", null, "new-project-dialog", _folder, allowReuseExisting: true);
+            var open = broker.RegisterExistingProject(_folder, "new-project-dialog");
+
+            Assert.False(reuse.Success);
+            Assert.False(open.Success);
+            Assert.Contains("deadbeef", open.Error);
+            Assert.Contains(first.ProjectId, open.Error);
+            Assert.Single(db.GetAllProjects());
+        }
+
+        // Two creates on one free folder. The seam holds each at the racy point (after the folder check,
+        // before the first write) until both are there, or 2s pass. Without the create lock both pass the
+        // check and both create; with it the second waits for the first and then sees the folder taken.
+        [Fact]
+        public async Task Concurrent_creates_on_one_folder_yield_exactly_one_project()
+        {
+            using var db = new ProjectDatabase();
+            using var service = new ProjectService(db);
+            using var broker = new MessageBroker { ProjectService = service };
+            using var barrier = new Barrier(2);
+            broker.TestHookAfterFolderCheck = () => barrier.SignalAndWait(TimeSpan.FromSeconds(2));
+            var results = new CreateProjectResult[2];
+
+            var t1 = Task.Run(() => results[0] = broker.CreateProject("A", null, "test", _folder));
+            var t2 = Task.Run(() => results[1] = broker.CreateProject("B", null, "test", _folder));
+
+            // Bounded wait, not a bare await: a deadlocked create fails the test instead of hanging the suite.
+            var both = Task.WhenAll(t1, t2);
+            var timeoutTask = Task.Delay(TimeSpan.FromSeconds(30));
+            Assert.True(await Task.WhenAny(both, timeoutTask) == both, "creates did not finish");
+            Assert.Equal(1, results.Count(r => r.Success));
+            Assert.Single(db.GetAllProjects());
         }
     }
 }
