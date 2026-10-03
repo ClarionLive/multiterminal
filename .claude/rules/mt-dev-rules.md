@@ -11,7 +11,8 @@ The authority is `.claude/CLAUDE.md`, section "YOU ARE RUNNING INSIDE MULTITERMI
 
 - A build (`dotnet build MultiTerminal.csproj -c Debug`, or `mcp__windows-build-runner__build_project`)
   compiles and mirrors to the **staged** folder. Staged is the build mirror, not where the app is
-  meant to run, so building never disturbs the running app.
+  meant to run, so building normally never disturbs the running app (if MT is running from staged,
+  build with `-p:SharedStagedPath=<a scratch folder>`).
 - The live app is meant to run from the **Deploy** folder, populated only by `deploy.ps1`. Do not
   assume it does: the human sometimes runs it from staged. Check the running exe's path and read
   the folder's `.build-info.json` stamp before concluding what is live.
