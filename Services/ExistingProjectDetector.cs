@@ -41,6 +41,25 @@ namespace MultiTerminal.Services
 
         /// <summary>project.json names one id while the database has other id(s) registered at this folder.</summary>
         IdConflict,
+
+        /// <summary>
+        /// Whether the folder has a .claude/project.json could not be determined (access denied, I/O error,
+        /// unusable path). Treated as occupied: not knowing is not "empty" (Run 2, fail closed).
+        /// </summary>
+        IndeterminateProjectFile,
+    }
+
+    /// <summary>What a look for .claude/project.json found (see <see cref="ExistingProjectDetector.ProbeProjectFile"/>).</summary>
+    public enum ProjectFileState
+    {
+        /// <summary>Confirmed: there is no .claude/project.json.</summary>
+        Absent,
+
+        /// <summary>The file exists (parsed or not).</summary>
+        Present,
+
+        /// <summary>The look failed, so the answer is unknown.</summary>
+        Indeterminate,
     }
 
     /// <summary>
@@ -140,9 +159,18 @@ namespace MultiTerminal.Services
         private static readonly char[] Separators = { '\\', '/' };
 
         /// <summary>
+        /// Resolves an EXISTING folder to its canonical path (8.3 names expanded, junctions followed), or
+        /// returns null to keep the path as given. Test seam (InternalsVisibleTo); production uses
+        /// <see cref="FinalPathNativeMethods.TryResolveFinalPath"/>.
+        /// </summary>
+        internal static Func<string, string> FinalPathResolver { get; set; } = FinalPathNativeMethods.TryResolveFinalPath;
+
+        /// <summary>
         /// Comparable form of a folder path: full path, trimmed, no trailing separators (a drive root
-        /// keeps its own). Returns null for a blank path. Compare results with
-        /// <see cref="StringComparison.OrdinalIgnoreCase"/> (see <see cref="PathsEqual"/>).
+        /// keeps its own); an existing folder is resolved to its final path, so a junction or symlink
+        /// compares equal to its target (Run 2; 8.3 short names are already expanded by
+        /// Path.GetFullPath on .NET). Returns null for a blank path. Compare
+        /// results with <see cref="StringComparison.OrdinalIgnoreCase"/> (see <see cref="PathsEqual"/>).
         /// </summary>
         public static string NormalizePath(string path)
         {
@@ -157,6 +185,23 @@ namespace MultiTerminal.Services
             catch (Exception ex) when (ex is ArgumentException || ex is NotSupportedException || ex is PathTooLongException)
             {
                 full = path.Trim();
+            }
+
+            try
+            {
+                // CA3003: resolving (not opening for read/write) a local folder path.
+#pragma warning disable CA3003
+                if (Directory.Exists(full))
+#pragma warning restore CA3003
+                {
+                    string resolved = FinalPathResolver?.Invoke(full);
+                    if (!string.IsNullOrEmpty(resolved))
+                        full = resolved;
+                }
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException)
+            {
+                // Keep the unresolved path.
             }
 
             string trimmed = full.TrimEnd(Separators);
@@ -183,18 +228,66 @@ namespace MultiTerminal.Services
             IEnumerable<(string Id, string Name, string Path)> databaseRows)
             => Detect(folder, projectJson != null, projectJson, databaseRows);
 
+        /// <summary>Looks for a project at <paramref name="folder"/>, with the file's existence as a bool.</summary>
+        public static ExistingProjectMatch Detect(
+            string folder,
+            bool projectFileExists,
+            MultiTerminal.Models.Project projectJson,
+            IEnumerable<(string Id, string Name, string Path)> databaseRows)
+            => Detect(folder, projectFileExists ? ProjectFileState.Present : ProjectFileState.Absent, projectJson, databaseRows);
+
+        /// <summary>
+        /// Looks for .claude/project.json in <paramref name="folder"/>, distinguishing "confirmed absent"
+        /// from "could not look" (Run 2). <see cref="File.Exists"/> alone answers false for both: it
+        /// swallows access-denied and I/O errors. So a false is confirmed by listing: the folder for
+        /// ".claude", then ".claude" for "project.json"; a listing that throws is
+        /// <see cref="ProjectFileState.Indeterminate"/>. A folder that does not exist yet is Absent
+        /// (New Project creates it).
+        /// </summary>
+        public static ProjectFileState ProbeProjectFile(string folder)
+        {
+            try
+            {
+                string full = Path.GetFullPath(folder);
+                string claude = Path.Combine(full, ".claude");
+                // CA3003: existence probes and listings on a local caller's project folder; nothing is
+                // opened for read or write here.
+#pragma warning disable CA3003
+                if (File.Exists(Path.Combine(claude, "project.json")))
+                    return ProjectFileState.Present;
+                if (!Directory.Exists(full))
+                    return ProjectFileState.Absent;
+                if (!Directory.EnumerateDirectories(full, ".claude").Any())
+                    return ProjectFileState.Absent;
+                return Directory.EnumerateFiles(claude, "project.json").Any()
+                    ? ProjectFileState.Present
+                    : ProjectFileState.Absent;
+#pragma warning restore CA3003
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException || ex is IOException || ex is ArgumentException
+                                       || ex is NotSupportedException || ex is System.Security.SecurityException)
+            {
+                return ProjectFileState.Indeterminate;
+            }
+        }
+
+        /// <summary>The refusal text for a project.json id that differs from the folder's database row(s).</summary>
+        public static string DescribeIdConflict(string projectJsonId, IEnumerable<string> databaseIds)
+            => $"This folder's .claude/project.json says project {projectJsonId}, but MultiTerminal has {string.Join(", ", databaseIds ?? Enumerable.Empty<string>())} registered at this folder. Remove or replace the file to settle which is right, or choose a different folder.";
+
         /// <summary>
         /// Looks for a project at <paramref name="folder"/>.
         /// </summary>
         /// <param name="folder">The folder the user picked.</param>
-        /// <param name="projectFileExists">Whether .claude/project.json EXISTS, whether or not it parsed.
-        /// Occupancy is the file's existence: a damaged file is still somebody's project (fail closed).</param>
+        /// <param name="projectFile">Whether .claude/project.json EXISTS, whether or not it parsed; Indeterminate
+        /// when that could not be determined. Occupancy is the file's existence, and not knowing counts as
+        /// occupied: a damaged or unreadable file is still somebody's project (fail closed).</param>
         /// <param name="projectJson">The folder's parsed .claude/project.json, or null when absent or unreadable.</param>
         /// <param name="databaseRows">Every project row in the database (id, name, path), not just this
         /// folder's: a copied project.json is recognised by its id being registered somewhere else.</param>
         public static ExistingProjectMatch Detect(
             string folder,
-            bool projectFileExists,
+            ProjectFileState projectFile,
             MultiTerminal.Models.Project projectJson,
             IEnumerable<(string Id, string Name, string Path)> databaseRows)
         {
@@ -212,7 +305,8 @@ namespace MultiTerminal.Services
                 .ToList();
             var rowIds = rows.Select(r => r.Id).ToList();
 
-            bool fileExists = projectFileExists || projectJson != null;
+            bool indeterminate = projectFile == ProjectFileState.Indeterminate && projectJson == null;
+            bool fileExists = projectFile == ProjectFileState.Present || projectJson != null || indeterminate;
             bool hasJsonId = projectJson != null && !string.IsNullOrWhiteSpace(projectJson.Id);
             if (!fileExists && rows.Count == 0)
                 return ExistingProjectMatch.None;
@@ -220,6 +314,13 @@ namespace MultiTerminal.Services
             var source = fileExists && rows.Count > 0 ? ExistingProjectSource.Both
                 : fileExists ? ExistingProjectSource.ProjectJson
                 : ExistingProjectSource.DatabaseRow;
+
+            if (indeterminate)
+            {
+                var first = rows.FirstOrDefault();
+                return new ExistingProjectMatch(source, first.Id, first.Name, folder, rowIds,
+                    ExistingProjectProblem.IndeterminateProjectFile);
+            }
 
             if (fileExists && !hasJsonId)
             {
@@ -267,7 +368,9 @@ namespace MultiTerminal.Services
                 case ExistingProjectProblem.IdRegisteredElsewhere:
                     return $"This folder's .claude/project.json is a copy of project '{match.ProjectName}' ({match.ProjectId}) at '{match.OtherPath}'. Choose a different folder, or remove/replace that file.";
                 case ExistingProjectProblem.IdConflict:
-                    return $"This folder's .claude/project.json says project {match.ProjectId}, but MultiTerminal has {string.Join(", ", match.DatabaseIds)} registered at this folder. Remove or replace the file to settle which is right, or choose a different folder.";
+                    return DescribeIdConflict(match.ProjectId, match.DatabaseIds);
+                case ExistingProjectProblem.IndeterminateProjectFile:
+                    return $"MultiTerminal can't read the .claude folder in '{match.ProjectPath}' (access denied, or the path can't be examined), so it can't tell whether a project is already there. Fix the folder's permissions, or choose a different folder.";
                 default:
                     return null;
             }

@@ -227,7 +227,35 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Registers a new project (creates .claude/project.json, upserts to SQLite).
+        /// Auto-registers a project discovered in a terminal's working directory by re-saving the folder's
+        /// OWN project.json under its own id. Skipped (returns false) when the file has no id, or when that
+        /// id is already registered at a different folder: the folder is then a copy, clone or move of
+        /// another project, and the re-save would rebind that project's row to this folder
+        /// (task 9f95ab0c Run 2). Returns true when it registered.
+        /// </summary>
+        public bool AutoRegisterDiscoveredProject(string directory, Project discovered)
+        {
+            if (discovered == null || string.IsNullOrEmpty(directory) || string.IsNullOrWhiteSpace(discovered.Id))
+                return false;
+
+            var registered = _projectDb.GetRichProject(discovered.Id);
+            if (registered != null)
+            {
+                // SaveProject stores a worktree folder as its repo root, so compare against that.
+                string folder = WorktreeLayout.TryResolveStableProjectPath(directory, discovered.SourcePath, out var stable) ? stable : directory;
+                if (!ExistingProjectDetector.PathsEqual(registered.Path, folder))
+                    return false;
+            }
+
+            SaveProject(discovered);
+            return true;
+        }
+
+        /// <summary>
+        /// Registers a new project (creates .claude/project.json, upserts to SQLite). Unguarded: it writes a
+        /// fresh project.json (new id) over whatever the folder holds, so nothing in the app calls it any
+        /// more (task 9f95ab0c Run 2 moved the Project Manager to MessageBroker.CreateProject). Create
+        /// projects through the broker, which checks the folder under its create lock.
         /// </summary>
         public Project RegisterProject(string path, string name, string description = null)
         {

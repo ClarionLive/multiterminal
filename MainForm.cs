@@ -4246,14 +4246,9 @@ namespace MultiTerminal
                 }
                 else
                 {
-                    project = Models.Project.Create(wpfDialog.ProjectName, projectFolder);
-                    project.TeamLead = wpfDialog.SelectedTeamLead;
-                    project.DefaultTerminal = wpfDialog.SelectedDefaultTerminal;
-                    project.CreatedBy = "new-project-dialog";
-                    if (_projectService != null)
-                        _projectService.SaveProject(project);
-                    else
-                        _sharedProjectDatabase?.SaveRichProject(project);
+                    // No broker, so no folder check: refuse rather than write an unchecked project.json over
+                    // whatever the folder holds (task 9f95ab0c Run 2; was an unguarded SaveProject fallback).
+                    throw new InvalidOperationException("The project service is not available; the project was not created.");
                 }
 
                 // Quiet start (GitHub #34). Written out-of-band rather than through CreateProject, so
@@ -5000,8 +4995,8 @@ namespace MultiTerminal
             // automatically add them to the registry
             if (!_projectService.IsProjectRegistered(directory))
             {
-                // Auto-register the discovered project
-                _projectService.SaveProject(discoveredProject);
+                // Auto-register the discovered project (skipped when its id belongs to another folder)
+                _projectService.AutoRegisterDiscoveredProject(directory, discoveredProject);
                 _currentProject = discoveredProject;
                 _projectPanel?.RefreshForProject(discoveredProject);
             }
@@ -8046,10 +8041,10 @@ namespace MultiTerminal
                 var project = _projectService?.DiscoverProject(workingDir);
                 if (project != null)
                 {
-                    // Auto-register if not already registered
+                    // Auto-register if not already registered (skipped when its id belongs to another folder)
                     if (!_projectService.IsProjectRegistered(workingDir))
                     {
-                        _projectService.SaveProject(project);
+                        _projectService.AutoRegisterDiscoveredProject(workingDir, project);
                     }
                     _currentProject = project;
                     _projectPanel?.RefreshForProject(project);
@@ -8240,7 +8235,7 @@ namespace MultiTerminal
         private void ShowProjectManagerDialog()
         {
             using var projectDb = new MultiTerminal.Services.ProjectDatabase();
-            using (var dialog = new ProjectManagerDialog(_projectService, projectDb, _currentTheme))
+            using (var dialog = new ProjectManagerDialog(_projectService, projectDb, _currentTheme, _mcpServer?.Broker))
             {
                 dialog.ProjectOpened += (s, args) =>
                 {

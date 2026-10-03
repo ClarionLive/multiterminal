@@ -122,6 +122,15 @@ namespace MultiTerminal.Dialogs
         /// <summary>Gets the resulting Project after OK is clicked (rich mode only).</summary>
         public Project ResultProject { get; private set; }
 
+        /// <summary>
+        /// Create mode (task 9f95ab0c, Run 2): creates the project through the guarded broker path BEFORE
+        /// this dialog writes anything. Returns null on success, having set the project's Id to the created
+        /// id (the dialog's own save then fills the rich columns of that row); returns the refusal text
+        /// when the folder already holds a project. Required in rich create mode: with no guard the
+        /// dialog refuses to create rather than write an unchecked row.
+        /// </summary>
+        public Func<Project, string> CreateGuard { get; set; }
+
         // ── Legacy constructor: create new project ────────────────────────────
         public EditProjectDialog(TerminalTheme theme)
         {
@@ -439,6 +448,20 @@ namespace MultiTerminal.Dialogs
             }
 
             BuildResultProject();
+
+            if (_projectDb != null && !_isEditMode)
+            {
+                // The folder check and the row insert happen in the broker, under its create lock; on a
+                // refusal nothing has been written and the dialog stays open.
+                string refusal = CreateGuard == null
+                    ? "Projects can't be created here right now (the project service is not available)."
+                    : CreateGuard(ResultProject);
+                if (refusal != null)
+                {
+                    MessageBox.Show(refusal, "New Project", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+            }
 
             if (_projectDb != null)
             {

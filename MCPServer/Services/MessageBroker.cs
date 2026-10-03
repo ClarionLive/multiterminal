@@ -6066,11 +6066,7 @@ namespace MultiTerminal.MCPServer.Services
 
             // Events are raised outside the lock: a subscriber that calls back into the broker must not
             // be able to deadlock against a create on another thread.
-            if (activity != null)
-            {
-                BroadcastProjectUpdate();
-                RecordActivity(activity);
-            }
+            RaiseProjectChangeEvents(activity);
             return result;
         }
 
@@ -6092,12 +6088,16 @@ namespace MultiTerminal.MCPServer.Services
                 result = AdoptExistingProjectLocked(existing, createdBy, out activity);
             }
 
-            if (activity != null)
-            {
-                BroadcastProjectUpdate();
-                RecordActivity(activity);
-            }
+            RaiseProjectChangeEvents(activity);
             return result;
+        }
+
+        private void RaiseProjectChangeEvents(ActivityEvent activity)
+        {
+            if (activity == null)
+                return;
+            BroadcastProjectUpdate();
+            RecordActivity(activity);
         }
 
         /// <summary>
@@ -6106,11 +6106,22 @@ namespace MultiTerminal.MCPServer.Services
         /// last write, so two creates on one folder cannot both see it free (pipeline Run 1 on 9f95ab0c).
         /// One global lock is fine: creates are rare and human-paced.
         ///
-        /// Deliberately NOT a unique index on projects.path: the live database already holds a same-path
-        /// pair ("Testing" d08313df and "mt-stress-fixture" 25760f44), so that migration would fail on
-        /// existing data. Every create path (New Project dialog, POST /api/projects and so the
-        /// create_project MCP tool, the ProjectRegistered sync hook) goes through this broker in-process,
-        /// so an in-process lock covers them all.
+        /// What it covers: the paths that CREATE a project in a folder all run through this broker,
+        /// in-process: the start-screen New Project dialog (MainForm), the Project Manager dialog's New
+        /// Project (routed here in Run 2; it used to write a fresh project.json via
+        /// ProjectService.RegisterProject before the broker saw it), and POST /api/projects (so the
+        /// create_project MCP tool). ProjectService.RegisterProject now has no callers; the
+        /// ProjectRegistered sync hook that adopts its output still runs through CreateProject. Paths that
+        /// are NOT covered, and why that is safe: ChangelogService/VersioningService and the edit dialogs
+        /// re-save an already registered project under its own id; MainForm's auto-registration of a
+        /// discovered folder re-saves that folder's OWN project.json, and since Run 2 skips it when the id
+        /// is registered at another folder (ProjectService.AutoRegisterDiscoveredProject).
+        ///
+        /// Across processes: MultiTerminal runs one instance per Windows session
+        /// (SingleInstanceGuard, mutex Local\MultiTerminal.SingleInstance, acquired in Program.Main) and the
+        /// database is per user, so one process owns these writes. Not a cross-process lock and NOT a
+        /// unique index on projects.path: the live database already holds a same-path pair ("Testing"
+        /// d08313df and "mt-stress-fixture" 25760f44), so that migration would fail on existing data.
         /// </summary>
         private readonly object _projectCreateLock = new object();
 
@@ -6119,6 +6130,12 @@ namespace MultiTerminal.MCPServer.Services
         /// check and the first write, so a test can hold two creates at exactly the racy point.
         /// </summary>
         internal Action TestHookAfterFolderCheck { get; set; }
+
+        /// <summary>
+        /// Test seam (InternalsVisibleTo): looks for the folder's .claude/project.json. Production uses the
+        /// real file system probe, which reports Indeterminate when it cannot look.
+        /// </summary>
+        internal Func<string, ProjectFileState> ProjectFileProbe { get; set; } = ExistingProjectDetector.ProbeProjectFile;
 
         private CreateProjectResult CreateNewProjectLocked(
             string name,
@@ -6171,7 +6188,15 @@ namespace MultiTerminal.MCPServer.Services
                     ProjectService.SaveProject(fileProject);
                     LogInfo($"Created/updated project file at {path}/.claude/project.json");
                 }
-                catch (Exception ex) { LogError($"Failed to save project file: {ex.Message}"); }
+                catch (Exception ex)
+                {
+                    // No half-made project (Run 2): a database row whose folder has no project.json would be
+                    // a second identity for the folder the next time anyone writes one. The folder was
+                    // confirmed free under the create lock, so any project.json there now is ours to remove.
+                    LogError($"CreateProject: writing {path}/.claude/project.json failed, rolling back {project.Id}: {ex.Message}");
+                    RollBackCreatedProject(project.Id, path);
+                    return new CreateProjectResult { Success = false, Error = $"Failed to write .claude/project.json: {ex.Message}. The project was not created." };
+                }
             }
 
             activity = new ActivityEvent
@@ -6205,28 +6230,26 @@ namespace MultiTerminal.MCPServer.Services
 
             string folder = WorktreeLayout.TryResolveStableProjectPath(path, null, out var stable) ? stable : path;
 
-            // Occupancy is the file's existence. LoadProject returns null for a damaged, empty, id-less or
-            // locked file, and that must not read as "empty folder" (pipeline Run 1: fail closed).
-            bool fileExists;
+            // Occupancy is the file's existence, and "could not look" counts as occupied. LoadProject returns
+            // null for a damaged, empty, id-less or locked file (Run 1), and File.Exists answers false on an
+            // access error (Run 2); neither may read as "empty folder".
+            var fileState = ProjectFileProbe(folder);
             MultiTerminal.Models.Project projectJson = null;
-            try
+            if (fileState == ProjectFileState.Present)
             {
-                // CA3003: an existence probe on a local caller's project folder (the same trust as
-                // ProjectService.LoadProject, which reads this file); nothing is opened or written here.
-#pragma warning disable CA3003
-                fileExists = File.Exists(System.IO.Path.Combine(folder, ".claude", "project.json"));
-#pragma warning restore CA3003
-                if (fileExists)
+                try
+                {
                     projectJson = ProjectService?.LoadProject(folder);
-            }
-            catch (Exception ex) when (ex is ArgumentException || ex is NotSupportedException || ex is IOException || ex is UnauthorizedAccessException)
-            {
-                LogError($"FindExistingProjectAtPath: checking project.json at '{folder}' failed: {ex.Message}");
-                fileExists = false;
+                }
+                catch (Exception ex) when (ex is ArgumentException || ex is NotSupportedException || ex is IOException || ex is UnauthorizedAccessException)
+                {
+                    LogError($"FindExistingProjectAtPath: reading project.json at '{folder}' failed: {ex.Message}");
+                }
             }
 
             // The database, not the _projects cache, is read first: rows written behind the broker's back
-            // (ProjectService.RegisterProject's SaveRichProject upsert) reach the cache only on restart.
+            // (EditProjectDialog's and the start screen's SaveRichProject, migrations) reach the cache only
+            // on restart.
             List<(string Id, string Name, string Path)> rows;
             try
             {
@@ -6238,7 +6261,7 @@ namespace MultiTerminal.MCPServer.Services
                 rows = _projects.Values.Select(p => (p.Id, p.Name, p.Path)).ToList();
             }
 
-            return ExistingProjectDetector.Detect(folder, fileExists, projectJson, rows);
+            return ExistingProjectDetector.Detect(folder, fileState, projectJson, rows);
         }
 
         /// <summary>
@@ -6270,7 +6293,7 @@ namespace MultiTerminal.MCPServer.Services
             // Defence in depth for the cases Detect already reports: the id must be one of this folder's
             // rows when the folder has rows, and an existing row for the id must live at this folder.
             if (existing.DatabaseIds.Count > 0 && !existing.DatabaseIds.Contains(id, StringComparer.Ordinal))
-                return Refuse($"This folder's .claude/project.json says project {id}, but MultiTerminal has {string.Join(", ", existing.DatabaseIds)} registered at this folder.");
+                return Refuse(ExistingProjectDetector.DescribeIdConflict(id, existing.DatabaseIds));
 
             var rich = _projectDb.GetRichProject(id);
             Project cachedRow = null;
@@ -6278,6 +6301,11 @@ namespace MultiTerminal.MCPServer.Services
             string registeredPath = rich != null ? rich.Path : cachedRow?.Path;
             if (registered && !ExistingProjectDetector.PathsEqual(registeredPath, existing.ProjectPath))
                 return Refuse($"Project {id} is registered at '{registeredPath}', not at '{existing.ProjectPath}'.");
+
+            // A row written behind the broker's back (e.g. the start screen) is not cached until restart, and
+            // UpdateProject (the Rename path) refuses ids it has not cached.
+            if (rich != null && cachedRow == null)
+                CacheProjectRowFromDb(id);
 
             var fileProject = existing.ProjectJson;
             if (fileProject != null && !string.Equals(fileProject.Id, id, StringComparison.Ordinal))
@@ -6705,6 +6733,45 @@ namespace MultiTerminal.MCPServer.Services
             {
                 LogError($"UpdateProject: project.json sync failed for {projectId} at '{cached.Path}': {ex.Message}");
             }
+        }
+
+        // Write-path helper: undoes InsertProjectInternal for a create whose project.json write failed. Also
+        // removes a project.json the failed write may have left; only called for a folder confirmed free
+        // under _projectCreateLock, so that file can only be the failed create's own.
+        private void RollBackCreatedProject(string projectId, string path)
+        {
+            try
+            {
+                _projectDb.DeleteProject(projectId);
+                _projects.TryRemove(projectId, out _);
+            }
+            catch (Exception ex)
+            {
+                LogError($"CreateProject rollback: removing row {projectId} failed: {ex.Message}");
+            }
+
+            try
+            {
+                string json = System.IO.Path.Combine(path, ".claude", "project.json");
+                // CA3003: the create's own folder, confirmed free under the create lock.
+#pragma warning disable CA3003
+                if (File.Exists(json) && ProjectService?.LoadProject(path)?.Id == projectId)
+                    File.Delete(json);
+#pragma warning restore CA3003
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException || ex is NotSupportedException)
+            {
+                LogError($"CreateProject rollback: removing {path}/.claude/project.json failed: {ex.Message}");
+            }
+        }
+
+        // Named census bypass: seeds ONE row FROM the database into the cache (the single-row form of
+        // LoadPersistedProjects). Not a mutation.
+        private void CacheProjectRowFromDb(string projectId)
+        {
+            var row = _projectDb.GetAllProjects().FirstOrDefault(p => string.Equals(p.Id, projectId, StringComparison.Ordinal));
+            if (row != null)
+                _projects.TryAdd(row.Id, row);
         }
 
         private Project InsertProjectInternal(Project project)
