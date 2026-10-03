@@ -9,7 +9,7 @@
 // What the stub DOM CAN see: whether the overlay and its search box are the same objects after a
 // keystroke (the defect: a rebuilt box put the caret at position 0, so "tes" came out as "set"),
 // and what the list is filled with. What it CANNOT see: the caret itself, focus, layout, or CSS,
-// so the icon column's fixed width is checked live, not here.
+// so nothing here checks the icon column's fixed width.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -98,7 +98,7 @@ const PROJECTS = [
   { id: 'c', name: 'Clarion Addin Registry', description: 'publisher list', path: 'H:\\p\\Reg', icon: 'package' },
 ];
 
-test('typing keeps the same overlay and search box, so the caret is never reset', () => {
+test('typing keeps the same overlay and search box (replacing the box is what reset the caret)', () => {
   const { api, document } = boot(PROJECTS);
   api.showProjectSelectorPopup();
   const overlay = document.querySelector('.picker-overlay.project-selector');
