@@ -64,6 +64,14 @@ namespace MultiTerminal.Terminal
         private WebView2 _webView;
         private bool _isInitialized;
         private bool _isInitializing;
+
+        // Host-side copy of the terminal menu's open state (SetContextMenuOpen), read by the Esc
+        // handler below on the UI thread, so it needs no round trip to the page (11edbec4).
+        private bool _contextMenuOpen;
+
+        // Set when OnWebViewKeyDown dismissed the menu: that Esc's auto-repeats and keyup are
+        // handled too, so none of them reaches the page once the menu is gone.
+        private bool _swallowEscapeUntilKeyUp;
         private TerminalTheme _theme = TerminalTheme.Dark;
         private float _fontSize = 10f;
         private int _cols = 80;
@@ -200,6 +208,12 @@ namespace MultiTerminal.Terminal
                 Dock = DockStyle.Fill,
                 Name = "webView"
             };
+
+            // Raised by the WinForms WebView2 from CoreWebView2Controller.AcceleratorKeyPressed,
+            // with e.Handled passed back (checked in Microsoft.Web.WebView2.WinForms
+            // 1.0.3800.47). Escape is always an accelerator, so this sees Esc before the page.
+            _webView.KeyDown += OnWebViewKeyDown;
+            _webView.KeyUp += OnWebViewKeyUp;
 
             Controls.Add(_webView);
 
@@ -352,7 +366,9 @@ namespace MultiTerminal.Terminal
                         break;
 
                     case "dismissContextMenu":
-                        // Esc pressed while the Shift+Right-click menu was open (GH #24).
+                        // Esc pressed while the Shift+Right-click menu was open (GH #24). The page's
+                        // path: normally OnWebViewKeyDown has already taken the Esc (11edbec4).
+                        DebugLogService?.Trace("WebViewTerminalRenderer", "dismissContextMenu from page (host-side menu flag: " + _contextMenuOpen + ")");
                         ContextMenuDismissRequested?.Invoke(this, EventArgs.Empty);
                         break;
 
@@ -537,10 +553,40 @@ namespace MultiTerminal.Terminal
         /// </summary>
         public void SetContextMenuOpen(bool open)
         {
+            _contextMenuOpen = open;
+            DebugLogService?.Trace("WebViewTerminalRenderer", "SetContextMenuOpen(" + open + "), posted to page: " + (_isInitialized && _webView?.CoreWebView2 != null));
             if (_isInitialized && _webView?.CoreWebView2 != null)
             {
                 _webView.CoreWebView2.PostWebMessageAsString(open ? "contextMenu:1" : "contextMenu:0");
             }
+        }
+
+        /// <summary>
+        /// Esc while the terminal menu is open closes it, and the page never sees the key (11edbec4).
+        /// The ContextMenuStrip cannot do this itself: keyboard focus stays in WebView2's
+        /// browser-process window, outside the WinForms message loop its menu filter watches, so
+        /// the dropdown never receives the key. Handling it here does not depend on the page
+        /// knowing the menu is open, which the page-side swallow in terminal.html does.
+        /// </summary>
+        private void OnWebViewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode != Keys.Escape || !(_contextMenuOpen || _swallowEscapeUntilKeyUp)) return;
+
+            e.Handled = true;
+            if (_contextMenuOpen)
+            {
+                _swallowEscapeUntilKeyUp = true;
+                DebugLogService?.Trace("WebViewTerminalRenderer", "Esc with the terminal menu open: handled host-side, dismissing");
+                ContextMenuDismissRequested?.Invoke(this, EventArgs.Empty);
+            }
+        }
+
+        private void OnWebViewKeyUp(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode != Keys.Escape || !_swallowEscapeUntilKeyUp) return;
+
+            e.Handled = true;
+            _swallowEscapeUntilKeyUp = false;
         }
 
         private void OnCopyRequested(string text)
@@ -1113,6 +1159,8 @@ namespace MultiTerminal.Terminal
                     {
                         _webView.CoreWebView2.WebMessageReceived -= OnWebMessageReceived;
                     }
+                    _webView.KeyDown -= OnWebViewKeyDown;
+                    _webView.KeyUp -= OnWebViewKeyUp;
                     _webView.Dispose();
                     _webView = null;
                 }
