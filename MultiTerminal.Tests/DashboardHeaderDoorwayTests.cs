@@ -117,7 +117,7 @@ namespace MultiTerminal.Tests
             "private void HandleAction(string action",
             "DashboardHeaderControl.HandleAction");
 
-        /// <summary>The popup's choices route through HandleAction, except switch_project, handled here.</summary>
+        /// <summary>The popup's choices route through HandleAction, except launch_project, handled here.</summary>
         private static string OnPopupActionBody() => BalancedBodyAfter(
             ReadCsStripped("DashboardHeader", "DashboardHeaderControl.cs"),
             "private void OnPopupAction(string action",
@@ -137,7 +137,7 @@ namespace MultiTerminal.Tests
         {
             string body = HandleActionBody();
 
-            // sendPopupAction (task 4cac608c) is the M and Select Project buttons: same message, plus a rect.
+            // sendPopupAction (task 4cac608c) is the M and Launch Project buttons: same message, plus a rect.
             var emitted = Regex.Matches(Header(), @"send(?:Popup)?Action\('([a-zA-Z0-9_]+)'")
                 .Select(m => m.Groups[1].Value)
                 .Distinct()
@@ -248,7 +248,7 @@ namespace MultiTerminal.Tests
 
         /// <summary>
         /// HOP 1 for the popup page (task 4cac608c): every action the M menu, its Grid Layout flyout
-        /// and the project picker can send is handled, by HandleAction or (switch_project only) by
+        /// and the project picker can send is handled, by HandleAction or (launch_project only) by
         /// OnPopupAction. The menu items are data (MENU/GRID entries) rather than onclick attributes,
         /// so both shapes are extracted.
         /// </summary>
@@ -263,7 +263,7 @@ namespace MultiTerminal.Tests
                 .Distinct()
                 .ToList();
 
-            // 5 menu actions + 8 grid layouts + browse_all + switch_project.
+            // 5 menu actions + 8 grid layouts + browse_all + launch_project.
             Assert.True(emitted.Count >= 15, $"Expected at least 15 popup actions, extracted {emitted.Count}: {string.Join(", ", emitted)}");
 
             var unhandled = emitted

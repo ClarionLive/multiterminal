@@ -2958,7 +2958,10 @@ namespace MultiTerminal
             _dashboardHeader.NewProjectRequested += () => RunOnHomeTab(OnStartScreenNewProject);
             _dashboardHeader.JustClaudeRequested += () => RunOnHomeTab(OnStartScreenJustClaude);
             _dashboardHeader.OpenPowerShellRequested += () => RunOnHomeTab(OnStartScreenOpenPowerShell);
-            _dashboardHeader.SwitchProjectRequested += projectId => _projectPanel?.SelectProjectById(projectId);
+            // Launch Project launches the chosen project exactly as clicking its card on the start
+            // screen does (Owner, 4cac608c live test: it used to only switch the Project pane).
+            _dashboardHeader.LaunchProjectRequested += projectId => RunOnHomeTab(
+                (sender, _) => OnStartScreenProjectLaunched(sender, new StartScreenLaunchEventArgs(projectId)));
             _dashboardHeader.ProjectListProvider = GetHeaderProjectList;
             _dashboardHeader.ToggleThemeRequested += () => ToggleTheme();
             _dashboardHeader.SettingsRequested += () => ShowSettingsDialog();
@@ -3044,7 +3047,7 @@ namespace MultiTerminal
             if (doc != null) startScreenHandler(doc, EventArgs.Empty);
         }
 
-        /// <summary>The header's Select Project list: every registered project, and the current one.</summary>
+        /// <summary>The header's Launch Project list: every registered project, and the current one.</summary>
         private (IReadOnlyList<DashboardHeader.HeaderProjectItem> Projects, string CurrentProjectId) GetHeaderProjectList()
         {
             var projects = _sharedProjectDatabase?.GetAllRichProjects() ?? new List<Models.Project>();
@@ -8234,8 +8237,7 @@ namespace MultiTerminal
             _currentProject = e.Project;
             _projectService?.MarkProjectOpened(e.Project.Id);
             _projectPanel?.RefreshForProject(e.Project);
-            // The header shows _currentProject's name; it went stale here before the header got
-            // its own Select Project button (task 4cac608c).
+            // The header shows _currentProject's name, which went stale on a pane switch (task 4cac608c).
             RefreshDashboardProjectInfo();
         }
 
