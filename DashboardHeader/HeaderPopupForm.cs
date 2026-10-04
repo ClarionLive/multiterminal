@@ -204,10 +204,19 @@ namespace MultiTerminal.DashboardHeader
 
             _webView.CoreWebView2.ProcessFailed += (s, e) =>
             {
-                if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.BrowserProcessExited) IsBroken = true;
+                // Only failures that take the page with them. GPU and utility process exits are
+                // recovered by WebView2 itself; reacting to them would only reload a working menu.
+                var kind = e.ProcessFailedKind;
+                if (kind != CoreWebView2ProcessFailedKind.BrowserProcessExited
+                    && kind != CoreWebView2ProcessFailedKind.RenderProcessExited
+                    && kind != CoreWebView2ProcessFailedKind.RenderProcessUnresponsive)
+                {
+                    return;
+                }
+                if (kind == CoreWebView2ProcessFailedKind.BrowserProcessExited) IsBroken = true;
                 _load.LoadFailed();
-                Fail("the menu's browser process stopped (" + e.ProcessFailedKind + ")");
-                BeginInvoke(new Action(HidePopup));
+                Fail("the menu's browser process stopped (" + kind + ")");
+                if (IsHandleCreated && !IsDisposed) BeginInvoke(new Action(HidePopup));
             };
         }
 
