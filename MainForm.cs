@@ -5990,6 +5990,7 @@ namespace MultiTerminal
                 PaneKey = t.PaneKey,
                 HelperName = t.HelperLinkName,
                 SpawnerPaneKey = t.HelperLinkSpawnerPaneKey,
+                SpawnerName = t.HelperLinkSpawnerName,
             }).ToList();
 
             _settings.SetSessionTerminals(sessionData);
@@ -6697,9 +6698,10 @@ namespace MultiTerminal
                 }
 
                 // The pane's key and helper link from the last run (task d71bb221). A link whose PM
-                // pane is not restored resolves to "PM unknown" on the rail; it is never re-guessed.
+                // pane is not restored, or is restored under another name, resolves to "Helpers of
+                // <recorded PM>" (or "PM unknown" with no recorded name); it is never re-guessed.
                 doc.RestorePaneKey(sessionInfo.PaneKey);
-                doc.SetHelperLink(sessionInfo.HelperName, sessionInfo.SpawnerPaneKey);
+                doc.SetHelperLink(sessionInfo.HelperName, sessionInfo.SpawnerPaneKey, sessionInfo.SpawnerName);
             }
             else
             {
@@ -7918,6 +7920,7 @@ namespace MultiTerminal
                         LaunchedAsHelper = d.LaunchedAsHelper,
                         LinkHelperName = d.HelperLinkName,
                         LinkSpawnerPaneKey = d.HelperLinkSpawnerPaneKey,
+                        LinkSpawnerName = d.HelperLinkSpawnerName,
                     }));
 
                 var cards = AttentionPanel.AttentionCardProjector.Project(
@@ -7970,12 +7973,33 @@ namespace MultiTerminal
                     bool sameAgent = string.Equals(doc.HelperLinkName, agent, StringComparison.OrdinalIgnoreCase);
                     if (sameAgent && doc.HelperLinkSpawnerPaneKey != null) continue;
 
-                    string spawnerDocId = registry?.SpawnerDocIdFor(doc.DocId);
-                    var spawner = spawnerDocId == null
-                        ? null
-                        : panes.FirstOrDefault(p => !ReferenceEquals(p, doc)
-                                                    && string.Equals(p.DocId, spawnerDocId, StringComparison.Ordinal));
-                    doc.SetHelperLink(agent, spawner?.PaneKey);
+                    var (spawnerDocId, spawnerNameAtSpawn) = registry?.SpawnerFor(doc.DocId) ?? (null, null);
+                    var matches = spawnerDocId == null
+                        ? new List<TerminalDocument>()
+                        : panes.Where(p => !ReferenceEquals(p, doc)
+                                           && string.Equals(p.DocId, spawnerDocId, StringComparison.Ordinal)).ToList();
+
+                    // Exactly one pane, still running the agent the registry recorded AT SPAWN TIME:
+                    // its key AND that name are the link (pipeline Run 1). The name is what lets the
+                    // rail notice later that the pane has been reused for somebody else. This stamp
+                    // is lazy, so the spawner may already have left its pane; a pane now running
+                    // anyone else (or nobody) stamps an unproven link instead of attributing the
+                    // helper to the newcomer, and that is retried on the next call because its key
+                    // is still missing.
+                    var spawner = matches.Count == 1 ? matches[0] : null;
+                    string spawnerName = spawner?.PaneAgentName;
+                    bool stillTheSpawner = spawnerNameAtSpawn != null
+                        && !string.IsNullOrWhiteSpace(spawnerName)
+                        && !TerminalRegistrationBinder.IsUnassigned(spawnerName)
+                        && string.Equals(spawnerName, spawnerNameAtSpawn, StringComparison.OrdinalIgnoreCase);
+                    if (!stillTheSpawner)
+                    {
+                        doc.SetHelperLink(agent, null, null);
+                    }
+                    else
+                    {
+                        doc.SetHelperLink(agent, spawner.PaneKey, spawnerName);
+                    }
                 }
             }
             catch (Exception ex)

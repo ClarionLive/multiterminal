@@ -19,6 +19,14 @@ namespace MultiTerminal.AttentionPanel
         /// known. Never guessed: null puts the helper in the "PM unknown" group.
         /// </summary>
         public string Pm { get; set; }
+
+        /// <summary>
+        /// True when <see cref="Pm"/> is only the name RECORDED for the spawner, because its pane is
+        /// closed, ambiguous, or now runs somebody else (pipeline Run 1). Such a helper is shown as
+        /// "Helpers of <see cref="Pm"/>" and is never placed under a card of that name: the card on
+        /// the rail is not proven to be the agent that spawned it.
+        /// </summary>
+        public bool PmRecordedOnly { get; set; }
     }
 
     /// <summary>The role strings the card carries. They are part of the view contract.</summary>
@@ -54,6 +62,12 @@ namespace MultiTerminal.AttentionPanel
 
         /// <summary>The spawner pane's <see cref="PaneKey"/> from the link, or null when unproven.</summary>
         public string LinkSpawnerPaneKey { get; set; }
+
+        /// <summary>
+        /// The agent name the spawner pane ran when the link was stamped, or null when unproven
+        /// (pipeline Run 1). The spawner pane counts only while it still runs under this name.
+        /// </summary>
+        public string LinkSpawnerName { get; set; }
     }
 
     /// <summary>
@@ -72,6 +86,17 @@ namespace MultiTerminal.AttentionPanel
     /// dropping it when the pane is reused for somebody else.
     /// </para>
     /// <para>
+    /// <b>The same holds for the SPAWNER's pane</b> (pipeline Run 1). Its key says which pane, its
+    /// recorded name says who was in it. The pane is accepted as the PM only while exactly one pane
+    /// holds that key AND it still runs the recorded agent. Otherwise the helper is filed under
+    /// "Helpers of &lt;recorded name&gt;", or "PM unknown" when no name was recorded — never under
+    /// whoever now happens to occupy the pane.
+    /// </para>
+    /// <para>
+    /// <b>A helper of a helper is filed under the root</b>: the chain of spawner panes is followed to
+    /// the first pane that is not a helper, so an intermediate helper needs no card of its own.
+    /// </para>
+    /// <para>
     /// Helper is checked before PM, the same precedence as <c>TerminalRoles.Resolve</c>.
     /// </para>
     /// </remarks>
@@ -87,30 +112,27 @@ namespace MultiTerminal.AttentionPanel
             if (panes == null) return result;
 
             var all = panes.Where(p => p != null).ToList();
+
+            // Ordinal: the key is a minted id, exact by decision. A key held by more than one pane
+            // is ambiguous and resolves to nothing — never to the first of them.
+            var byKey = all.Where(p => !string.IsNullOrEmpty(p.PaneKey))
+                .GroupBy(p => p.PaneKey, StringComparer.Ordinal)
+                .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
+
             foreach (var pane in all)
             {
                 string agent = pane.AgentName;
                 if (string.IsNullOrWhiteSpace(agent) || result.ContainsKey(agent)) continue;
 
-                bool linkHolds = !string.IsNullOrEmpty(pane.LinkHelperName)
-                                 && string.Equals(pane.LinkHelperName, agent, StringComparison.OrdinalIgnoreCase);
-
-                if (linkHolds || pane.LaunchedAsHelper)
+                if (IsHelperPane(pane))
                 {
-                    string pm = null;
-                    if (linkHolds && !string.IsNullOrEmpty(pane.LinkSpawnerPaneKey))
+                    var (pm, recordedOnly) = RootPm(pane, byKey);
+                    result[agent] = new AttentionTeamLink
                     {
-                        // Ordinal: the key is a minted id, exact by decision.
-                        var spawner = all.FirstOrDefault(p => !ReferenceEquals(p, pane)
-                            && string.Equals(p.PaneKey, pane.LinkSpawnerPaneKey, StringComparison.Ordinal));
-                        if (!string.IsNullOrWhiteSpace(spawner?.AgentName)
-                            && !string.Equals(spawner.AgentName, agent, StringComparison.OrdinalIgnoreCase))
-                        {
-                            pm = spawner.AgentName;
-                        }
-                    }
-
-                    result[agent] = new AttentionTeamLink { Role = AttentionTeamRoles.Helper, Pm = pm };
+                        Role = AttentionTeamRoles.Helper,
+                        Pm = pm,
+                        PmRecordedOnly = pm != null && recordedOnly,
+                    };
                 }
                 else if (pane.DisplayedAsPm)
                 {
@@ -119,6 +141,60 @@ namespace MultiTerminal.AttentionPanel
             }
 
             return result;
+        }
+
+        /// <summary>The pane is a helper: its link holds under its current name, or this launch was a spawn.</summary>
+        private static bool IsHelperPane(AttentionPaneTeamFacts p) => LinkHolds(p) || p.LaunchedAsHelper;
+
+        // Agent names are compared ordinal-ignore-case throughout MT (one name, one terminal).
+        private static bool LinkHolds(AttentionPaneTeamFacts p)
+            => !string.IsNullOrWhiteSpace(p.AgentName)
+               && !string.IsNullOrEmpty(p.LinkHelperName)
+               && string.Equals(p.LinkHelperName, p.AgentName, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// The spawner pane of <paramref name="pane"/>, or null unless EXACTLY one other pane holds
+        /// the recorded key and it still runs the recorded spawner name.
+        /// </summary>
+        private static AttentionPaneTeamFacts ConfirmedSpawner(
+            AttentionPaneTeamFacts pane, Dictionary<string, List<AttentionPaneTeamFacts>> byKey)
+        {
+            if (string.IsNullOrEmpty(pane.LinkSpawnerPaneKey) || string.IsNullOrWhiteSpace(pane.LinkSpawnerName)) return null;
+            if (!byKey.TryGetValue(pane.LinkSpawnerPaneKey, out var holders) || holders.Count != 1) return null;
+
+            var spawner = holders[0];
+            if (ReferenceEquals(spawner, pane)) return null;
+            return string.Equals(spawner.AgentName, pane.LinkSpawnerName, StringComparison.OrdinalIgnoreCase) ? spawner : null;
+        }
+
+        /// <summary>
+        /// The first ancestor of a helper pane that is not a helper, following confirmed spawner
+        /// panes. When a hop cannot be confirmed, the name recorded at that hop is returned with
+        /// <c>recordedOnly</c> set; with no recorded name, or on a loop, null (PM unknown).
+        /// </summary>
+        private static (string Pm, bool RecordedOnly) RootPm(
+            AttentionPaneTeamFacts helper, Dictionary<string, List<AttentionPaneTeamFacts>> byKey)
+        {
+            var seen = new HashSet<AttentionPaneTeamFacts> { helper };
+            var current = helper;
+            while (true)
+            {
+                // A pane launched as a helper with no link yet: its spawner is not proven.
+                if (!LinkHolds(current)) return (null, false);
+
+                var spawner = ConfirmedSpawner(current, byKey);
+                if (spawner == null)
+                {
+                    string recorded = current.LinkSpawnerName;
+                    bool usable = !string.IsNullOrWhiteSpace(recorded)
+                                  && !string.Equals(recorded, helper.AgentName, StringComparison.OrdinalIgnoreCase);
+                    return usable ? (recorded, true) : (null, false);
+                }
+
+                if (!seen.Add(spawner)) return (null, false);   // a loop proves nothing
+                if (!IsHelperPane(spawner)) return (spawner.AgentName, false);
+                current = spawner;
+            }
         }
     }
 
@@ -193,8 +269,10 @@ namespace MultiTerminal.AttentionPanel
     /// </list>
     /// <para>
     /// Helpers of helpers are filed under the first ancestor that is not a helper, so a team is
-    /// always one level deep. A chain that loops, or ends at an agent with no card, is not followed
-    /// further than it can be proven.
+    /// always one level deep. <see cref="AttentionTeamResolver"/> already resolves that root from the
+    /// panes; the chain is followed here too only as a fallback for cards built some other way. A
+    /// chain that loops, or ends at an agent with no card, is not followed further than it can be
+    /// proven.
     /// </para>
     /// </remarks>
     public static class AttentionTeamLayout
@@ -266,7 +344,13 @@ namespace MultiTerminal.AttentionPanel
                 var c = cards[i];
                 if (c == null || !IsHelper(c)) continue;
 
-                string pm = RootPm(c, headByAgent, helperByAgent, out bool hasCard);
+                // A PM known only by its recorded name is never placed under a card of that name,
+                // nor followed through other cards by name (pipeline Run 1): neither is proven to be
+                // the agent that spawned it. It gets its own "Helpers of <name>" group.
+                bool hasCard = false;
+                string pm = c.PmRecordedOnly && !string.IsNullOrWhiteSpace(c.Pm)
+                    ? c.Pm
+                    : RootPm(c, headByAgent, helperByAgent, out hasCard);
                 Work target;
                 if (pm == null)
                 {
@@ -335,12 +419,16 @@ namespace MultiTerminal.AttentionPanel
         private static bool IsHelper(AttentionCard c)
             => string.Equals(c?.Role, AttentionTeamRoles.Helper, StringComparison.Ordinal);
 
-        /// <summary>The card states the rail treats as "needs you". Mirrors the view's BLOCKING map.</summary>
+        /// <summary>
+        /// The card states the rail treats as "needs you": <see cref="AttentionStates.IsBlocking"/>,
+        /// the one list, applied to the card's state name. The name must round-trip exactly, so a
+        /// numeric or differently-cased string cannot parse its way into a blocked state.
+        /// </summary>
         internal static bool IsBlocked(AttentionCard c)
-            => c != null
-               && (c.State == nameof(AttentionState.BlockedQuestion)
-                   || c.State == nameof(AttentionState.BlockedPermission)
-                   || c.State == nameof(AttentionState.BlockedUnknown));
+            => c?.State != null
+               && Enum.TryParse(c.State, ignoreCase: false, out AttentionState state)
+               && string.Equals(state.ToString(), c.State, StringComparison.Ordinal)
+               && AttentionStates.IsBlocking(state);
 
         /// <summary>Attention first's rank: blocked, then everyone else, then offline.</summary>
         private static int Rank(AttentionCard c)

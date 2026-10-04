@@ -64,6 +64,27 @@ namespace MultiTerminal.Tests
 
         private static List<string> Names(IEnumerable<string> ids) => ids.Select(id => id.Substring(2)).ToList();
 
+        /// <summary>A fresh pane key in the stored form.</summary>
+        private static string Key() => Guid.NewGuid().ToString("N");
+
+        /// <summary>A restored pane as the rail sees it once the Owner relaunches it as the same agent.</summary>
+        private static AttentionPaneTeamFacts Restored(TerminalSessionInfo r) => new AttentionPaneTeamFacts
+        {
+            PaneKey = r.PaneKey,
+            AgentName = r.CustomTitle,
+            DisplayedAsPm = true,   // relaunched from the project start screen
+            LinkHelperName = r.HelperName,
+            LinkSpawnerPaneKey = r.SpawnerPaneKey,
+            LinkSpawnerName = r.SpawnerName,
+        };
+
+        private string WriteRawSessions(string value)
+        {
+            string path = Path.Combine(_dir, "settings.txt");
+            File.WriteAllText(path, "SessionTerminals=" + value + "\n");
+            return path;
+        }
+
         private static string RepoRoot([CallerFilePath] string thisFile = "")
             => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile) ?? ".", ".."));
 
@@ -356,7 +377,7 @@ namespace MultiTerminal.Tests
             {
                 new AttentionPaneTeamFacts { PaneKey = "k-alice", AgentName = "Alice", DisplayedAsPm = true },
                 new AttentionPaneTeamFacts { PaneKey = "k-owen", AgentName = "Owen", DisplayedAsPm = true },
-                new AttentionPaneTeamFacts { PaneKey = "k-tess", AgentName = "Tess", LaunchedAsHelper = true, LinkHelperName = "Tess", LinkSpawnerPaneKey = "k-owen" },
+                new AttentionPaneTeamFacts { PaneKey = "k-tess", AgentName = "Tess", LaunchedAsHelper = true, LinkHelperName = "Tess", LinkSpawnerPaneKey = "k-owen", LinkSpawnerName = "Owen" },
                 new AttentionPaneTeamFacts { PaneKey = "k-zed", AgentName = "Zed" },
             };
 
@@ -393,7 +414,7 @@ namespace MultiTerminal.Tests
             var sameName = AttentionTeamResolver.Resolve(new[]
             {
                 new AttentionPaneTeamFacts { PaneKey = "k-owen", AgentName = "Owen", DisplayedAsPm = true },
-                new AttentionPaneTeamFacts { PaneKey = "k-tess", AgentName = "tess", DisplayedAsPm = true, LinkHelperName = "Tess", LinkSpawnerPaneKey = "k-owen" },
+                new AttentionPaneTeamFacts { PaneKey = "k-tess", AgentName = "tess", DisplayedAsPm = true, LinkHelperName = "Tess", LinkSpawnerPaneKey = "k-owen", LinkSpawnerName = "Owen" },
             });
             Assert.Equal(AttentionTeamRoles.Helper, sameName["tess"].Role);
             Assert.Equal("Owen", sameName["tess"].Pm);
@@ -401,7 +422,7 @@ namespace MultiTerminal.Tests
             var reused = AttentionTeamResolver.Resolve(new[]
             {
                 new AttentionPaneTeamFacts { PaneKey = "k-owen", AgentName = "Owen", DisplayedAsPm = true },
-                new AttentionPaneTeamFacts { PaneKey = "k-tess", AgentName = "Bob", DisplayedAsPm = true, LinkHelperName = "Tess", LinkSpawnerPaneKey = "k-owen" },
+                new AttentionPaneTeamFacts { PaneKey = "k-tess", AgentName = "Bob", DisplayedAsPm = true, LinkHelperName = "Tess", LinkSpawnerPaneKey = "k-owen", LinkSpawnerName = "Owen" },
             });
             Assert.Equal(AttentionTeamRoles.Pm, reused["Bob"].Role);
         }
@@ -429,30 +450,25 @@ namespace MultiTerminal.Tests
         [Fact]
         public void The_helper_link_survives_a_reload()
         {
+            string kOwen = Key(), kTess = Key(), kUma = Key();
             new SettingsService(_dir).SetSessionTerminals(new List<TerminalSessionInfo>
             {
-                new TerminalSessionInfo { WorkingDirectory = @"C:\p", FontSize = 10f, CustomTitle = "Owen", PaneKey = "k-owen" },
-                new TerminalSessionInfo { WorkingDirectory = @"C:\p", FontSize = 10f, CustomTitle = "Tess", PaneKey = "k-tess", HelperName = "Tess", SpawnerPaneKey = "k-owen" },
-                new TerminalSessionInfo { WorkingDirectory = @"C:\p", FontSize = 10f, CustomTitle = "Uma", PaneKey = "k-uma", HelperName = "Uma" },
+                new TerminalSessionInfo { WorkingDirectory = @"C:\p", FontSize = 10f, CustomTitle = "Owen", PaneKey = kOwen },
+                new TerminalSessionInfo { WorkingDirectory = @"C:\p", FontSize = 10f, CustomTitle = "Tess", PaneKey = kTess, HelperName = "Tess", SpawnerPaneKey = kOwen, SpawnerName = "Owen" },
+                new TerminalSessionInfo { WorkingDirectory = @"C:\p", FontSize = 10f, CustomTitle = "Uma", PaneKey = kUma, HelperName = "Uma" },
             });
 
             var restored = new SettingsService(_dir).GetSessionTerminals();
 
-            Assert.Equal(new[] { "k-owen", "k-tess", "k-uma" }, restored.Select(r => r.PaneKey));
+            Assert.Equal(new[] { kOwen, kTess, kUma }, restored.Select(r => r.PaneKey));
             Assert.Null(restored[0].HelperName);
             Assert.Equal("Tess", restored[1].HelperName);
-            Assert.Equal("k-owen", restored[1].SpawnerPaneKey);
+            Assert.Equal(kOwen, restored[1].SpawnerPaneKey);
+            Assert.Equal("Owen", restored[1].SpawnerName);
             Assert.Equal("Uma", restored[2].HelperName);
             Assert.Null(restored[2].SpawnerPaneKey);
 
-            var links = AttentionTeamResolver.Resolve(restored.Select(r => new AttentionPaneTeamFacts
-            {
-                PaneKey = r.PaneKey,
-                AgentName = r.CustomTitle,
-                DisplayedAsPm = true,   // relaunched from the project start screen
-                LinkHelperName = r.HelperName,
-                LinkSpawnerPaneKey = r.SpawnerPaneKey,
-            }));
+            var links = AttentionTeamResolver.Resolve(restored.Select(Restored));
 
             Assert.Equal(AttentionTeamRoles.Pm, links["Owen"].Role);
             Assert.Equal("Owen", links["Tess"].Pm);
@@ -473,19 +489,343 @@ namespace MultiTerminal.Tests
             Assert.All(restored, r => Assert.Null(r.HelperName));
         }
 
-        /// <summary>A name holding the format's separator drops the link instead of shifting the fields.</summary>
+        // ───────────────────────────────────────────────────────────── the stored format (pipeline Run 1)
+
+        /// <summary>
+        /// Every field round-trips ANY string exactly — separators, quotes, a backslash, a newline,
+        /// non-ASCII — and a title, directory or name can never become a pane key, helper or spawner.
+        /// </summary>
         [Fact]
-        public void A_link_that_cannot_be_stored_safely_is_dropped_not_shifted()
+        public void Values_holding_separators_and_quotes_round_trip_exactly_and_set_no_link()
         {
+            string kOwen = Key(), kTess = Key(), kOdd = Key();
+            const string oddTitle = "O|d;d \"quoted\" 'x' \\ back\nline Å";
+            const string oddDir = @"C:\a;b|c ""d""";
+            const string oddHelper = "Te|s;s\"";
+            const string oddSpawner = "Ow|e;n\"";
+
             new SettingsService(_dir).SetSessionTerminals(new List<TerminalSessionInfo>
             {
-                new TerminalSessionInfo { WorkingDirectory = @"C:\p", FontSize = 10f, CustomTitle = "Tess", PaneKey = "k-tess", HelperName = "Te|ss", SpawnerPaneKey = "k-owen" },
+                new TerminalSessionInfo { WorkingDirectory = oddDir, FontSize = 12.5f, CustomTitle = oddTitle, PaneKey = kOdd },
+                new TerminalSessionInfo { WorkingDirectory = @"C:\p", FontSize = 10f, CustomTitle = oddSpawner, PaneKey = kOwen },
+                new TerminalSessionInfo { WorkingDirectory = @"C:\p", FontSize = 10f, CustomTitle = oddHelper, PaneKey = kTess, HelperName = oddHelper, SpawnerPaneKey = kOwen, SpawnerName = oddSpawner },
             });
 
-            var r = new SettingsService(_dir).GetSessionTerminals().Single();
-            Assert.Equal("k-tess", r.PaneKey);
-            Assert.Null(r.HelperName);
-            Assert.Null(r.SpawnerPaneKey);
+            // The raw stored line is a single line: a newline in a title must not split settings.txt.
+            string raw = File.ReadAllLines(Path.Combine(_dir, "settings.txt")).Single(l => l.StartsWith("SessionTerminals=", StringComparison.Ordinal));
+            Assert.StartsWith("SessionTerminals={", raw, StringComparison.Ordinal);
+
+            var restored = new SettingsService(_dir).GetSessionTerminals();
+
+            Assert.Equal(3, restored.Count);
+            Assert.Equal(oddTitle, restored[0].CustomTitle);
+            Assert.Equal(oddDir, restored[0].WorkingDirectory);
+            Assert.Equal(12.5f, restored[0].FontSize);
+            Assert.Equal(kOdd, restored[0].PaneKey);
+            Assert.Null(restored[0].HelperName);
+            Assert.Null(restored[0].SpawnerPaneKey);
+            Assert.Null(restored[0].SpawnerName);
+
+            // A link whose names hold separators is KEPT (Run 0 silently dropped it), exactly.
+            Assert.Equal(oddHelper, restored[2].HelperName);
+            Assert.Equal(kOwen, restored[2].SpawnerPaneKey);
+            Assert.Equal(oddSpawner, restored[2].SpawnerName);
+
+            var links = AttentionTeamResolver.Resolve(restored.Select(Restored));
+            Assert.Equal(oddSpawner, links[oddHelper].Pm);
+            Assert.False(links[oddHelper].PmRecordedOnly);
+        }
+
+        /// <summary>
+        /// Codex's exploit: an agent named <c>Evil|&lt;key&gt;|Evil|&lt;targetKey&gt;</c>. Under the old
+        /// format it restored as title "Evil" with a forged helper link to the target PM. Now it
+        /// restores under its full name with no link, in the new format AND from both legacy writers.
+        /// </summary>
+        [Fact]
+        public void The_crafted_name_cannot_forge_a_link()
+        {
+            string kOwen = Key(), kEvil = Key(), kForged = Key();
+            string crafted = $"Evil|{kForged}|Evil|{kOwen}";
+
+            // New format.
+            new SettingsService(_dir).SetSessionTerminals(new List<TerminalSessionInfo>
+            {
+                new TerminalSessionInfo { WorkingDirectory = @"C:\p", FontSize = 10f, CustomTitle = "Owen", PaneKey = kOwen },
+                new TerminalSessionInfo { WorkingDirectory = @"C:\p", FontSize = 10f, CustomTitle = crafted, PaneKey = kEvil },
+            });
+            AssertNoForgedLink(new SettingsService(_dir).GetSessionTerminals(), crafted, kEvil);
+
+            // Written by the Run 0 build (a key for every pane, fields raw): nine parts, so not even
+            // the pane's own key is trusted, let alone a link.
+            WriteRawSessions($@"C:\p|10.0|Owen|{kOwen}||;C:\p|10.0|{crafted}|{kEvil}||");
+            AssertNoForgedLink(new SettingsService(_dir).GetSessionTerminals(), crafted, expectedKey: null);
+
+            // Written by a pre-ticket build (three fields, title raw): the crafted entry is exactly
+            // six well-formed parts, but the session predates keys, so the columns are not trusted.
+            WriteRawSessions($@"C:\p|10.0|Owen;C:\p|10.0|{crafted}");
+            AssertNoForgedLink(new SettingsService(_dir).GetSessionTerminals(), crafted, expectedKey: null);
+        }
+
+        private static void AssertNoForgedLink(List<TerminalSessionInfo> restored, string crafted, string expectedKey)
+        {
+            Assert.Equal(2, restored.Count);
+            var evil = restored[1];
+            Assert.Equal(crafted, evil.CustomTitle);
+            Assert.Equal(expectedKey, evil.PaneKey);
+            Assert.Null(evil.HelperName);
+            Assert.Null(evil.SpawnerPaneKey);
+            Assert.Null(evil.SpawnerName);
+
+            // Relaunched as "Evil" (what the shifted columns would have named it): still no team.
+            var links = AttentionTeamResolver.Resolve(new[]
+            {
+                Restored(restored[0]),
+                new AttentionPaneTeamFacts
+                {
+                    PaneKey = evil.PaneKey, AgentName = "Evil",
+                    LinkHelperName = evil.HelperName, LinkSpawnerPaneKey = evil.SpawnerPaneKey, LinkSpawnerName = evil.SpawnerName,
+                },
+            });
+            Assert.False(links.ContainsKey("Evil"));
+        }
+
+        /// <summary>
+        /// The Run 0 six-field lines still load with their key and link (no spawner name was
+        /// recorded then, so the helper's PM is unknown rather than guessed). A Run 0 entry whose
+        /// title held a separator loads its title back whole, with no key or link.
+        /// </summary>
+        [Fact]
+        public void A_legacy_six_field_session_still_restores()
+        {
+            string kOwen = Key(), kTess = Key(), kOdd = Key();
+            WriteRawSessions($@"C:\p|10.0|Owen|{kOwen}||;C:\q|11.0|Tess|{kTess}|Tess|{kOwen};C:\r|9.0|A|B|{kOdd}||");
+
+            var restored = new SettingsService(_dir).GetSessionTerminals();
+
+            Assert.Equal(new[] { "Owen", "Tess", "A|B" }, restored.Select(r => r.CustomTitle));
+            Assert.Equal(new[] { @"C:\p", @"C:\q", @"C:\r" }, restored.Select(r => r.WorkingDirectory));
+            Assert.Equal(kOwen, restored[0].PaneKey);
+            Assert.Equal(kTess, restored[1].PaneKey);
+            Assert.Equal("Tess", restored[1].HelperName);
+            Assert.Equal(kOwen, restored[1].SpawnerPaneKey);
+            Assert.Null(restored[1].SpawnerName);
+            Assert.Null(restored[2].PaneKey);
+            Assert.Null(restored[2].HelperName);
+
+            var links = AttentionTeamResolver.Resolve(restored.Take(2).Select(Restored));
+            Assert.Equal(AttentionTeamRoles.Helper, links["Tess"].Role);
+            Assert.Null(links["Tess"].Pm);
+        }
+
+        /// <summary>
+        /// A duplicated or malformed pane key is replaced by a fresh, unique GUID on every pane that
+        /// held it, and a link pointing at it loses its spawner key; the recorded name remains.
+        /// </summary>
+        [Fact]
+        public void Duplicate_and_malformed_keys_are_regenerated_and_their_links_cleared()
+        {
+            string kDup = Key(), kGood = Key(), kHelperA = Key(), kHelperB = Key();
+            string upperGood = kGood.ToUpperInvariant();   // well-formed, canonicalised on read
+            string json = "{\"v\":2,\"terminals\":["
+                + $"{{\"dir\":\"C:\\\\p\",\"size\":10,\"title\":\"Alice\",\"paneKey\":\"{kDup}\"}},"
+                + $"{{\"dir\":\"C:\\\\p\",\"size\":10,\"title\":\"Bob\",\"paneKey\":\"{kDup}\"}},"
+                + "{\"dir\":\"C:\\\\p\",\"size\":10,\"title\":\"Carl\",\"paneKey\":\"not-a-guid\"},"
+                + $"{{\"dir\":\"C:\\\\p\",\"size\":10,\"title\":\"Dina\",\"paneKey\":\"{upperGood}\"}},"
+                + $"{{\"dir\":\"C:\\\\p\",\"size\":10,\"title\":\"Uma\",\"paneKey\":\"{kHelperA}\",\"helper\":\"Uma\",\"spawnerPaneKey\":\"{kDup}\",\"spawnerName\":\"Alice\"}},"
+                + $"{{\"dir\":\"C:\\\\p\",\"size\":10,\"title\":\"Vic\",\"paneKey\":\"{kHelperB}\",\"helper\":\"Vic\",\"spawnerPaneKey\":\"not-a-guid\",\"spawnerName\":\"Carl\"}},"
+                + $"{{\"dir\":\"C:\\\\p\",\"size\":10,\"title\":\"Wes\",\"paneKey\":\"{kHelperB.ToUpperInvariant()}\",\"helper\":\"Wes\",\"spawnerPaneKey\":\"{upperGood}\",\"spawnerName\":\"Dina\"}}"
+                + "]}";
+            WriteRawSessions(json);
+
+            var r = new SettingsService(_dir).GetSessionTerminals();
+
+            Assert.Equal(7, r.Count);
+            Assert.All(r, t => Assert.Matches("^[0-9a-f]{32}$", t.PaneKey));
+            Assert.Equal(r.Count, r.Select(t => t.PaneKey).Distinct(StringComparer.Ordinal).Count());
+
+            Assert.NotEqual(kDup, r[0].PaneKey);   // both holders of the duplicate re-keyed
+            Assert.NotEqual(kDup, r[1].PaneKey);
+            Assert.Equal(kGood, r[3].PaneKey);     // a well-formed unique key survives, canonicalised
+
+            // Vic and Wes held the same key once canonicalised: both re-keyed.
+            Assert.NotEqual(kHelperB, r[5].PaneKey);
+            Assert.NotEqual(kHelperB, r[6].PaneKey);
+
+            Assert.Null(r[4].SpawnerPaneKey);      // pointed at the ambiguous key
+            Assert.Equal("Alice", r[4].SpawnerName);
+            Assert.Null(r[5].SpawnerPaneKey);      // malformed
+            Assert.Equal(kGood, r[6].SpawnerPaneKey);   // unambiguous, canonicalised
+
+            // Uma's link no longer names a pane: "Helpers of Alice", never Alice's or Bob's card.
+            var links = AttentionTeamResolver.Resolve(r.Select(Restored));
+            Assert.Equal("Alice", links["Uma"].Pm);
+            Assert.True(links["Uma"].PmRecordedOnly);
+            Assert.Equal("Dina", links["Wes"].Pm);
+            Assert.False(links["Wes"].PmRecordedOnly);
+        }
+
+        /// <summary>
+        /// Two live panes holding the same key (the restore check is bypassed, as by a hand-built
+        /// list): resolution refuses both rather than taking the first.
+        /// </summary>
+        [Fact]
+        public void An_ambiguous_spawner_key_resolves_to_no_pane()
+        {
+            var links = AttentionTeamResolver.Resolve(new[]
+            {
+                new AttentionPaneTeamFacts { PaneKey = "k-dup", AgentName = "Alice", DisplayedAsPm = true },
+                new AttentionPaneTeamFacts { PaneKey = "k-dup", AgentName = "Alice2", DisplayedAsPm = true },
+                new AttentionPaneTeamFacts { PaneKey = "k-uma", AgentName = "Uma", LinkHelperName = "Uma", LinkSpawnerPaneKey = "k-dup", LinkSpawnerName = "Alice" },
+            });
+
+            Assert.Equal("Alice", links["Uma"].Pm);
+            Assert.True(links["Uma"].PmRecordedOnly);
+        }
+
+        // ───────────────────────────────────────────────────────────── the spawner's name (pipeline Run 1)
+
+        /// <summary>
+        /// Alice spawned Uma; Alice's pane now runs Bob, and Alice runs in another pane. Uma does NOT
+        /// move under Bob, and is not attached to Alice's new card either: "Helpers of Alice".
+        /// </summary>
+        [Fact]
+        public void A_reused_spawner_pane_does_not_take_over_the_helper()
+        {
+            var links = AttentionTeamResolver.Resolve(new[]
+            {
+                new AttentionPaneTeamFacts { PaneKey = "k-1", AgentName = "Bob", DisplayedAsPm = true },
+                new AttentionPaneTeamFacts { PaneKey = "k-2", AgentName = "Alice", DisplayedAsPm = true },
+                new AttentionPaneTeamFacts { PaneKey = "k-uma", AgentName = "Uma", LaunchedAsHelper = true, LinkHelperName = "Uma", LinkSpawnerPaneKey = "k-1", LinkSpawnerName = "Alice" },
+            });
+
+            Assert.Equal(AttentionTeamRoles.Pm, links["Bob"].Role);
+            Assert.Equal("Alice", links["Uma"].Pm);
+            Assert.True(links["Uma"].PmRecordedOnly);
+
+            var now = DateTime.UtcNow;
+            var entries = new[] { "Bob", "Alice", "Uma" }
+                .Select((n, i) => new AgentAttentionEntry { SessionId = n, AgentName = n, State = AttentionState.Working, EnteredAtUtc = now.AddSeconds(-10 - i) })
+                .ToArray();
+            var cards = AttentionCardProjector.Project(entries, null, null, now, teamLinks: links);
+            var groups = AttentionTeamLayout.Build(cards);
+
+            Assert.Empty(groups.Single(g => g.HeadId == "Bob").HelperIds);
+            Assert.Empty(groups.Single(g => g.HeadId == "Alice").HelperIds);
+            var headless = groups.Single(g => g.Kind == AttentionTeamLayout.KindHeadless);
+            Assert.Equal("Alice", headless.PmName);
+            Assert.Equal(new[] { "Uma" }, headless.HelperIds);
+        }
+
+        /// <summary>The spawner pane still running the recorded agent IS the PM (the positive control).</summary>
+        [Fact]
+        public void A_spawner_pane_still_running_the_recorded_agent_is_the_pm()
+        {
+            var links = AttentionTeamResolver.Resolve(new[]
+            {
+                new AttentionPaneTeamFacts { PaneKey = "k-1", AgentName = "alice", DisplayedAsPm = true },
+                new AttentionPaneTeamFacts { PaneKey = "k-uma", AgentName = "Uma", LaunchedAsHelper = true, LinkHelperName = "Uma", LinkSpawnerPaneKey = "k-1", LinkSpawnerName = "Alice" },
+            });
+
+            Assert.Equal("alice", links["Uma"].Pm);
+            Assert.False(links["Uma"].PmRecordedOnly);
+        }
+
+        /// <summary>A link with a spawner key but no recorded name cannot be checked, so the PM is unknown.</summary>
+        [Fact]
+        public void A_link_without_a_recorded_spawner_name_is_pm_unknown()
+        {
+            var links = AttentionTeamResolver.Resolve(new[]
+            {
+                new AttentionPaneTeamFacts { PaneKey = "k-1", AgentName = "Bob", DisplayedAsPm = true },
+                new AttentionPaneTeamFacts { PaneKey = "k-uma", AgentName = "Uma", LinkHelperName = "Uma", LinkSpawnerPaneKey = "k-1" },
+            });
+
+            Assert.Equal(AttentionTeamRoles.Helper, links["Uma"].Role);
+            Assert.Null(links["Uma"].Pm);
+        }
+
+        /// <summary>
+        /// The registry hands back the name the PROVEN spawner pane had at spawn time, which is what
+        /// MainForm stamps, and never the nonce.
+        /// </summary>
+        [Fact]
+        public void The_registry_returns_the_spawners_name_at_spawn_time()
+        {
+            var reg = new SpawnedPaneRegistry();
+            Assert.True(reg.Record("helper-doc", "Uma", "spawner-doc", "nonce-123", "Alice"));
+            Assert.Equal(("spawner-doc", "Alice"), reg.SpawnerFor("helper-doc"));
+            Assert.Equal(((string)null, (string)null), reg.SpawnerFor("nobody"));
+
+            Assert.True(reg.Record("helper-2", "Vic", "spawner-doc", "nonce-123"));
+            Assert.Equal(("spawner-doc", (string)null), reg.SpawnerFor("helper-2"));
+        }
+
+        // ───────────────────────────────────────────────────────────── helper of a helper (pipeline Run 1)
+
+        /// <summary>
+        /// Owen spawned Tess, Tess spawned Tiny, and Tess has no card on the rail. Tiny still resolves
+        /// to Owen by following the PANES, not "Helpers of Tess".
+        /// </summary>
+        [Fact]
+        public void A_helpers_helper_resolves_to_the_root_pm_through_the_panes()
+        {
+            var links = AttentionTeamResolver.Resolve(new[]
+            {
+                new AttentionPaneTeamFacts { PaneKey = "k-owen", AgentName = "Owen", DisplayedAsPm = true },
+                new AttentionPaneTeamFacts { PaneKey = "k-tess", AgentName = "Tess", LaunchedAsHelper = true, LinkHelperName = "Tess", LinkSpawnerPaneKey = "k-owen", LinkSpawnerName = "Owen" },
+                new AttentionPaneTeamFacts { PaneKey = "k-tiny", AgentName = "Tiny", LaunchedAsHelper = true, LinkHelperName = "Tiny", LinkSpawnerPaneKey = "k-tess", LinkSpawnerName = "Tess" },
+            });
+
+            Assert.Equal("Owen", links["Tess"].Pm);
+            Assert.Equal("Owen", links["Tiny"].Pm);
+            Assert.False(links["Tiny"].PmRecordedOnly);
+
+            // Tess has no card (no attention entry): Tiny still joins Owen's team.
+            var now = DateTime.UtcNow;
+            var entries = new[]
+            {
+                new AgentAttentionEntry { SessionId = "Owen", AgentName = "Owen", State = AttentionState.Working, EnteredAtUtc = now },
+                new AgentAttentionEntry { SessionId = "Tiny", AgentName = "Tiny", State = AttentionState.Working, EnteredAtUtc = now },
+            };
+            var team = AttentionTeamLayout.Build(AttentionCardProjector.Project(entries, null, null, now, teamLinks: links)).Single();
+            Assert.Equal("Owen", team.HeadId);
+            Assert.Equal(new[] { "Tiny" }, team.HelperIds);
+        }
+
+        /// <summary>
+        /// A chain of panes that loops proves nothing: PM unknown. Run with a deadline, so a broken
+        /// loop guard FAILS this fact instead of hanging the suite.
+        /// </summary>
+        [Fact]
+        public async System.Threading.Tasks.Task A_looping_pane_chain_is_pm_unknown()
+        {
+            var resolving = System.Threading.Tasks.Task.Run(() => AttentionTeamResolver.Resolve(new[]
+            {
+                new AttentionPaneTeamFacts { PaneKey = "k-a", AgentName = "A", LinkHelperName = "A", LinkSpawnerPaneKey = "k-b", LinkSpawnerName = "B" },
+                new AttentionPaneTeamFacts { PaneKey = "k-b", AgentName = "B", LinkHelperName = "B", LinkSpawnerPaneKey = "k-a", LinkSpawnerName = "A" },
+            }));
+
+            var winner = await System.Threading.Tasks.Task.WhenAny(resolving, System.Threading.Tasks.Task.Delay(TimeSpan.FromSeconds(10)));
+            Assert.True(winner == resolving, "Resolve did not return: the loop guard is broken.");
+            var links = await resolving;
+            Assert.Null(links["A"].Pm);
+            Assert.Null(links["B"].Pm);
+        }
+
+        /// <summary>
+        /// IsBlocked reads the one blocked-state list (AttentionStates.IsBlocking) through the card's
+        /// state NAME, which must round-trip exactly: a numeric string is not a state name.
+        /// </summary>
+        [Fact]
+        public void Only_an_exact_blocked_state_name_is_blocked()
+        {
+            Assert.True(AttentionTeamLayout.IsBlocked(Card("A", state: nameof(AttentionState.BlockedQuestion))));
+            Assert.True(AttentionTeamLayout.IsBlocked(Card("A", state: nameof(AttentionState.BlockedPermission))));
+            Assert.True(AttentionTeamLayout.IsBlocked(Card("A", state: nameof(AttentionState.BlockedUnknown))));
+            Assert.False(AttentionTeamLayout.IsBlocked(Card("A", state: nameof(AttentionState.Working))));
+            Assert.False(AttentionTeamLayout.IsBlocked(Card("A", state: ((int)AttentionState.BlockedQuestion).ToString(System.Globalization.CultureInfo.InvariantCulture))));
+            Assert.False(AttentionTeamLayout.IsBlocked(Card("A", state: "blockedquestion")));
+            Assert.False(AttentionTeamLayout.IsBlocked(Card("A", state: null)));
         }
 
         // ───────────────────────────────────────────────────────────── zoom
@@ -563,15 +903,19 @@ namespace MultiTerminal.Tests
             Assert.Contains("type = \"sessions\", sessions, quota, teams", ReadRepoFile("AttentionPanel", "AttentionPanelControl.cs"), StringComparison.Ordinal);
         }
 
-        /// <summary>The kinds the host emits are the kinds the view draws.</summary>
+        /// <summary>
+        /// The kind and role strings the host emits are the ones the view compares against, in its
+        /// SCRIPT (comments stripped, so prose naming them cannot satisfy this).
+        /// </summary>
         [Fact]
         public void Every_group_kind_is_known_to_the_view()
         {
-            string script = ReadRepoFile("AttentionPanel", "attention-panel.html");
+            string script = StripComments(Regex.Replace(ReadRepoFile("AttentionPanel", "attention-panel.html"),
+                @"<style\b[^>]*>.*?</style>", string.Empty, RegexOptions.Singleline));
+            Assert.True(script.Length > 5000, "attention-panel.html script extraction came back too short to mean anything.");
+
             Assert.Contains("g.kind === \"" + AttentionTeamLayout.KindUnknown + "\"", script, StringComparison.Ordinal);
-            Assert.Contains("\"pm\"", script, StringComparison.Ordinal);
-            Assert.Equal("pm", AttentionTeamRoles.Pm);
-            Assert.Equal("helper", AttentionTeamRoles.Helper);
+            Assert.Matches(@"\bs\.role\s*===\s*""" + AttentionTeamRoles.Pm + @"""", script);
         }
     }
 }
