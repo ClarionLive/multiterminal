@@ -17,7 +17,9 @@ namespace MultiTerminal.DashboardHeader
 {
     /// <summary>
     /// WebView2-based dashboard header that replaces the traditional ToolStrip.
-    /// Shows: logo menu, new terminal, panel toggles, project info, active task.
+    /// Shows: the M menu, the project actions (Select Project, Browse All Projects, New Project,
+    /// Just Claude, Open PowerShell), panel toggles, project info, active task. The M menu and the
+    /// project picker open in <see cref="HeaderPopupForm"/> windows (task 4cac608c).
     /// </summary>
     public class DashboardHeaderControl : UserControl
     {
@@ -31,10 +33,24 @@ namespace MultiTerminal.DashboardHeader
         private System.Windows.Forms.Timer _fallbackTimer;
         private double _pendingZoom = 1.0;
         private readonly Queue<string> _pendingMessages = new();
-        private ContextMenuStrip _logoMenu;
+
+        // The M menu and the Select Project picker share one popup window; the Grid Layout flyout
+        // has its own, so it can sit beside the menu (task 4cac608c).
+        private HeaderPopupForm _menuPopup;
+        private HeaderPopupForm _subPopup;
+        private long _popupAutoClosedAt;      // Environment.TickCount64 when a click-away closed the popups
+        private string _popupAutoClosedView;  // which view that was, so its own button doesn't reopen it
+
+        // A click on the M or Select Project button while its popup is open first deactivates the
+        // popup (closing it), then arrives as an action. Within this window, treat it as "close".
+        private const int ReopenSuppressMs = 300;
 
         // Events for MainForm to handle actions
-        public event Action NewTerminalRequested;
+        public event Action BrowseAllRequested;
+        public event Action NewProjectRequested;
+        public event Action JustClaudeRequested;
+        public event Action OpenPowerShellRequested;
+        public event Action<string> SwitchProjectRequested;
         public event Action ToggleThemeRequested;
         public event Action SettingsRequested;
         public event Action DocsRequested;
@@ -44,6 +60,9 @@ namespace MultiTerminal.DashboardHeader
         public event Action ExitRequested;
         public event Action ShowChatHistoryRequested;
         public event Action DashboardReady;
+
+        /// <summary>The projects the Select Project picker lists, and the current project's id.</summary>
+        public Func<(IReadOnlyList<HeaderProjectItem> Projects, string CurrentProjectId)> ProjectListProvider { get; set; }
 
         public DashboardHeaderControl()
         {
@@ -59,8 +78,6 @@ namespace MultiTerminal.DashboardHeader
             _webView.DefaultBackgroundColor = Color.FromArgb(30, 30, 37);
 
             Controls.Add(_webView);
-
-            BuildLogoMenu();
 
             HandleCreated += OnHandleCreated;
         }
@@ -213,7 +230,12 @@ namespace MultiTerminal.DashboardHeader
 
                     case "action":
                         if (root.TryGetProperty("action", out var actionEl))
-                            HandleAction(actionEl.GetString());
+                        {
+                            // The two popup buttons send their position so the popup can open under them.
+                            var anchor = root.TryGetProperty("rect", out var rectEl) ? HeaderRectToScreen(rectEl) : (Rectangle?)null;
+                            bool keyboard = root.TryGetProperty("keyboard", out var kbEl) && kbEl.ValueKind == JsonValueKind.True;
+                            HandleAction(actionEl.GetString(), anchor, keyboard);
+                        }
                         break;
                 }
             }
@@ -223,12 +245,22 @@ namespace MultiTerminal.DashboardHeader
             }
         }
 
-        private void HandleAction(string action)
+        /// <summary>
+        /// Every action the header page and its popups can send (task 4cac608c: one vocabulary for
+        /// both pages; HeaderActionContractTests checks the pages and this switch agree).
+        /// </summary>
+        /// <param name="anchor">Screen rect of the button that sent it, for the two popup buttons.</param>
+        /// <param name="keyboard">The button was pressed from the keyboard, so the popup takes focus on its first item.</param>
+        private void HandleAction(string action, Rectangle? anchor = null, bool keyboard = false)
         {
             switch (action)
             {
-                case "show_menu": ShowLogoMenu(); break;
-                case "new_terminal": NewTerminalRequested?.Invoke(); break;
+                case "show_menu": ToggleAppMenu(anchor, keyboard); break;
+                case "select_project": ToggleProjectPicker(anchor, keyboard); break;
+                case "browse_all": BrowseAllRequested?.Invoke(); break;
+                case "new_project": NewProjectRequested?.Invoke(); break;
+                case "just_claude": JustClaudeRequested?.Invoke(); break;
+                case "open_powershell": OpenPowerShellRequested?.Invoke(); break;
                 case "toggle_theme": ToggleThemeRequested?.Invoke(); break;
                 case "settings": SettingsRequested?.Invoke(); break;
                 case "docs": DocsRequested?.Invoke(); break;
@@ -260,85 +292,148 @@ namespace MultiTerminal.DashboardHeader
             }
         }
 
-        private void BuildLogoMenu()
+        // ============ Header popups (task 4cac608c) ============
+
+        /// <summary>Physical pixels per CSS pixel in the header page.</summary>
+        private double HeaderScale => (_webView?.ZoomFactor ?? 1.0) * DeviceDpi / 96.0;
+
+        private Rectangle? HeaderRectToScreen(JsonElement rect)
         {
-            _logoMenu = new ContextMenuStrip();
-            _logoMenu.RenderMode = ToolStripRenderMode.Professional;
-
-            _logoMenu.Items.Add("Toggle Theme", null, (s, e) => ToggleThemeRequested?.Invoke());
-            _logoMenu.Items.Add("Documentation", null, (s, e) => DocsRequested?.Invoke());
-            _logoMenu.Items.Add("Settings", null, (s, e) => SettingsRequested?.Invoke());
-            _logoMenu.Items.Add(new ToolStripSeparator());
-
-            // Grid Layout submenu
-            var gridMenu = new ToolStripMenuItem("Grid Layout");
-            gridMenu.DropDownItems.Add("2x2 Grid", null, (s, e) => GridLayoutRequested?.Invoke("2x2"));
-            gridMenu.DropDownItems.Add("2x3 Grid", null, (s, e) => GridLayoutRequested?.Invoke("2x3"));
-            gridMenu.DropDownItems.Add("3x2 Grid", null, (s, e) => GridLayoutRequested?.Invoke("3x2"));
-            gridMenu.DropDownItems.Add(new ToolStripSeparator());
-            gridMenu.DropDownItems.Add("2 Horizontal", null, (s, e) => GridLayoutRequested?.Invoke("h2"));
-            gridMenu.DropDownItems.Add("2 Vertical", null, (s, e) => GridLayoutRequested?.Invoke("v2"));
-            gridMenu.DropDownItems.Add("3 Horizontal", null, (s, e) => GridLayoutRequested?.Invoke("h3"));
-            gridMenu.DropDownItems.Add("3 Vertical", null, (s, e) => GridLayoutRequested?.Invoke("v3"));
-            gridMenu.DropDownItems.Add(new ToolStripSeparator());
-            gridMenu.DropDownItems.Add("Reset to Tabs", null, (s, e) => GridLayoutRequested?.Invoke("reset"));
-            _logoMenu.Items.Add(gridMenu);
-
-            _logoMenu.Items.Add(new ToolStripSeparator());
-            _logoMenu.Items.Add("About", null, (s, e) => AboutRequested?.Invoke());
-            _logoMenu.Items.Add(new ToolStripSeparator());
-            _logoMenu.Items.Add("Exit", null, (s, e) => ExitRequested?.Invoke());
+            if (rect.ValueKind != JsonValueKind.Object) return null;
+            double s = HeaderScale;
+            var topLeft = _webView.PointToScreen(new Point(
+                (int)Math.Round(rect.GetProperty("x").GetDouble() * s),
+                (int)Math.Round(rect.GetProperty("y").GetDouble() * s)));
+            return new Rectangle(topLeft, new Size(
+                (int)Math.Round(rect.GetProperty("w").GetDouble() * s),
+                (int)Math.Round(rect.GetProperty("h").GetDouble() * s)));
         }
 
-        private void ShowLogoMenu()
+        /// <summary>Fallback anchor (the M button's spot) when a message carries no rect.</summary>
+        private Rectangle DefaultAnchor()
         {
-            if (_logoMenu.Visible)
+            var s = HeaderScale;
+            return new Rectangle(PointToScreen(new Point((int)(14 * s), (int)(16 * s))), new Size((int)(40 * s), (int)(40 * s)));
+        }
+
+        private void EnsurePopups()
+        {
+            if (_menuPopup != null) return;
+            var owner = FindForm();
+
+            _menuPopup = new HeaderPopupForm();
+            _subPopup = new HeaderPopupForm();
+            foreach (var popup in new[] { _menuPopup, _subPopup })
             {
-                _logoMenu.Close();
+                popup.SetOwnerForm(owner);
+                popup.ActionChosen += OnPopupAction;
+                popup.Deactivate += (s, e) => BeginInvoke(new Action(CloseIfFocusLeftPopups));
+            }
+            _menuPopup.SubmenuRequested += OnSubmenuRequested;
+            _menuPopup.DismissRequested += back => CloseAllPopups();
+            _subPopup.DismissRequested += back =>
+            {
+                _subPopup.HidePopup();
+                if (back) _menuPopup.FocusPage();
+                else CloseAllPopups();
+            };
+
+            _ = _menuPopup.WarmUpAsync();
+            _ = _subPopup.WarmUpAsync();
+        }
+
+        private bool JustAutoClosed(string view) =>
+            _popupAutoClosedView == view && Environment.TickCount64 - _popupAutoClosedAt < ReopenSuppressMs;
+
+        private void ToggleAppMenu(Rectangle? anchor, bool keyboard)
+        {
+            EnsurePopups();
+            if (_menuPopup.Visible && _menuPopup.CurrentView == "menu") { CloseAllPopups(); return; }
+            if (JustAutoClosed("menu")) return;
+            CloseAllPopups();
+            var show = JsonSerializer.Serialize(new { type = "show", view = "menu", theme = ThemeName, keyboard });
+            _menuPopup.ShowAt(show, anchor ?? DefaultAnchor(), PopupSide.Below, HeaderScale, _webView.ZoomFactor, activate: true);
+        }
+
+        private void ToggleProjectPicker(Rectangle? anchor, bool keyboard)
+        {
+            EnsurePopups();
+            if (_menuPopup.Visible && _menuPopup.CurrentView == "projects") { CloseAllPopups(); return; }
+            if (JustAutoClosed("projects")) return;
+            CloseAllPopups();
+
+            var (projects, currentId) = ProjectListProvider?.Invoke() ?? (Array.Empty<HeaderProjectItem>(), null);
+            var show = JsonSerializer.Serialize(new
+            {
+                type = "show",
+                view = "projects",
+                theme = ThemeName,
+                keyboard,
+                currentProjectId = currentId ?? "",
+                projects = projects.Select(p => new
+                {
+                    id = p.Id,
+                    name = p.Name,
+                    path = p.Path,
+                    icon = p.Icon,
+                    iconColor = p.IconColor,
+                    isPinned = p.IsPinned,
+                    status = p.Status,
+                    lastOpenedAt = p.LastOpenedAt == default ? null : p.LastOpenedAt.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture),
+                }),
+            });
+            _menuPopup.ShowAt(show, anchor ?? DefaultAnchor(), PopupSide.Below, HeaderScale, _webView.ZoomFactor, activate: true);
+        }
+
+        private void OnSubmenuRequested(bool open, double cssTop, bool focus)
+        {
+            if (!open)
+            {
+                _subPopup.HidePopup();
                 return;
             }
-
-            // Close the menu when the parent form is clicked anywhere (WebView2 HWNDs
-            // swallow mouse events so ContextMenuStrip's auto-dismiss doesn't work)
-            var parentForm = FindForm();
-            if (parentForm != null)
+            if (_subPopup.Visible)
             {
-                // Use a message filter to catch any mouse click in the application
-                var filter = new LogoMenuClickFilter(_logoMenu);
-                Application.AddMessageFilter(filter);
-                _logoMenu.Closed += (s, e) => Application.RemoveMessageFilter(filter);
+                if (focus) _subPopup.FocusPage();
+                return;
             }
-
-            // Show below the logo button (left edge, below the 40px button + padding)
-            _logoMenu.Show(this, new Point(14, Height - 4));
+            // Line the flyout's first item up with the Grid Layout item: the panel has 6px padding.
+            int top = _menuPopup.ScreenYForCssTop(cssTop) - (int)Math.Round(6 * HeaderScale);
+            var anchor = new Rectangle(_menuPopup.Left, top, _menuPopup.Width, 1);
+            var show = JsonSerializer.Serialize(new { type = "show", view = "submenu", theme = ThemeName, keyboard = focus });
+            _subPopup.ShowAt(show, anchor, PopupSide.Right, HeaderScale, _webView.ZoomFactor, activate: focus);
         }
 
-        /// <summary>
-        /// Message filter that closes the logo menu when the user clicks anywhere
-        /// outside the menu. Needed because WebView2 HWNDs don't forward mouse events
-        /// to WinForms, so ContextMenuStrip auto-dismiss fails within the app.
-        /// </summary>
-        private class LogoMenuClickFilter : IMessageFilter
+        private void OnPopupAction(string action, string projectId)
         {
-            private readonly ContextMenuStrip _menu;
-            private const int WM_LBUTTONDOWN = 0x0201;
-            private const int WM_RBUTTONDOWN = 0x0204;
-            private const int WM_NCLBUTTONDOWN = 0x00A1;
-
-            public LogoMenuClickFilter(ContextMenuStrip menu) => _menu = menu;
-
-            public bool PreFilterMessage(ref System.Windows.Forms.Message m)
+            CloseAllPopups();
+            if (action == "switch_project")
             {
-                if (m.Msg == WM_LBUTTONDOWN || m.Msg == WM_RBUTTONDOWN || m.Msg == WM_NCLBUTTONDOWN)
-                {
-                    if (_menu.Visible && !_menu.Bounds.Contains(Cursor.Position))
-                    {
-                        _menu.Close();
-                    }
-                }
-                return false; // never eat the message
+                if (!string.IsNullOrEmpty(projectId)) SwitchProjectRequested?.Invoke(projectId);
+                return;
             }
+            HandleAction(action);
         }
+
+        // Deactivate fires when focus moves anywhere else, including from the menu to its own
+        // flyout. Only close when neither popup is the active window afterwards.
+        private void CloseIfFocusLeftPopups()
+        {
+            var active = Form.ActiveForm;
+            if (active == _menuPopup || active == _subPopup) return;
+            if (_menuPopup?.Visible != true && _subPopup?.Visible != true) return;
+            _popupAutoClosedView = _menuPopup?.Visible == true ? _menuPopup.CurrentView : "menu";
+            _popupAutoClosedAt = Environment.TickCount64;
+            CloseAllPopups();
+        }
+
+        private void CloseAllPopups()
+        {
+            _subPopup?.HidePopup();
+            _menuPopup?.HidePopup();
+        }
+
+        private string ThemeName => _isDarkTheme ? "dark" : "light";
 
         private void OnDashboardReady()
         {
@@ -365,6 +460,9 @@ namespace MultiTerminal.DashboardHeader
                 // Send initial data
                 RefreshActiveTask();
                 RefreshInbox();
+
+                // Build the popups now, hidden, so the first click on M opens instantly.
+                EnsurePopups();
 
                 // Signal that the dashboard is ready for display
                 FireDashboardReadyIfNeeded();
@@ -555,7 +653,8 @@ namespace MultiTerminal.DashboardHeader
                 }
                 _fallbackTimer?.Dispose();
                 _webView?.Dispose();
-                _logoMenu?.Dispose();
+                _subPopup?.Dispose();
+                _menuPopup?.Dispose();
             }
             base.Dispose(disposing);
         }

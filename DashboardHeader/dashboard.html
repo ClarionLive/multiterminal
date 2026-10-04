@@ -17,6 +17,7 @@
     --mauve: #cba6f7;
     --border: #313244;
     --surface: #181825;
+    --pill-border: #3a3a52;
   }
 
   body.light {
@@ -33,6 +34,7 @@
     --mauve: #8839ef;
     --border: #ccd0da;
     --surface: #e6e9ef;
+    --pill-border: #bcc0cc;
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -79,24 +81,34 @@
 
   .divider { width: 1px; height: 36px; background: var(--border); flex-shrink: 0; }
 
-  /* New Terminal button */
-  .new-terminal-btn {
+  /* Project action buttons (task 4cac608c): dark rounded pills, a thin line icon and a label */
+  .actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  .action-btn {
+    height: 38px;
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 8px 16px;
-    background: var(--accent);
-    color: var(--bg);
-    border: none;
+    gap: 8px;
+    padding: 0 14px;
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--pill-border);
     border-radius: 10px;
+    font: inherit;
     font-size: 14px;
-    font-weight: 600;
+    font-weight: 500;
     cursor: pointer;
-    transition: all 0.15s ease;
     white-space: nowrap;
+    transition: background 0.15s ease, border-color 0.15s ease;
   }
+  .action-btn:hover { background: var(--bg-hover); border-color: var(--accent); }
+  .action-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .action-btn[aria-expanded="true"] { background: var(--bg-hover); border-color: var(--accent); }
+  .action-btn svg { flex-shrink: 0; }
+  .action-btn .chev { color: var(--text-dim); }
 
-  .new-terminal-btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
+  /* Narrow window: every action but Select Project becomes icon-only; its title is the tooltip. */
+  body.compact .action-btn.shrinks { width: 38px; padding: 0; justify-content: center; }
+  body.compact .action-btn.shrinks .label { display: none; }
 
   /* Panel groups */
   .panel-group {
@@ -180,13 +192,36 @@
 <body>
 <div class="dashboard">
 
-  <!-- Logo button — menu handled natively in C# (HTML dropdown clips at 80px control height) -->
+  <!-- Logo button. Its menu opens in a separate popup window (HeaderPopupForm), because a dropdown
+       inside this 80px-tall page would be clipped at its bottom edge. -->
   <div class="logo-container">
-    <button class="logo-btn" onclick="sendAction('show_menu')">M</button>
+    <button class="logo-btn" id="btn-menu" aria-haspopup="menu" aria-label="MultiTerminal menu" onclick="sendPopupAction('show_menu', this, event)">M</button>
   </div>
 
-  <!-- New Terminal -->
-  <button class="new-terminal-btn" onclick="sendAction('new_terminal')">+ New</button>
+  <!-- Project actions (task 4cac608c; these replaced "+ New", which only opened a start-screen tab) -->
+  <div class="actions" id="actions">
+    <button class="action-btn" id="btn-select-project" aria-haspopup="listbox" title="Select Project" onclick="sendPopupAction('select_project', this, event)">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>
+      <span class="label">Select Project</span>
+      <svg class="chev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+    </button>
+    <button class="action-btn shrinks" title="Browse All Projects" aria-label="Browse All Projects" onclick="sendAction('browse_all')">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></svg>
+      <span class="label">Browse All Projects</span>
+    </button>
+    <button class="action-btn shrinks" title="New Project" aria-label="New Project" onclick="sendAction('new_project')">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+      <span class="label">New Project</span>
+    </button>
+    <button class="action-btn shrinks" title="Just Claude" aria-label="Just Claude" onclick="sendAction('just_claude')">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M9 9l6 6M15 9l-6 6"/></svg>
+      <span class="label">Just Claude</span>
+    </button>
+    <button class="action-btn shrinks" title="Open PowerShell" aria-label="Open PowerShell" onclick="sendAction('open_powershell')">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zM7 10l3 2-3 2M12 15h5"/></svg>
+      <span class="label">Open PowerShell</span>
+    </button>
+  </div>
 
   <div class="gap-sm"></div>
 
@@ -245,6 +280,30 @@
       window.chrome.webview.postMessage({ type: 'action', action: action });
     }
   }
+
+  // The M menu and the project picker open under their button, so send its position (CSS px).
+  // A click with detail 0 came from the keyboard (Enter/Space): the popup then focuses its first item.
+  function sendPopupAction(action, btn, ev) {
+    if (!(window.chrome && window.chrome.webview)) return;
+    const r = btn.getBoundingClientRect();
+    window.chrome.webview.postMessage({
+      type: 'action', action: action,
+      rect: { x: r.left, y: r.top, w: r.width, h: r.height },
+      keyboard: !!ev && ev.detail === 0
+    });
+  }
+
+  // ============ Narrow window ============
+  // Labels go first when the right-hand project/task info would be squeezed below a readable
+  // width; measured rather than a fixed breakpoint, so it holds at any zoom level.
+  const MIN_INFO_WIDTH = 260;
+  function fitActions() {
+    document.body.classList.remove('compact');
+    const zone = document.querySelector('.dashboard-zone');
+    if (zone && zone.clientWidth < MIN_INFO_WIDTH) document.body.classList.add('compact');
+  }
+  window.addEventListener('resize', fitActions);
+  fitActions();
 
   // ============ C# → JS Communication ============
   if (window.chrome && window.chrome.webview) {

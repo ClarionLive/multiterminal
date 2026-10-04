@@ -108,10 +108,20 @@ namespace MultiTerminal.Tests
 
         private static string Header() => ReadHtmlStripped("DashboardHeader", "dashboard.html");
 
+        private static string Popup() => ReadHtmlStripped("DashboardHeader", "header-popup.html");
+
+        // Since task 4cac608c HandleAction also takes the sending button's position, so the anchor
+        // is the method name and first parameter rather than the whole old signature.
         private static string HandleActionBody() => BalancedBodyAfter(
             ReadCsStripped("DashboardHeader", "DashboardHeaderControl.cs"),
-            "private void HandleAction(string action)",
+            "private void HandleAction(string action",
             "DashboardHeaderControl.HandleAction");
+
+        /// <summary>The popup's choices route through HandleAction, except switch_project, handled here.</summary>
+        private static string OnPopupActionBody() => BalancedBodyAfter(
+            ReadCsStripped("DashboardHeader", "DashboardHeaderControl.cs"),
+            "private void OnPopupAction(string action",
+            "DashboardHeaderControl.OnPopupAction");
 
         private static string MainFormPanelSwitch() => BalancedBodyAfter(
             ReadCsStripped("MainForm.cs"),
@@ -127,12 +137,15 @@ namespace MultiTerminal.Tests
         {
             string body = HandleActionBody();
 
-            var emitted = Regex.Matches(Header(), @"sendAction\('([a-zA-Z0-9_]+)'\)")
+            // sendPopupAction (task 4cac608c) is the M and Select Project buttons: same message, plus a rect.
+            var emitted = Regex.Matches(Header(), @"send(?:Popup)?Action\('([a-zA-Z0-9_]+)'")
                 .Select(m => m.Groups[1].Value)
                 .Distinct()
                 .ToList();
 
-            Assert.NotEmpty(emitted);
+            // 11 panel/history toggles + show_menu + the 5 project actions. A rename of either send
+            // function would otherwise leave this fact checking nothing.
+            Assert.True(emitted.Count >= 17, $"Expected at least 17 header actions, extracted {emitted.Count}: {string.Join(", ", emitted)}");
 
             var unhandled = emitted
                 .Where(a => !body.Contains($"case \"{a}\":", StringComparison.Ordinal))
@@ -214,19 +227,97 @@ namespace MultiTerminal.Tests
         /// The header markup is Content-copied, not embedded. Omit the csproj entry and the header
         /// loads a blank WebView2 with no error at all — the trap recorded in
         /// .claude/rules/checklist-graph.md, which costs an entire deploy cycle to diagnose.
+        /// The popup page (task 4cac608c) is the same trap: the M menu would open as an empty box.
         /// </summary>
-        [Fact]
-        public void Dashboard_header_html_is_copied_to_output()
+        [Theory]
+        [InlineData("dashboard.html")]
+        [InlineData("header-popup.html")]
+        public void Dashboard_header_html_is_copied_to_output(string file)
         {
             string csproj = File.ReadAllText(PathTo("MultiTerminal.csproj"));
+            string name = Regex.Escape(file);
 
             var include = Regex.Match(
                 csproj,
-                @"<(?:Content|None)\s+[^>]*Include=""DashboardHeader[\\/]dashboard\.html""[^>]*>.*?</(?:Content|None)>|<(?:Content|None)\s+[^>]*Include=""DashboardHeader[\\/]dashboard\.html""[^>]*/>",
+                $@"<(?:Content|None)\s+[^>]*Include=""DashboardHeader[\\/]{name}""[^>]*>.*?</(?:Content|None)>|<(?:Content|None)\s+[^>]*Include=""DashboardHeader[\\/]{name}""[^>]*/>",
                 RegexOptions.Singleline);
 
-            Assert.True(include.Success, "MultiTerminal.csproj does not copy DashboardHeader/dashboard.html to the output.");
+            Assert.True(include.Success, $"MultiTerminal.csproj does not copy DashboardHeader/{file} to the output.");
             Assert.Contains("PreserveNewest", include.Value, StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// HOP 1 for the popup page (task 4cac608c): every action the M menu, its Grid Layout flyout
+        /// and the project picker can send is handled, by HandleAction or (switch_project only) by
+        /// OnPopupAction. The menu items are data (MENU/GRID entries) rather than onclick attributes,
+        /// so both shapes are extracted.
+        /// </summary>
+        [Fact]
+        public void Every_action_the_header_popup_sends_is_handled()
+        {
+            string handled = HandleActionBody() + OnPopupActionBody();
+            string popup = Popup();
+
+            var emitted = Regex.Matches(popup, @"\baction: '([a-zA-Z0-9_]+)'|data-action=""([a-zA-Z0-9_]+)""")
+                .Select(m => m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value)
+                .Distinct()
+                .ToList();
+
+            // 5 menu actions + 8 grid layouts + browse_all + switch_project.
+            Assert.True(emitted.Count >= 15, $"Expected at least 15 popup actions, extracted {emitted.Count}: {string.Join(", ", emitted)}");
+
+            var unhandled = emitted
+                .Where(a => !handled.Contains($"case \"{a}\":", StringComparison.Ordinal)
+                         && !handled.Contains($"action == \"{a}\"", StringComparison.Ordinal))
+                .ToList();
+
+            Assert.True(
+                unhandled.Count == 0,
+                "header-popup.html emits action(s) nothing handles, so the menu item does nothing: "
+                + string.Join(", ", unhandled));
+        }
+
+        /// <summary>
+        /// HOP 2 for every header event: each <c>...Requested</c> event DashboardHeaderControl declares
+        /// is subscribed by MainForm. An event with no subscriber is a button that clicks and does
+        /// nothing, with a clean build. General on purpose, like HOP 1: the next event is covered
+        /// before anyone thinks of it.
+        /// </summary>
+        [Fact]
+        public void Every_header_event_is_subscribed_by_MainForm()
+        {
+            string header = ReadCsStripped("DashboardHeader", "DashboardHeaderControl.cs");
+            string mainForm = ReadCsStripped("MainForm.cs");
+
+            var events = Regex.Matches(header, @"public event Action(?:<[^>]+>)? (\w+Requested);")
+                .Select(m => m.Groups[1].Value)
+                .ToList();
+
+            Assert.True(events.Count >= 13, $"Expected at least 13 header events, extracted {events.Count}: {string.Join(", ", events)}");
+
+            var unsubscribed = events
+                .Where(e => !Regex.IsMatch(mainForm, $@"_dashboardHeader\.{e}\s*\+="))
+                .ToList();
+
+            Assert.True(
+                unsubscribed.Count == 0,
+                "DashboardHeaderControl raises event(s) MainForm never subscribes to, so the button "
+                + $"does nothing: {string.Join(", ", unsubscribed)}");
+        }
+
+        /// <summary>
+        /// REMOVAL PROOF (task 4cac608c). "+ New" is gone from the header, and so is the native M menu,
+        /// so there is one menu, not a styled one plus a stock one that a code path can still reach.
+        /// </summary>
+        [Fact]
+        public void The_header_has_no_new_terminal_button_and_no_native_menu()
+        {
+            Assert.DoesNotContain("new_terminal", Header(), StringComparison.Ordinal);
+            Assert.DoesNotContain("case \"new_terminal\":", HandleActionBody(), StringComparison.Ordinal);
+
+            string header = ReadCsStripped("DashboardHeader", "DashboardHeaderControl.cs");
+            Assert.DoesNotContain("ContextMenuStrip", header, StringComparison.Ordinal);
+            Assert.DoesNotContain("NewTerminalRequested", header, StringComparison.Ordinal);
         }
     }
 }
