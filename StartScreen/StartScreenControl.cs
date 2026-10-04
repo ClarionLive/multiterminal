@@ -46,6 +46,14 @@ namespace MultiTerminal.StartScreen
         // ── WebView2 state ────────────────────────────────────────────────────
         private WebView2 _webView;
         private bool _isInitialized;
+
+        // _isInitialized is set when navigation STARTS; the page can only receive messages once it
+        // has posted "ready". Browse All requested before then waits here (task 4cac608c).
+        private bool _pageReady;
+        private bool _browseAllPending;
+
+        private const string ShowBrowseAllMessage = "{\"type\":\"show_browse_all\"}";
+
         private bool _isInitializing;
         private bool _initializePending;
         private bool _isDarkTheme = true;
@@ -163,6 +171,25 @@ namespace MultiTerminal.StartScreen
                 return;
             }
             SendProjectsToWebView();
+        }
+
+        /// <summary>
+        /// Switches the page to its Browse All view, as its own Browse All Projects button does
+        /// (the header's button, task 4cac608c). Waits for the page if it is still loading.
+        /// </summary>
+        public void ShowBrowseAll()
+        {
+            if (InvokeRequired)
+            {
+                Invoke(new Action(ShowBrowseAll));
+                return;
+            }
+            if (!_pageReady)
+            {
+                _browseAllPending = true;
+                return;
+            }
+            PostMessage(ShowBrowseAllMessage);
         }
 
         /// <summary>
@@ -284,6 +311,12 @@ namespace MultiTerminal.StartScreen
                         // JS has finished loading — push initial data
                         ApplyTheme(_isDarkTheme);
                         SendProjectsToWebView();
+                        _pageReady = true;
+                        if (_browseAllPending)
+                        {
+                            _browseAllPending = false;
+                            PostMessage(ShowBrowseAllMessage);
+                        }
                         break;
 
                     case "launch_project":

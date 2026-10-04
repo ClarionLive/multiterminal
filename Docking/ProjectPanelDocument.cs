@@ -1267,6 +1267,12 @@ namespace MultiTerminal.Docking
         #endregion
 
         /// <summary>
+        /// Switches the current project by id, exactly as the pane's own Switch Project popup does.
+        /// The header's Select Project picker comes in here (task 4cac608c).
+        /// </summary>
+        public void SelectProjectById(string projectId) => OnSelectProjectRequested(this, projectId);
+
+        /// <summary>
         /// Handles JS request to switch to a different project by ID.
         /// Loads from SQLite first, falls back to JSON, then fires ProjectSelected.
         /// </summary>

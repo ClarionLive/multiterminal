@@ -2951,8 +2951,15 @@ namespace MultiTerminal
         {
             _dashboardHeader = new DashboardHeader.DashboardHeaderControl();
 
-            // Wire action events to existing MainForm methods
-            _dashboardHeader.NewTerminalRequested += () => AddNewTerminal();
+            // Wire action events to existing MainForm methods.
+            // The project actions are the start screen's own buttons, run against a Home tab
+            // (task 4cac608c; they replaced "+ New", which only opened that tab).
+            _dashboardHeader.BrowseAllRequested += () => GetOrCreateHomeTab()?.ShowStartScreenBrowseAll();
+            _dashboardHeader.NewProjectRequested += () => RunOnHomeTab(OnStartScreenNewProject);
+            _dashboardHeader.JustClaudeRequested += () => RunOnHomeTab(OnStartScreenJustClaude);
+            _dashboardHeader.OpenPowerShellRequested += () => RunOnHomeTab(OnStartScreenOpenPowerShell);
+            _dashboardHeader.SwitchProjectRequested += projectId => _projectPanel?.SelectProjectById(projectId);
+            _dashboardHeader.ProjectListProvider = GetHeaderProjectList;
             _dashboardHeader.ToggleThemeRequested += () => ToggleTheme();
             _dashboardHeader.SettingsRequested += () => ShowSettingsDialog();
             _dashboardHeader.AboutRequested += () => ShowAboutDialog();
@@ -3006,6 +3013,45 @@ namespace MultiTerminal
             };
 
             Controls.Add(_dashboardHeader);
+        }
+
+        /// <summary>
+        /// The tab a header project action runs in: the active tab if it is showing its start screen,
+        /// else any open tab that is, else a new one. Reusing a Home tab means cancelling a dialog
+        /// never leaves a growing row of empty Home tabs behind (task 4cac608c).
+        /// </summary>
+        private TerminalDocument GetOrCreateHomeTab()
+        {
+            if (_dockPanel.ActiveDocument is TerminalDocument active && active.IsStartScreenVisible)
+                return active;
+
+            var home = _dockPanel.Documents.OfType<TerminalDocument>()
+                .FirstOrDefault(d => d.IsStartScreenVisible && !d.IsHidden);
+            if (home != null)
+            {
+                home.Activate();
+                return home;
+            }
+
+            var (_, docId) = AddNewTerminal();
+            return _dockPanel.Documents.OfType<TerminalDocument>().FirstOrDefault(d => d.DocId == docId);
+        }
+
+        /// <summary>Runs a start-screen button's handler as if it had been clicked in a Home tab.</summary>
+        private void RunOnHomeTab(EventHandler startScreenHandler)
+        {
+            var doc = GetOrCreateHomeTab();
+            if (doc != null) startScreenHandler(doc, EventArgs.Empty);
+        }
+
+        /// <summary>The header's Select Project list: every registered project, and the current one.</summary>
+        private (IReadOnlyList<DashboardHeader.HeaderProjectItem> Projects, string CurrentProjectId) GetHeaderProjectList()
+        {
+            var projects = _sharedProjectDatabase?.GetAllRichProjects() ?? new List<Models.Project>();
+            var items = projects.Select(p => new DashboardHeader.HeaderProjectItem(
+                p.Id, p.Name, p.SourcePath ?? p.Path, p.Icon, p.IconColor, p.IsPinned, p.LastOpenedAt,
+                Models.Project.NormalizeStatus(p.Status))).ToList();
+            return (items, _currentProject?.Id);
         }
 
         private void RefreshDashboardProjectInfo()
@@ -8188,6 +8234,9 @@ namespace MultiTerminal
             _currentProject = e.Project;
             _projectService?.MarkProjectOpened(e.Project.Id);
             _projectPanel?.RefreshForProject(e.Project);
+            // The header shows _currentProject's name; it went stale here before the header got
+            // its own Select Project button (task 4cac608c).
+            RefreshDashboardProjectInfo();
         }
 
         private void OnMcpJsonWriteRequested(object sender, (string ProjectId, string SourcePath) args)

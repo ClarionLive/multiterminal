@@ -2620,6 +2620,17 @@ namespace MultiTerminal.Docking
         public bool IsStartScreenVisible => _isStartScreenVisible;
 
         /// <summary>
+        /// Switches a visible start screen to its Browse All view (the header's Browse All Projects
+        /// button, task 4cac608c). Does nothing once the terminal has started.
+        /// </summary>
+        public void ShowStartScreenBrowseAll()
+        {
+            if (!_isStartScreenVisible || _startScreen == null) return;
+            _startScreen.ShowBrowseAll();
+            _startScreen.Focus();
+        }
+
+        /// <summary>
         /// Sets the debug log service for status bar, task HUD, and terminal (ConPTY +
         /// WebView2 renderer) logging.
         /// </summary>

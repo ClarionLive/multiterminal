@@ -1784,6 +1784,9 @@
         if (data && typeof data === 'object') {
             if (data.type === 'projects') {
                 onProjectsReceived(data.projects);
+            } else if (data.type === 'show_browse_all') {
+                // The header's Browse All Projects button (task 4cac608c)
+                showBrowseAll();
             }
             return;
         }
