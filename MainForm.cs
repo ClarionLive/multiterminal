@@ -8017,7 +8017,10 @@ namespace MultiTerminal
                     // is lazy, so the spawner may already have left its pane; a pane now running
                     // anyone else (or nobody) stamps an unproven link instead of attributing the
                     // helper to the newcomer, and that is retried on the next call because its key
-                    // is still missing.
+                    // is still missing. The unproven link keeps the name recorded at spawn time, so
+                    // the rail can still say "Helpers of <name>" if the pane never comes back
+                    // (pipeline Run 2: dropping it left the helper "PM unknown" for good after a
+                    // restart, since a restored pane is not LaunchedAsHelper and is never re-stamped).
                     var spawner = matches.Count == 1 ? matches[0] : null;
                     string spawnerName = spawner?.PaneAgentName;
                     bool stillTheSpawner = spawnerNameAtSpawn != null
@@ -8026,7 +8029,7 @@ namespace MultiTerminal
                         && string.Equals(spawnerName, spawnerNameAtSpawn, StringComparison.OrdinalIgnoreCase);
                     if (!stillTheSpawner)
                     {
-                        doc.SetHelperLink(agent, null, null);
+                        doc.SetHelperLink(agent, null, spawnerNameAtSpawn);
                     }
                     else
                     {

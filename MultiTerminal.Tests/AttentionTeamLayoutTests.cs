@@ -555,15 +555,33 @@ namespace MultiTerminal.Tests
             });
             AssertNoForgedLink(new SettingsService(_dir).GetSessionTerminals(), crafted, kEvil);
 
-            // Written by the Run 0 build (a key for every pane, fields raw): nine parts, so not even
-            // the pane's own key is trusted, let alone a link.
+            // Written by the Run 0 build (a key for every pane, fields raw): no legacy column is
+            // trusted, so that build's own trailing columns stay part of the title text.
             WriteRawSessions($@"C:\p|10.0|Owen|{kOwen}||;C:\p|10.0|{crafted}|{kEvil}||");
-            AssertNoForgedLink(new SettingsService(_dir).GetSessionTerminals(), crafted, expectedKey: null);
+            AssertNoForgedLink(new SettingsService(_dir).GetSessionTerminals(), $"{crafted}|{kEvil}||", expectedKey: null);
 
             // Written by a pre-ticket build (three fields, title raw): the crafted entry is exactly
-            // six well-formed parts, but the session predates keys, so the columns are not trusted.
+            // six well-formed parts. No legacy column is trusted, so it is a title.
             WriteRawSessions($@"C:\p|10.0|Owen;C:\p|10.0|{crafted}");
             AssertNoForgedLink(new SettingsService(_dir).GetSessionTerminals(), crafted, expectedKey: null);
+
+            // Pipeline Run 2 (Codex security + adversary): the same pre-ticket session holding ONLY
+            // the crafted pane, and one where every pane is crafted. Each looks like a session in
+            // which every entry is six parts with GUID columns, which the Run 1 rule trusted.
+            string crafted2 = $"Mal|{Key()}|Mal|{kOwen}";
+            foreach (string raw in new[] { $@"C:\p|10.0|{crafted}", $@"C:\p|10.0|{crafted};C:\q|10.0|{crafted2}" })
+            {
+                WriteRawSessions(raw);
+                var restored = new SettingsService(_dir).GetSessionTerminals();
+                Assert.Equal(crafted, restored[0].CustomTitle);
+                Assert.All(restored, r =>
+                {
+                    Assert.Null(r.PaneKey);
+                    Assert.Null(r.HelperName);
+                    Assert.Null(r.SpawnerPaneKey);
+                    Assert.Null(r.SpawnerName);
+                });
+            }
         }
 
         private static void AssertNoForgedLink(List<TerminalSessionInfo> restored, string crafted, string expectedKey)
@@ -590,31 +608,27 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
-        /// The Run 0 six-field lines still load with their key and link (no spawner name was
-        /// recorded then, so the helper's PM is unknown rather than guessed). A Run 0 entry whose
-        /// title held a separator loads its title back whole, with no key or link.
+        /// A six-field legacy line (written only by the unshipped Run 0 build) restores its pane
+        /// with directory and size but NO key or link (pipeline Run 2): its columns cannot be told
+        /// from a pre-ticket title that held separators, so they are kept as title text.
         /// </summary>
         [Fact]
-        public void A_legacy_six_field_session_still_restores()
+        public void A_legacy_six_field_line_restores_with_no_key_or_link()
         {
-            string kOwen = Key(), kTess = Key(), kOdd = Key();
-            WriteRawSessions($@"C:\p|10.0|Owen|{kOwen}||;C:\q|11.0|Tess|{kTess}|Tess|{kOwen};C:\r|9.0|A|B|{kOdd}||");
+            string kOwen = Key(), kTess = Key();
+            WriteRawSessions($@"C:\p|10.0|Owen|{kOwen}||;C:\q|11.0|Tess|{kTess}|Tess|{kOwen}");
 
             var restored = new SettingsService(_dir).GetSessionTerminals();
 
-            Assert.Equal(new[] { "Owen", "Tess", "A|B" }, restored.Select(r => r.CustomTitle));
-            Assert.Equal(new[] { @"C:\p", @"C:\q", @"C:\r" }, restored.Select(r => r.WorkingDirectory));
-            Assert.Equal(kOwen, restored[0].PaneKey);
-            Assert.Equal(kTess, restored[1].PaneKey);
-            Assert.Equal("Tess", restored[1].HelperName);
-            Assert.Equal(kOwen, restored[1].SpawnerPaneKey);
-            Assert.Null(restored[1].SpawnerName);
-            Assert.Null(restored[2].PaneKey);
-            Assert.Null(restored[2].HelperName);
-
-            var links = AttentionTeamResolver.Resolve(restored.Take(2).Select(Restored));
-            Assert.Equal(AttentionTeamRoles.Helper, links["Tess"].Role);
-            Assert.Null(links["Tess"].Pm);
+            Assert.Equal(new[] { @"C:\p", @"C:\q" }, restored.Select(r => r.WorkingDirectory));
+            Assert.Equal(new[] { 10f, 11f }, restored.Select(r => r.FontSize));
+            Assert.Equal($"Tess|{kTess}|Tess|{kOwen}", restored[1].CustomTitle);
+            Assert.All(restored, r =>
+            {
+                Assert.Null(r.PaneKey);
+                Assert.Null(r.HelperName);
+                Assert.Null(r.SpawnerPaneKey);
+            });
         }
 
         /// <summary>

@@ -29,13 +29,10 @@ namespace MultiTerminal.Services
     /// </para>
     /// <para>
     /// <b>Backward compatibility.</b> A value that is not a JSON object is read as the legacy
-    /// <c>dir|size|title[|paneKey|helper|spawnerPaneKey]</c> lines, under one rule: <i>a column is
-    /// trusted only where it cannot have been shifted.</i> Every entry keeps its directory, size and
-    /// title, but a pane key and helper link are taken only from an entry of exactly six parts whose
-    /// key columns are GUIDs, in a session where EVERY entry has at least six parts (the only writer
-    /// that produced six-part entries wrote them for every pane). A pre-ticket session (three-part
-    /// entries), or an entry with any other count, is a title that contained a separator: it is
-    /// loaded with its title rejoined and no key or link.
+    /// <c>dir|size|title</c> lines. Every entry keeps its directory, size and title (everything after
+    /// the size, rejoined), and NOTHING else: no pane key and no helper link is ever read from a legacy
+    /// line, because no field count can tell a writer's columns from a title that contained separators
+    /// (pipeline Run 2). The panes mint fresh keys; helper links start again from the next spawn.
     /// </para>
     /// <para>
     /// <b>Keys.</b> After either reader, <see cref="NormalizePaneKeys"/> makes every restored pane key a
@@ -184,34 +181,21 @@ namespace MultiTerminal.Services
                 }
             }
 
-            // Only the writer that produced six-part entries could have written a key, and it wrote
-            // one for every pane. Any shorter entry means this session predates keys, so a six-part
-            // entry in it is a title holding separators, not a link.
-            bool writerHadKeys = parsed.Count > 0 && parsed.All(p => p.Parts.Length >= 6);
-
+            // No pane key or helper link is EVER taken from a legacy line (pipeline Run 2). No field
+            // count can tell a writer's own columns from a title that held separators: a pre-ticket
+            // three-field writer turns the title "x|<guid>|Evil|<guid>" into exactly the six parts a
+            // key-writing build would have produced, and a session holding only that pane looks
+            // key-written throughout. The only builds that wrote six-part lines never shipped, so
+            // dropping their links costs nothing; every pane keeps its directory, size and title
+            // (everything after the size, rejoined, because the separators were part of the name)
+            // and mints a fresh key.
             var result = new List<TerminalSessionInfo>();
             foreach (var (parts, size) in parsed)
             {
                 var info = new TerminalSessionInfo { WorkingDirectory = parts[0], FontSize = size };
-
-                bool unambiguous = writerHadKeys
-                    && parts.Length == 6
-                    && CanonicalKey(parts[3]) != null
-                    && (parts[5].Length == 0 || CanonicalKey(parts[5]) != null);
-
-                if (unambiguous)
+                if (parts.Length >= 3)
                 {
-                    info.CustomTitle = NonEmpty(parts[2]);
-                    info.PaneKey = parts[3];
-                    info.HelperName = NonEmpty(parts[4]);
-                    if (info.HelperName != null) info.SpawnerPaneKey = NonEmpty(parts[5]);
-                }
-                else if (parts.Length >= 3)
-                {
-                    // The title is everything between the size and the writer's own trailing three
-                    // fields (when it wrote them), rejoined: the separators were part of the name.
-                    int end = writerHadKeys && parts.Length >= 6 ? parts.Length - 3 : parts.Length;
-                    info.CustomTitle = NonEmpty(string.Join("|", parts, 2, end - 2));
+                    info.CustomTitle = NonEmpty(string.Join("|", parts, 2, parts.Length - 2));
                 }
 
                 result.Add(info);
