@@ -247,7 +247,7 @@ namespace MultiTerminal.DashboardHeader
 
         /// <summary>
         /// Every action the header page and its popups can send (task 4cac608c: one vocabulary for
-        /// both pages; HeaderActionContractTests checks the pages and this switch agree).
+        /// both pages; DashboardHeaderDoorwayTests checks every action either page sends has a case).
         /// </summary>
         /// <param name="anchor">Screen rect of the button that sent it, for the two popup buttons.</param>
         /// <param name="keyboard">The button was pressed from the keyboard, so the popup takes focus on its first item.</param>
