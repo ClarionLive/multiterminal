@@ -1462,10 +1462,16 @@
             text-overflow: ellipsis;
         }
 
-        .project-selector-search {
-            width: calc(100% - 32px);
+        /* The wrap holds the field and its clear (x) button (task 28343a65). */
+        .project-selector-search-wrap {
+            position: relative;
             margin: 8px 16px;
-            padding: 6px 10px;
+        }
+
+        .project-selector-search {
+            width: 100%;
+            /* right padding reserves room for the x so text never runs under it */
+            padding: 6px 26px 6px 10px;
             border: 1px solid var(--border-color);
             border-radius: 4px;
             background: var(--bg-tertiary);
@@ -1481,6 +1487,32 @@
         .project-selector-search::placeholder {
             color: var(--text-muted);
         }
+
+        /* Clear (x) button inside the search field: hidden until the field has text
+           (same look as the Task HUD's na-clear; task 28343a65). */
+        .search-clear {
+            appearance: none;
+            position: absolute;
+            right: 5px;
+            top: 50%;
+            transform: translateY(-50%);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            width: 16px;
+            height: 16px;
+            padding: 0;
+            border: none;
+            border-radius: 3px;
+            background: transparent;
+            color: var(--text-muted);
+            font-family: inherit;
+            font-size: 15px;
+            line-height: 1;
+            cursor: pointer;
+        }
+        .search-clear.visible { display: flex; }
+        .search-clear:hover { color: var(--text-primary); background: var(--bg-hover); }
 
         .project-selector-footer {
             padding: 8px 16px;
@@ -3371,8 +3403,12 @@
             overlay.innerHTML = `
                 <div class="picker-dialog" style="width:440px;">
                     <div class="picker-header">Switch Project</div>
-                    <input class="project-selector-search" type="text" placeholder="Search projects..."
-                           value="${escapeHtml(filterText || '')}" oninput="onProjectSearchInput(this.value)">
+                    <div class="project-selector-search-wrap">
+                        <input class="project-selector-search" type="text" placeholder="Search projects..."
+                               value="${escapeHtml(filterText || '')}" oninput="onProjectSearchInput(this.value)">
+                        <button type="button" class="search-clear" tabindex="-1" title="Clear search" aria-label="Clear search"
+                                onmousedown="event.preventDefault()" onclick="clearProjectSearch()">&times;</button>
+                    </div>
                     <div class="picker-list" style="max-height:55vh; padding: 4px 0;"></div>
                     <div class="project-selector-footer">
                         <button class="picker-btn" onclick="closeProjectSelector()">Close</button>
@@ -3383,6 +3419,7 @@
             });
             document.body.appendChild(overlay);
             renderProjectSelectorList(overlay, filterText);
+            syncProjectSearchClear();
 
             // Focus search
             const searchInput = overlay.querySelector('.project-selector-search');
@@ -3459,6 +3496,29 @@
 
         function onProjectSearchInput(value) {
             showProjectSelectorPopup(value);
+            syncProjectSearchClear();
+        }
+
+        // The x shows only while the search box has text (task 28343a65).
+        function syncProjectSearchClear() {
+            const overlay = document.querySelector('.picker-overlay.project-selector');
+            if (!overlay) return;
+            const input = overlay.querySelector('.project-selector-search');
+            const clear = overlay.querySelector('.search-clear');
+            if (input && clear) clear.classList.toggle('visible', input.value.length > 0);
+        }
+
+        // The x empties the box and re-runs the same path a keystroke takes, so only the list is
+        // re-rendered and the box itself is kept. Its mousedown is cancelled in the markup, so focus
+        // never leaves the box; the focus() here covers a click that arrives some other way.
+        function clearProjectSearch() {
+            const overlay = document.querySelector('.picker-overlay.project-selector');
+            if (!overlay) return;
+            const input = overlay.querySelector('.project-selector-search');
+            if (!input) return;
+            input.value = '';
+            onProjectSearchInput('');
+            input.focus();
         }
 
         function selectProject(projectId) {

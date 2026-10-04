@@ -272,14 +272,13 @@
             padding: 4px;
             font-size: 14px;
             line-height: 1;
-            opacity: 0;
-            transition: opacity 0.2s;
+            /* Hidden until the field has text (task 28343a65). It used to fade in on hover or
+               focus even over an empty field, and stayed clickable at opacity 0. */
+            display: none;
         }
 
-        .search-container:hover .search-clear,
-        .search-input:focus + .search-clear,
         .search-clear.visible {
-            opacity: 1;
+            display: block;
         }
 
         .search-clear:hover {
@@ -1261,7 +1260,7 @@
             </div>
             <div class="search-container">
                 <input type="text" class="search-input" id="taskSearchInput" placeholder="Search tasks..." oninput="handleSearchInput()">
-                <button class="search-clear" id="searchClearBtn" onclick="clearSearch()" title="Clear search">&#x2715;</button>
+                <button type="button" class="search-clear" id="searchClearBtn" tabindex="-1" onmousedown="event.preventDefault()" onclick="clearSearch()" title="Clear search" aria-label="Clear search">&#x2715;</button>
             </div>
         </div>
         <div class="hidden-columns-indicator" id="hiddenColumnsIndicator" onclick="toggleDropdown(event)">
@@ -1491,13 +1490,10 @@
             const input = document.getElementById('taskSearchInput');
             searchQuery = input.value;
 
-            // Show/hide clear button
+            // Show the clear button while the field has any text, spaces included: a field holding
+            // only spaces still has something to clear (task 28343a65).
             const clearBtn = document.getElementById('searchClearBtn');
-            if (searchQuery.trim()) {
-                clearBtn.classList.add('visible');
-            } else {
-                clearBtn.classList.remove('visible');
-            }
+            clearBtn.classList.toggle('visible', input.value.length > 0);
 
             // Re-render with filter applied
             renderAllTasks();
@@ -1514,6 +1510,10 @@
 
             // Re-render without filter
             renderAllTasks();
+
+            // Keep focus in the field (the button's mousedown is cancelled, so it normally never
+            // left; this covers a click that arrives some other way). Task 28343a65.
+            input.focus();
         }
 
         function renderAllTasks() {

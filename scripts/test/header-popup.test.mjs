@@ -95,3 +95,114 @@ test('an emoji icon shows as-is; anything else becomes the first letter', () => 
   assert.equal(glyph({ name: 'zeta', icon: '' }).text, 'Z');
   assert.equal(glyph({ name: 'zeta', icon: 'code', iconColor: '#ff0000' }).color, '#ff0000');
 });
+
+// ---- Clear (x) button in the search (task 28343a65) ----
+//
+// Runs the REAL renderProjects/syncSearchClear/onSearchInput/clearSearch against a stub DOM of
+// getElementById elements. What the stub CAN see: the x's `visible` class, what the rows are filled
+// with, whether the search input is the same object afterwards (assigning the picker panel's
+// innerHTML replaces its children, as in a real DOM), and that focus() was asked for. What it
+// CANNOT see: CSS (that `visible` actually shows the x), the caret, real focus, or the popup window
+// staying open; those rest on the x's cancelled mousedown and need the running app.
+
+function stubElement(id) {
+  const classes = new Set();
+  return {
+    id,
+    value: '',
+    innerHTML: '',
+    focused: 0,
+    classList: {
+      contains: (c) => classes.has(c),
+      toggle: (c, force) => {
+        const on = force === undefined ? !classes.has(c) : !!force;
+        if (on) classes.add(c); else classes.delete(c);
+        return on;
+      },
+    },
+    focus() { this.focused++; },
+    querySelectorAll: () => [],
+    getBoundingClientRect: () => ({ width: 400, height: 300 }),
+  };
+}
+
+function bootPicker(list) {
+  const els = {};
+  const children = ['search', 'searchClear', 'rows'];
+  for (const id of children) els[id] = stubElement(id);
+  const panel = stubElement('projects');
+  let panelHtml = '';
+  Object.defineProperty(panel, 'innerHTML', {
+    get: () => panelHtml,
+    set: (v) => { panelHtml = v; for (const id of children) els[id] = stubElement(id); },
+  });
+  els.projects = panel;
+  const document = { getElementById: (id) => els[id] || null };
+  const sandbox = { document, out: null, posted: [] };
+  vm.runInNewContext([
+    "var view = 'projects';",
+    'var requestId = 0;',
+    'var focusIndex = -1;',
+    "var currentProjectId = '';",
+    'var projects = [];',
+    'function post(msg) { posted.push(msg); }',
+    extract(PAGE, 'var ICONS = {') + ';',
+    extract(PAGE, 'function esc('),
+    extract(PAGE, 'function svg('),
+    extract(PAGE, 'function glyph('),
+    extract(PAGE, 'function recency('),
+    extract(PAGE, 'function pickerSections('),
+    extract(PAGE, 'function renderProjects('),
+    extract(PAGE, 'function postSize('),
+    extract(PAGE, 'function buttons('),
+    extract(PAGE, 'function paintFocus('),
+    extract(PAGE, 'function syncSearchClear('),
+    extract(PAGE, 'function onSearchInput('),
+    extract(PAGE, 'function clearSearch('),
+    'out = { onSearchInput, clearSearch, setProjects(l) { projects = l; } };',
+  ].join('\n'), sandbox);
+  sandbox.out.setProjects(list);
+  sandbox.out.onSearchInput(); // the popup opens with an empty search
+  return { api: sandbox.out, els };
+}
+
+// Typing, as the browser does it: the value changes, then the input listener runs.
+function typeInto(api, els, text) {
+  els.search.value = text;
+  api.onSearchInput();
+}
+
+const PICKER = [
+  P('Alpha', { lastOpenedAt: '2026-10-01 10:00:00' }),
+  P('Beta', { lastOpenedAt: '2026-10-02 10:00:00' }),
+  P('Gamma'),
+];
+
+test('the clear (x) button is hidden while the search is empty and shows once it has text (task 28343a65)', () => {
+  const { api, els } = bootPicker(PICKER);
+  assert.equal(els.searchClear.classList.contains('visible'), false, 'the x shows on an empty search');
+  typeInto(api, els, 'a');
+  assert.equal(els.searchClear.classList.contains('visible'), true, 'the x did not appear after typing');
+  typeInto(api, els, '');
+  assert.equal(els.searchClear.classList.contains('visible'), false, 'the x stayed after the search was emptied by typing');
+});
+
+test('the clear (x) button empties the search, lists every project again and keeps the same focused input (task 28343a65)', () => {
+  const { api, els } = bootPicker(PICKER);
+  const input = els.search;
+  const clear = els.searchClear;
+  typeInto(api, els, 'alp');
+  assert.doesNotMatch(els.rows.innerHTML, />Beta</, 'precondition: the filter is applied');
+  const focusedBefore = input.focused;
+
+  api.clearSearch();
+
+  assert.equal(els.search, input, 'clearing replaced the search input');
+  assert.equal(input.value, '');
+  for (const name of ['Alpha', 'Beta', 'Gamma']) {
+    assert.match(els.rows.innerHTML, new RegExp(`>${name}<`), `"${name}" is missing after clearing`);
+  }
+  assert.doesNotMatch(els.rows.innerHTML, /MATCHES/, 'the list is still in search mode after clearing');
+  assert.ok(input.focused > focusedBefore, 'clearing did not put focus back in the search');
+  assert.equal(clear.classList.contains('visible'), false, 'the x is still showing on an empty search');
+});
