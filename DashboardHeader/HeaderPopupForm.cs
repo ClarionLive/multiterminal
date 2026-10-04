@@ -50,7 +50,7 @@ namespace MultiTerminal.DashboardHeader
         private PopupSide _side;
         private double _scale = 1.0;          // CSS px -> physical px
         private double _zoom = 1.0;
-        private bool _activateOnShow = true;
+        private readonly PopupShowIntent _intent = new();
         private Form _owner;
 
         /// <summary>The view the page is showing: "menu", "submenu" or "projects".</summary>
@@ -98,7 +98,7 @@ namespace MultiTerminal.DashboardHeader
 
         // A hover-opened flyout must not take activation from the menu, or the menu would lose the
         // keyboard. Keyboard-opened popups do activate (so arrows and Esc reach the page).
-        protected override bool ShowWithoutActivation => !_activateOnShow;
+        protected override bool ShowWithoutActivation => !_intent.UserInitiated;
 
         protected override CreateParams CreateParams
         {
@@ -234,7 +234,7 @@ namespace MultiTerminal.DashboardHeader
             _side = side;
             _scale = scale <= 0 ? 1.0 : scale;
             _zoom = zoom <= 0 ? 1.0 : zoom;
-            _activateOnShow = activate;
+            _intent.Request(activate);
             show["requestId"] = ++_requestId;
             ApplyThemeColors(isDark);
 
@@ -278,6 +278,7 @@ namespace MultiTerminal.DashboardHeader
             _pendingShow = null;
             _readyTimer.Stop();
             _requestId++;
+            _intent.Ended();
             if (Visible) Hide();
         }
 
@@ -298,7 +299,8 @@ namespace MultiTerminal.DashboardHeader
         {
             _readyTimer.Stop();
             _logError("HeaderPopup: " + reason);
-            bool report = ShouldReportFailure(_pendingShow != null, userInitiated: _activateOnShow);
+            bool report = ShouldReportFailure(_pendingShow != null, _intent.UserInitiated);
+            _intent.Ended();
             _pendingShow = null;
             if (report) ShowFailed?.Invoke(reason);
         }
@@ -356,7 +358,8 @@ namespace MultiTerminal.DashboardHeader
                         {
                             if (_owner != null) Show(_owner); else Show();
                         }
-                        if (_activateOnShow) FocusPage();
+                        if (_intent.UserInitiated) FocusPage();
+                        _intent.Shown();
                         break;
 
                     case "action":

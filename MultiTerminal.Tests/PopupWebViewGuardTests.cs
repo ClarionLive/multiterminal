@@ -63,5 +63,47 @@ namespace MultiTerminal.Tests
         {
             Assert.Equal(reported, HeaderPopupForm.ShouldReportFailure(pending, userInitiated));
         }
+
+        /// <summary>
+        /// The ordering the truth table cannot see (Run 3 adversary delta): Right arrow on Grid Layout
+        /// opens the flyout from the keyboard; before it appears the mouse twitches inside the item and
+        /// the page posts hover requests. The keyboard intent must survive them, or the flyout opens
+        /// without focus and a failure is never shown.
+        /// </summary>
+        [Fact]
+        public void A_hover_cannot_downgrade_a_keyboard_open_still_in_flight()
+        {
+            var intent = new PopupShowIntent();
+            intent.Request(userInitiated: true);   // Right arrow
+            intent.Request(userInitiated: false);  // mouseover repeats while it loads
+            intent.Request(userInitiated: false);
+            Assert.True(intent.UserInitiated);
+            Assert.True(HeaderPopupForm.ShouldReportFailure(hasPendingShow: true, intent.UserInitiated));
+        }
+
+        [Fact]
+        public void Once_the_show_appears_or_ends_a_hover_is_a_hover_again()
+        {
+            var shown = new PopupShowIntent();
+            shown.Request(userInitiated: true);
+            shown.Shown();
+            shown.Request(userInitiated: false);
+            Assert.False(shown.UserInitiated);
+
+            var cancelled = new PopupShowIntent();
+            cancelled.Request(userInitiated: true);
+            cancelled.Ended();                     // hidden before it appeared, e.g. moved to another item
+            cancelled.Request(userInitiated: false);
+            Assert.False(cancelled.UserInitiated);
+        }
+
+        [Fact]
+        public void A_click_after_a_hover_is_a_user_request()
+        {
+            var intent = new PopupShowIntent();
+            intent.Request(userInitiated: false);
+            intent.Request(userInitiated: true);
+            Assert.True(intent.UserInitiated);
+        }
     }
 }
