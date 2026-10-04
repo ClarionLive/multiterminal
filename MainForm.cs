@@ -4227,45 +4227,53 @@ namespace MultiTerminal
                 if (picker.ShowDialog(this) != DialogResult.OK)
                     return; // User cancelled
 
-                // "Unassigned" (the picker's default since ae3d0193) takes no team identity: see
-                // JustClaudeLaunchIdentity for why it registers like Open PowerShell rather than by name.
-                var identity = Services.JustClaudeLaunchIdentity.FromPickerSelection(picker.SelectedIdentity);
-                string terminalName = identity.TerminalName;
+                // "Unassigned" (the picker's default since ae3d0193) launches under its OWN unique, non-team
+                // name ("Claude", "Claude-2"…), 6a8d029f's no-lead rule with "Claude" as the base. See
+                // JustClaudeLaunchIdentity. Like a project-derived launch it needs the reserved-name census
+                // and FAILS CLOSED without it.
+                HashSet<string> reserved = null;
+                if (Services.JustClaudeLaunchIdentity.IsDefaultChoice(picker.SelectedIdentity)
+                    && !TryTakeJustClaudeReservedNames(identities, out reserved, out string censusError))
+                {
+                    doc.ShowStartScreen();
+                    ShowReservedCensusFailed(censusError);
+                    return;
+                }
+
+                var identity = Services.JustClaudeLaunchIdentity.FromPickerSelection(picker.SelectedIdentity, doc.DocId, reserved);
                 string workingDir = picker.SelectedFolder ?? defaultFolder;
                 bool isTeamLead = identity.IsTeamLead;
 
                 // Track the selected folder as a recent directory
                 _settings?.AddRecentDirectory(workingDir);
 
-                string taskWorktreePath = null;
-                if (identity.IsPlaceholder)
+                // The default registers ONLY through TryRegisterProjectIdentity (atomic, fail-closed, no
+                // placeholder or pool fallback); a named agent keeps PreRegisterTerminalWithName exactly as
+                // before. Run 5: that call used to discard the RegisterResult — see the note at the
+                // project-launch site.
+                if (!Services.JustClaudeLaunchIdentity.TryRegister(
+                        identity,
+                        (string requested, out string resolved, out string error) =>
+                            TryRegisterProjectIdentity(doc.DocId, requested, doc.LaunchNonce, out resolved, out error),
+                        named => _mcpServer?.Broker != null
+                            ? PreRegisterTerminalWithName(doc.DocId, named, isTeamLead, launchNonce: doc.LaunchNonce)
+                            : named,
+                        out string terminalName,
+                        out string refusal))
                 {
-                    // Open PowerShell's registration, verbatim. NOT PreRegisterTerminalWithName: its refusal
-                    // fallback hands out the first free pool name, i.e. a team member's identity.
-                    // Unlike Open PowerShell, a refusal is logged rather than dropped silently.
-                    var placeholder = _mcpServer?.Broker?.RegisterTerminal(terminalName, doc.DocId, nonce: doc.LaunchNonce);
-                    if (placeholder != null && !placeholder.Success)
-                        _debugLogService?.Warning("StartScreen", $"Just Claude: placeholder registration refused for docId {doc.DocId}: {placeholder.Error ?? "(no reason given)"}");
+                    doc.ShowStartScreen();
+                    ShowProjectIdentityRefused(identity.TerminalName, refusal);
+                    return;
                 }
-                else
-                {
-                    if (_mcpServer?.Broker != null)
-                    {
-                        // Run 5: was discarding the RegisterResult — see the note at the project-launch site.
-                        // A gate-(4) refusal here launched the session under a name the broker had rejected.
-                        terminalName = PreRegisterTerminalWithName(
-                            doc.DocId,
-                            terminalName,
-                            isTeamLead,
-                            launchNonce: doc.LaunchNonce);
-                    }
 
-                    // AC7 launch-root strategy (task c6ed236c): spawn at repo root, in-shell
-                    // cd narrows to the worktree. Falls through to workingDir on no worktree.
-                    // The picker's folder is an explicit user choice, so the override only
-                    // applies when the agent's active task lives in that repo (f1f74a8f).
+                // AC7 launch-root strategy (task c6ed236c): spawn at repo root, in-shell
+                // cd narrows to the worktree. Falls through to workingDir on no worktree.
+                // The picker's folder is an explicit user choice, so the override only
+                // applies when the agent's active task lives in that repo (f1f74a8f).
+                // Not for the default launch: it chose no team identity, so there is no task to follow.
+                string taskWorktreePath = null;
+                if (!identity.RegisterUnique)
                     workingDir = ResolveSpawnDir(terminalName, workingDir, out taskWorktreePath, explicitTargetDir: workingDir);
-                }
 
                 doc.StartTerminal(workingDir, terminalName, launch.AutoRunCommand, isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath);
 
@@ -4710,6 +4718,38 @@ namespace MultiTerminal
             }
 
             request = Services.ProjectLaunchIdentity.Resolve(project?.TeamLead, kind, codexDefault, project?.Name, project?.Id, reserved);
+            error = null;
+            return true;
+        }
+
+        /// <summary>
+        /// The reserved-name census for a default ("Unassigned") Just Claude launch (ae3d0193): the same
+        /// ALL-OR-NOTHING census a no-lead project launch takes (<see cref="TryResolveProjectLaunchIdentity"/>),
+        /// with no project of its own, so every project's lead, roster agents and sanitized name are
+        /// reserved, plus Oracle, the Codex default agent, the WHOLE name pool and every name the picker
+        /// offered. False with the reason when it cannot be taken; the caller fails the launch closed.
+        /// </summary>
+        private bool TryTakeJustClaudeReservedNames(IEnumerable<string> offeredIdentities, out HashSet<string> reserved, out string error)
+        {
+            var db = _sharedProjectDatabase;
+            var extras = new List<string> { Services.OracleService.OracleName, _settings?.GetCodexDefaultAgentName() };
+            extras.AddRange(_terminalNamePool);
+            if (offeredIdentities != null) extras.AddRange(offeredIdentities);
+
+            var census = Services.ProjectLaunchIdentity.TryTakeCensus(
+                null,
+                db == null ? null : () => db.GetAllRichProjects().Select(p => (p.Id, p.Name, p.TeamLead)),
+                db == null ? null : id => db.GetProjectAgents(id).Select(a => a.AgentName),
+                extras);
+            if (!census.Succeeded)
+            {
+                _debugLogService?.Warning("StartScreen", $"Reserved-name census failed; Just Claude launch refused: {census.Error}");
+                reserved = null;
+                error = census.Error;
+                return false;
+            }
+
+            reserved = census.Names;
             error = null;
             return true;
         }

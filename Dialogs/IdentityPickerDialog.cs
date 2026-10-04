@@ -180,6 +180,12 @@ namespace MultiTerminal.Dialogs
         /// <summary>Test seam: the identity list's selected index (-1 for none).</summary>
         internal int SelectedIdentityIndex => _identityList.SelectedIndex;
 
+        /// <summary>Test seam: the identity list's selected entry as TryAccept reads it (null for none).</summary>
+        internal string SelectedIdentityEntry => _identityList.SelectedItem?.ToString().Trim();
+
+        /// <summary>Test seam: the identity list's background, to prove the theme reached it inside the layout.</summary>
+        internal System.Drawing.Color IdentityListBackColor => _identityList.BackColor;
+
         private void BuildSelectionLayout(string defaultFolder, List<string> recentFolders)
         {
             // Resizable (ticket ae3d0193): a docked TableLayoutPanel whose two list rows are percent-sized,
