@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MultiTerminal header popup</title>
+<style>
+  /* Same palette as dashboard.html, so the popups read as part of the header (task 4cac608c). */
+  :root {
+    --panel: #1e1e2e;
+    --hover: #313244;
+    --selected: #2a2a40;
+    --border: #45475a;
+    --divider: #313244;
+    --text: #cdd6f4;
+    --text-strong: #ffffff;
+    --text-dim: #a6adc8;
+    --icon: #9399b2;
+    --accent: #89b4fa;
+    --danger: #f38ba8;
+    --input: #181825;
+    --cell: #6c7086;
+  }
+  body.light {
+    --panel: #ffffff;
+    --hover: #e6e9ef;
+    --selected: #dce0e8;
+    --border: #bcc0cc;
+    --divider: #dce0e8;
+    --text: #4c4f69;
+    --text-strong: #1e1e2e;
+    --text-dim: #5c5f77;
+    --icon: #6c6f85;
+    --accent: #1e66f5;
+    --danger: #d20f39;
+    --input: #eff1f5;
+    --cell: #8c8fa1;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: var(--panel); }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    color: var(--text);
+    overflow: hidden;
+    user-select: none;
+    display: inline-block; /* shrink-wraps the panel so its size can be measured */
+  }
+
+  .panel { padding: 6px; display: flex; flex-direction: column; }
+  .panel.menu { width: 250px; }
+  .panel.submenu { width: 220px; }
+  .panel.projects { width: 400px; padding: 10px; gap: 2px; }
+  [hidden] { display: none !important; }
+
+  .item {
+    height: 36px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 10px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: 14px;
+    text-align: left;
+    cursor: pointer;
+    width: 100%;
+    outline: none;
+  }
+  .submenu .item { height: 34px; font-size: 13.5px; }
+  .item.focus { background: var(--hover); }
+  .item.danger { color: var(--danger); }
+  .item svg { flex-shrink: 0; color: var(--icon); }
+  .item.danger svg { color: var(--danger); }
+  .item .label { flex-grow: 1; }
+  .item .hint { font-size: 12px; color: var(--text-dim); }
+
+  .sep { height: 1px; background: var(--divider); margin: 5px 6px; }
+
+  /* Mini picture of a grid layout */
+  .mini {
+    width: 22px; height: 16px; flex-shrink: 0;
+    border: 1.5px solid var(--icon); border-radius: 3px;
+    display: grid; gap: 1.5px; padding: 1.5px;
+  }
+  .mini span { background: var(--cell); border-radius: 1px; }
+
+  /* Project picker */
+  .search {
+    display: flex; align-items: center; gap: 8px;
+    height: 36px; padding: 0 10px; margin-bottom: 4px;
+    border-radius: 8px; border: 1px solid var(--accent); background: var(--input);
+  }
+  .search svg { color: var(--icon); flex-shrink: 0; }
+  .search input {
+    flex-grow: 1; border: none; background: transparent; outline: none;
+    color: var(--text); font: inherit; font-size: 13.5px;
+  }
+  .search input::placeholder { color: var(--text-dim); }
+  .section { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; color: var(--text-dim); padding: 6px 8px 2px; }
+  .rows { max-height: 360px; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
+  .row { height: auto; padding: 7px 8px; gap: 10px; }
+  .row.current { background: var(--selected); }
+  .row.current.focus { background: var(--hover); }
+  .row .glyph { width: 22px; flex-shrink: 0; text-align: center; font-size: 14px; font-weight: 700; }
+  .row .text { display: flex; flex-direction: column; flex-grow: 1; min-width: 0; }
+  .row .name { font-size: 13.5px; font-weight: 600; color: var(--text-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .path { font-size: 11.5px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .check { color: var(--accent); flex-shrink: 0; }
+  .empty { padding: 10px 8px; font-size: 13px; color: var(--text-dim); }
+  .browse { margin-top: 4px; border-top: 1px solid var(--divider); padding-top: 4px; }
+  .browse .item { color: var(--accent); font-size: 13px; height: 32px; }
+</style>
+</head>
+<body>
+
+<div class="panel menu" id="menu" hidden></div>
+<div class="panel submenu" id="submenu" hidden></div>
+<div class="panel projects" id="projects" hidden>
+  <label class="search">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4a7 7 0 1 0 0 14a7 7 0 1 0 0-14M20 20l-4-4"></path></svg>
+    <input id="search" type="text" placeholder="Search projects…" aria-label="Search projects" autocomplete="off" spellcheck="false">
+  </label>
+  <div class="rows" id="rows" role="listbox" aria-label="Projects"></div>
+  <div class="browse"><button type="button" class="item" data-index="-1" id="browseAll">Browse all projects →</button></div>
+</div>
+
+<script>
+"use strict";
+
+/* One page, three views. The C# host (HeaderPopupForm) sends {type:'show', view, ...}; the page
+   renders, measures itself and answers {type:'size'} so the window can be sized to fit before it
+   is shown. Every choice goes back as {type:'action', action, ...}: the SAME vocabulary the header
+   page sends, routed through DashboardHeaderControl.HandleAction (task 4cac608c). */
+
+var ICONS = {
+  theme:    'M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z',
+  docs:     'M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15H6.5A1.5 1.5 0 0 0 5 19.5zM5 19.5A1.5 1.5 0 0 0 6.5 21H19',
+  settings: 'M4 7h10M18 7h2M4 17h4M12 17h8M14 5v4M8 15v4',
+  grid:     'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z',
+  about:    'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 11v5M12 8h.01',
+  exit:     'M14 4h4a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-4M10 16l-4-4 4-4M6 12h10',
+  check:    'M5 12l5 5 9-10'
+};
+
+/* The app menu. `sub` opens the Grid Layout flyout instead of acting. */
+var MENU = [
+  { action: 'toggle_theme', label: 'Toggle Theme', icon: 'theme', hint: 'theme' },
+  { action: 'docs',         label: 'Documentation', icon: 'docs' },
+  { action: 'settings',     label: 'Settings', icon: 'settings' },
+  { sep: true },
+  { sub: 'grid',            label: 'Grid Layout', icon: 'grid', hint: '›' },
+  { sep: true },
+  { action: 'about',        label: 'About', icon: 'about' },
+  { sep: true },
+  { action: 'exit',         label: 'Exit', icon: 'exit', danger: true }
+];
+
+/* cols/rows draw the mini picture: "2x2" is two columns by two rows. */
+var GRID = [
+  { action: 'grid_2x2',   label: '2×2 Grid',      cols: 2, rows: 2 },
+  { action: 'grid_2x3',   label: '2×3 Grid',      cols: 3, rows: 2 },
+  { action: 'grid_3x2',   label: '3×2 Grid',      cols: 2, rows: 3 },
+  { sep: true },
+  { action: 'grid_h2',    label: '2 Horizontal',  cols: 1, rows: 2 },
+  { action: 'grid_v2',    label: '2 Vertical',    cols: 2, rows: 1 },
+  { action: 'grid_h3',    label: '3 Horizontal',  cols: 1, rows: 3 },
+  { action: 'grid_v3',    label: '3 Vertical',    cols: 3, rows: 1 },
+  { sep: true },
+  { action: 'grid_reset', label: 'Reset to Tabs', cols: 1, rows: 1 }
+];
+
+var view = null;          // 'menu' | 'submenu' | 'projects'
+var requestId = 0;        // echoed in every size reply; the host ignores replies for an old show
+var focusIndex = -1;      // index into the current view's focusable buttons
+var theme = 'dark';
+var projects = [];
+var currentProjectId = '';
+
+function post(msg) {
+  if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(msg);
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+function svg(name, size) {
+  return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="' + ICONS[name] + '"></path></svg>';
+}
+
+function mini(cols, rows) {
+  var cells = '';
+  for (var i = 0; i < cols * rows; i++) cells += '<span></span>';
+  return '<span class="mini" style="grid-template-columns:repeat(' + cols + ',1fr);grid-template-rows:repeat(' + rows + ',1fr)">' + cells + '</span>';
+}
+
+/* ---------- views ---------- */
+
+function renderMenu() {
+  var html = '', n = 0;
+  MENU.forEach(function (m) {
+    if (m.sep) { html += '<div class="sep"></div>'; return; }
+    var hint = m.hint === 'theme' ? (theme === 'light' ? 'Light' : 'Dark') : (m.hint || '');
+    html += '<button type="button" class="item' + (m.danger ? ' danger' : '') + '" data-index="' + (n++) + '"' +
+      (m.sub ? ' data-sub="' + m.sub + '" aria-haspopup="true"' : ' data-action="' + m.action + '"') + '>' +
+      svg(m.icon, 16) + '<span class="label">' + esc(m.label) + '</span><span class="hint">' + esc(hint) + '</span></button>';
+  });
+  document.getElementById('menu').innerHTML = html;
+}
+
+function renderSubmenu() {
+  var html = '', n = 0;
+  GRID.forEach(function (g) {
+    if (g.sep) { html += '<div class="sep"></div>'; return; }
+    html += '<button type="button" class="item" data-index="' + (n++) + '" data-action="' + g.action + '">' +
+      mini(g.cols, g.rows) + '<span class="label">' + esc(g.label) + '</span></button>';
+  });
+  document.getElementById('submenu').innerHTML = html;
+}
+
+/* Emoji icons show as-is; anything else becomes the first letter of the name in the project's
+   colour, like the start screen's cards. */
+function glyph(p) {
+  var icon = (p.icon || '').trim();
+  if (icon && icon.codePointAt(0) > 127) return { text: icon, color: '' };
+  return { text: (p.name || '?').charAt(0).toUpperCase(), color: p.iconColor || 'var(--accent)' };
+}
+
+function recency(p) { return p.lastOpenedAt ? new Date(p.lastOpenedAt.replace(' ', 'T')).getTime() || 0 : 0; }
+
+/* Pinned first, then the most recently opened. Archived projects only appear when searched for.
+   With a query, every match is listed (name or path), ranked the same way. */
+function pickerSections(list, query, maxRecent) {
+  var q = (query || '').trim().toLowerCase();
+  var live = list.filter(function (p) { return q ? true : p.status !== 'archived'; });
+  if (q) {
+    live = live.filter(function (p) {
+      return (p.name || '').toLowerCase().indexOf(q) >= 0 || (p.path || '').toLowerCase().indexOf(q) >= 0;
+    });
+  }
+  var byRecent = function (a, b) { return recency(b) - recency(a); };
+  var pinned = live.filter(function (p) { return p.isPinned; }).sort(byRecent);
+  var rest = live.filter(function (p) { return !p.isPinned; }).sort(byRecent);
+  if (q) return [{ title: 'MATCHES', rows: pinned.concat(rest) }];
+  var sections = [];
+  if (pinned.length) sections.push({ title: 'PINNED', rows: pinned });
+  if (rest.length) sections.push({ title: 'RECENT', rows: rest.slice(0, maxRecent) });
+  return sections;
+}
+
+function renderProjects() {
+  var query = document.getElementById('search').value;
+  var sections = pickerSections(projects, query, 8);
+  var html = '', n = 0;
+  sections.forEach(function (s) {
+    html += '<div class="section">' + s.title + '</div>';
+    s.rows.forEach(function (p) {
+      var g = glyph(p);
+      var current = p.id === currentProjectId;
+      html += '<button type="button" class="item row' + (current ? ' current' : '') + '" role="option" aria-selected="' + current + '"' +
+        ' data-index="' + (n++) + '" data-action="launch_project" data-project-id="' + esc(p.id) + '">' +
+        '<span class="glyph"' + (g.color ? ' style="color:' + esc(g.color) + '"' : '') + '>' + esc(g.text) + '</span>' +
+        '<span class="text"><span class="name">' + esc(p.name) + '</span><span class="path">' + esc(p.path) + '</span></span>' +
+        (current ? '<span class="check">' + svg('check', 16) + '</span>' : '') + '</button>';
+    });
+  });
+  if (!n) html = '<div class="empty">' + (query ? 'No matching projects' : 'No projects yet') + '</div>';
+  document.getElementById('rows').innerHTML = html;
+  focusIndex = n ? 0 : -1;
+  paintFocus();
+  postSize(); // the list grows and shrinks as the search narrows it
+}
+
+function postSize() {
+  var r = document.getElementById(view).getBoundingClientRect();
+  post({ type: 'size', width: Math.ceil(r.width), height: Math.ceil(r.height), view: view, requestId: requestId });
+}
+
+/* ---------- focus + keyboard ---------- */
+
+function buttons() {
+  var root = document.getElementById(view);
+  return root ? Array.prototype.slice.call(root.querySelectorAll('.rows .item, :scope > .item')) : [];
+}
+
+function paintFocus() {
+  buttons().forEach(function (b, i) { b.classList.toggle('focus', i === focusIndex); });
+  var b = buttons()[focusIndex];
+  if (b && b.scrollIntoView) b.scrollIntoView({ block: 'nearest' });
+}
+
+function move(delta) {
+  var list = buttons();
+  if (!list.length) return;
+  focusIndex = focusIndex < 0 ? (delta > 0 ? 0 : list.length - 1) : (focusIndex + delta + list.length) % list.length;
+  paintFocus();
+  if (view === 'menu') hoverSub(list[focusIndex], false);
+}
+
+/* Opening the flyout is the host's job: it owns the second window. The item's position is sent
+   so the flyout lines up beside it. */
+function hoverSub(btn, focusIt) {
+  if (view !== 'menu') return;
+  if (btn && btn.getAttribute('data-sub')) {
+    var r = btn.getBoundingClientRect();
+    post({ type: 'submenu', open: true, sub: btn.getAttribute('data-sub'), top: r.top, focus: !!focusIt });
+  } else {
+    post({ type: 'submenu', open: false });
+  }
+}
+
+function activate(btn) {
+  if (!btn) return;
+  if (btn.getAttribute('data-sub')) { hoverSub(btn, true); return; }
+  if (btn.id === 'browseAll') { post({ type: 'action', action: 'browse_all' }); return; }
+  var action = btn.getAttribute('data-action');
+  if (!action) return;
+  var msg = { type: 'action', action: action };
+  var pid = btn.getAttribute('data-project-id');
+  if (pid) msg.projectId = pid;
+  post(msg);
+}
+
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape') { e.preventDefault(); post({ type: 'dismiss', back: view === 'submenu' }); return; }
+  if (e.key === 'ArrowDown') { e.preventDefault(); move(1); return; }
+  if (e.key === 'ArrowUp') { e.preventDefault(); move(-1); return; }
+  if (e.key === 'Enter') { e.preventDefault(); activate(buttons()[focusIndex]); return; }
+  if (e.key === 'ArrowRight' && view === 'menu') {
+    var b = buttons()[focusIndex];
+    if (b && b.getAttribute('data-sub')) { e.preventDefault(); hoverSub(b, true); }
+    return;
+  }
+  if (e.key === 'ArrowLeft' && view === 'submenu') { e.preventDefault(); post({ type: 'dismiss', back: true }); }
+});
+
+document.addEventListener('mouseover', function (e) {
+  var btn = e.target.closest && e.target.closest('.item');
+  if (!btn || !btn.hasAttribute('data-index')) return;
+  var list = buttons();
+  var i = list.indexOf(btn);
+  if (i < 0) return;
+  if (i !== focusIndex) { focusIndex = i; paintFocus(); }
+  if (view === 'menu') hoverSub(btn, false);
+});
+
+document.addEventListener('click', function (e) {
+  var btn = e.target.closest && e.target.closest('.item');
+  if (btn) activate(btn);
+});
+
+document.getElementById('search').addEventListener('input', renderProjects);
+
+/* ---------- host messages ---------- */
+
+function show(msg) {
+  view = msg.view;
+  requestId = msg.requestId || 0;
+  if (msg.theme) { theme = msg.theme; document.body.classList.toggle('light', theme === 'light'); }
+  ['menu', 'submenu', 'projects'].forEach(function (id) { document.getElementById(id).hidden = id !== view; });
+  if (view === 'menu') { renderMenu(); focusIndex = msg.keyboard ? 0 : -1; paintFocus(); }
+  if (view === 'submenu') { renderSubmenu(); focusIndex = msg.keyboard ? 0 : -1; paintFocus(); }
+  if (view === 'projects') {
+    projects = msg.projects || [];
+    currentProjectId = msg.currentProjectId || '';
+    var input = document.getElementById('search');
+    input.value = '';
+    renderProjects(); // posts the size itself
+    input.focus();
+    return;
+  }
+  postSize();
+}
+
+if (window.chrome && window.chrome.webview) {
+  window.chrome.webview.addEventListener('message', function (event) {
+    var msg = event.data;
+    if (msg && msg.type === 'show') show(msg);
+  });
+  post({ type: 'ready' });
+}
+</script>
+</body>
+</html>

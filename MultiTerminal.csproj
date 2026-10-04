@@ -141,6 +141,9 @@
     <Content Include="DashboardHeader\dashboard.html">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="DashboardHeader\header-popup.html">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <Content Include="Controls\HudDashboardPanel\hud-dashboard.html">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
