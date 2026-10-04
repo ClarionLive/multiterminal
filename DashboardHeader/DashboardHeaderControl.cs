@@ -444,6 +444,9 @@ namespace MultiTerminal.DashboardHeader
                 if (focus) _subPopup.FocusPage();
                 return;
             }
+            // A broken flyout already reported its failure once; retrying on every hover would
+            // repeat that error as the mouse moves. The next click on M rebuilds both popups.
+            if (!IsUsable(_subPopup)) return;
             // Line the flyout's first item up with the Grid Layout item: the panel has 6px padding.
             int top = _menuPopup.ScreenYForCssTop(cssTop) - (int)Math.Round(6 * HeaderScale);
             var anchor = new Rectangle(_menuPopup.Left, top, _menuPopup.Width, 1);

@@ -238,19 +238,38 @@ namespace MultiTerminal.DashboardHeader
             show["requestId"] = ++_requestId;
             ApplyThemeColors(isDark);
 
+            // Pending from here on, so a failure below is reported to the user (Fail only reports a
+            // show that is pending). The ready/size path clears it as usual.
+            _pendingShow = show;
             var next = _load.NextForShow();
             if (next == PopupLoadAction.Post)
             {
-                if (Math.Abs(_webView.ZoomFactor - _zoom) > 0.001) _webView.ZoomFactor = _zoom;
-                _webView.CoreWebView2.PostWebMessageAsJson(show.ToJsonString());
+                _pendingShow = null;
+                Guarded(() => PostShow(show), "show the menu", show);
                 return;
             }
 
-            _pendingShow = show;
             _readyTimer.Stop();
             _readyTimer.Start();
             if (next == PopupLoadAction.Init) _ = InitAsync();
-            else if (next == PopupLoadAction.Reload) _webView.CoreWebView2.Navigate(_pageUri);
+            else if (next == PopupLoadAction.Reload) Guarded(() => _webView.CoreWebView2.Navigate(_pageUri), "reload the menu page", show);
+        }
+
+        private void PostShow(JsonObject show)
+        {
+            if (Math.Abs(_webView.ZoomFactor - _zoom) > 0.001) _webView.ZoomFactor = _zoom;
+            _webView.CoreWebView2.PostWebMessageAsJson(show.ToJsonString());
+        }
+
+        // Every WebView2 call on the show path goes through here (see PopupWebViewGuard).
+        private void Guarded(Action op, string what, JsonObject show)
+        {
+            PopupWebViewGuard.Run(op, what, _load, () => IsBroken = true, reason =>
+            {
+                _pendingShow = show; // so Fail reports it rather than only logging
+                Fail(reason);
+                if (Visible) Hide();
+            });
         }
 
         /// <summary>Hides the popup and retires any show still in flight; the page stays loaded.</summary>
@@ -315,8 +334,7 @@ namespace MultiTerminal.DashboardHeader
                         {
                             var show = _pendingShow;
                             _pendingShow = null;
-                            _webView.ZoomFactor = _zoom;
-                            _webView.CoreWebView2.PostWebMessageAsJson(show.ToJsonString());
+                            Guarded(() => PostShow(show), "show the menu", show);
                         }
                         break;
 
