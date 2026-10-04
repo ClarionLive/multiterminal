@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Text.RegularExpressions;
 using MultiTerminal.Docking;
 using MultiTerminal.Models;
 
@@ -23,7 +25,8 @@ namespace MultiTerminal.Services
     /// (the broker's atomic <c>RegisterTerminalUnique</c>, failing closed). So it is "Claude", then
     /// "Claude-2", "Claude-3"… among connected terminals; if "Claude" is itself reserved (a team lead or
     /// roster agent of any project, a project named Claude, a pool name, Oracle, the Codex default or a
-    /// name the picker offered) it becomes "Claude-&lt;first 4 of the docId&gt;". It is never team lead,
+    /// name the picker offered, which never includes a generated name: see <see cref="IsGeneratedName"/>)
+    /// it becomes "Claude-&lt;first 4 of the docId&gt;". It is never team lead,
     /// never the placeholder, and never goes through <c>PreRegisterTerminalWithName</c>, whose refusal
     /// fallback hands out the first free POOL name (Grace, Charlie…).</para>
     ///
@@ -41,6 +44,65 @@ namespace MultiTerminal.Services
     {
         /// <summary>The base of the unique name a default ("Unassigned") launch takes.</summary>
         internal const string DefaultBaseName = "Claude";
+
+        /// <summary>
+        /// Exactly the names a default launch can end up with, and no others. <see cref="ProjectLaunchIdentity.Resolve"/>
+        /// gives the literal base or base + "-" + the first 4 of the docId (always lower-case hex: the docId is
+        /// <c>Guid.ToString("N")</c>); <c>MessageBroker.FindUniqueCandidate</c> then adds at most ONE suffix,
+        /// "-2".."-999" or a last-resort 4-hex guid. Case-sensitive and untrimmed on purpose: a name a person
+        /// chose ("claude", "Claude-1", "Claude-Reviewer") is not generated and stays pickable.
+        /// </summary>
+        private static readonly Regex GeneratedNamePattern = new(
+            "^" + DefaultBaseName
+                + "(?:-(?:[2-9]|[1-9][0-9]{1,2}|[0-9a-f]{4})"                // Claude-N | Claude-hhhh (unqualified base, broker suffix)
+                + "|-[0-9a-f]{4}-(?:[2-9]|[1-9][0-9]{1,2}|[0-9a-f]{4}))?$",  // Claude-hhhh-N | Claude-hhhh-hhhh (qualified base, broker suffix)
+            RegexOptions.CultureInvariant);
+
+        /// <summary>
+        /// True for a name a default ("Unassigned") launch generates. Such a name is a throwaway, not a team
+        /// identity, so it must never be offered as a pickable agent: once a "Claude" session was recorded in
+        /// a folder's history the picker listed it, the census then reserved every listed name, and every
+        /// later default launch became "Claude-&lt;docId4&gt;" (each of which was listed next time, and picking
+        /// one launched it as team lead). Live test 2026-10-04.
+        /// </summary>
+        internal static bool IsGeneratedName(string name) =>
+            !string.IsNullOrEmpty(name) && GeneratedNamePattern.IsMatch(name);
+
+        /// <summary>
+        /// The identities a Launch Claude / project picker offers: the names discovered in the folder's
+        /// session history, minus <see cref="IsGeneratedName"/> names, then the pool names not already
+        /// listed. <c>MainForm.GetAvailableIdentities</c> builds its list here, so the picker and the
+        /// reserved-name census (which reserves every offered name) both leave the generated names out.
+        /// </summary>
+        /// <param name="isRegisteredIdentity">True for a name a project declares (team lead or roster agent).
+        /// Such a name is a real identity even when it has a generated shape (a team lead called "Claude"),
+        /// so it is kept. Null means no project names are known.</param>
+        internal static List<string> BuildPickerIdentities(
+            IEnumerable<string> discovered,
+            IEnumerable<string> pool,
+            Func<string, bool> isRegisteredIdentity = null)
+        {
+            var identities = new List<string>();
+            if (discovered != null)
+            {
+                foreach (var name in discovered)
+                {
+                    if (!IsGeneratedName(name) || (isRegisteredIdentity?.Invoke(name) ?? false))
+                        identities.Add(name);
+                }
+            }
+
+            var existing = identities.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (pool != null)
+            {
+                foreach (var name in pool)
+                {
+                    if (existing.Add(name)) identities.Add(name);
+                }
+            }
+
+            return identities;
+        }
 
         /// <summary>The unique, fail-closed registration route (<c>MainForm.TryRegisterProjectIdentity</c>).</summary>
         internal delegate bool TryRegisterUniqueName(string requested, out string resolved, out string error);

@@ -4562,7 +4562,7 @@ namespace MultiTerminal
         /// </summary>
         public List<string> GetAvailableIdentities(string projectPath = null)
         {
-            var identities = new List<string>();
+            var discoveredNames = new List<string>();
             projectPath = projectPath ?? _settings?.GetLastDirectory() ?? Directory.GetCurrentDirectory();
 
             try
@@ -4579,22 +4579,55 @@ namespace MultiTerminal
                     sid => (agentMap != null && agentMap.TryGetValue(sid, out var agent)) ? agent : null);
                 var discovered = discovery.DiscoverIdentitiesInProject(projectPath);
                 // Dictionary keys are identity names
-                identities.AddRange(discovered.Keys);
+                discoveredNames.AddRange(discovered.Keys);
             }
             catch (Exception ex)
             {
                 _debugLogService?.Error("MainForm", $"Identity discovery failed: {ex.Message}");
             }
 
-            // Also include the name pool for new identities
-            var existing = identities.ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (var name in _terminalNamePool.Take(8)) // First 8 common names
-            {
-                if (!existing.Contains(name))
-                    identities.Add(name);
-            }
+            // Drops the names a default Just Claude launch generates ("Claude", "Claude-02a8"…), which are
+            // throwaways rather than team identities, unless a project declares that name as its team lead or a
+            // roster agent; then adds the first 8 pool names for new identities.
+            return Services.JustClaudeLaunchIdentity.BuildPickerIdentities(
+                discoveredNames, _terminalNamePool.Take(8), IsProjectDeclaredIdentity());
+        }
 
-            return identities;
+        /// <summary>
+        /// A predicate answering "does any project declare this name as its team lead or a roster agent?",
+        /// reading the project database once, on first use (most picker lists contain no generated-shape
+        /// name, so most never read it). If the read fails, generated-shape names stay out of the list.
+        /// </summary>
+        private Func<string, bool> IsProjectDeclaredIdentity()
+        {
+            var db = _sharedProjectDatabase;
+            if (db == null) return null;
+
+            HashSet<string> declared = null;
+            return name =>
+            {
+                if (declared == null)
+                {
+                    declared = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    try
+                    {
+                        foreach (var project in db.GetAllRichProjects())
+                        {
+                            if (!string.IsNullOrWhiteSpace(project.TeamLead)) declared.Add(project.TeamLead);
+                            foreach (var agent in db.GetProjectAgents(project.Id))
+                            {
+                                if (!string.IsNullOrWhiteSpace(agent.AgentName)) declared.Add(agent.AgentName);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _debugLogService?.Error("MainForm", $"Project identity lookup failed: {ex.Message}");
+                    }
+                }
+
+                return declared.Contains(name);
+            };
         }
 
         /// <summary>

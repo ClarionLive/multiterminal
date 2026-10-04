@@ -155,6 +155,100 @@ namespace MultiTerminal.Tests
             Assert.True(identity.RegisterUnique);
         }
 
+        // The generator's whole output: the base or base-<docId4> from Resolve (docId is lower-case hex), plus at
+        // most one broker suffix, -2..-999 or a last-resort 4-hex guid.
+        [Theory]
+        [InlineData("Claude")]
+        [InlineData("Claude-2")]
+        [InlineData("Claude-17")]
+        [InlineData("Claude-999")]
+        [InlineData("Claude-1f3c")]
+        [InlineData("Claude-02a8")]
+        [InlineData("Claude-02a8-2")]
+        [InlineData("Claude-02a8-999")]
+        [InlineData("Claude-02a8-1f3c")]
+        [InlineData("Claude-1000")] // all-digit hex: a docId or guid can start "1000"
+        [InlineData("Claude-0002")]
+        public void A_name_the_default_launch_generates_counts_as_generated(string name)
+        {
+            Assert.True(JustClaudeLaunchIdentity.IsGeneratedName(name));
+        }
+
+        // Names a person could choose that the generator never produces, including near misses on each part
+        // of the pattern: case, the 2..999 range, leading zeros, two numeric suffixes, three segments, padding.
+        [Theory]
+        [InlineData("Grace")]
+        [InlineData("claude")]
+        [InlineData("CLAUDE")]
+        [InlineData("Claude-DBB9")]
+        [InlineData("Claude-0")]
+        [InlineData("Claude-1")]
+        [InlineData("Claude-02")]
+        [InlineData("Claude-10000")]
+        [InlineData("Claude-2-3")]
+        [InlineData("Claude-02a8-1")]
+        [InlineData("Claude-02a8-2-3")]
+        [InlineData("Claude-02a")]
+        [InlineData("Claude-02a8x")]
+        [InlineData("Claude-Reviewer")]
+        [InlineData("Claudette")]
+        [InlineData("MyClaude")]
+        [InlineData(" Claude")]
+        [InlineData("Claude ")]
+        [InlineData("")]
+        [InlineData(null)]
+        public void A_name_the_default_launch_never_generates_is_not_generated(string name)
+        {
+            Assert.False(JustClaudeLaunchIdentity.IsGeneratedName(name));
+        }
+
+        [Fact]
+        public void Picker_identities_drop_generated_names_and_keep_real_ones_then_the_pool()
+        {
+            var discovered = new[] { "Claude", "Bob", "Claude-02a8", "Claude-dbb9", "Charlie" };
+            var pool = new[] { "Alice", "Bob", "Charlie", "Diana" };
+
+            var identities = JustClaudeLaunchIdentity.BuildPickerIdentities(discovered, pool);
+
+            Assert.Equal(new[] { "Bob", "Charlie", "Alice", "Diana" }, identities);
+        }
+
+        [Fact]
+        public void A_generated_shape_name_a_project_declares_stays_pickable()
+        {
+            // A team lead or roster agent genuinely called "Claude" is a real identity, not a throwaway.
+            var declared = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Claude" };
+
+            var identities = JustClaudeLaunchIdentity.BuildPickerIdentities(
+                new[] { "Claude", "Claude-02a8" }, new[] { "Alice" }, declared.Contains);
+
+            Assert.Equal(new[] { "Claude", "Alice" }, identities);
+        }
+
+        [Fact]
+        public void A_past_Claude_session_in_the_folder_does_not_qualify_the_next_default_launch()
+        {
+            // The live failure (2026-10-04): a "Claude" session in the folder's history was offered by the
+            // picker, the census reserved every offered name, and both default launches came out as
+            // "Claude-<docId4>". The same picker-list -> census -> name sequence as OnStartScreenJustClaude,
+            // with the census's other sources (pool, Oracle, Codex default) left out; none of them is "Claude".
+            // MainForm.GetAvailableIdentities calling BuildPickerIdentities is NOT covered here (private WinForms
+            // wiring); the Owner's live test covers it.
+            var offered = JustClaudeLaunchIdentity.BuildPickerIdentities(
+                new[] { "Claude", "Claude-02a8", "Bob" }, new[] { "Alice", "Grace" });
+            var census = ProjectLaunchIdentity.TryTakeCensus(
+                null,
+                () => Array.Empty<(string Id, string Name, string TeamLead)>(),
+                _ => Array.Empty<string>(),
+                offered);
+            Assert.True(census.Succeeded, census.Error);
+
+            var identity = JustClaudeLaunchIdentity.FromPickerSelection("Unassigned", "d0c1d2e3f4", census.Names);
+
+            Assert.Equal("Claude", identity.TerminalName);
+            Assert.Contains("Bob", census.Names, StringComparer.OrdinalIgnoreCase);
+        }
+
         [Fact]
         public void The_default_choice_without_a_census_is_refused()
         {
