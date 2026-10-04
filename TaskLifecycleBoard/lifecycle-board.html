@@ -353,9 +353,19 @@ body.light .chip-assignee {
     border-color: #3B82F6;
 }
 
+/* The wrap holds the field and its clear (x) button (task 28343a65). */
+.notes-stream-search-wrap {
+    flex: 1;
+    min-width: 0;
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
 .notes-stream-search {
     flex: 1;
-    padding: 3px 6px;
+    /* right padding reserves room for the x so text never runs under it */
+    padding: 3px 22px 3px 6px;
     border: 1px solid var(--border-input);
     border-radius: 4px;
     background: var(--bg-input);
@@ -372,6 +382,32 @@ body.light .chip-assignee {
 .notes-stream-search::placeholder {
     color: var(--text-muted);
 }
+
+/* Clear (x) button inside the notes search: hidden until the field has text
+   (same look as the Task HUD's na-clear). */
+.search-clear {
+    appearance: none;
+    position: absolute;
+    right: 3px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    border: none;
+    border-radius: 3px;
+    background: transparent;
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+}
+.search-clear.visible { display: flex; }
+.search-clear:hover { color: var(--text-primary); background: var(--bg-card-hover); }
 
 .notes-stream-body {
     flex: 1;
@@ -2108,7 +2144,10 @@ body.light .helper-chip {
                         <option value="continuation">Continuation</option>
                         <option value="report">Reports</option>
                     </select>
-                    <input type="text" class="notes-stream-search" id="notesStreamSearch" placeholder="Search...">
+                    <div class="notes-stream-search-wrap">
+                        <input type="text" class="notes-stream-search" id="notesStreamSearch" placeholder="Search...">
+                        <button type="button" class="search-clear" id="notesStreamSearchClear" tabindex="-1" title="Clear search" aria-label="Clear search">&times;</button>
+                    </div>
                 </div>
             </div>
             <div class="notes-stream-body" id="notesStreamBody">
@@ -3490,8 +3529,21 @@ body.light .helper-chip {
         document.getElementById("notesStreamFilter").addEventListener("change", function () {
             renderNotesStream();
         });
-        document.getElementById("notesStreamSearch").addEventListener("input", function () {
+        // Clear (x) button: shows only while the search has text; clearing re-runs the same render
+        // a keystroke does and keeps focus in the box (its mousedown is cancelled; task 28343a65).
+        var search = document.getElementById("notesStreamSearch");
+        var clear = document.getElementById("notesStreamSearchClear");
+        function syncClear() { clear.classList.toggle("visible", search.value.length > 0); }
+        search.addEventListener("input", function () {
+            syncClear();
             renderNotesStream();
+        });
+        clear.addEventListener("mousedown", function (e) { e.preventDefault(); });
+        clear.addEventListener("click", function () {
+            search.value = "";
+            syncClear();
+            renderNotesStream();
+            search.focus();
         });
     }
 

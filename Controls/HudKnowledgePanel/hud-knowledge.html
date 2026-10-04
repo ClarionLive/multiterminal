@@ -60,13 +60,26 @@ body.light {
     background: rgba(255,255,255,0.08); padding: 0 5px;
     border-radius: 8px;
 }
+/* The wrap holds the field and its clear (x) button (task 28343a65). */
+.search-wrap { flex: 1; min-width: 0; position: relative; display: flex; align-items: center; }
 .search-box {
-    flex: 1; background: var(--bg-input); border: 1px solid var(--border);
-    border-radius: 4px; padding: 3px 8px; color: var(--text-primary);
+    flex: 1; min-width: 0; background: var(--bg-input); border: 1px solid var(--border);
+    /* right padding reserves room for the x so text never runs under it */
+    border-radius: 4px; padding: 3px 22px 3px 8px; color: var(--text-primary);
     font-size: 11px; outline: none;
 }
 .search-box:focus { border-color: var(--accent); }
 .search-box::placeholder { color: var(--text-muted); }
+/* Clear (x) button: hidden until the field has text (same look as the Task HUD's na-clear). */
+.search-clear {
+    appearance: none; position: absolute; right: 3px; top: 50%; transform: translateY(-50%);
+    display: none; align-items: center; justify-content: center;
+    width: 16px; height: 16px; padding: 0; border: none; border-radius: 3px;
+    background: transparent; color: var(--text-muted);
+    font-family: inherit; font-size: 15px; line-height: 1; cursor: pointer;
+}
+.search-clear.visible { display: flex; }
+.search-clear:hover { color: var(--text-primary); background: var(--bg-card-hover); }
 
 .kb-list {
     flex: 1; overflow-y: auto; padding: 6px 10px; min-height: 0;
@@ -165,7 +178,10 @@ body.no-project-state .no-project { display: flex; }
 <div class="kb-header">
     <span class="kb-title">Knowledge</span>
     <span class="kb-count" id="kb-count">0</span>
-    <input type="text" class="search-box" id="search-box" placeholder="Search knowledge...">
+    <span class="search-wrap">
+        <input type="text" class="search-box" id="search-box" placeholder="Search knowledge...">
+        <button type="button" class="search-clear" id="search-clear" tabindex="-1" title="Clear search" aria-label="Clear search">&times;</button>
+    </span>
 </div>
 <div class="kb-list" id="kb-list">
     <div class="kb-empty">
@@ -257,7 +273,18 @@ function filterAndRender() {
     list.innerHTML = html;
 }
 
-searchBox.addEventListener('input', filterAndRender);
+// Clear (x) button: shows only while the search has text; clearing re-runs the same filter a
+// keystroke does and keeps focus in the box (its mousedown is cancelled; task 28343a65).
+const searchClear = document.getElementById('search-clear');
+function syncSearchClear() { searchClear.classList.toggle('visible', searchBox.value.length > 0); }
+searchBox.addEventListener('input', () => { syncSearchClear(); filterAndRender(); });
+searchClear.addEventListener('mousedown', (e) => e.preventDefault());
+searchClear.addEventListener('click', () => {
+    searchBox.value = '';
+    syncSearchClear();
+    filterAndRender();
+    searchBox.focus();
+});
 
 // --- Reader modal ---
 const modal = document.getElementById('kb-modal');

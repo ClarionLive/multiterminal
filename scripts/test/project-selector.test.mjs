@@ -10,6 +10,11 @@
 // keystroke (the defect: a rebuilt box put the caret at position 0, so "tes" came out as "set"),
 // and what the list is filled with. What it CANNOT see: the caret itself, focus, layout, or CSS,
 // so nothing here checks the icon column's fixed width.
+//
+// Task 28343a65 (the clear (x) button): the stub records the x's `visible` class and counts focus()
+// calls on the box. That shows the clear path ASKS for focus; it cannot show that focus or the caret
+// actually stay in the box (that rests on the x's cancelled mousedown), nor that `visible` hides
+// anything (that is CSS). Those need the running app.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -49,7 +54,9 @@ function makeElement(tag) {
     className: '',
     value: '',
     removed: false,
+    focused: 0, // how many times focus() was called
     renders: [], // every innerHTML assignment, in order
+    classList: makeClassList(),
     get innerHTML() { return html; },
     set innerHTML(v) { html = v; children = new Map(); this.renders.push(v); },
     querySelector(sel) {
@@ -57,8 +64,22 @@ function makeElement(tag) {
       return children.get(sel);
     },
     addEventListener() {},
-    focus() {},
+    focus() { this.focused++; },
     remove() { this.removed = true; },
+  };
+}
+
+function makeClassList() {
+  const set = new Set();
+  return {
+    contains: (c) => set.has(c),
+    add: (c) => { set.add(c); },
+    remove: (c) => { set.delete(c); },
+    toggle: (c, force) => {
+      const on = force === undefined ? !set.has(c) : !!force;
+      if (on) set.add(c); else set.delete(c);
+      return on;
+    },
   };
 }
 
@@ -87,8 +108,10 @@ function boot(projects) {
     extract(PANEL, 'const PROJECT_ICON_NAMES = {') + ';',
     extract(PANEL, 'function projectIconGlyph('),
     extract(PANEL, 'function onProjectSearchInput('),
+    extract(PANEL, 'function syncProjectSearchClear('),
+    extract(PANEL, 'function clearProjectSearch('),
     extract(PANEL, 'function closeProjectSelector('),
-    'out = { showProjectSelectorPopup, onProjectSearchInput, projectIconGlyph, PROJECT_ICON_NAMES, onProjectListReply,',
+    'out = { showProjectSelectorPopup, onProjectSearchInput, clearProjectSearch, projectIconGlyph, PROJECT_ICON_NAMES, onProjectListReply,',
     '        setProjects(list) { cachedProjectList = list; },',
     '        setPendingOpen(v) { _projectSelectorPendingOpen = v; } };',
   ].join('\n');
@@ -168,6 +191,51 @@ test('a projectList reply opens the popup only when one was pending and none is 
   const idle = boot([]);
   idle.api.onProjectListReply(JSON.stringify({ projects: PROJECTS }));
   assert.equal(idle.document.querySelector('.picker-overlay.project-selector'), null, 'opened with nothing pending');
+});
+
+// Typing, as the browser does it: the box's value changes, then its oninput runs.
+function type(api, box, text) {
+  box.value = text;
+  api.onProjectSearchInput(text);
+}
+
+test('the clear (x) button is hidden while the box is empty and shows once it has text (task 28343a65)', () => {
+  const { api, document } = boot(PROJECTS);
+  api.showProjectSelectorPopup();
+  const overlay = document.querySelector('.picker-overlay.project-selector');
+  const box = overlay.querySelector('.project-selector-search');
+  const clear = overlay.querySelector('.search-clear');
+
+  assert.equal(clear.classList.contains('visible'), false, 'the x shows on an empty box');
+  type(api, box, 't');
+  assert.equal(clear.classList.contains('visible'), true, 'the x did not appear after typing');
+  type(api, box, '');
+  assert.equal(clear.classList.contains('visible'), false, 'the x stayed after the box was emptied by typing');
+});
+
+test('the clear (x) button empties the box, lists every project again and keeps the same focused box (task 28343a65)', () => {
+  const { api, document } = boot(PROJECTS);
+  api.showProjectSelectorPopup();
+  const overlay = document.querySelector('.picker-overlay.project-selector');
+  const box = overlay.querySelector('.project-selector-search');
+  const clear = overlay.querySelector('.search-clear');
+  const list = () => document.querySelector('.picker-overlay.project-selector').querySelector('.picker-list').innerHTML;
+
+  type(api, box, 'tra');
+  assert.doesNotMatch(list(), /TestB/, 'precondition: the filter is applied');
+  const focusedBefore = box.focused;
+
+  api.clearProjectSearch();
+
+  assert.equal(box.value, '');
+  for (const name of ['TestB', 'TravelRemote', 'Clarion Addin Registry']) {
+    assert.match(list(), new RegExp(name), `"${name}" is missing after clearing`);
+  }
+  const now = document.querySelector('.picker-overlay.project-selector');
+  assert.equal(now, overlay, 'clearing rebuilt the overlay');
+  assert.equal(now.querySelector('.project-selector-search'), box, 'clearing replaced the search box');
+  assert.ok(box.focused > focusedBefore, 'clearing did not put focus back in the box');
+  assert.equal(clear.classList.contains('visible'), false, 'the x is still showing on an empty box');
 });
 
 test('icon names become emoji; unknown or empty names get the folder; emoji pass through', () => {

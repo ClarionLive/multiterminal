@@ -99,6 +99,16 @@
     color: var(--text); font: inherit; font-size: 13.5px;
   }
   .search input::placeholder { color: var(--text-dim); }
+  /* Clear (x) button at the right edge of the field, hidden until it has text (task 28343a65).
+     Not an .item, so the page's row click/hover handlers ignore it. */
+  .search-clear {
+    display: none; align-items: center; justify-content: center; flex-shrink: 0;
+    width: 18px; height: 18px; padding: 0; border: none; border-radius: 4px;
+    background: transparent; color: var(--icon); font: inherit; font-size: 16px; line-height: 1;
+    cursor: pointer;
+  }
+  .search-clear.visible { display: flex; }
+  .search-clear:hover { color: var(--text-strong); background: var(--hover); }
   .section { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; color: var(--text-dim); padding: 6px 8px 2px; }
   .rows { max-height: 360px; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
   .row { height: auto; padding: 7px 8px; gap: 10px; }
@@ -122,6 +132,7 @@
   <label class="search">
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4a7 7 0 1 0 0 14a7 7 0 1 0 0-14M20 20l-4-4"></path></svg>
     <input id="search" type="text" placeholder="Search projects…" aria-label="Search projects" autocomplete="off" spellcheck="false">
+    <button type="button" class="search-clear" id="searchClear" tabindex="-1" title="Clear search" aria-label="Clear search">&times;</button>
   </label>
   <div class="rows" id="rows" role="listbox" aria-label="Projects"></div>
   <div class="browse"><button type="button" class="item" data-index="-1" id="browseAll">Browse all projects →</button></div>
@@ -355,7 +366,30 @@ document.addEventListener('click', function (e) {
   if (btn) activate(btn);
 });
 
-document.getElementById('search').addEventListener('input', renderProjects);
+/* The x shows only while the search has text (task 28343a65). */
+function syncSearchClear() {
+  document.getElementById('searchClear').classList.toggle('visible', document.getElementById('search').value.length > 0);
+}
+
+function onSearchInput() {
+  syncSearchClear();
+  renderProjects();
+}
+
+/* Empties the search and re-runs the keystroke path, so only the rows are re-rendered and the
+   input itself is kept. The x's mousedown is cancelled below, so focus never leaves the input
+   (and the popup window is never deactivated, which would close it); the focus() covers a click
+   that arrives some other way. */
+function clearSearch() {
+  var input = document.getElementById('search');
+  input.value = '';
+  onSearchInput();
+  input.focus();
+}
+
+document.getElementById('search').addEventListener('input', onSearchInput);
+document.getElementById('searchClear').addEventListener('mousedown', function (e) { e.preventDefault(); });
+document.getElementById('searchClear').addEventListener('click', clearSearch);
 
 /* ---------- host messages ---------- */
 
@@ -371,6 +405,7 @@ function show(msg) {
     currentProjectId = msg.currentProjectId || '';
     var input = document.getElementById('search');
     input.value = '';
+    syncSearchClear();
     renderProjects(); // posts the size itself
     input.focus();
     return;
