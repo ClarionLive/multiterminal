@@ -152,6 +152,7 @@ namespace MultiTerminal.Services
         private const string TasksPanelZoomKey = "TasksPanelZoom";
         private const string ChatPanelZoomKey = "ChatPanelZoom";
         private const string OfficePanelZoomKey = "OfficePanelZoom";
+        private const string AttentionPanelZoomKey = "AttentionPanelZoom";
         private const double DefaultPanelZoom = 1.0;
         private const double MinPanelZoom = 0.25;
         private const double MaxPanelZoom = 5.0;
@@ -407,8 +408,12 @@ namespace MultiTerminal.Services
         /// blocking agent in any mode — the panel ranks blocking first and then applies the mode to
         /// what is left, so the one thing the rail exists to surface can never be filed away under
         /// a heading.
+        /// <para>
+        /// <c>team</c> (task d71bb221) lists each PM with its helpers underneath. Same rule: a team
+        /// with anyone blocked moves to the top as a whole.
+        /// </para>
         /// </remarks>
-        private static readonly string[] AttentionOrders = { "attention", "fixed", "project" };
+        private static readonly string[] AttentionOrders = { "attention", "fixed", "project", "team" };
 
         /// <summary>
         /// Ambient treatments — the "is it working?" channel, running on every card at once.
@@ -622,6 +627,29 @@ namespace MultiTerminal.Services
         {
             zoom = Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
             Set(OfficePanelZoomKey, zoom.ToString("F2", CultureInfo.InvariantCulture));
+        }
+
+        /// <summary>
+        /// Gets the Attention panel WebView2 zoom level (0.25-5.0 range), task d71bb221. Same
+        /// storage, clamp and default as the chat panel's.
+        /// </summary>
+        public double GetAttentionPanelZoom()
+        {
+            string value = Get(AttentionPanelZoomKey);
+            if (!string.IsNullOrEmpty(value) && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double zoom))
+            {
+                return Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
+            }
+            return DefaultPanelZoom;
+        }
+
+        /// <summary>
+        /// Sets the Attention panel WebView2 zoom level.
+        /// </summary>
+        public void SetAttentionPanelZoom(double zoom)
+        {
+            zoom = Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
+            Set(AttentionPanelZoomKey, zoom.ToString("F2", CultureInfo.InvariantCulture));
         }
 
         /// <summary>
@@ -1125,6 +1153,13 @@ namespace MultiTerminal.Services
                         {
                             info.CustomTitle = parts[2];
                         }
+
+                        // The pane's team link (task d71bb221), optional fourth to sixth parts. An
+                        // entry written before this ticket simply has none, and restores exactly as
+                        // it always did.
+                        if (parts.Length >= 4 && !string.IsNullOrEmpty(parts[3])) info.PaneKey = parts[3];
+                        if (parts.Length >= 5 && !string.IsNullOrEmpty(parts[4])) info.HelperName = parts[4];
+                        if (parts.Length >= 6 && !string.IsNullOrEmpty(parts[5])) info.SpawnerPaneKey = parts[5];
                         result.Add(info);
                     }
                 }
@@ -1174,7 +1209,9 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Saves the terminal sessions for the next run.
-        /// Format: "dir1|size1|title1;dir2|size2|title2;..."
+        /// Format: "dir1|size1|title1|paneKey1|helper1|spawnerPaneKey1;..." — the last three are the
+        /// pane's team link (task d71bb221) and are written only when there is something to say, so
+        /// a pane with no link saves exactly the three-part entry it always did.
         /// </summary>
         public void SetSessionTerminals(List<TerminalSessionInfo> terminals)
         {
@@ -1195,9 +1232,32 @@ namespace MultiTerminal.Services
                 string dir = t.WorkingDirectory ?? "";
                 string size = t.FontSize.ToString("F1", CultureInfo.InvariantCulture);
                 string title = t.CustomTitle ?? "";
-                entries.Add($"{dir}|{size}|{title}");
+                string paneKey = SessionField(t.PaneKey);
+                if (paneKey.Length == 0)
+                {
+                    entries.Add($"{dir}|{size}|{title}");
+                    continue;
+                }
+
+                // A helper name that cannot be stored safely drops the WHOLE link rather than
+                // keeping a spawner key with no name to check it against: a link that cannot be
+                // verified on restore must restore as no link, never as a guess.
+                string helper = SessionField(t.HelperName);
+                string spawner = helper.Length == 0 ? string.Empty : SessionField(t.SpawnerPaneKey);
+                entries.Add($"{dir}|{size}|{title}|{paneKey}|{helper}|{spawner}");
             }
             Set(SessionTerminalsKey, string.Join(";", entries));
+        }
+
+        /// <summary>
+        /// A session field that can be stored in the pipe/semicolon format, or empty when it cannot.
+        /// The separators are not escaped by this format, so a value containing one is dropped
+        /// rather than allowed to shift every later field of the entry.
+        /// </summary>
+        private static string SessionField(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return string.Empty;
+            return value.IndexOf('|') >= 0 || value.IndexOf(';') >= 0 ? string.Empty : value;
         }
 
         /// <summary>

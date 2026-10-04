@@ -10,10 +10,21 @@
 body {
     --bg-primary: #1a1a2e; --bg-card: #2d2d44; --bg-card-hover: #353550;
     --bg-header: #12122a; --border: #3d3d5c;
-    --text-primary: #e0e0e0; --text-secondary: #a0a0b8; --text-muted: #707088;
+    /* Text tokens (task d71bb221). Every one of these reaches 4.5:1 on every surface it is drawn
+       on, including the red-alert wash at its peak; the ratios are listed in the ticket report.
+       Text never takes its contrast from opacity any more, because an opacity's result depends
+       on whatever is behind it and cannot be checked once. */
+    --text-primary: #e6e6f5; --text-secondary: #c4c4dc; --text-muted: #b2b2cc;
+    --text-proj: #d6d6ee; --text-quote: #cfcfe4;
     --accent: #89b4fa; --green: #a6e3a1; --peach: #fab387; --mauve: #cba6f7;
     --red: #f38ba8; --red-wash: rgba(243,139,168,0.16); --red-edge: rgba(243,139,168,0.55);
+    /* The state hues as TEXT. Same as the hues in the dark theme; darker in the light one, where
+       the hues themselves fail on white. */
+    --peach-text: #fab387; --accent-text: #89b4fa; --red-text: #f6a0b8;
     --bg-tag: rgba(255,255,255,0.08);
+    --bg-helper: #26263b;
+    --pm-tag-bg: #8ab4ff; --pm-tag-fg: #12122a;
+    --badge-bg: #c93b3b; --badge-fg: #ffffff;
     --pulse-question: rgba(203,166,247,0.26);
     --pulse-permission: rgba(250,179,135,0.24);
 
@@ -24,11 +35,16 @@ body {
 }
 body.light {
     --bg-primary: #f5f5f5; --bg-card: #fff; --bg-card-hover: #fafafa;
-    --bg-header: #e8e8e8; --border: #e0e0e0;
-    --text-primary: #333; --text-secondary: #666; --text-muted: #999;
+    --bg-header: #e8e8e8; --border: #d6d6dc;
+    --text-primary: #333333; --text-secondary: #4a4a4a; --text-muted: #5e5e5e;
+    --text-proj: #3a3a3a; --text-quote: #454545;
     --accent: #1e66f5; --green: #40a02b; --peach: #fe640b; --mauve: #8839ef;
     --red: #d20f39; --red-wash: rgba(210,15,57,0.12); --red-edge: rgba(210,15,57,0.45);
+    --peach-text: #a84300; --accent-text: #1a56d6; --red-text: #b80d32;
     --bg-tag: rgba(0,0,0,0.06);
+    --bg-helper: #f7f7fa;
+    --pm-tag-bg: #1e66f5; --pm-tag-fg: #ffffff;
+    --badge-bg: #b42318; --badge-fg: #ffffff;
     --pulse-question: rgba(136,57,239,0.20);
     --pulse-permission: rgba(254,100,11,0.20);
 }
@@ -40,15 +56,15 @@ body.light {
 /* ---- header ---- */
 .head {
     display: flex; align-items: center; gap: 8px;
-    padding: 6px 12px; background: var(--bg-header);
+    padding: 8px 12px; background: var(--bg-header);
     border-bottom: 1px solid var(--border); flex-shrink: 0;
 }
 .head-title {
-    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    font-size: 12.5px; font-weight: 700; text-transform: uppercase;
     letter-spacing: 0.05em; color: var(--text-secondary);
 }
 .needs {
-    font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 9px;
+    font-size: 11.5px; font-weight: 700; padding: 1px 8px; border-radius: 9px;
     background: var(--mauve); color: var(--bg-primary);
     font-variant-numeric: tabular-nums;
 }
@@ -57,25 +73,33 @@ body.light {
 /* Account quota, beside the title because it describes the ACCOUNT and not any one agent
    (task 85af4635). Quiet by default — it is a reference number, not an alarm. */
 .quota {
-    font-size: 9.5px; color: var(--text-muted); letter-spacing: 0.02em;
+    font-size: 12px; color: var(--text-secondary); letter-spacing: 0.01em;
     white-space: nowrap; margin-left: 6px;
+    display: flex; align-items: center; gap: 12px; min-width: 0;
 }
-.quota b { font-weight: 600; color: var(--text-secondary); }
-.quota.stale { color: var(--peach); }
+.quota[hidden] { display: none; }
+.quota b { font-weight: 700; color: var(--text-primary); }
+.quota.stale, .quota.stale b { color: var(--peach-text); }
+/* One figure and the small bar under it (task d71bb221). The bar is the at-a-glance half: a
+   number has to be read, a bar's length does not. */
+.q-part { display: inline-flex; flex-direction: column; gap: 3px; }
+.q-bar { width: 52px; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
+.q-fill { display: block; height: 100%; border-radius: 2px; background: var(--green); }
+.q-fill.low { background: var(--peach); }
 
 /* Context fill on each card. Neutral until it is worth acting on — see ctxChip(). */
 .ctx {
-    font-size: 9.5px; font-variant-numeric: tabular-nums;
+    font-size: 11.5px; font-variant-numeric: tabular-nums;
     color: var(--text-muted); background: var(--bg-tag);
     border-radius: 4px; padding: 1px 4px;
     flex-shrink: 0;
 }
-.ctx-warn { color: var(--peach); }
-.ctx-high { color: var(--red); font-weight: 600; }
+.ctx-warn { color: var(--peach-text); }
+.ctx-high { color: var(--red-text); font-weight: 600; }
 /* Stale is about the READING, not the value, so it is an underline rather than a colour —
    a stale 91% must still read as high, and a colour swap would hide that. */
 .ctx-stale { text-decoration: underline dotted; text-underline-offset: 2px; }
-.ctx-unknown { color: var(--text-muted); opacity: 0.7; }
+.ctx-unknown { color: var(--text-muted); }
 .spacer { flex: 1; }
 
 /* ---- gear + settings popover (task 42052f0c) ----
@@ -83,9 +107,9 @@ body.light {
    hold them at this width, so they all live behind one control and the header goes back to
    saying what the panel is. */
 button.gear {
-    font-family: inherit; font-size: 12px; line-height: 1; color: var(--text-secondary);
-    background: var(--bg-tag); border: 1px solid transparent;
-    border-radius: 8px; padding: 3px 6px; cursor: pointer;
+    font-family: inherit; font-size: 16px; line-height: 1; color: var(--text-secondary);
+    background: var(--bg-tag); border: 1px solid var(--border);
+    border-radius: 8px; padding: 5px 8px; cursor: pointer;
     transition: border-color .12s, color .12s;
 }
 button.gear:hover { border-color: var(--border); color: var(--text-primary); }
@@ -93,26 +117,26 @@ button.gear:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 button.gear[aria-expanded="true"] { border-color: var(--accent); color: var(--text-primary); }
 
 .pop {
-    position: absolute; top: 30px; right: 8px; z-index: 20;
-    width: 208px; max-height: calc(100vh - 44px); overflow-y: auto;
+    position: absolute; top: 46px; right: 8px; z-index: 20;
+    width: 284px; max-width: calc(100vw - 16px); max-height: calc(100vh - 56px); overflow-y: auto;
     background: var(--bg-card); border: 1px solid var(--border);
-    border-radius: 10px; padding: 8px;
+    border-radius: 10px; padding: 12px;
     box-shadow: 0 10px 26px -10px rgba(0,0,0,.7);
-    display: flex; flex-direction: column; gap: 10px;
+    display: flex; flex-direction: column; gap: 14px;
 }
 .pop[hidden] { display: none; }
 .pop-group > h4 {
-    font-size: 9px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
-    color: var(--text-muted); margin-bottom: 4px;
+    font-size: 11.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--text-secondary); margin-bottom: 4px;
 }
 .pop-group > p {
-    font-size: 9.5px; color: var(--text-muted); margin: -2px 0 5px; line-height: 1.4;
+    font-size: 12px; color: var(--text-muted); margin: 0 0 6px; line-height: 1.4;
 }
 .opt {
     display: block; width: 100%; text-align: left;
-    font-family: inherit; font-size: 11px; color: var(--text-secondary);
+    font-family: inherit; font-size: 13.5px; font-weight: 600; color: var(--text-primary);
     background: transparent; border: 1px solid transparent; border-radius: 6px;
-    padding: 4px 7px; cursor: pointer;
+    padding: 6px 9px; cursor: pointer;
     transition: background .12s, color .12s, border-color .12s;
 }
 .opt:hover { background: var(--bg-tag); color: var(--text-primary); }
@@ -120,7 +144,7 @@ button.gear[aria-expanded="true"] { border-color: var(--accent); color: var(--te
 .opt[aria-pressed="true"] {
     background: var(--bg-tag); color: var(--text-primary); border-color: var(--accent);
 }
-.opt small { display: block; font-size: 9px; color: var(--text-muted); margin-top: 1px; }
+.opt small { display: block; font-size: 11.5px; font-weight: 400; color: var(--text-muted); margin-top: 1px; }
 
 /* ---- list ---- */
 .list { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; min-height: 0; }
@@ -135,7 +159,11 @@ button.gear[aria-expanded="true"] { border-color: var(--accent); color: var(--te
 }
 .card:hover { background: var(--bg-card-hover); }
 .card:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.card.offline { opacity: .5; }
+/* Offline is shown by form, not by fading the text (task d71bb221): an opacity of .5 took every
+   line on the card below a readable contrast. A dashed edge and a greyed avatar say "gone"
+   while the words stay legible. */
+.card.offline { border-style: dashed; }
+.card.offline .avatar { filter: grayscale(.8); opacity: .55; }
 
 /* state encoded as form (a stripe) as well as colour */
 .card::before {
@@ -150,16 +178,17 @@ button.gear[aria-expanded="true"] { border-color: var(--accent); color: var(--te
 
 .top { display: flex; align-items: center; gap: 9px; }
 .avatar {
-    width: 26px; height: 26px; border-radius: 8px; flex-shrink: 0;
+    width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0;
     display: grid; place-items: center;
-    font-size: 11px; font-weight: 700; color: #12122a;
+    font-size: 12px; font-weight: 700; color: #12122a;
 }
 .who { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
-.who-name { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.who-name { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The project line (task d71bb221): was 10px at about 2.8:1, which the Owner could not read. */
 .who-proj {
-    font-size: 10px; color: var(--text-muted);
+    font-size: 12.5px; font-weight: 600; color: var(--text-proj);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    display: flex; align-items: center; gap: 4px;
+    display: flex; align-items: center; gap: 5px;
 }
 /* The project's colour tick (task 42052f0c). It sits WITH the project name rather than on
    the avatar, because the avatar already carries the agent's own terminal colour and
@@ -168,15 +197,15 @@ button.gear[aria-expanded="true"] { border-color: var(--accent); color: var(--te
    Small, but in a fixed position on every card — which is what makes it groupable at a
    glance. Text is not glanceable; a repeated mark in a repeated place is. */
 .proj-tick {
-    width: 6px; height: 6px; border-radius: 2px; flex-shrink: 0;
+    width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0;
     background: var(--proj-c, var(--border));
 }
-.proj-working-on { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.elapsed { font-size: 10px; color: var(--text-muted); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.proj-working-on { color: var(--text-muted); font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.elapsed { font-size: 11.5px; color: var(--text-muted); flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .card[data-blocking="true"] .elapsed { color: var(--text-secondary); font-weight: 600; }
 
 /* OBSERVED — the high-confidence line, from hooks */
-.observed { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; line-height: 1.45; }
+.observed { display: flex; align-items: baseline; gap: 6px; font-size: 13px; line-height: 1.45; }
 .pip { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; transform: translateY(-1px); background: var(--text-muted); }
 .card[data-state="BlockedQuestion"] .pip { background: var(--mauve); }
 .card[data-state="BlockedPermission"] .pip,
@@ -184,37 +213,39 @@ button.gear[aria-expanded="true"] { border-color: var(--accent); color: var(--te
 .card[data-state="Working"] .pip { background: var(--accent); }
 .card[data-state="Idle"] .pip { background: var(--green); }
 .observed b { font-weight: 600; }
-.observed q { color: var(--text-secondary); font-style: italic; quotes: '"' '"'; display: block; }
+.observed q { color: var(--text-quote); font-size: 12.5px; font-style: italic; quotes: '"' '"'; display: block; }
 
 /* CLAIMED — the board's word. Quieter, and stamped with its age on purpose. */
 .claimed {
     display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-    font-size: 10px; color: var(--text-muted);
+    font-size: 12px; color: var(--text-muted);
     padding-top: 6px; border-top: 1px dashed var(--border);
 }
 button.tkt {
     font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-    font-size: 9.5px; background: var(--bg-tag); color: var(--accent);
+    font-size: 11.5px; background: var(--bg-tag); color: var(--accent-text);
     padding: 1px 5px; border-radius: 4px; border: 1px solid transparent; cursor: pointer;
     transition: border-color .12s, background .12s;
 }
 button.tkt:hover { border-color: var(--accent); background: transparent; text-decoration: underline; }
 button.tkt:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .claim-age { margin-left: auto; font-variant-numeric: tabular-nums; }
-.claim-age.stale { color: var(--peach); }
+.claim-age.stale { color: var(--peach-text); }
 
 /* The detail line's own freshness (task edcdcdd5). Quieter than the line it annotates --
    it is metadata about the observation, not the observation. */
 .detail-age {
   display: block;
   margin-top: 2px;
-  font-size: 10px;
-  opacity: 0.55;
+  font-size: 11.5px;
+  font-style: normal;
+  color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
-.detail-age.stale { color: var(--peach); opacity: 0.85; }
-/* Not an observation at all: the message the alert carried, never refreshed. */
-.detail-age.fossil { font-style: italic; opacity: 0.45; }
+.detail-age.stale { color: var(--peach-text); }
+/* Not an observation at all: the message the alert carried, never refreshed. Told apart by
+   form (italic) rather than by fading it below a readable contrast (task d71bb221). */
+.detail-age.fossil { font-style: italic; }
 
 /* ============================================================================
    TWO CHANNELS (task 42052f0c)
@@ -319,7 +350,7 @@ body[data-alarm="hand"] .card.pulsing {
 .card.acked { transform: none; box-shadow: none; background: var(--bg-card); }
 .card.acked .beacon, .card.acked .klax { display: none !important; }
 .ack-mark {
-    font-size: 9px; letter-spacing: .08em; text-transform: uppercase;
+    font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
     color: var(--text-muted); border: 1px solid var(--border);
     border-radius: 4px; padding: 0 4px; margin-left: 6px; white-space: nowrap;
 }
@@ -341,8 +372,68 @@ body[data-alarm="hand"] .card.pulsing {
     .card { transition: none; }
 }
 
-.empty { margin: auto; padding: 26px 18px; text-align: center; color: var(--text-muted); font-size: 11.5px; line-height: 1.6; }
-.empty b { display: block; color: var(--text-secondary); margin-bottom: 4px; font-size: 12px; }
+.empty { margin: auto; padding: 26px 18px; text-align: center; color: var(--text-muted); font-size: 12.5px; line-height: 1.6; }
+.empty b { display: block; color: var(--text-secondary); margin-bottom: 4px; font-size: 13.5px; }
+
+/* ============================================================================
+   BY TEAM (task d71bb221)
+
+   Each PM card, then its helpers as compact cards underneath, joined by a line in the
+   PM's own colour. A helper keeps the full alarm treatment on its own card: it is still
+   a .card, so every "needs you" rule above applies to it unchanged. Only the layout
+   differs.
+   ============================================================================ */
+.team { display: flex; flex-direction: column; gap: 6px; }
+.team + .team { margin-top: 8px; }
+.who-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pm-tag {
+    font-size: 10.5px; font-weight: 700; letter-spacing: .06em;
+    color: var(--pm-tag-fg); background: var(--pm-tag-bg);
+    border-radius: 4px; padding: 1px 6px; flex-shrink: 0;
+}
+.needs-badge {
+    font-size: 12px; font-weight: 700; white-space: nowrap; flex-shrink: 0;
+    color: var(--badge-fg); background: var(--badge-bg);
+    border-radius: 6px; padding: 3px 8px; font-variant-numeric: tabular-nums;
+}
+.group-head {
+    font-size: 11.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--text-secondary); padding: 2px 2px 0;
+}
+.helpers { display: flex; padding-left: 18px; }
+.helpers-line {
+    width: 2px; border-radius: 1px; flex-shrink: 0; opacity: .75;
+    background: var(--line-c, var(--border));
+}
+.helpers-body { display: flex; flex-direction: column; gap: 6px; padding-left: 10px; flex: 1; min-width: 0; }
+.helpers-label {
+    font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--text-secondary);
+}
+.card.compact { background: var(--bg-helper); border-radius: 8px; padding: 8px 10px 8px 11px; gap: 4px; }
+.card.compact:hover { background: var(--bg-card-hover); }
+.card.compact::before { top: 7px; bottom: 7px; }
+.card.compact .avatar { width: 24px; height: 24px; border-radius: 6px; font-size: 10.5px; }
+.compact-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.compact-name { font-size: 13.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 1; min-width: 0; }
+.compact-state {
+    font-size: 12px; color: var(--text-secondary);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1;
+}
+.card.compact[data-blocking="true"] .compact-state { font-weight: 700; color: var(--text-primary); }
+.card.compact .pip { transform: none; }
+.compact-act {
+    font-size: 12px; font-style: italic; color: var(--text-quote);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* The red-alert pulse returns a card to the card colour; a helper's own colour is a shade
+   darker, so it gets its own copy of the keyframes rather than flashing the wrong base. */
+@keyframes red-alert-compact {
+    0%, 100% { background: var(--bg-helper); box-shadow: 0 0 0 0 transparent; }
+    50%      { background: var(--red-wash); box-shadow: 0 0 0 3px var(--red-edge); }
+}
+body[data-alarm="redalert"] .card.compact.pulsing { animation-name: red-alert-compact; }
+.card.compact.acked { background: var(--bg-helper); }
 </style>
 </head>
 <body>
@@ -379,6 +470,10 @@ body[data-alarm="hand"] .card.pulsing {
 var BLOCKING = { BlockedQuestion: 1, BlockedPermission: 1, BlockedUnknown: 1 };
 
 var sessions = [];
+/* The By-team grouping of `sessions`, computed by the host (AttentionTeamLayout, task d71bb221) and
+   delivered in the SAME envelope, so the grouping and the cards are always from one moment. The
+   rules live in C# where they are pinned by tests; this script only draws them. */
+var teams = [];
 var order = "attention";
 var ambient = "stream";
 var alarm = "redalert";
@@ -416,9 +511,10 @@ var ALARMS = [
     ["hand",     "Raised hand", "the walker stands up and waves"]
 ];
 var ORDERS = [
+    ["team",      "By team",         "each PM with its helpers underneath"],
     ["attention", "Attention first", "blocked agents on top"],
-    ["fixed",     "Fixed",           "never reorders under the cursor"],
-    ["project",   "By project",      "grouped, blocked still on top"]
+    ["project",   "By project",      "grouped, blocked still on top"],
+    ["fixed",     "Fixed",           "never reorders under the cursor"]
 ];
 
 /* Canvas-drawn ambients. The others are CSS, and "off" is nothing at all — the loop skips
@@ -533,6 +629,290 @@ function initials(name) {
     return name.trim().slice(0, 2).toUpperCase();
 }
 
+/* The card shell every card shares, full or compact: identity, state, alarm classes and the
+   click/keyboard handling. A helper's compact card goes through here too, which is what keeps
+   the existing alarm — pulse, acknowledgement, focus ring — on a blocked helper's own card. */
+function cardShell(s, extraClass) {
+    /* NOT a <button>: the ticket chip is a nested control, and a button inside a button is
+       invalid markup that silently breaks keyboard focus. */
+    var card = document.createElement("div");
+    card.className = "card" + (extraClass || "")
+        + (s.state === "Offline" ? " offline" : "")
+        + (isBlocking(s) ? " pulsing" : "")
+        + (isBlocking(s) && isAcked(s) ? " acked" : "")
+        + (s.id === focusedId ? " focused" : "");
+    card.setAttribute("role", "button");
+    card.tabIndex = 0;
+    card.setAttribute("data-id", s.id);
+    card.setAttribute("data-state", s.state);
+    card.setAttribute("data-blocking", isBlocking(s) ? "true" : "false");
+
+    card.addEventListener("click", function () { activate(s); });
+    card.addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); activate(s); }
+    });
+    return card;
+}
+
+function avatarFor(s) {
+    var av = document.createElement("span");
+    av.className = "avatar";
+    av.style.background = s.color || "#89b4fa";
+    av.textContent = initials(s.agent);
+    return av;
+}
+
+/* The alarm overlays exist on every blocking card; CSS decides which one is visible, so
+   switching treatment never needs a re-render. */
+function addAlarmOverlays(card, s) {
+    if (!isBlocking(s)) return;
+    var bc = document.createElement("span"); bc.className = "beacon";
+    var kx = document.createElement("span"); kx.className = "klax";
+    card.appendChild(bc); card.appendChild(kx);
+}
+
+/* "Uma needs you · 2m" (task d71bb221). The age is read from the helper's own card on every
+   tick, so the badge and the helper's card can never show two different waits. */
+function needsYouText(ny) {
+    var who = ny.agent || "A helper";
+    var more = ny.more > 0 ? " +" + ny.more : "";
+    var helper = byId(ny.id);
+    var since = helper ? helper.sinceSeconds : ny.sinceSeconds;
+    return who + more + (more ? " need you · " : " needs you · ") + fmtAge(since);
+}
+
+function byId(id) {
+    for (var i = 0; i < sessions.length; i++) { if (sessions[i].id === id) return sessions[i]; }
+    return null;
+}
+
+/* A full card. `team` is set only in the By team order: the PM tag and the needs-you badge
+   exist there and nowhere else, so every other order draws exactly the card it always did. */
+function buildCard(s, team) {
+    var card = cardShell(s, "");
+
+    var top = document.createElement("div");
+    top.className = "top";
+
+    var who = document.createElement("span");
+    who.className = "who";
+    var n = document.createElement("span");
+    n.className = "who-name"; n.textContent = s.agent || "(unnamed)";
+    if (team && s.role === "pm") {
+        var line = document.createElement("span");
+        line.className = "who-line";
+        var tag = document.createElement("span");
+        tag.className = "pm-tag"; tag.textContent = "PM";
+        tag.title = "Project Manager";
+        line.appendChild(n); line.appendChild(tag);
+        who.appendChild(line);
+    } else {
+        who.appendChild(n);
+    }
+    var pr = document.createElement("span");
+    pr.className = "who-proj";
+    if (s.project) {
+        var tick = document.createElement("i");
+        tick.className = "proj-tick";
+        tick.style.setProperty("--proj-c", projectColor(s.project));
+        var pname = document.createElement("span");
+        pname.textContent = s.project;
+        pr.appendChild(tick); pr.appendChild(pname);
+        // The active task's project when it is not the session's (task 19a26090). Same value
+        // the agent's terminal header shows.
+        if (s.workingOn) {
+            var won = document.createElement("span");
+            won.className = "proj-working-on";
+            won.textContent = "· working on " + s.workingOn;
+            won.title = "The active task belongs to " + s.workingOn + "; this session runs in " + s.project + ".";
+            pr.appendChild(won);
+        }
+    }
+    who.appendChild(pr);
+
+    top.appendChild(avatarFor(s)); top.appendChild(who);
+
+    /* A blocked helper is named on its PM's card, in the place the mockup puts it. The PM's
+       own context chip and age give way to it: the badge is the one thing on this card that
+       needs reading right now. */
+    if (team && team.needsYou) {
+        var badge = document.createElement("span");
+        badge.className = "needs-badge";
+        badge.setAttribute("data-helper", team.needsYou.id || "");
+        badge.textContent = needsYouText(team.needsYou);
+        badge.title = "A helper in this team is waiting on you";
+        top.appendChild(badge);
+    } else {
+        var el = document.createElement("span");
+        el.className = "elapsed"; el.textContent = fmtAge(s.sinceSeconds);
+        top.appendChild(ctxChip(s)); top.appendChild(el);
+    }
+
+    var obs = document.createElement("span");
+    obs.className = "observed";
+    var pip = document.createElement("i"); pip.className = "pip";
+    var wrap = document.createElement("span");
+    var verb = document.createElement("b"); verb.textContent = s.observedVerb || "";
+    wrap.appendChild(verb);
+
+    /* The state is untouched by acknowledgement — this marker is the only thing that
+       changes, and it says what actually happened: the owner saw it. */
+    if (isBlocking(s) && isAcked(s)) {
+        var am = document.createElement("span");
+        am.className = "ack-mark";
+        am.textContent = "acknowledged";
+        wrap.appendChild(am);
+    }
+    if (s.observedDetail) {
+        var q = document.createElement("q"); q.textContent = s.observedDetail;
+        wrap.appendChild(q);
+
+        /* The detail line has its OWN age, separate from the state's (task edcdcdd5).
+           A live line that has quietly stopped updating is the same lie the frozen
+           notification text was, in a new position -- so say when it was last seen, and
+           go amber past two minutes so "gone quiet" is visible rather than inferred.
+           A NON-live detail is the notification message captured at block time and never
+           regenerated; it is marked so the reader is not left to guess which kind it is. */
+        var meta = document.createElement("span");
+        meta.className = "detail-age";
+        if (s.detailIsLive && typeof s.activityAgeSeconds === "number" && s.activityAgeSeconds >= 0) {
+            if (s.activityAgeSeconds >= 120) meta.className += " stale";
+            meta.textContent = "seen " + fmtAge(s.activityAgeSeconds) + " ago";
+        } else {
+            meta.className += " fossil";
+            meta.textContent = "from the alert, not observed since";
+        }
+        wrap.appendChild(meta);
+    }
+    obs.appendChild(pip); obs.appendChild(wrap);
+
+    card.appendChild(top); card.appendChild(obs);
+    addAlarmOverlays(card, s);
+
+    /* The stage, only for the canvas-drawn ambients. The CSS treatments and "off" cost
+       no height, so choosing a quiet option is quiet in layout too. */
+    if (CANVAS_AMBIENTS[ambient]) {
+        var stage = document.createElement("div");
+        stage.className = "stage";
+        var cv = document.createElement("canvas");
+        cv.setAttribute("data-id", s.id);
+        stage.appendChild(cv);
+        card.appendChild(stage);
+    }
+
+    if (s.ticketId) {
+        var cl = document.createElement("span");
+        cl.className = "claimed";
+        var tk = document.createElement("button");
+        tk.type = "button"; tk.className = "tkt"; tk.textContent = s.ticketId;
+        tk.title = "Open " + s.ticketId + " in the Tasks panel";
+        tk.addEventListener("click", function (ev) {
+            ev.stopPropagation();
+            post({ type: "open_ticket", taskId: s.ticketId });
+        });
+        var it = document.createElement("span");
+        it.textContent = s.ticketItem || "";
+        var age = document.createElement("span");
+        age.className = "claim-age" + (s.claimAgeSeconds >= 1200 ? " stale" : "");
+        age.textContent = "board · " + fmtAge(s.claimAgeSeconds) + " ago";
+        cl.appendChild(tk); cl.appendChild(it); cl.appendChild(age);
+        card.appendChild(cl);
+    }
+
+    return card;
+}
+
+/* A helper's compact card (task d71bb221): smaller avatar; name, state, context, age, and the
+   activity on one line. No ambient stage — the walker belongs on the PM's card, and the
+   animation state stays keyed by session id in `anim`, so moving a card into a group never
+   restarts it. */
+function buildCompactCard(s) {
+    var card = cardShell(s, " compact");
+
+    var top = document.createElement("div");
+    top.className = "compact-top";
+    var name = document.createElement("span");
+    name.className = "compact-name"; name.textContent = s.agent || "(unnamed)";
+    if (s.pm) name.title = s.agent + " is a helper of " + s.pm;
+    var pip = document.createElement("i"); pip.className = "pip";
+    var st = document.createElement("span");
+    st.className = "compact-state"; st.textContent = s.observedVerb || "";
+    if (isBlocking(s) && isAcked(s)) st.textContent += " · acknowledged";
+    var el = document.createElement("span");
+    el.className = "elapsed"; el.textContent = fmtAge(s.sinceSeconds);
+    top.appendChild(avatarFor(s)); top.appendChild(name); top.appendChild(pip); top.appendChild(st);
+    top.appendChild(ctxChip(s)); top.appendChild(el);
+    card.appendChild(top);
+
+    if (s.observedDetail) {
+        var act = document.createElement("div");
+        act.className = "compact-act";
+        act.textContent = "“" + s.observedDetail + "”";
+        act.title = s.observedDetail;
+        card.appendChild(act);
+    }
+
+    addAlarmOverlays(card, s);
+    return card;
+}
+
+/* By team: draws the host's groups in the host's order. It decides NOTHING about order — that
+   is AttentionTeamLayout's job, where a blocked helper lifting its team is pinned by tests. */
+function renderTeams() {
+    var shown = Object.create(null);
+
+    teams.forEach(function (g) {
+        var head = g.headId ? byId(g.headId) : null;
+        var helpers = (g.helperIds || []).map(byId).filter(function (h) { return !!h; });
+        if (!head && !helpers.length) return;
+
+        var sec = document.createElement("section");
+        sec.className = "team";
+        sec.setAttribute("data-id", "team:" + (g.headId || (g.kind + ":" + (g.pmName || ""))));
+
+        if (head) {
+            sec.appendChild(buildCard(head, { needsYou: g.needsYou }));
+            shown[head.id] = 1;
+        } else {
+            var gh = document.createElement("div");
+            gh.className = "group-head";
+            gh.textContent = g.kind === "unknown" ? "Helpers (PM unknown)" : "Helpers of " + (g.pmName || "?");
+            sec.appendChild(gh);
+        }
+
+        if (helpers.length) {
+            var block = document.createElement("div");
+            block.className = "helpers";
+            var line = document.createElement("i");
+            line.className = "helpers-line";
+            if (head && head.color) line.style.setProperty("--line-c", head.color);
+            var body = document.createElement("div");
+            body.className = "helpers-body";
+            if (head) {
+                var label = document.createElement("span");
+                label.className = "helpers-label";
+                label.textContent = helpers.length === 1 ? "1 helper" : helpers.length + " helpers";
+                body.appendChild(label);
+            }
+            helpers.forEach(function (h) {
+                body.appendChild(buildCompactCard(h));
+                shown[h.id] = 1;
+            });
+            block.appendChild(line); block.appendChild(body);
+            sec.appendChild(block);
+        }
+
+        listEl.appendChild(sec);
+    });
+
+    /* Any card the grouping did not mention is still drawn, in Attention-first order, rather
+       than silently dropped. It cannot happen with a well-formed push; if it ever does, a
+       missing card is the one failure this rail must not have. */
+    ordered().forEach(function (s) {
+        if (!shown[s.id]) listEl.appendChild(buildCard(s, null));
+    });
+}
+
 function render() {
     var first = {};
     Array.prototype.forEach.call(listEl.children, function (el) {
@@ -558,144 +938,13 @@ function render() {
         return;
     }
 
-    rows.forEach(function (s) {
-        /* NOT a <button>: the ticket chip is a nested control, and a button inside a button is
-           invalid markup that silently breaks keyboard focus. */
-        var card = document.createElement("div");
-        card.className = "card"
-            + (s.state === "Offline" ? " offline" : "")
-            + (isBlocking(s) ? " pulsing" : "")
-            + (isBlocking(s) && isAcked(s) ? " acked" : "")
-            + (s.id === focusedId ? " focused" : "");
-        card.setAttribute("role", "button");
-        card.tabIndex = 0;
-        card.setAttribute("data-id", s.id);
-        card.setAttribute("data-state", s.state);
-        card.setAttribute("data-blocking", isBlocking(s) ? "true" : "false");
-
-        var top = document.createElement("div");
-        top.className = "top";
-
-        var av = document.createElement("span");
-        av.className = "avatar";
-        av.style.background = s.color || "#89b4fa";
-        av.textContent = initials(s.agent);
-
-        var who = document.createElement("span");
-        who.className = "who";
-        var n = document.createElement("span");
-        n.className = "who-name"; n.textContent = s.agent || "(unnamed)";
-        var pr = document.createElement("span");
-        pr.className = "who-proj";
-        if (s.project) {
-            var tick = document.createElement("i");
-            tick.className = "proj-tick";
-            tick.style.setProperty("--proj-c", projectColor(s.project));
-            var pname = document.createElement("span");
-            pname.textContent = s.project;
-            pr.appendChild(tick); pr.appendChild(pname);
-            // The active task's project when it is not the session's (task 19a26090). Same value
-            // the agent's terminal header shows.
-            if (s.workingOn) {
-                var won = document.createElement("span");
-                won.className = "proj-working-on";
-                won.textContent = "· working on " + s.workingOn;
-                won.title = "The active task belongs to " + s.workingOn + "; this session runs in " + s.project + ".";
-                pr.appendChild(won);
-            }
-        }
-        who.appendChild(n); who.appendChild(pr);
-
-        var el = document.createElement("span");
-        el.className = "elapsed"; el.textContent = fmtAge(s.sinceSeconds);
-
-        top.appendChild(av); top.appendChild(who); top.appendChild(ctxChip(s)); top.appendChild(el);
-
-        var obs = document.createElement("span");
-        obs.className = "observed";
-        var pip = document.createElement("i"); pip.className = "pip";
-        var wrap = document.createElement("span");
-        var verb = document.createElement("b"); verb.textContent = s.observedVerb || "";
-        wrap.appendChild(verb);
-
-        /* The state is untouched by acknowledgement — this marker is the only thing that
-           changes, and it says what actually happened: the owner saw it. */
-        if (isBlocking(s) && isAcked(s)) {
-            var am = document.createElement("span");
-            am.className = "ack-mark";
-            am.textContent = "acknowledged";
-            wrap.appendChild(am);
-        }
-        if (s.observedDetail) {
-            var q = document.createElement("q"); q.textContent = s.observedDetail;
-            wrap.appendChild(q);
-
-            /* The detail line has its OWN age, separate from the state's (task edcdcdd5).
-               A live line that has quietly stopped updating is the same lie the frozen
-               notification text was, in a new position -- so say when it was last seen, and
-               go amber past two minutes so "gone quiet" is visible rather than inferred.
-               A NON-live detail is the notification message captured at block time and never
-               regenerated; it is marked so the reader is not left to guess which kind it is. */
-            var meta = document.createElement("span");
-            meta.className = "detail-age";
-            if (s.detailIsLive && typeof s.activityAgeSeconds === "number" && s.activityAgeSeconds >= 0) {
-                if (s.activityAgeSeconds >= 120) meta.className += " stale";
-                meta.textContent = "seen " + fmtAge(s.activityAgeSeconds) + " ago";
-            } else {
-                meta.className += " fossil";
-                meta.textContent = "from the alert, not observed since";
-            }
-            wrap.appendChild(meta);
-        }
-        obs.appendChild(pip); obs.appendChild(wrap);
-
-        card.appendChild(top); card.appendChild(obs);
-
-        /* The alarm overlays exist on every blocking card; CSS decides which one is visible,
-           so switching treatment never needs a re-render. */
-        if (isBlocking(s)) {
-            var bc = document.createElement("span"); bc.className = "beacon";
-            var kx = document.createElement("span"); kx.className = "klax";
-            card.appendChild(bc); card.appendChild(kx);
-        }
-
-        /* The stage, only for the canvas-drawn ambients. The CSS treatments and "off" cost
-           no height, so choosing a quiet option is quiet in layout too. */
-        if (CANVAS_AMBIENTS[ambient]) {
-            var stage = document.createElement("div");
-            stage.className = "stage";
-            var cv = document.createElement("canvas");
-            cv.setAttribute("data-id", s.id);
-            stage.appendChild(cv);
-            card.appendChild(stage);
-        }
-
-        if (s.ticketId) {
-            var cl = document.createElement("span");
-            cl.className = "claimed";
-            var tk = document.createElement("button");
-            tk.type = "button"; tk.className = "tkt"; tk.textContent = s.ticketId;
-            tk.title = "Open " + s.ticketId + " in the Tasks panel";
-            tk.addEventListener("click", function (ev) {
-                ev.stopPropagation();
-                post({ type: "open_ticket", taskId: s.ticketId });
-            });
-            var it = document.createElement("span");
-            it.textContent = s.ticketItem || "";
-            var age = document.createElement("span");
-            age.className = "claim-age" + (s.claimAgeSeconds >= 1200 ? " stale" : "");
-            age.textContent = "board · " + fmtAge(s.claimAgeSeconds) + " ago";
-            cl.appendChild(tk); cl.appendChild(it); cl.appendChild(age);
-            card.appendChild(cl);
-        }
-
-        card.addEventListener("click", function () { activate(s); });
-        card.addEventListener("keydown", function (ev) {
-            if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); activate(s); }
-        });
-
-        listEl.appendChild(card);
-    });
+    /* By team falls back to Attention first when the host sent no grouping, so blocked-first
+       still holds in that mode (ordered() ranks "team" exactly like "attention"). */
+    if (order === "team" && teams.length) {
+        renderTeams();
+    } else {
+        rows.forEach(function (s) { listEl.appendChild(buildCard(s, null)); });
+    }
 
     /* FLIP: reordering slides rather than teleporting, so the eye can follow a card that moved. */
     if (!window.matchMedia("(prefers-reduced-motion:reduce)").matches) {
@@ -794,9 +1043,7 @@ function applyQuota(quota) {
     quotaEl.textContent = "";
 
     if (has5) quotaEl.appendChild(quotaPart("5h", quota.fiveHourLeft));
-    if (has5 && has7) quotaEl.appendChild(document.createTextNode(" · "));
     if (has7) quotaEl.appendChild(quotaPart("7d", quota.sevenDayLeft));
-    quotaEl.appendChild(document.createTextNode(" left"));
 
     quotaEl.classList.toggle("stale", !!(quota && quota.stale));
 
@@ -811,13 +1058,25 @@ function applyQuota(quota) {
     quotaEl.title = tip;
 }
 
+/* "5h 96% left" with a small bar under it (task d71bb221). Each figure says "left" on its own
+   now that they stack as separate columns, so neither can be read as "used". */
 function quotaPart(label, pct) {
-    var span = document.createElement("span");
-    span.appendChild(document.createTextNode(label + " "));
+    var part = document.createElement("span");
+    part.className = "q-part";
+    var text = document.createElement("span");
+    text.appendChild(document.createTextNode(label + " "));
     var b = document.createElement("b");
     b.textContent = pct + "%";
-    span.appendChild(b);
-    return span;
+    text.appendChild(b);
+    text.appendChild(document.createTextNode(" left"));
+    var bar = document.createElement("span");
+    bar.className = "q-bar";
+    var fill = document.createElement("i");
+    fill.className = "q-fill" + (pct <= 20 ? " low" : "");
+    fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+    bar.appendChild(fill);
+    part.appendChild(text); part.appendChild(bar);
+    return part;
 }
 
 /* CONTEXT FILL — how full this terminal's conversation is, as a percentage USED (task 85af4635).
@@ -893,12 +1152,15 @@ listEl.addEventListener("pointerleave", function () {
     if (reshufflePending) { reshufflePending = false; render(); }
 });
 
-function applySessions(next) {
+function applySessions(next, nextTeams) {
     sessions = next || [];
+    teams = nextTeams || [];
     haveReceivedData = true;
     reconcileAcks();
     pruneAnim();
-    if (order === "attention" && pointerInList) {
+    /* By team reorders as much as Attention first does (a team jumps up when a helper blocks),
+       so it defers under the pointer for the same reason. */
+    if ((order === "attention" || order === "team") && pointerInList) {
         reshufflePending = true;
         var n = sessions.filter(isBlocking).length;
         needsEl.textContent = String(n);
@@ -986,7 +1248,7 @@ window.chrome.webview.addEventListener("message", function (ev) {
         document.body.classList.toggle("light", !msg.isDark);
         rebuildColorCache();   // the only thing that changes what stateColor() resolves to
     } else if (msg.type === "sessions") {
-        applySessions(msg.sessions);
+        applySessions(msg.sessions, msg.teams);
         /* Arrives in the SAME envelope as the cards, deliberately — a separate message would be a
            second freshness path, letting the header and the cards come from different moments
            while presenting as one reading. */
@@ -1031,12 +1293,17 @@ window.chrome.webview.addEventListener("message", function (ev) {
 /* Ages tick locally so "waiting 4m" stays true between pushes from the host. */
 setInterval(function () {
     sessions.forEach(function (s) { if (typeof s.sinceSeconds === "number") s.sinceSeconds += 1; });
-    Array.prototype.forEach.call(listEl.children, function (el) {
-        var id = el.getAttribute("data-id");
-        var s = null;
-        for (var i = 0; i < sessions.length; i++) { if (sessions[i].id === id) { s = sessions[i]; break; } }
+    /* Every card, including a helper's card nested inside its team. Only a card's OWN age:
+       a PM card's .elapsed is its own child, and its helpers are siblings, not children. */
+    Array.prototype.forEach.call(listEl.querySelectorAll(".card[data-id]"), function (el) {
+        var s = byId(el.getAttribute("data-id"));
         var t = el.querySelector(".elapsed");
         if (s && t) t.textContent = fmtAge(s.sinceSeconds);
+    });
+    teams.forEach(function (g) {
+        if (!g.needsYou) return;
+        var badge = listEl.querySelector(".needs-badge[data-helper=\"" + g.needsYou.id + "\"]");
+        if (badge) badge.textContent = needsYouText(g.needsYou);
     });
 }, 1000);
 

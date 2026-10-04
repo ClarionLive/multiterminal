@@ -112,6 +112,24 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// The DocId of the pane that spawned the helper pane <paramref name="helperDocId"/>, or null
+        /// when nothing proven is recorded for it (task d71bb221: the Attention rail groups a helper
+        /// under its PM). Returns the DocId only — never the nonce, which stays a secret of this class.
+        /// </summary>
+        public string? SpawnerDocIdFor(string? helperDocId)
+        {
+            if (string.IsNullOrEmpty(helperDocId))
+            {
+                return null;
+            }
+
+            lock (_lock)
+            {
+                return _byHelperDocId.TryGetValue(helperDocId, out var e) ? e.SpawnerDocId : null;
+            }
+        }
+
+        /// <summary>
         /// Drops the helper pane's entry, whoever closed it. Called when the pane leaves the dock, so a
         /// closed pane's entry can never be matched again. Returns whether an entry was removed.
         /// </summary>

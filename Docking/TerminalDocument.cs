@@ -3024,6 +3024,51 @@ namespace MultiTerminal.Docking
         public string PaneAgentName => StatusLineIdentity;
 
         /// <summary>
+        /// This pane's stable key (task d71bb221). Minted once per pane and saved with the session,
+        /// unlike <see cref="DocId"/>, which is re-minted every run and so cannot carry a link from
+        /// one run to the next. The Attention rail uses it to remember which pane spawned a helper.
+        /// </summary>
+        public string PaneKey { get; private set; } = Guid.NewGuid().ToString("N");
+
+        /// <summary>
+        /// The agent name this pane's helper link was recorded under, or null when the pane is not
+        /// a known helper. See <see cref="SetHelperLink"/>.
+        /// </summary>
+        public string HelperLinkName { get; private set; }
+
+        /// <summary>
+        /// The <see cref="PaneKey"/> of the pane that spawned this helper, proven at spawn time, or
+        /// null when the spawner was not proven (a helper whose PM is unknown).
+        /// </summary>
+        public string HelperLinkSpawnerPaneKey { get; private set; }
+
+        /// <summary>Restores the key a saved session recorded. Ignores an empty value.</summary>
+        internal void RestorePaneKey(string paneKey)
+        {
+            if (!string.IsNullOrWhiteSpace(paneKey)) PaneKey = paneKey;
+        }
+
+        /// <summary>
+        /// Records that this pane is a helper running as <paramref name="helperName"/>, spawned by the
+        /// pane keyed <paramref name="spawnerPaneKey"/> (null = unproven). A null name clears the link.
+        /// </summary>
+        internal void SetHelperLink(string helperName, string spawnerPaneKey)
+        {
+            HelperLinkName = string.IsNullOrWhiteSpace(helperName) ? null : helperName;
+            HelperLinkSpawnerPaneKey = HelperLinkName == null || string.IsNullOrWhiteSpace(spawnerPaneKey) ? null : spawnerPaneKey;
+        }
+
+        /// <summary>True when this pane's CURRENT launch was a <c>spawn_helper</c> spawn.</summary>
+        internal bool LaunchedAsHelper => _terminalRole == MultiTerminal.Terminal.TerminalRole.Helper;
+
+        /// <summary>
+        /// The role this pane's tab shows right now, so the Attention rail's PM tag and the tab's
+        /// "(PM)" are one decision (task d71bb221).
+        /// </summary>
+        internal MultiTerminal.Terminal.TerminalRole DisplayedRole =>
+            MultiTerminal.Terminal.TerminalRoles.ForDisplay(_terminalRole, _launchProjectId, _currentProjectId, _currentProjectKnown);
+
+        /// <summary>
         /// Pre-writes a fallback statusline JSON file containing just the folder path
         /// and terminal name. Ensures the header renders something (folder row + model
         /// placeholder) even if the child Claude Code process has a project-level
