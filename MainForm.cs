@@ -5975,12 +5975,21 @@ namespace MultiTerminal
             if (terminals.Count == 0)
                 return;
 
+            // A helper spawned while the Attention rail was closed has not had its link stamped yet.
+            StampHelperLinks();
+
             // Save terminal states
             var sessionData = terminals.Select(t => new TerminalSessionInfo
             {
                 WorkingDirectory = t.GetWorkingDirectory() ?? _settings?.GetLastDirectory(),
                 FontSize = t.GetFontSize(),
-                CustomTitle = t.CustomTitle
+                CustomTitle = t.CustomTitle,
+
+                // The pane's team link, so the Attention rail's By team grouping survives a restart
+                // (task d71bb221).
+                PaneKey = t.PaneKey,
+                HelperName = t.HelperLinkName,
+                SpawnerPaneKey = t.HelperLinkSpawnerPaneKey,
             }).ToList();
 
             _settings.SetSessionTerminals(sessionData);
@@ -6686,6 +6695,11 @@ namespace MultiTerminal
                 {
                     doc.CustomTitle = sessionInfo.CustomTitle;
                 }
+
+                // The pane's key and helper link from the last run (task d71bb221). A link whose PM
+                // pane is not restored resolves to "PM unknown" on the rail; it is never re-guessed.
+                doc.RestorePaneKey(sessionInfo.PaneKey);
+                doc.SetHelperLink(sessionInfo.HelperName, sessionInfo.SpawnerPaneKey);
             }
             else
             {
@@ -7891,8 +7905,23 @@ namespace MultiTerminal
                     if (activeProject != null) activeTaskProjects[agent] = activeProject;
                 }
 
+                // Team roles for the By team order (task d71bb221): PM from the tab's own role, helper
+                // and its PM from the pane link. Same launched-first pane order as paneProjects, so a
+                // stale restored pane cannot claim a running agent's role.
+                StampHelperLinks();
+                var teamLinks = AttentionPanel.AttentionTeamResolver.Resolve(
+                    panesLaunchedFirst.Select(d => new AttentionPanel.AttentionPaneTeamFacts
+                    {
+                        PaneKey = d.PaneKey,
+                        AgentName = TerminalRegistrationBinder.IsUnassigned(d.PaneAgentName) ? null : d.PaneAgentName,
+                        DisplayedAsPm = d.DisplayedRole == MultiTerminal.Terminal.TerminalRole.ProjectManager,
+                        LaunchedAsHelper = d.LaunchedAsHelper,
+                        LinkHelperName = d.HelperLinkName,
+                        LinkSpawnerPaneKey = d.HelperLinkSpawnerPaneKey,
+                    }));
+
                 var cards = AttentionPanel.AttentionCardProjector.Project(
-                    snapshot, colors, claims, DateTime.UtcNow, agentProjects, agentStats, paneProjects, activeTaskProjects);
+                    snapshot, colors, claims, DateTime.UtcNow, agentProjects, agentStats, paneProjects, activeTaskProjects, teamLinks);
 
                 // The account reading is offered ALONGSIDE the per-terminal copies rather than
                 // instead of them: From() already ranks a shared-source reading above a
@@ -7902,11 +7931,57 @@ namespace MultiTerminal
                 if (accountQuota != null) quotaCandidates.Add(accountQuota);
 
                 _attentionPanel.SetSessions(
-                    cards, AttentionPanel.AttentionQuota.From(quotaCandidates));
+                    cards, AttentionPanel.AttentionQuota.From(quotaCandidates),
+                    AttentionPanel.AttentionTeamLayout.Build(cards));
             }
             catch (Exception ex)
             {
                 _debugLogService?.Error("AttentionPanel", $"RefreshAttentionPanel failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Stamps each spawned helper pane with the stable key of the pane that spawned it
+        /// (task d71bb221), so the Attention rail can group it under its PM and the link survives a
+        /// restart.
+        /// </summary>
+        /// <remarks>
+        /// The spawner comes from <c>SpawnedPaneRegistry</c>, which records only a NONCE-PROVEN
+        /// spawner pane — never the name the caller typed into <c>spawn_helper</c>. A helper with no
+        /// proven spawner (the phone app, an old MCP server) is stamped with no spawner key, and the
+        /// rail files it under "PM unknown" rather than guessing. Re-checked on every call while the
+        /// key is missing, so a proof that lands after the pane registers still upgrades the link.
+        /// Done here rather than at spawn time so the spawn path is untouched.
+        /// </remarks>
+        private void StampHelperLinks()
+        {
+            try
+            {
+                var panes = _dockPanel?.Documents.OfType<TerminalDocument>().ToList();
+                if (panes == null || panes.Count == 0) return;
+                var registry = _mcpServer?.SpawnService?.Panes;
+
+                foreach (var doc in panes)
+                {
+                    if (!doc.LaunchedAsHelper) continue;
+                    string agent = doc.PaneAgentName;
+                    if (string.IsNullOrWhiteSpace(agent) || TerminalRegistrationBinder.IsUnassigned(agent)) continue;
+
+                    bool sameAgent = string.Equals(doc.HelperLinkName, agent, StringComparison.OrdinalIgnoreCase);
+                    if (sameAgent && doc.HelperLinkSpawnerPaneKey != null) continue;
+
+                    string spawnerDocId = registry?.SpawnerDocIdFor(doc.DocId);
+                    var spawner = spawnerDocId == null
+                        ? null
+                        : panes.FirstOrDefault(p => !ReferenceEquals(p, doc)
+                                                    && string.Equals(p.DocId, spawnerDocId, StringComparison.Ordinal));
+                    doc.SetHelperLink(agent, spawner?.PaneKey);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Costs the grouping, never the rail.
+                _debugLogService?.Info("AttentionPanel", $"Helper link stamp failed: {ex.Message}");
             }
         }
 
@@ -7950,6 +8025,10 @@ namespace MultiTerminal
             _attentionPanel.AmbientChanged += (s, ambient) => _settings?.SetAttentionPanelAmbient(ambient);
             _attentionPanel.AlarmChanged += (s, alarm) => _settings?.SetAttentionPanelAlarm(alarm);
 
+            // Ctrl+wheel zoom, saved like the chat panel's (task d71bb221) and restored by
+            // ApplyAttentionPanelSettings below.
+            _attentionPanel.ZoomChanged += (s, zoom) => _settings?.SetAttentionPanelZoom(zoom);
+
             // Covers the two RECREATE paths (GetContentFromPersistString, ToggleAttentionPanel),
             // which run long after LoadSettings and so must re-push the stored preferences
             // themselves. On the CONSTRUCTION path this is a deliberate no-op — see
@@ -7987,6 +8066,9 @@ namespace MultiTerminal
             _attentionPanel.SetOrder(_settings.GetAttentionPanelOrder());
             _attentionPanel.SetAmbient(_settings.GetAttentionPanelAmbient());
             _attentionPanel.SetAlarm(_settings.GetAttentionPanelAlarm());
+
+            // Held as a pending value and applied once the WebView2 initialises, like ChatPanel.
+            _attentionPanel.SetZoomFactor(_settings.GetAttentionPanelZoom());
         }
 
         /// <summary>

@@ -39,14 +39,21 @@ namespace MultiTerminal.AttentionPanel
         private string _alarm = "redalert";
         private string _focusedSessionId;
 
+        // Ctrl+wheel zoom (task d71bb221), the ChatPanelControl pattern: held until the WebView2
+        // exists, then applied, and every change after that is raised for MainForm to save.
+        private double _pendingZoom = 1.0;
+
         /// <summary>Raised when the user clicks a card. Argument is the session id.</summary>
         public event EventHandler<string> FocusSessionRequested;
 
         /// <summary>Raised when the user clicks a ticket chip. Argument is the task id.</summary>
         public event EventHandler<string> OpenTicketRequested;
 
-        /// <summary>Raised when the user changes the ordering preference ("attention" | "fixed" | "project").</summary>
+        /// <summary>Raised when the user changes the ordering preference ("attention" | "fixed" | "project" | "team").</summary>
         public event EventHandler<string> OrderChanged;
+
+        /// <summary>Raised when the WebView2 zoom factor changes (e.g. Ctrl+wheel). Task d71bb221.</summary>
+        public event EventHandler<double> ZoomChanged;
 
         /// <summary>Raised when the user picks an ambient (activity) treatment from the gear.</summary>
         public event EventHandler<string> AmbientChanged;
@@ -69,6 +76,16 @@ namespace MultiTerminal.AttentionPanel
             {
                 if (Visible && !_isInitialized && !_isInitializing) InitializeWebView();
             };
+        }
+
+        /// <summary>
+        /// Sets the zoom factor. Applies immediately if the WebView2 exists, otherwise it is held and
+        /// applied once it does — so MainForm can restore the saved value before the pane is shown.
+        /// </summary>
+        public void SetZoomFactor(double zoom)
+        {
+            _pendingZoom = zoom;
+            if (_webView?.CoreWebView2 != null) _webView.ZoomFactor = zoom;
         }
 
         /// <summary>Applies the current ordering preference, echoing it to the view.</summary>
@@ -132,7 +149,7 @@ namespace MultiTerminal.AttentionPanel
             return allowed[0];
         }
 
-        internal static readonly string[] Orders = { "attention", "fixed", "project" };
+        internal static readonly string[] Orders = { "attention", "fixed", "project", "team" };
         internal static readonly string[] Ambients = { "stream", "vitals", "walker", "rail", "breath", "off" };
         internal static readonly string[] Alarms = { "redalert", "beacon", "klaxon", "hand" };
 
@@ -155,9 +172,14 @@ namespace MultiTerminal.AttentionPanel
         /// means the "keep only the LATEST" queue below covers both without a second copy of that
         /// logic.
         /// </remarks>
-        public void SetSessions(IEnumerable<object> sessions, object quota = null)
+        /// <param name="teams">
+        /// The By-team grouping of these same cards (task d71bb221), or null. In the SAME envelope for
+        /// the same reason as the quota: a second message would let the grouping and the cards come
+        /// from different moments.
+        /// </param>
+        public void SetSessions(IEnumerable<object> sessions, object quota = null, IEnumerable<object> teams = null)
         {
-            string json = JsonSerializer.Serialize(new { type = "sessions", sessions, quota });
+            string json = JsonSerializer.Serialize(new { type = "sessions", sessions, quota, teams });
             if (!_isInitialized)
             {
                 // Keep only the LATEST: replaying a queue of stale snapshots would animate the
@@ -203,6 +225,13 @@ namespace MultiTerminal.AttentionPanel
 
                 _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
 
+                _webView.ZoomFactorChanged += (zs, ze) =>
+                {
+                    _pendingZoom = _webView.ZoomFactor;
+                    ZoomChanged?.Invoke(this, _webView.ZoomFactor);
+                };
+                if (Math.Abs(_pendingZoom - 1.0) > 0.01) _webView.ZoomFactor = _pendingZoom;
+
                 string htmlPath = FindHtml("AttentionPanel/attention-panel.html");
                 if (File.Exists(htmlPath))
                 {
@@ -246,6 +275,10 @@ namespace MultiTerminal.AttentionPanel
                 {
                     _isInitialized = true;
                     _isInitializing = false;
+
+                    // Re-applied once the page is up, as ChatPanelControl does after its navigation,
+                    // so a zoom restored before the first navigation cannot be lost to it.
+                    if (Math.Abs(_webView.ZoomFactor - _pendingZoom) > 0.01) _webView.ZoomFactor = _pendingZoom;
                     PostJson(new { type = "theme", isDark = _isDarkTheme });
                     PostJson(new { type = "order", order = _order });
                     PostJson(new { type = "ambient", ambient = _ambient });

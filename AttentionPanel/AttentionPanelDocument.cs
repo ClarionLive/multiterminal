@@ -43,6 +43,12 @@ namespace MultiTerminal.AttentionPanel
         /// <summary>Raised when the user picks an alarm treatment from the gear.</summary>
         public event EventHandler<string> AlarmChanged;
 
+        /// <summary>Raised when the WebView2 zoom factor changes (Ctrl+wheel). Task d71bb221.</summary>
+        public event EventHandler<double> ZoomChanged;
+
+        /// <summary>Applies a saved zoom factor; held until the WebView2 is ready.</summary>
+        public void SetZoomFactor(double zoom) => _control?.SetZoomFactor(zoom);
+
         /// <summary>Creates the dockable attention panel.</summary>
         public AttentionPanelDocument()
         {
@@ -69,13 +75,14 @@ namespace MultiTerminal.AttentionPanel
             _control.OrderChanged += (s, order) => OrderChanged?.Invoke(this, order);
             _control.AmbientChanged += (s, ambient) => AmbientChanged?.Invoke(this, ambient);
             _control.AlarmChanged += (s, alarm) => AlarmChanged?.Invoke(this, alarm);
+            _control.ZoomChanged += (s, zoom) => ZoomChanged?.Invoke(this, zoom);
 
             Controls.Add(_control);
         }
 
         /// <summary>Pushes the current card list to the view.</summary>
-        public void SetSessions(IEnumerable<object> sessions, object quota = null)
-            => _control?.SetSessions(sessions, quota);
+        public void SetSessions(IEnumerable<object> sessions, object quota = null, IEnumerable<object> teams = null)
+            => _control?.SetSessions(sessions, quota, teams);
 
         /// <summary>Applies the saved ordering preference.</summary>
         public void SetOrder(string order) => _control?.SetOrder(order);
