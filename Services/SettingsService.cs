@@ -1126,46 +1126,32 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Gets the saved terminal sessions from the last run.
-        /// Format: "dir1|size1|title1;dir2|size2|title2;..."
         /// </summary>
+        /// <remarks>
+        /// Stored as versioned JSON since task d71bb221 (pipeline Run 1); the legacy
+        /// "dir|size|title[|paneKey|helper|spawnerPaneKey];..." form is still read. Both formats, the
+        /// rule for when a legacy column can be trusted, and the pane-key checks are documented on
+        /// <see cref="SessionTerminalsFormat"/>.
+        /// </remarks>
         public List<TerminalSessionInfo> GetSessionTerminals()
         {
             string data = Get(SessionTerminalsKey);
             if (string.IsNullOrEmpty(data))
                 return null;
 
-            var result = new List<TerminalSessionInfo>();
+            List<TerminalSessionInfo> result;
             try
             {
-                foreach (string entry in data.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
-                {
-                    string[] parts = entry.Split('|');
-                    if (parts.Length >= 2 &&
-                        float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float size))
-                    {
-                        var info = new TerminalSessionInfo
-                        {
-                            WorkingDirectory = parts[0],
-                            FontSize = size
-                        };
-                        // Custom title is optional (third part)
-                        if (parts.Length >= 3 && !string.IsNullOrEmpty(parts[2]))
-                        {
-                            info.CustomTitle = parts[2];
-                        }
-
-                        // The pane's team link (task d71bb221), optional fourth to sixth parts. An
-                        // entry written before this ticket simply has none, and restores exactly as
-                        // it always did.
-                        if (parts.Length >= 4 && !string.IsNullOrEmpty(parts[3])) info.PaneKey = parts[3];
-                        if (parts.Length >= 5 && !string.IsNullOrEmpty(parts[4])) info.HelperName = parts[4];
-                        if (parts.Length >= 6 && !string.IsNullOrEmpty(parts[5])) info.SpawnerPaneKey = parts[5];
-                        result.Add(info);
-                    }
-                }
+                result = SessionTerminalsFormat.Read(data);
             }
             catch
             {
+                return null;
+            }
+
+            if (result == null)
+            {
+                System.Diagnostics.Trace.WriteLine("[SettingsService.GetSessionTerminals] Unrecognised SessionTerminals value; restoring no panes.");
                 return null;
             }
 
@@ -1175,6 +1161,11 @@ namespace MultiTerminal.Services
             // TerminalDocument / statusline renderer on restore. Empty/null titles are left
             // untouched — distinct unnamed terminals are legitimately distinct.
             result = DedupByCustomTitle(result, "GetSessionTerminals");
+
+            // Every restored pane key is a well-formed GUID no other restored pane holds, and no link
+            // points at an ambiguous one (pipeline Run 1). After the dedup, so a dropped duplicate
+            // terminal's key does not count.
+            SessionTerminalsFormat.NormalizePaneKeys(result);
 
             return result.Count > 0 ? result : null;
         }
@@ -1208,10 +1199,9 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Saves the terminal sessions for the next run.
-        /// Format: "dir1|size1|title1|paneKey1|helper1|spawnerPaneKey1;..." — the last three are the
-        /// pane's team link (task d71bb221) and are written only when there is something to say, so
-        /// a pane with no link saves exactly the three-part entry it always did.
+        /// Saves the terminal sessions for the next run, as one line of versioned JSON (task
+        /// d71bb221, pipeline Run 1): every field — directory, title, pane key, helper link — is
+        /// escaped, so no value can reach another field. See <see cref="SessionTerminalsFormat"/>.
         /// </summary>
         public void SetSessionTerminals(List<TerminalSessionInfo> terminals)
         {
@@ -1226,38 +1216,7 @@ namespace MultiTerminal.Services
             // duplicate that a later restore could re-materialize (task d14048ef).
             terminals = DedupByCustomTitle(terminals, "SetSessionTerminals");
 
-            var entries = new List<string>();
-            foreach (var t in terminals)
-            {
-                string dir = t.WorkingDirectory ?? "";
-                string size = t.FontSize.ToString("F1", CultureInfo.InvariantCulture);
-                string title = t.CustomTitle ?? "";
-                string paneKey = SessionField(t.PaneKey);
-                if (paneKey.Length == 0)
-                {
-                    entries.Add($"{dir}|{size}|{title}");
-                    continue;
-                }
-
-                // A helper name that cannot be stored safely drops the WHOLE link rather than
-                // keeping a spawner key with no name to check it against: a link that cannot be
-                // verified on restore must restore as no link, never as a guess.
-                string helper = SessionField(t.HelperName);
-                string spawner = helper.Length == 0 ? string.Empty : SessionField(t.SpawnerPaneKey);
-                entries.Add($"{dir}|{size}|{title}|{paneKey}|{helper}|{spawner}");
-            }
-            Set(SessionTerminalsKey, string.Join(";", entries));
-        }
-
-        /// <summary>
-        /// A session field that can be stored in the pipe/semicolon format, or empty when it cannot.
-        /// The separators are not escaped by this format, so a value containing one is dropped
-        /// rather than allowed to shift every later field of the entry.
-        /// </summary>
-        private static string SessionField(string value)
-        {
-            if (string.IsNullOrEmpty(value)) return string.Empty;
-            return value.IndexOf('|') >= 0 || value.IndexOf(';') >= 0 ? string.Empty : value;
+            Set(SessionTerminalsKey, SessionTerminalsFormat.Write(terminals));
         }
 
         /// <summary>

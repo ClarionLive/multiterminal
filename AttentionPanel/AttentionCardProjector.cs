@@ -176,6 +176,7 @@ namespace MultiTerminal.AttentionPanel
                     // PM name only for a helper, so a malformed link cannot invent a role or a team.
                     Role = team?.Role == AttentionTeamRoles.Pm || team?.Role == AttentionTeamRoles.Helper ? team.Role : null,
                     Pm = team?.Role == AttentionTeamRoles.Helper && !string.IsNullOrWhiteSpace(team.Pm) ? team.Pm : null,
+                    PmRecordedOnly = team?.Role == AttentionTeamRoles.Helper && !string.IsNullOrWhiteSpace(team.Pm) && team.PmRecordedOnly,
                 });
             }
 

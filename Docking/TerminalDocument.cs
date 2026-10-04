@@ -3042,7 +3042,18 @@ namespace MultiTerminal.Docking
         /// </summary>
         public string HelperLinkSpawnerPaneKey { get; private set; }
 
-        /// <summary>Restores the key a saved session recorded. Ignores an empty value.</summary>
+        /// <summary>
+        /// The agent name the spawner pane was running when the link was stamped, or null when the
+        /// spawner was unproven (pipeline Run 1). The spawner pane counts as the PM only while it
+        /// still runs under this name: a pane is reused and restored, so its key alone does not say
+        /// who the PM was.
+        /// </summary>
+        public string HelperLinkSpawnerName { get; private set; }
+
+        /// <summary>
+        /// Restores the key a saved session recorded. Ignores an empty value. The session reader has
+        /// already checked it is a well-formed GUID that no other restored pane holds.
+        /// </summary>
         internal void RestorePaneKey(string paneKey)
         {
             if (!string.IsNullOrWhiteSpace(paneKey)) PaneKey = paneKey;
@@ -3050,12 +3061,14 @@ namespace MultiTerminal.Docking
 
         /// <summary>
         /// Records that this pane is a helper running as <paramref name="helperName"/>, spawned by the
-        /// pane keyed <paramref name="spawnerPaneKey"/> (null = unproven). A null name clears the link.
+        /// pane keyed <paramref name="spawnerPaneKey"/> while it ran as <paramref name="spawnerName"/>
+        /// (both null = unproven). A null helper name clears the whole link.
         /// </summary>
-        internal void SetHelperLink(string helperName, string spawnerPaneKey)
+        internal void SetHelperLink(string helperName, string spawnerPaneKey, string spawnerName)
         {
             HelperLinkName = string.IsNullOrWhiteSpace(helperName) ? null : helperName;
             HelperLinkSpawnerPaneKey = HelperLinkName == null || string.IsNullOrWhiteSpace(spawnerPaneKey) ? null : spawnerPaneKey;
+            HelperLinkSpawnerName = HelperLinkName == null || string.IsNullOrWhiteSpace(spawnerName) ? null : spawnerName;
         }
 
         /// <summary>True when this pane's CURRENT launch was a <c>spawn_helper</c> spawn.</summary>
