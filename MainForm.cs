@@ -5408,59 +5408,35 @@ namespace MultiTerminal
 
         private void ApplyGridLayout(GridLayoutManager.GridPreset preset)
         {
-            var docs = _gridManager.GetTerminalDocuments();
+            int existingCount = _gridManager.GetTerminalDocuments().Count;
             int neededCount = GetTerminalCountForPreset(preset);
 
-            // Add terminals if needed
-            while (docs.Count < neededCount)
+            // Top up with Home tabs (task a7d3e675). Each added pane goes through AddNewTerminal, the
+            // same path as "+ New", with NO launch parameter: no shell starts and no team name is taken
+            // until the user picks something on the start screen. This loop used to build and start
+            // terminals itself (pre-register a pool name, then StartTerminal at the last directory), so
+            // a layout produced named PowerShells whose HUDs showed other projects' tasks. That private
+            // copy of the wiring had already drifted once (task 0d72698a lost zoom here), so it is gone
+            // rather than shared.
+            //
+            // forceTabMode docks with DockState.Document, exactly as the old loop did, so ApplyPreset
+            // below still places every pane in its grid slot. AddNewTerminal's own MaxGridPanes
+            // placement is bypassed on purpose, because ApplyPreset owns placement here.
+            //
+            // AddNewTerminal also makes each new pane the last active terminal, which the old loop never
+            // did. Put the user's terminal back so Recent-folder cd and similar still target it.
+            var previousLastActive = _lastActiveTerminal;
+            for (int i = existingCount; i < neededCount; i++)
             {
-                var doc = new TerminalDocument();
-                doc.Terminal.SetDebugLogService(_debugLogService);
-                doc.SetDebugLogService(_debugLogService); // Enable status bar logging
-                doc.SetTheme(_currentTheme);
-                doc.SetMessageBroker(_mcpServer?.Broker); // Enable status bar updates
-                doc.TerminalExited += OnTerminalExited;
-                doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
-                doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
-                doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
-                doc.StatusBarHeightChanged += OnStatusBarHeightChanged;
-                doc.HudTabZoomChanged += OnHudTabZoomChanged;
-                doc.Terminal.TerminalClicked += OnTerminalClicked;
-                doc.SaveAsPromptRequested += OnSaveAsPromptRequested;
-                doc.DirectoryChanged += OnTerminalDirectoryChanged;
-                doc.ProjectFileChanged += OnProjectFileChanged;
-                doc.ClaudeCodeDetected += OnClaudeCodeDetected;
-                doc.TaskDropped += OnTaskDroppedOnTerminal;
-
-                // Wire up "Launch as..." context menu support
-                doc.GetAvailableIdentities = () => GetAvailableIdentities().ToArray();
-                doc.LaunchAsIdentityRequested += OnLaunchAsIdentityRequested;
-                WireStartScreenEvents(doc);
-
-                doc.Show(_dockPanel, DockState.Document);
-
-                // Pre-register with MessageBroker so the terminal is routable immediately
-                var terminalName = PreRegisterTerminal(doc.DocId, doc.LaunchNonce);
-                doc.StartTerminal(_settings?.GetLastDirectory(), terminalName);
-                doc.SetFontSize(_settings?.GetTerminalFontSize() ?? 10f);
-
-                // Grid-preset terminals get the same saved layout as every other creation path.
-                // This block was absent here (task 0d72698a, debugger gate): a terminal spawned by a
-                // layout preset opened every HUD tab at 1.0 no matter what was saved, and Ctrl+wheel
-                // in it went nowhere because nothing was subscribed — the ticket's own defect, one
-                // layer up. Split ratios and status-bar height were missing for the same reason.
-                if (_settings != null)
-                {
-                    doc.ApplyAgentSplitRatio(_settings.GetAgentPanelSplitRatio());
-                    doc.ApplyHudSplitRatio(_settings.GetHudSplitRatio());
-                    ApplySavedHudTabZooms(doc);
-                    doc.ApplyStatusBarHeight(_settings.GetStatusBarHeight());
-                }
-
-                docs.Add(doc);
+                AddNewTerminal(forceTabMode: true);
+            }
+            if (previousLastActive != null && !previousLastActive.IsDisposed)
+            {
+                _lastActiveTerminal = previousLastActive;
             }
 
-            // Apply the layout
+            // Apply the layout. A preset with fewer slots than open terminals closes nothing:
+            // ArrangeAsGrid lays out the first rows*cols documents and leaves the rest where they are.
             _gridManager.ApplyPreset(preset);
         }
 
