@@ -18,7 +18,7 @@ namespace MultiTerminal.DashboardHeader
 {
     /// <summary>
     /// WebView2-based dashboard header that replaces the traditional ToolStrip.
-    /// Shows: the M menu, the project actions (Select Project, Browse All Projects, New Project,
+    /// Shows: the M menu, the project actions (Launch Project, Browse All Projects, New Project,
     /// Just Claude, Open PowerShell), panel toggles, project info, active task. The M menu and the
     /// project picker open in <see cref="HeaderPopupForm"/> windows (task 4cac608c).
     /// </summary>
@@ -36,14 +36,14 @@ namespace MultiTerminal.DashboardHeader
         private readonly Queue<string> _pendingMessages = new();
         private string _pageUri;              // dashboard.html; the only page whose messages count
 
-        // The M menu and the Select Project picker share one popup window; the Grid Layout flyout
+        // The M menu and the Launch Project picker share one popup window; the Grid Layout flyout
         // has its own, so it can sit beside the menu (task 4cac608c).
         private HeaderPopupForm _menuPopup;
         private HeaderPopupForm _subPopup;
         private long _popupAutoClosedAt;      // Environment.TickCount64 when a click-away closed the popups
         private string _popupAutoClosedView;  // which view that was, so its own button doesn't reopen it
 
-        // A click on the M or Select Project button while its popup is open first deactivates the
+        // A click on the M or Launch Project button while its popup is open first deactivates the
         // popup (closing it), then arrives as an action. Within this window, treat it as "close".
         private const int ReopenSuppressMs = 300;
 
@@ -52,7 +52,7 @@ namespace MultiTerminal.DashboardHeader
         public event Action NewProjectRequested;
         public event Action JustClaudeRequested;
         public event Action OpenPowerShellRequested;
-        public event Action<string> SwitchProjectRequested;
+        public event Action<string> LaunchProjectRequested;
         public event Action ToggleThemeRequested;
         public event Action SettingsRequested;
         public event Action DocsRequested;
@@ -63,7 +63,7 @@ namespace MultiTerminal.DashboardHeader
         public event Action ShowChatHistoryRequested;
         public event Action DashboardReady;
 
-        /// <summary>The projects the Select Project picker lists, and the current project's id.</summary>
+        /// <summary>The projects the Launch Project picker lists, and the current project's id.</summary>
         public Func<(IReadOnlyList<HeaderProjectItem> Projects, string CurrentProjectId)> ProjectListProvider { get; set; }
 
         public DashboardHeaderControl()
@@ -457,9 +457,9 @@ namespace MultiTerminal.DashboardHeader
         private void OnPopupAction(string action, string projectId)
         {
             CloseAllPopups();
-            if (action == "switch_project")
+            if (action == "launch_project")
             {
-                if (!string.IsNullOrEmpty(projectId)) SwitchProjectRequested?.Invoke(projectId);
+                if (!string.IsNullOrEmpty(projectId)) LaunchProjectRequested?.Invoke(projectId);
                 return;
             }
             HandleAction(action);

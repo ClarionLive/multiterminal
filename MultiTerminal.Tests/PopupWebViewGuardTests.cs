@@ -55,7 +55,7 @@ namespace MultiTerminal.Tests
         }
 
         [Theory]
-        [InlineData(true, true, true)]    // clicked M or Select Project, still waiting: tell the user
+        [InlineData(true, true, true)]    // clicked M or Launch Project, still waiting: tell the user
         [InlineData(true, false, false)]  // flyout opened by hovering over Grid Layout: log only
         [InlineData(false, true, false)]  // nobody is waiting (e.g. the startup warm-up): log only
         [InlineData(false, false, false)]

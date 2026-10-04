@@ -264,7 +264,7 @@ function renderProjects() {
       var g = glyph(p);
       var current = p.id === currentProjectId;
       html += '<button type="button" class="item row' + (current ? ' current' : '') + '" role="option" aria-selected="' + current + '"' +
-        ' data-index="' + (n++) + '" data-action="switch_project" data-project-id="' + esc(p.id) + '">' +
+        ' data-index="' + (n++) + '" data-action="launch_project" data-project-id="' + esc(p.id) + '">' +
         '<span class="glyph"' + (g.color ? ' style="color:' + esc(g.color) + '"' : '') + '>' + esc(g.text) + '</span>' +
         '<span class="text"><span class="name">' + esc(p.name) + '</span><span class="path">' + esc(p.path) + '</span></span>' +
         (current ? '<span class="check">' + svg('check', 16) + '</span>' : '') + '</button>';

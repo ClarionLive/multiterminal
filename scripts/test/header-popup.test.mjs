@@ -1,4 +1,4 @@
-// header-popup.test.mjs — the Select Project picker's list rules (task 4cac608c).
+// header-popup.test.mjs — the Launch Project picker's list rules (task 4cac608c).
 //
 // Runs the REAL pickerSections/glyph functions, cut out of DashboardHeader/header-popup.html by
 // brace matching (each cut asserted), in node:vm. What this cannot see: the popup window, focus,

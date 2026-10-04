@@ -3,7 +3,7 @@ using System;
 namespace MultiTerminal.DashboardHeader
 {
     /// <summary>
-    /// One project as the header's Select Project picker shows it (task 4cac608c). MainForm builds
+    /// One project as the header's Launch Project picker shows it (task 4cac608c). MainForm builds
     /// the list; the picker sorts pinned first, then most recently opened.
     /// </summary>
     public sealed record HeaderProjectItem(

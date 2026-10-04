@@ -15,7 +15,7 @@ namespace MultiTerminal.DashboardHeader
 {
     /// <summary>
     /// A borderless popup window that hosts header-popup.html: the M menu, its Grid Layout flyout and
-    /// the Select Project picker (task 4cac608c).
+    /// the Launch Project picker (task 4cac608c).
     /// </summary>
     /// <remarks>
     /// The header is one 80px-tall WebView2, and a dropdown drawn inside it is clipped at its bottom
