@@ -173,6 +173,7 @@ var GRID = [
 ];
 
 var view = null;          // 'menu' | 'submenu' | 'projects'
+var requestId = 0;        // echoed in every size reply; the host ignores replies for an old show
 var focusIndex = -1;      // index into the current view's focusable buttons
 var theme = 'dark';
 var projects = [];
@@ -278,7 +279,7 @@ function renderProjects() {
 
 function postSize() {
   var r = document.getElementById(view).getBoundingClientRect();
-  post({ type: 'size', width: Math.ceil(r.width), height: Math.ceil(r.height), view: view });
+  post({ type: 'size', width: Math.ceil(r.width), height: Math.ceil(r.height), view: view, requestId: requestId });
 }
 
 /* ---------- focus + keyboard ---------- */
@@ -360,6 +361,7 @@ document.getElementById('search').addEventListener('input', renderProjects);
 
 function show(msg) {
   view = msg.view;
+  requestId = msg.requestId || 0;
   if (msg.theme) { theme = msg.theme; document.body.classList.toggle('light', theme === 'light'); }
   ['menu', 'submenu', 'projects'].forEach(function (id) { document.getElementById(id).hidden = id !== view; });
   if (view === 'menu') { renderMenu(); focusIndex = msg.keyboard ? 0 : -1; paintFocus(); }

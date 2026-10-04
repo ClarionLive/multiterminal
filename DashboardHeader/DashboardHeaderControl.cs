@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
@@ -33,6 +34,7 @@ namespace MultiTerminal.DashboardHeader
         private System.Windows.Forms.Timer _fallbackTimer;
         private double _pendingZoom = 1.0;
         private readonly Queue<string> _pendingMessages = new();
+        private string _pageUri;              // dashboard.html; the only page whose messages count
 
         // The M menu and the Select Project picker share one popup window; the Grid Layout flyout
         // has its own, so it can sit beside the menu (task 4cac608c).
@@ -170,7 +172,11 @@ namespace MultiTerminal.DashboardHeader
             var htmlPath = GetHtmlPath();
             if (File.Exists(htmlPath))
             {
-                _webView.CoreWebView2.Navigate(new Uri(htmlPath).AbsoluteUri);
+                // Header buttons trigger native actions (Exit, Open PowerShell...), so only this page
+                // may load here and only its messages are acted on (task 4cac608c, Run 1 security).
+                _pageUri = new Uri(htmlPath).AbsoluteUri;
+                WebViewPagePin.Pin(_webView, _pageUri);
+                _webView.CoreWebView2.Navigate(_pageUri);
             }
             else
             {
@@ -213,6 +219,12 @@ namespace MultiTerminal.DashboardHeader
 
         private void OnWebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
+            if (!WebViewPagePin.IsFromPage(e.Source, _pageUri))
+            {
+                _broker?.DebugLogService?.Error("DashboardHeader", $"Ignored a message from {e.Source}");
+                return;
+            }
+
             try
             {
                 var json = e.WebMessageAsJson;
@@ -309,25 +321,42 @@ namespace MultiTerminal.DashboardHeader
                 (int)Math.Round(rect.GetProperty("h").GetDouble() * s)));
         }
 
+        // Where the M button sits in dashboard.html (.dashboard padding-left 14px, .logo-btn 40x40,
+        // vertically centred in the 80px bar less its 10px bottom padding). Only used when a
+        // message arrives without the button's own rect.
+        private const int LogoLeftCss = 14;
+        private const int LogoTopCss = 15;
+        private const int LogoSizeCss = 40;
+
         /// <summary>Fallback anchor (the M button's spot) when a message carries no rect.</summary>
         private Rectangle DefaultAnchor()
         {
             var s = HeaderScale;
-            return new Rectangle(PointToScreen(new Point((int)(14 * s), (int)(16 * s))), new Size((int)(40 * s), (int)(40 * s)));
+            var topLeft = PointToScreen(new Point((int)(LogoLeftCss * s), (int)(LogoTopCss * s)));
+            return new Rectangle(topLeft, new Size((int)(LogoSizeCss * s), (int)(LogoSizeCss * s)));
         }
 
         private void EnsurePopups()
         {
-            if (_menuPopup != null) return;
+            // A popup can only be disposed by MT shutting down now (OnFormClosing turns Alt+F4 into
+            // a hide), but rebuilding a disposed one is cheap insurance against a dead M button.
+            if (_menuPopup != null && !_menuPopup.IsDisposed && _subPopup != null && !_subPopup.IsDisposed) return;
+            _menuPopup?.Dispose();
+            _subPopup?.Dispose();
             var owner = FindForm();
 
-            _menuPopup = new HeaderPopupForm();
-            _subPopup = new HeaderPopupForm();
+            Action<string> log = msg => _broker?.DebugLogService?.Error("DashboardHeader", msg);
+            _menuPopup = new HeaderPopupForm(log);
+            _subPopup = new HeaderPopupForm(log);
             foreach (var popup in new[] { _menuPopup, _subPopup })
             {
                 popup.SetOwnerForm(owner);
                 popup.ActionChosen += OnPopupAction;
-                popup.Deactivate += (s, e) => BeginInvoke(new Action(CloseIfFocusLeftPopups));
+                popup.ShowFailed += OnPopupShowFailed;
+                popup.Deactivate += (s, e) =>
+                {
+                    if (IsHandleCreated && !IsDisposed) BeginInvoke(new Action(CloseIfFocusLeftPopups));
+                };
             }
             _menuPopup.SubmenuRequested += OnSubmenuRequested;
             _menuPopup.DismissRequested += back => CloseAllPopups();
@@ -342,28 +371,43 @@ namespace MultiTerminal.DashboardHeader
             _ = _subPopup.WarmUpAsync();
         }
 
+        // A click that produces nothing is the worst outcome (pipeline Run 1): say what went wrong.
+        private void OnPopupShowFailed(string reason)
+        {
+            _broker?.DebugLogService?.Error("DashboardHeader", "Header popup could not open: " + reason);
+            MessageBox.Show(FindForm(), "The menu could not open: " + reason + ".\n\nDetails are in the debug log.",
+                "MultiTerminal", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
         private bool JustAutoClosed(string view) =>
             _popupAutoClosedView == view && Environment.TickCount64 - _popupAutoClosedAt < ReopenSuppressMs;
 
-        private void ToggleAppMenu(Rectangle? anchor, bool keyboard)
+        /// <summary>
+        /// Shared start of both popup buttons: false when this click should only close the popup
+        /// (it was open on that view, or a click-away just closed it).
+        /// </summary>
+        private bool PrepareToOpen(string view)
         {
             EnsurePopups();
-            if (_menuPopup.Visible && _menuPopup.CurrentView == "menu") { CloseAllPopups(); return; }
-            if (JustAutoClosed("menu")) return;
+            if (_menuPopup.Visible && _menuPopup.CurrentView == view) { CloseAllPopups(); return false; }
+            if (JustAutoClosed(view)) return false;
             CloseAllPopups();
-            var show = JsonSerializer.Serialize(new { type = "show", view = "menu", theme = ThemeName, keyboard });
-            _menuPopup.ShowAt(show, anchor ?? DefaultAnchor(), PopupSide.Below, HeaderScale, _webView.ZoomFactor, activate: true);
+            return true;
+        }
+
+        private void ToggleAppMenu(Rectangle? anchor, bool keyboard)
+        {
+            if (!PrepareToOpen("menu")) return;
+            var show = new JsonObject { ["type"] = "show", ["view"] = "menu", ["theme"] = ThemeName, ["keyboard"] = keyboard };
+            _menuPopup.ShowAt(show, anchor ?? DefaultAnchor(), PopupSide.Below, HeaderScale, _webView.ZoomFactor, activate: true, isDark: _isDarkTheme);
         }
 
         private void ToggleProjectPicker(Rectangle? anchor, bool keyboard)
         {
-            EnsurePopups();
-            if (_menuPopup.Visible && _menuPopup.CurrentView == "projects") { CloseAllPopups(); return; }
-            if (JustAutoClosed("projects")) return;
-            CloseAllPopups();
+            if (!PrepareToOpen("projects")) return;
 
             var (projects, currentId) = ProjectListProvider?.Invoke() ?? (Array.Empty<HeaderProjectItem>(), null);
-            var show = JsonSerializer.Serialize(new
+            var show = (JsonObject)JsonSerializer.SerializeToNode(new
             {
                 type = "show",
                 view = "projects",
@@ -382,7 +426,7 @@ namespace MultiTerminal.DashboardHeader
                     lastOpenedAt = p.LastOpenedAt == default ? null : p.LastOpenedAt.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture),
                 }),
             });
-            _menuPopup.ShowAt(show, anchor ?? DefaultAnchor(), PopupSide.Below, HeaderScale, _webView.ZoomFactor, activate: true);
+            _menuPopup.ShowAt(show, anchor ?? DefaultAnchor(), PopupSide.Below, HeaderScale, _webView.ZoomFactor, activate: true, isDark: _isDarkTheme);
         }
 
         private void OnSubmenuRequested(bool open, double cssTop, bool focus)
@@ -400,8 +444,8 @@ namespace MultiTerminal.DashboardHeader
             // Line the flyout's first item up with the Grid Layout item: the panel has 6px padding.
             int top = _menuPopup.ScreenYForCssTop(cssTop) - (int)Math.Round(6 * HeaderScale);
             var anchor = new Rectangle(_menuPopup.Left, top, _menuPopup.Width, 1);
-            var show = JsonSerializer.Serialize(new { type = "show", view = "submenu", theme = ThemeName, keyboard = focus });
-            _subPopup.ShowAt(show, anchor, PopupSide.Right, HeaderScale, _webView.ZoomFactor, activate: focus);
+            var show = new JsonObject { ["type"] = "show", ["view"] = "submenu", ["theme"] = ThemeName, ["keyboard"] = focus };
+            _subPopup.ShowAt(show, anchor, PopupSide.Right, HeaderScale, _webView.ZoomFactor, activate: focus, isDark: _isDarkTheme);
         }
 
         private void OnPopupAction(string action, string projectId)

@@ -51,6 +51,7 @@ namespace MultiTerminal.StartScreen
         // has posted "ready". Browse All requested before then waits here (task 4cac608c).
         private bool _pageReady;
         private bool _browseAllPending;
+        private const string ShowBrowseAllMessage = "{\"type\":\"show_browse_all\"}";
         private bool _isInitializing;
         private bool _initializePending;
         private bool _isDarkTheme = true;
@@ -186,7 +187,7 @@ namespace MultiTerminal.StartScreen
                 _browseAllPending = true;
                 return;
             }
-            PostMessage("{\"type\":\"show_browse_all\"}");
+            PostMessage(ShowBrowseAllMessage);
         }
 
         /// <summary>
@@ -312,7 +313,7 @@ namespace MultiTerminal.StartScreen
                         if (_browseAllPending)
                         {
                             _browseAllPending = false;
-                            PostMessage("{\"type\":\"show_browse_all\"}");
+                            PostMessage(ShowBrowseAllMessage);
                         }
                         break;
 

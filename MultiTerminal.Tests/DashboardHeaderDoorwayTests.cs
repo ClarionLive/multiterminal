@@ -306,6 +306,29 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// Both header WebViews check where a message came from BEFORE they parse it (task 4cac608c,
+        /// pipeline Run 1 security finding). Asserts the order, not just the presence: a check placed
+        /// after the parse and dispatch would already have run Exit or Open PowerShell for a foreign page.
+        /// WebViewPagePinTests covers what the check accepts; this covers that it is on the path.
+        /// </summary>
+        [Theory]
+        [InlineData("DashboardHeaderControl.cs")]
+        [InlineData("HeaderPopupForm.cs")]
+        public void Messages_are_checked_for_their_page_before_they_are_parsed(string file)
+        {
+            string body = BalancedBodyAfter(
+                ReadCsStripped("DashboardHeader", file),
+                "private void OnWebMessageReceived(",
+                file + " OnWebMessageReceived");
+            Assert.True(body.Length > 300, $"{file} OnWebMessageReceived extraction looks truncated ({body.Length} chars).");
+
+            int check = body.IndexOf("WebViewPagePin.IsFromPage(e.Source", StringComparison.Ordinal);
+            int parse = body.IndexOf("JsonDocument.Parse(", StringComparison.Ordinal);
+            Assert.True(check >= 0, $"{file} OnWebMessageReceived does not check the message's page.");
+            Assert.True(parse > check, $"{file} parses the message before checking which page sent it.");
+        }
+
+        /// <summary>
         /// REMOVAL PROOF (task 4cac608c). "+ New" is gone from the header, and so is the native M menu,
         /// so there is one menu, not a styled one plus a stock one that a code path can still reach.
         /// </summary>
