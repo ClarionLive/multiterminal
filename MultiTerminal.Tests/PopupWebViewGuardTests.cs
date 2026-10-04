@@ -53,5 +53,15 @@ namespace MultiTerminal.Tests
             Assert.Contains("show the menu", failure);
             Assert.Contains("CoreWebView2 is closed", failure);
         }
+
+        [Theory]
+        [InlineData(true, true, true)]    // clicked M or Select Project, still waiting: tell the user
+        [InlineData(true, false, false)]  // flyout opened by hovering over Grid Layout: log only
+        [InlineData(false, true, false)]  // nobody is waiting (e.g. the startup warm-up): log only
+        [InlineData(false, false, false)]
+        public void Only_a_failed_show_the_user_asked_for_is_reported(bool pending, bool userInitiated, bool reported)
+        {
+            Assert.Equal(reported, HeaderPopupForm.ShouldReportFailure(pending, userInitiated));
+        }
     }
 }

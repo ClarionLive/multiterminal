@@ -292,16 +292,23 @@ namespace MultiTerminal.DashboardHeader
         /// <summary>Scale of an item's top edge (CSS px) to a screen y inside this popup.</summary>
         public int ScreenYForCssTop(double cssTop) => Top + (int)Math.Round(cssTop * _scale);
 
-        // Every failure is logged, including a warm-up nobody was waiting for; only a show that was
-        // actually requested is reported to the user.
+        // Every failure is logged, including a warm-up nobody was waiting for; only a show the user
+        // asked for by clicking or from the keyboard is reported (see ShouldReportFailure).
         private void Fail(string reason)
         {
             _readyTimer.Stop();
             _logError("HeaderPopup: " + reason);
-            if (_pendingShow == null) return;
+            bool report = ShouldReportFailure(_pendingShow != null, userInitiated: _activateOnShow);
             _pendingShow = null;
-            ShowFailed?.Invoke(reason);
+            if (report) ShowFailed?.Invoke(reason);
         }
+
+        /// <summary>
+        /// Whether a failure is shown to the user (Run 3 adversary delta). Only a show that is still
+        /// pending AND was asked for by a click or a key: a flyout opened because the mouse passed
+        /// over Grid Layout must not raise a modal error box. It is logged and marked broken instead.
+        /// </summary>
+        public static bool ShouldReportFailure(bool hasPendingShow, bool userInitiated) => hasPendingShow && userInitiated;
 
         // The window's own colour shows for a moment before the page paints, and at the rounded edge.
         private void ApplyThemeColors(bool isDark)
