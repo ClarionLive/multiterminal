@@ -17,10 +17,11 @@ namespace MultiTerminal.DashboardHeader
     }
 
     /// <summary>
-    /// The load state of a header popup's page, kept apart from the window so every failure path can
-    /// be tested (task 4cac608c, pipeline Run 2). The rule it pins: after ANY failure, the next show
-    /// tries again, choosing the cheapest step that can work. Restarting the WebView2 only when
-    /// it never started, and only reloading the page when the WebView2 is fine.
+    /// The load state of a header popup's page, kept apart from the window so the retry rules can be
+    /// tested without a WebView2 (task 4cac608c, pipeline Run 2). The rule: after any reported
+    /// failure, the next show tries again with the cheapest step that can work: restart the WebView2
+    /// only when it never started, and only reload the page when the WebView2 is fine. Reporting
+    /// each failure here is HeaderPopupForm's job.
     /// </summary>
     public sealed class PopupLoadState
     {
