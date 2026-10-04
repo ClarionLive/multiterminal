@@ -4227,29 +4227,45 @@ namespace MultiTerminal
                 if (picker.ShowDialog(this) != DialogResult.OK)
                     return; // User cancelled
 
-                string terminalName = picker.SelectedIdentity;
+                // "Unassigned" (the picker's default since ae3d0193) takes no team identity: see
+                // JustClaudeLaunchIdentity for why it registers like Open PowerShell rather than by name.
+                var identity = Services.JustClaudeLaunchIdentity.FromPickerSelection(picker.SelectedIdentity);
+                string terminalName = identity.TerminalName;
                 string workingDir = picker.SelectedFolder ?? defaultFolder;
-                bool isTeamLead = true;
+                bool isTeamLead = identity.IsTeamLead;
 
                 // Track the selected folder as a recent directory
                 _settings?.AddRecentDirectory(workingDir);
 
-                if (_mcpServer?.Broker != null)
+                string taskWorktreePath = null;
+                if (identity.IsPlaceholder)
                 {
-                    // Run 5: was discarding the RegisterResult — see the note at the project-launch site.
-                    // A gate-(4) refusal here launched the session under a name the broker had rejected.
-                    terminalName = PreRegisterTerminalWithName(
-                        doc.DocId,
-                        terminalName,
-                        isTeamLead,
-                        launchNonce: doc.LaunchNonce);
+                    // Open PowerShell's registration, verbatim. NOT PreRegisterTerminalWithName: its refusal
+                    // fallback hands out the first free pool name, i.e. a team member's identity.
+                    // Unlike Open PowerShell, a refusal is logged rather than dropped silently.
+                    var placeholder = _mcpServer?.Broker?.RegisterTerminal(terminalName, doc.DocId, nonce: doc.LaunchNonce);
+                    if (placeholder != null && !placeholder.Success)
+                        _debugLogService?.Warning("StartScreen", $"Just Claude: placeholder registration refused for docId {doc.DocId}: {placeholder.Error ?? "(no reason given)"}");
                 }
+                else
+                {
+                    if (_mcpServer?.Broker != null)
+                    {
+                        // Run 5: was discarding the RegisterResult — see the note at the project-launch site.
+                        // A gate-(4) refusal here launched the session under a name the broker had rejected.
+                        terminalName = PreRegisterTerminalWithName(
+                            doc.DocId,
+                            terminalName,
+                            isTeamLead,
+                            launchNonce: doc.LaunchNonce);
+                    }
 
-                // AC7 launch-root strategy (task c6ed236c): spawn at repo root, in-shell
-                // cd narrows to the worktree. Falls through to workingDir on no worktree.
-                // The picker's folder is an explicit user choice, so the override only
-                // applies when the agent's active task lives in that repo (f1f74a8f).
-                workingDir = ResolveSpawnDir(terminalName, workingDir, out string taskWorktreePath, explicitTargetDir: workingDir);
+                    // AC7 launch-root strategy (task c6ed236c): spawn at repo root, in-shell
+                    // cd narrows to the worktree. Falls through to workingDir on no worktree.
+                    // The picker's folder is an explicit user choice, so the override only
+                    // applies when the agent's active task lives in that repo (f1f74a8f).
+                    workingDir = ResolveSpawnDir(terminalName, workingDir, out taskWorktreePath, explicitTargetDir: workingDir);
+                }
 
                 doc.StartTerminal(workingDir, terminalName, launch.AutoRunCommand, isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath);
 
