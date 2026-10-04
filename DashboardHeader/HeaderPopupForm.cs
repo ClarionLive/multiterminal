@@ -42,9 +42,8 @@ namespace MultiTerminal.DashboardHeader
         private readonly Action<string> _logError;
         private readonly string _pageUri;
         private readonly System.Windows.Forms.Timer _readyTimer = new() { Interval = ReadyTimeoutMs };
-        private Task _initTask;
-        private string _initError;
-        private bool _pageReady;
+        private readonly PopupLoadState _load = new();
+        private bool _hooked;
         private JsonObject _pendingShow;      // a show requested before the page was ready
         private int _requestId;               // the show whose size reply may still be applied
         private Rectangle _anchor;            // screen rect the popup opens against
@@ -88,7 +87,9 @@ namespace MultiTerminal.DashboardHeader
             _readyTimer.Tick += (s, e) =>
             {
                 _readyTimer.Stop();
-                if (!_pageReady) FailPendingShow("the menu page did not load");
+                if (_load.PageReady) return;
+                _load.LoadFailed(); // the next show reloads the page rather than waiting forever
+                Fail("the menu page did not load within " + (ReadyTimeoutMs / 1000) + " seconds");
             };
         }
 
@@ -139,9 +140,16 @@ namespace MultiTerminal.DashboardHeader
             base.OnFormClosing(e);
         }
 
-        /// <summary>Creates the WebView2 and loads the page while the window stays hidden. Single-flight.</summary>
-        public Task WarmUpAsync() => _initTask ??= InitAsync();
+        /// <summary>The background warm-up at startup: starts the WebView2 unless something already has.</summary>
+        public Task WarmUpAsync() => _load.ShouldWarmUp() ? InitAsync() : Task.CompletedTask;
 
+        /// <summary>
+        /// The WebView2's browser process died: this window cannot recover. The header replaces a
+        /// broken popup before its next show.
+        /// </summary>
+        public bool IsBroken { get; private set; }
+
+        // Callers have already moved _load into its "init running" state.
         private async Task InitAsync()
         {
             try
@@ -149,41 +157,64 @@ namespace MultiTerminal.DashboardHeader
                 var path = new Uri(_pageUri).LocalPath;
                 if (!File.Exists(path))
                 {
-                    _initError = "the menu page is missing (" + path + ")";
-                    _logError("HeaderPopup: " + _initError);
-                    FailPendingShow(_initError);
+                    _load.InitFailed();
+                    Fail("the menu page is missing (" + path + ")");
                     return;
                 }
 
                 _ = Handle;          // the WebView2 needs a parent window, but not a visible one
                 _ = _webView.Handle;
-                var env = await WebView2EnvironmentCache.GetEnvironmentAsync();
-                await _webView.EnsureCoreWebView2Async(env);
-
-                var settings = _webView.CoreWebView2.Settings;
-                settings.AreDefaultContextMenusEnabled = false;
-                settings.IsStatusBarEnabled = false;
-                settings.AreDevToolsEnabled = false;
-                settings.IsZoomControlEnabled = false;
-                WebViewPagePin.Pin(_webView, _pageUri);
-                _webView.CoreWebView2.NavigationCompleted += (s, e) =>
+                if (_webView.CoreWebView2 == null)
                 {
-                    if (!e.IsSuccess) FailPendingShow("the menu page failed to load (" + e.WebErrorStatus + ")");
-                };
+                    var env = await WebView2EnvironmentCache.GetEnvironmentAsync();
+                    await _webView.EnsureCoreWebView2Async(env);
+                }
+                HookOnce();
                 _webView.ZoomFactor = _zoom;
+                _load.InitSucceeded();
                 _webView.CoreWebView2.Navigate(_pageUri);
             }
             catch (Exception ex) when (ex is not OutOfMemoryException)
             {
-                _initError = "the menu could not start (" + ex.Message + ")";
-                _logError("HeaderPopup: " + _initError);
-                FailPendingShow(_initError);
+                _load.InitFailed();
+                Fail("the menu could not start (" + ex.Message + ")");
             }
+        }
+
+        // A retried start must not attach the handlers a second time.
+        private void HookOnce()
+        {
+            if (_hooked) return;
+            _hooked = true;
+
+            var settings = _webView.CoreWebView2.Settings;
+            settings.AreDefaultContextMenusEnabled = false;
+            settings.IsStatusBarEnabled = false;
+            settings.AreDevToolsEnabled = false;
+            settings.IsZoomControlEnabled = false;
+            WebViewPagePin.Pin(_webView, _pageUri);
+
+            _webView.CoreWebView2.NavigationCompleted += (s, e) =>
+            {
+                // The pin cancelling a foreign navigation also ends here; that is not a failure.
+                if (e.IsSuccess || e.WebErrorStatus == CoreWebView2WebErrorStatus.OperationCanceled) return;
+                _load.LoadFailed();
+                Fail("the menu page failed to load (" + e.WebErrorStatus + ")");
+            };
+
+            _webView.CoreWebView2.ProcessFailed += (s, e) =>
+            {
+                if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.BrowserProcessExited) IsBroken = true;
+                _load.LoadFailed();
+                Fail("the menu's browser process stopped (" + e.ProcessFailedKind + ")");
+                BeginInvoke(new Action(HidePopup));
+            };
         }
 
         /// <summary>
         /// Renders a view and shows the popup beside <paramref name="anchor"/> (screen coordinates)
-        /// once the page reports its size.
+        /// once the page reports its size. If the page is not ready, the show waits for it, and any
+        /// earlier failure is retried first (see <see cref="PopupLoadState"/>).
         /// </summary>
         /// <param name="show">The page's show message: view, theme and view data. A request id is added here.</param>
         /// <param name="scale">Physical pixels per CSS pixel (DPI scale times the header's zoom).</param>
@@ -198,23 +229,19 @@ namespace MultiTerminal.DashboardHeader
             show["requestId"] = ++_requestId;
             ApplyThemeColors(isDark);
 
-            if (!_pageReady)
+            var next = _load.NextForShow();
+            if (next == PopupLoadAction.Post)
             {
-                _pendingShow = show;
-                if (_initError != null)
-                {
-                    // A failed start is retried once per click, so a transient failure heals.
-                    _initError = null;
-                    _initTask = null;
-                }
-                _readyTimer.Stop();
-                _readyTimer.Start();
-                _ = WarmUpAsync();
+                if (Math.Abs(_webView.ZoomFactor - _zoom) > 0.001) _webView.ZoomFactor = _zoom;
+                _webView.CoreWebView2.PostWebMessageAsJson(show.ToJsonString());
                 return;
             }
 
-            if (Math.Abs(_webView.ZoomFactor - _zoom) > 0.001) _webView.ZoomFactor = _zoom;
-            _webView.CoreWebView2.PostWebMessageAsJson(show.ToJsonString());
+            _pendingShow = show;
+            _readyTimer.Stop();
+            _readyTimer.Start();
+            if (next == PopupLoadAction.Init) _ = InitAsync();
+            else if (next == PopupLoadAction.Reload) _webView.CoreWebView2.Navigate(_pageUri);
         }
 
         /// <summary>Hides the popup and retires any show still in flight; the page stays loaded.</summary>
@@ -237,9 +264,12 @@ namespace MultiTerminal.DashboardHeader
         /// <summary>Scale of an item's top edge (CSS px) to a screen y inside this popup.</summary>
         public int ScreenYForCssTop(double cssTop) => Top + (int)Math.Round(cssTop * _scale);
 
-        private void FailPendingShow(string reason)
+        // Every failure is logged, including a warm-up nobody was waiting for; only a show that was
+        // actually requested is reported to the user.
+        private void Fail(string reason)
         {
             _readyTimer.Stop();
+            _logError("HeaderPopup: " + reason);
             if (_pendingShow == null) return;
             _pendingShow = null;
             ShowFailed?.Invoke(reason);
@@ -270,7 +300,7 @@ namespace MultiTerminal.DashboardHeader
                 switch (typeEl.GetString())
                 {
                     case "ready":
-                        _pageReady = true;
+                        _load.Ready();
                         _readyTimer.Stop();
                         if (_pendingShow != null)
                         {

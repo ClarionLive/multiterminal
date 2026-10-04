@@ -338,9 +338,10 @@ namespace MultiTerminal.DashboardHeader
 
         private void EnsurePopups()
         {
-            // A popup can only be disposed by MT shutting down now (OnFormClosing turns Alt+F4 into
-            // a hide), but rebuilding a disposed one is cheap insurance against a dead M button.
-            if (_menuPopup != null && !_menuPopup.IsDisposed && _subPopup != null && !_subPopup.IsDisposed) return;
+            // Rebuild a popup whose browser process died (IsBroken: that WebView2 cannot recover), and
+            // a disposed one as insurance (OnFormClosing turns Alt+F4 into a hide, so only shutdown
+            // should dispose them). Either would otherwise leave the M button dead until restart.
+            if (IsUsable(_menuPopup) && IsUsable(_subPopup)) return;
             _menuPopup?.Dispose();
             _subPopup?.Dispose();
             var owner = FindForm();
@@ -370,6 +371,8 @@ namespace MultiTerminal.DashboardHeader
             _ = _menuPopup.WarmUpAsync();
             _ = _subPopup.WarmUpAsync();
         }
+
+        private static bool IsUsable(HeaderPopupForm popup) => popup != null && !popup.IsDisposed && !popup.IsBroken;
 
         // A click that produces nothing is the worst outcome (pipeline Run 1): say what went wrong.
         private void OnPopupShowFailed(string reason)
