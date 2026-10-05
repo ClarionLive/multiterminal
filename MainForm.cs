@@ -4275,7 +4275,9 @@ namespace MultiTerminal
                 if (!identity.RegisterUnique)
                     workingDir = ResolveSpawnDir(terminalName, workingDir, out taskWorktreePath, explicitTargetDir: workingDir);
 
-                doc.StartTerminal(workingDir, terminalName, launch.AutoRunCommand, isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath);
+                // Always a quiet start (Owner request 2026-10-04): a plain Claude session opens at an idle
+                // prompt, with no session-start menu, for the default and for a named agent alike.
+                doc.StartTerminal(workingDir, terminalName, launch.AutoRunCommand, isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath, launchQuietStart: true);
 
                 float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
                 doc.SetFontSize(terminalFontSize);

@@ -1357,7 +1357,8 @@ namespace MultiTerminal.Docking
         /// <param name="gatewayProfile">MCP Gateway profile name (sets MCP_GATEWAY_PROFILE env var)</param>
         /// <param name="taskWorktreePath">Per-task worktree path resolved from the active task (sets MULTITERMINAL_TASK_WORKTREE env var). Empty when no task worktree is in play.</param>
         /// <param name="quietStartProjectId">The project whose Quiet start setting applies when <paramref name="projectId"/> is null (GitHub #34). Used by "Launch as...", which is not a project launch and must not get a project's role or env, but still opens in a quiet project. Ignored when projectId is set.</param>
-        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string quietStartProjectId = null)
+        /// <param name="launchQuietStart">Quiet start whatever the project says ("Just Claude", ticket ae3d0193). A helper is still never quiet.</param>
+        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string quietStartProjectId = null, bool launchQuietStart = false)
         {
             _debugLogService?.Info("TerminalDocument.StartTerminal", $"===== START =====");
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"workingDirectory: '{workingDirectory ?? "null"}'");
@@ -1435,8 +1436,8 @@ namespace MultiTerminal.Docking
                     _debugLogService?.Error("TerminalDocument", $"Quiet start lookup threw for project '{quietProjectId}': {quietEx.Message}");
                 }
             }
-            _terminal.QuietStart = MultiTerminal.Terminal.TerminalRoles.IsQuietStart(projectQuietStart, spawnerName);
-            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"quietStart: '{_terminal.QuietStart}' (project setting '{projectQuietStart}')");
+            _terminal.QuietStart = MultiTerminal.Terminal.TerminalRoles.IsQuietStart(projectQuietStart, spawnerName, launchQuietStart);
+            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"quietStart: '{_terminal.QuietStart}' (project setting '{projectQuietStart}', launch '{launchQuietStart}')");
 
             // Set terminal name as custom title if provided. StartTerminal is
             // an AUTHORITATIVE identity source — the terminalName comes from
