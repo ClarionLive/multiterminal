@@ -131,6 +131,15 @@ test('recorded list keeps successful adds, already-registered failed adds, and f
     assert.deepEqual(out, ['D:\\ok', 'D:\\failold', 'D:\\stuck']);
 });
 
+// The shared "same folder" definition. MultiTerminal.iss CleanPluginPath (folds '/', ExpandFileName
+// on absolute paths, drops the trailing '\', compared with CompareText) must agree with this case.
+test('sameDir: forward slashes and .. segments name the same folder; a different folder does not', () => {
+    assert.equal(reg.sameDir('C:/A/Y', 'C:\\A\\B\\..\\Y'), true);
+    assert.equal(reg.sameDir('C:/A/Y/', 'c:\\a\\.\\y'), true);
+    assert.equal(reg.sameDir('C:/A/Y', 'C:\\A\\B\\..\\Z'), false);
+    assert.equal(reg.sameDir('C:/A/Y', 'C:\\A\\B\\Y'), false);
+});
+
 test('profile list: ; separated, %VARS% expanded, quotes/trailing slashes dropped, duplicates removed', () => {
     const list = reg.parseProfileList(' "%USERPROFILE%\\.claude-work\\" ;;C:\\Users\\Test User\\.CLAUDE-WORK; D:\\x\\ ', { UserProfile: USERPROFILE });
     assert.deepEqual(list, [WORK_CFG, 'D:\\x']);

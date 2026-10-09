@@ -198,6 +198,8 @@ function removeSharedPluginLocation() {
             ...reg.inspectSharedDir(root),
         });
         if (decision.remove) {
+            // Known gap: the checks above and this delete are not atomic (check-then-delete race),
+            // so the folder could be swapped between inspection and removal. Deferred to 4fb14422.
             safeRmdir(root);
         } else {
             console.log(`  Kept shared plugin directory ${root}: ${decision.reason}`);
