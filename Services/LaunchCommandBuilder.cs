@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 
@@ -577,22 +578,126 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Returns the path to the MultiTerminal plugin directory if it exists.
-        /// Location: ~/.claude/plugins/marketplaces/multiterminal-marketplace/plugins/multiterminal
+        /// The HKCU key the installer writes the shared plugin location under (ticket c8ee0eec, GitHub #23).
         /// </summary>
-        public static string GetMtPluginPath()
+        internal const string InstallerRegistryKey = @"Software\MultiTerminal";
+
+        /// <summary>
+        /// REG_SZ under <see cref="InstallerRegistryKey"/>: the shared MARKETPLACE ROOT the installer put the
+        /// plugin in (the folder equivalent to <c>~\.claude\plugins\marketplaces\multiterminal-marketplace</c>).
+        /// Absent or empty means the user chose the default-profile location.
+        /// </summary>
+        internal const string PluginMarketplacePathValueName = "PluginMarketplacePath";
+
+        /// <summary>
+        /// Returns the first MultiTerminal plugin directory that exists, in the order of
+        /// <see cref="ExpectedMtPluginPaths"/>, or null when none does.
+        /// </summary>
+        public static string GetMtPluginPath() =>
+            ResolveMtPluginPath(ExpectedMtPluginPaths, Directory.Exists);
+
+        /// <summary>
+        /// Every place <see cref="GetMtPluginPath"/> looks, in lookup order, whether or not anything is
+        /// there. <see cref="ClaudeIntegrationCheck"/> names all of them in its startup warning.
+        /// </summary>
+        internal static IReadOnlyList<string> ExpectedMtPluginPaths =>
+            MtPluginPathCandidates(
+                ReadInstallerPluginMarketplacePath(),
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+
+        /// <summary>
+        /// Pure: the plugin-directory candidates, in lookup order.
+        /// <list type="number">
+        /// <item>The installer's shared location, <c>&lt;PluginMarketplacePath&gt;\plugins\multiterminal</c>,
+        /// only when the registry value is a usable absolute path. Anything else (null, blank, relative,
+        /// malformed) is ignored, so the lookup falls through to the default rather than throwing or
+        /// resolving against MT's current directory.</item>
+        /// <item>The default profile's marketplace checkout under <paramref name="userProfile"/>.
+        /// CLAUDE_CONFIG_DIR is deliberately NOT honoured: "default profile" means
+        /// <c>%USERPROFILE%\.claude</c> until profile support lands.</item>
+        /// </list>
+        /// The default profile's plugin CACHE (<c>~\.claude\plugins\cache\...</c>) is deliberately not a
+        /// candidate: Claude Code copies it once at <c>/plugin install</c> time and MultiTerminal's updater
+        /// never refreshes it, so it can be months stale, and finding it would also silence the
+        /// missing-plugin warning while launching agents with an outdated plugin.
+        /// </summary>
+        internal static IReadOnlyList<string> MtPluginPathCandidates(string registryMarketplacePath, string userProfile)
         {
-            string pluginDir = ExpectedMtPluginPath;
-            return Directory.Exists(pluginDir) ? pluginDir : null;
+            var candidates = new List<string>(2);
+
+            string shared = SharedPluginDirFromRegistryValue(registryMarketplacePath);
+            if (shared != null)
+                candidates.Add(shared);
+
+            if (!string.IsNullOrWhiteSpace(userProfile))
+            {
+                candidates.Add(Path.Combine(userProfile, ".claude", "plugins",
+                    "marketplaces", "multiterminal-marketplace", "plugins", "multiterminal"));
+            }
+
+            return candidates;
         }
 
         /// <summary>
-        /// Where the plugin must be for <see cref="GetMtPluginPath"/> to find it, whether or not it is
-        /// there. <see cref="ClaudeIntegrationCheck"/> names this path in its startup warning.
+        /// Pure: the first candidate <paramref name="directoryExists"/> accepts, or null. A probe that
+        /// throws counts as "not there" for that candidate only.
         /// </summary>
-        internal static string ExpectedMtPluginPath =>
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "plugins",
-                "marketplaces", "multiterminal-marketplace", "plugins", "multiterminal");
+        internal static string ResolveMtPluginPath(IEnumerable<string> candidates, Func<string, bool> directoryExists)
+        {
+            foreach (string candidate in candidates)
+            {
+                try
+                {
+                    if (directoryExists(candidate))
+                        return candidate;
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException)
+                {
+                    // Unreadable candidate: try the next one.
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// <c>&lt;value&gt;\plugins\multiterminal</c> when <paramref name="registryMarketplacePath"/> is a
+        /// fully qualified path; otherwise null.
+        /// </summary>
+        private static string SharedPluginDirFromRegistryValue(string registryMarketplacePath)
+        {
+            if (string.IsNullOrWhiteSpace(registryMarketplacePath))
+                return null;
+
+            string root = registryMarketplacePath.Trim().Trim('"');
+            try
+            {
+                if (!Path.IsPathFullyQualified(root))
+                    return null;
+                return Path.Combine(root, "plugins", "multiterminal");
+            }
+            catch (ArgumentException)
+            {
+                return null; // Illegal characters: treat as absent.
+            }
+        }
+
+        /// <summary>
+        /// HKCU\Software\MultiTerminal\PluginMarketplacePath, or null when absent, not a string, or
+        /// unreadable. Never throws: a broken registry must not stop a terminal launching.
+        /// </summary>
+        private static string ReadInstallerPluginMarketplacePath()
+        {
+            try
+            {
+                using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(InstallerRegistryKey);
+                return key?.GetValue(PluginMarketplacePathValueName) as string;
+            }
+            catch (Exception ex) when (ex is System.Security.SecurityException || ex is IOException || ex is UnauthorizedAccessException)
+            {
+                return null;
+            }
+        }
 
         /// <summary>
         /// Returns the path to the centralized MCP config file, healing it first if it has gone

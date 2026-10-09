@@ -11,6 +11,11 @@
  *    (LaunchCommandBuilder), along with the plugin via --plugin-dir.
  * 3. Writing gateway-defaults.json for optional MCP servers (gateway auto-seeds on startup)
  * 4. Patching runtimeconfig.json for framework-dependent mode (if .NET 8 detected)
+ * 5. Shared plugin location only (ticket c8ee0eec, GH#23): registering the shared marketplace
+ *    into each extra Claude Code config dir the user listed, with CLAUDE_CONFIG_DIR set in the
+ *    CHILD process env only, and recording the dirs that succeeded in
+ *    HKCU\Software\MultiTerminal\PluginRegisteredProfiles. ADD ONLY: the plugin is never
+ *    installed/enabled (MT loads it via --plugin-dir; enabling it too would load it twice).
  *
  * Note: hooks, agents, skills, and CLAUDE.md live in the Claude Code plugin at
  *   %USERPROFILE%\.claude\plugins\marketplaces\multiterminal-marketplace\plugins\multiterminal\
@@ -20,6 +25,8 @@
  * or --plugin-dir).
  *
  * Usage: node post-install.js <installDir> <appDataDir> <userProfileDir> [--framework-dependent|--self-contained] [--mcps=name1,name2,...] [--global-reg=yes|no]
+ *          [--plugin-mode=default|shared|skip] [--plugin-root=<marketplace root>] [--plugin-profiles=<dir1;dir2>]
+ * The --plugin-* flags are optional and matched by name (absent = skip step 5).
  */
 
 const fs = require('fs');
@@ -41,6 +48,17 @@ const isFrameworkDependent = (dotnetFlag === '--framework-dependent');
 const selectedMcps = mcpsFlag.replace('--mcps=', '').split(',').filter(m => m && m !== 'none');
 const globalRegistration = (globalRegFlag === '--global-reg=yes');
 const claudeGlobalDir = path.join(userProfileDir, '.claude');
+
+// Named --plugin-* flags (ticket c8ee0eec). Read by prefix so the positional args above keep
+// their meaning; an older .iss that passes none of them leaves step 5 a no-op.
+function namedFlag(name) {
+    const prefix = `--${name}=`;
+    const hit = process.argv.slice(5).find(a => a.startsWith(prefix));
+    return hit === undefined ? null : hit.slice(prefix.length);
+}
+const pluginMode = namedFlag('plugin-mode') || 'skip';
+const pluginRoot = namedFlag('plugin-root') || '';
+const pluginProfiles = namedFlag('plugin-profiles') || '';
 
 function ensureDir(dir) {
     if (!fs.existsSync(dir)) {
@@ -265,6 +283,81 @@ function patchRuntimeConfig() {
 }
 
 // ============================================================
+// 5. Register the SHARED plugin marketplace into extra Claude Code
+//    config profiles (ticket c8ee0eec, GH#23).
+//    The default profile needs nothing here: its copy lives where it
+//    always did. Never fails the install — every failure is logged.
+// ============================================================
+function registerPluginProfiles() {
+    if (pluginMode === 'skip') {
+        console.log('Plugin profile registration: skipped (plugin component not selected).');
+        return;
+    }
+
+    let reg;
+    try {
+        reg = require('./plugin-registration');
+    } catch (e) {
+        console.warn(`Warning: plugin-registration.js not found next to post-install.js (${e.message}); profile registration skipped.`);
+        return;
+    }
+
+    const prevText = reg.readReg(reg.REG_PROFILES);
+    const previous = reg.parseProfileList(prevText || '', {});
+    const requested = reg.parseProfileList(pluginProfiles, process.env);
+    const plan = reg.planPostInstall({ mode: pluginMode, requested, previous });
+
+    console.log(`Plugin location: ${pluginMode}${pluginMode === 'shared' ? ` (${pluginRoot})` : ''}`);
+    if (plan.add.length === 0 && plan.remove.length === 0) {
+        console.log('  No Claude Code profiles to register or de-register.');
+    }
+
+    const results = {};
+    const rootProblem = reg.unsafeDirReason(pluginRoot);
+
+    for (const dir of plan.add) {
+        const problem = rootProblem || reg.unsafeDirReason(dir);
+        if (problem) {
+            console.warn(`  Skipped ${dir}: ${problem}`);
+            results[reg.dirKey(dir)] = { ok: false, failureCode: 'invalid_input' };
+            continue;
+        }
+        if (!fs.existsSync(dir)) {
+            // Setting CLAUDE_CONFIG_DIR at a mistyped path would silently create a new profile.
+            console.warn(`  Skipped ${dir}: directory does not exist (not creating a new profile)`);
+            results[reg.dirKey(dir)] = { ok: false, failureCode: 'missing_dir' };
+            continue;
+        }
+        const r = reg.runMarketplace('add', { configDir: dir, sharedRoot: pluginRoot, userProfileDir });
+        results[reg.dirKey(dir)] = r;
+        console.log(`  ${r.ok ? 'Registered' : 'FAILED to register'} marketplace in ${dir}${r.message ? `: ${r.message}` : ''}`);
+    }
+
+    for (const dir of plan.remove) {
+        const problem = reg.unsafeDirReason(dir);
+        if (problem) {
+            console.warn(`  Could not de-register ${dir}: ${problem}`);
+            results[reg.dirKey(dir)] = { ok: false, failureCode: 'invalid_input' };
+            continue;
+        }
+        const r = reg.runMarketplace('remove', { configDir: dir, sharedRoot: pluginRoot, userProfileDir });
+        results[reg.dirKey(dir)] = r;
+        const clean = r.ok || r.failureCode === 'not_configured';
+        console.log(`  ${clean ? 'De-registered' : 'FAILED to de-register'} marketplace from ${dir}${r.message ? `: ${r.message}` : ''}`);
+    }
+
+    const registered = reg.registeredAfterInstall({ plan, previous, results });
+    const ok = registered.length > 0
+        ? reg.writeRegString(reg.REG_PROFILES, registered.join(';'))
+        : (prevText === null || reg.deleteRegValue(reg.REG_PROFILES));
+    if (!ok) {
+        console.warn(`  Warning: could not record ${reg.REG_PROFILES} in ${reg.REG_KEY}; uninstall will not de-register these profiles.`);
+    } else if (registered.length > 0) {
+        console.log(`  Recorded ${registered.length} registered profile(s) in ${reg.REG_KEY}\\${reg.REG_PROFILES}`);
+    }
+}
+
+// ============================================================
 // Run all steps
 // ============================================================
 try {
@@ -280,6 +373,11 @@ try {
     registerMcpServers();
     registerOptionalMcps();
     patchRuntimeConfig();
+    try {
+        registerPluginProfiles();
+    } catch (e) {
+        console.warn(`Warning: plugin profile registration failed: ${e.message}`);
+    }
 
     console.log('');
     console.log('Claude Code integration configured successfully.');

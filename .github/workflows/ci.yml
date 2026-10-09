@@ -157,6 +157,12 @@ jobs:
       - name: script node tests
         run: node --test "scripts/test/*.test.mjs"
 
+      # ---- Installer node tests (installer/test/). The plugin-location helpers behind GH #23
+      #      (task c8ee0eec): which profile dirs get CLAUDE_CONFIG_DIR in the child env (never the
+      #      default one) and whether uninstall may delete the shared folder (only if created). ----
+      - name: installer node tests
+        run: node --test "installer/test/*.test.mjs"
+
       # ---- Invariant censuses (scripts/verify-*.mjs). These guard architectural rules the C#
       #      compiler cannot see: one-owner-per-SQLite-connection (bb2b0104), no bare event raises,
       #      the logging sweep, write-path locking, and the SqliteWriteGate write-fairness invariant

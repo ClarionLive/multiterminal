@@ -229,9 +229,9 @@ namespace MultiTerminal
             try
             {
                 string indexJs = Services.CentralMcpConfig.DefaultMcpIndexJs;
-                string pluginDir = LaunchCommandBuilder.ExpectedMtPluginPath;
+                var pluginDirs = LaunchCommandBuilder.ExpectedMtPluginPaths;
                 var problems = Services.ClaudeIntegrationCheck.Find(
-                    indexJs, pluginDir,
+                    indexJs, pluginDirs,
                     Environment.GetEnvironmentVariable("PATH"), Environment.GetEnvironmentVariable("PATHEXT"),
                     File.Exists, Directory.Exists);
 
@@ -244,7 +244,7 @@ namespace MultiTerminal
 
                 var answer = MessageBox.Show(
                     this,
-                    Services.ClaudeIntegrationCheck.BuildMessage(problems, indexJs, pluginDir),
+                    Services.ClaudeIntegrationCheck.BuildMessage(problems, indexJs, pluginDirs),
                     "MultiTerminal: agent tools unavailable",
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Warning);

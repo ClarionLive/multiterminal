@@ -251,8 +251,14 @@ Source: "{#DocsDir}\*"; DestDir: "{app}\docs\html"; Components: docs; Flags: ign
 ; --- Ships hooks, agents, skills, CLAUDE.md, and the
 ; --- multiterminal-channel MCP server (with node_modules).
 ; --- Claude Code auto-discovers marketplaces placed here.
+; --- Destination is chosen on the "Plugin location" page (ticket
+; --- c8ee0eec, GH#23): the default profile's
+; --- %USERPROFILE%\.claude\plugins\marketplaces\multiterminal-marketplace
+; --- (unchanged behaviour, the default choice) or a shared folder every
+; --- Claude Code config profile can use. GetPluginDir returns exactly the
+; --- old path for the default choice.
 ; ============================================================
-Source: "{#PluginMarketplaceDir}\*"; DestDir: "{%USERPROFILE}\.claude\plugins\marketplaces\multiterminal-marketplace"; Components: claude\plugin; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PluginMarketplaceDir}\*"; DestDir: "{code:GetPluginDir}"; Components: claude\plugin; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; ============================================================
 ; --- MCP Server (to %APPDATA%\multiterminal\mcp) ---
@@ -292,6 +298,9 @@ Source: "{#McpEverythingDir}\package.json"; DestDir: "{app}\mcps\everything-sear
 ; --- Post-install/uninstall scripts (temp) ---
 Source: "post-install.js"; DestDir: "{tmp}"; Flags: deleteafterinstall
 Source: "post-uninstall.js"; DestDir: "{app}"; Flags: ignoreversion
+; Shared-marketplace registration helpers, required by BOTH scripts above (ticket c8ee0eec)
+Source: "plugin-registration.js"; DestDir: "{tmp}"; Flags: deleteafterinstall
+Source: "plugin-registration.js"; DestDir: "{app}"; Flags: ignoreversion
 
 ; ============================================================
 ; SHORTCUTS
@@ -307,7 +316,7 @@ Name: "{group}\{#AppName} Documentation"; Filename: "{app}\docs\html\index.html"
 ; ============================================================
 [Run]
 ; Run post-install script to merge hooks into settings.json and generate configs
-Filename: "node"; Parameters: """{tmp}\post-install.js"" ""{app}"" ""{userappdata}"" ""{%USERPROFILE}"" {code:GetDotNetFlag} {code:GetSelectedMcps} {code:GetGlobalRegFlag}"; \
+Filename: "node"; Parameters: """{tmp}\post-install.js"" ""{app}"" ""{userappdata}"" ""{%USERPROFILE}"" {code:GetDotNetFlag} {code:GetSelectedMcps} {code:GetGlobalRegFlag} {code:GetPluginModeArg} ""--plugin-root={code:GetPluginDir}"" ""--plugin-profiles={code:GetPluginProfilesArg}"""; \
   StatusMsg: "Configuring Claude Code integration..."; \
   Components: claude; Flags: runhidden waituntilterminated
 
@@ -332,6 +341,10 @@ Filename: "node"; Parameters: """{app}\post-uninstall.js"" ""{app}"" ""{userappd
 ; Note: MCP servers MAY be registered in ~/.claude.json (opt-in claude\globalreg component) —
 ;       post-uninstall.js removes the entries if present (no-op when the opt-in was off)
 ; Note: Plugin marketplace at %USERPROFILE%\.claude\plugins\... — cleaned up by post-uninstall.js
+; Note: Shared plugin location (HKCU\Software\MultiTerminal\PluginMarketplacePath) - post-uninstall.js
+;       de-registers it from every PluginRegisteredProfiles dir and deletes it only if
+;       PluginDirCreatedByInstaller=1. CurUninstallStepChanged(usPostUninstall) also removes the
+;       three registry values, in case the script could not run.
 Type: filesandordirs; Name: "{app}\mcp-gateway"
 Type: filesandordirs; Name: "{app}\mcps"
 
@@ -343,6 +356,21 @@ var
   DeleteUserData: Boolean;
   DotNet8Detected: Boolean;
   McpPage: TInputOptionWizardPage;
+  // Plugin location (ticket c8ee0eec, GH#23)
+  PluginLocPage: TInputOptionWizardPage;
+  PluginDirPage: TInputDirWizardPage;
+  PluginProfilesPage: TInputQueryWizardPage;
+  PrevPluginPath: String;
+  PrevPluginCreated: Cardinal;
+  PrevPluginProfiles: String;
+  PluginDirExistedBefore: Boolean;
+
+const
+  // Shared with Services/LaunchCommandBuilder.cs and installer/plugin-registration.js
+  PluginRegKey = 'Software\MultiTerminal';
+  PluginRegPath = 'PluginMarketplacePath';
+  PluginRegCreated = 'PluginDirCreatedByInstaller';
+  PluginRegProfiles = 'PluginRegisteredProfiles';
 
 // Check if .NET 8 Desktop Runtime is installed (includes WinForms + WPF + NETCore)
 function IsDotNet8DesktopInstalled: Boolean;
@@ -450,9 +478,252 @@ begin
   McpPage.Values[4] := True;
 end;
 
+// ============================================================
+// Plugin location page (ticket c8ee0eec, GH#23)
+// ============================================================
+
+// Today's location, byte-for-byte the old [Files] DestDir.
+function DefaultProfilePluginDir: String;
+begin
+  Result := ExpandConstant('{%USERPROFILE}\.claude\plugins\marketplaces\multiterminal-marketplace');
+end;
+
+function SuggestedSharedPluginDir: String;
+begin
+  Result := ExpandConstant('{localappdata}\ClarionLive\claude-plugins\marketplaces\multiterminal-marketplace');
+end;
+
+// Trimmed, unquoted, no trailing backslash (a trailing backslash before a closing quote would
+// swallow the quote when the path is passed on post-install.js's command line).
+function CleanPluginPath(Value: String): String;
+begin
+  Result := Trim(Value);
+  StringChangeEx(Result, '"', '', True);
+  Result := Trim(Result);
+  while (Length(Result) > 3) and (Result[Length(Result)] = '\') do
+    Result := Copy(Result, 1, Length(Result) - 1);
+end;
+
+function IsPluginComponentSelected: Boolean;
+begin
+  Result := WizardIsComponentSelected('claude\plugin');
+end;
+
+function IsSharedPluginLocation: Boolean;
+begin
+  Result := (PluginLocPage <> nil) and PluginLocPage.Values[1];
+end;
+
+// [Files] DestDir for the marketplace, and --plugin-root for post-install.js.
+function GetPluginDir(Param: String): String;
+begin
+  if IsSharedPluginLocation then
+    Result := CleanPluginPath(PluginDirPage.Values[0])
+  else
+    Result := DefaultProfilePluginDir;
+end;
+
+function GetPluginModeArg(Param: String): String;
+begin
+  if not IsPluginComponentSelected then
+    Result := '--plugin-mode=skip'
+  else if IsSharedPluginLocation then
+    Result := '--plugin-mode=shared'
+  else
+    Result := '--plugin-mode=default';
+end;
+
+// ';'-separated extra config dirs (shared choice only). Never ends in a backslash, for the same
+// quoting reason as CleanPluginPath; post-install.js ignores empty entries.
+function GetPluginProfilesArg(Param: String): String;
+begin
+  Result := '';
+  if IsSharedPluginLocation and (PluginProfilesPage <> nil) then
+  begin
+    Result := Trim(PluginProfilesPage.Values[0]);
+    StringChangeEx(Result, '"', '', True);
+    if (Length(Result) > 0) and (Result[Length(Result)] = '\') then
+      Result := Result + ';';
+  end;
+end;
+
+function IsAbsoluteDir(Dir: String): Boolean;
+begin
+  Result := ((Length(Dir) >= 3) and (Dir[2] = ':') and (Dir[3] = '\')) or (Copy(Dir, 1, 2) = '\\');
+end;
+
+// True when one path is the other or contains it.
+function PathsOverlap(A, B: String): Boolean;
+begin
+  A := Lowercase(CleanPluginPath(A));
+  B := Lowercase(CleanPluginPath(B));
+  Result := (A = B) or (Pos(A + '\', B) = 1) or (Pos(B + '\', A) = 1);
+end;
+
+procedure CreatePluginLocationPages(AfterID: Integer);
+begin
+  PluginLocPage := CreateInputOptionPage(AfterID,
+    'Plugin location',
+    'Where should the MultiTerminal Claude Code plugin be installed?',
+    'The default installs it into your default Claude Code profile, as earlier versions did.' + #13#10 + #13#10 +
+    'Choose the shared location if you use more than one Claude Code config profile ' +
+    '(CLAUDE_CONFIG_DIR). It installs one copy outside any profile, and MultiTerminal terminals ' +
+    'use it whichever profile they run under.',
+    True, False);
+  PluginLocPage.Add('Default Claude Code profile (%USERPROFILE%\.claude)');
+  PluginLocPage.Add('Shared location, usable by every Claude Code config profile');
+
+  PluginDirPage := CreateInputDirPage(PluginLocPage.ID,
+    'Shared plugin location',
+    'Choose the folder for the shared plugin marketplace.',
+    'The MultiTerminal plugin marketplace will be installed into this folder. Choose a folder ' +
+    'outside every .claude profile directory.',
+    False, '');
+  PluginDirPage.Add('');
+
+  PluginProfilesPage := CreateInputQueryPage(PluginDirPage.ID,
+    'Register in other Claude Code profiles (optional)',
+    'Make the plugin marketplace known to other Claude Code config profiles.',
+    'MultiTerminal terminals do not need this. Fill it in only if you want plain "claude" ' +
+    'sessions in other profiles to see the MultiTerminal marketplace. Each listed profile gets ' +
+    'the marketplace added, not the plugin installed: run "/plugin install" in that profile if ' +
+    'you want it enabled there.' + #13#10 + #13#10 +
+    'Separate profile directories with a semicolon, e.g. %USERPROFILE%\.claude-work. ' +
+    'Directories that do not exist are skipped.');
+  PluginProfilesPage.Add('Claude Code config directories:', False);
+
+  // Upgrade: pre-select the previous choice so an upgrade (including a silent one) never
+  // quietly moves the plugin back into the default profile.
+  if not RegQueryStringValue(HKCU, PluginRegKey, PluginRegPath, PrevPluginPath) then
+    PrevPluginPath := '';
+  PrevPluginPath := CleanPluginPath(PrevPluginPath);
+  if not RegQueryDWordValue(HKCU, PluginRegKey, PluginRegCreated, PrevPluginCreated) then
+    PrevPluginCreated := 0;
+  if not RegQueryStringValue(HKCU, PluginRegKey, PluginRegProfiles, PrevPluginProfiles) then
+    PrevPluginProfiles := '';
+
+  if PrevPluginPath <> '' then
+  begin
+    PluginLocPage.Values[1] := True;
+    PluginDirPage.Values[0] := PrevPluginPath;
+    Log('Plugin location: previous install used the shared location ' + PrevPluginPath);
+  end
+  else
+  begin
+    PluginLocPage.Values[0] := True;
+    PluginDirPage.Values[0] := SuggestedSharedPluginDir;
+  end;
+  PluginProfilesPage.Values[0] := PrevPluginProfiles;
+end;
+
 procedure InitializeWizard;
 begin
   CreateMcpPage;
+  CreatePluginLocationPages(McpPage.ID);
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+  if (PluginLocPage <> nil) and (PageID = PluginLocPage.ID) then
+    Result := not IsPluginComponentSelected
+  else if ((PluginDirPage <> nil) and (PageID = PluginDirPage.ID)) or
+          ((PluginProfilesPage <> nil) and (PageID = PluginProfilesPage.ID)) then
+    Result := not (IsPluginComponentSelected and IsSharedPluginLocation);
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  Dir: String;
+begin
+  Result := True;
+  if (PluginDirPage <> nil) and (CurPageID = PluginDirPage.ID) then
+  begin
+    Dir := CleanPluginPath(PluginDirPage.Values[0]);
+    if (not IsAbsoluteDir(Dir)) or (Length(Dir) <= 3) then
+    begin
+      MsgBox('Please enter a full folder path (for example C:\...\multiterminal-marketplace), not a drive root.', mbError, MB_OK);
+      Result := False;
+    end
+    else if Pos('%', Dir) > 0 then
+    begin
+      MsgBox('The folder path cannot contain a % character.', mbError, MB_OK);
+      Result := False;
+    end
+    else if PathsOverlap(Dir, DefaultProfilePluginDir) then
+    begin
+      MsgBox('That is the default profile''s location. Go back and choose "Default Claude Code profile" instead.', mbError, MB_OK);
+      Result := False;
+    end
+    else
+      PluginDirPage.Values[0] := Dir;
+  end;
+end;
+
+// Deletes a shared marketplace folder a PREVIOUS install created and this install moved away
+// from. Guarded: it must still look like the marketplace, and must not contain (or sit inside)
+// the folder this install just wrote or the default-profile location.
+procedure RemoveAbandonedPluginDir(OldDir, NewDir: String);
+begin
+  if (Length(OldDir) <= 3) or not IsAbsoluteDir(OldDir) then Exit;
+  if PathsOverlap(OldDir, NewDir) or PathsOverlap(OldDir, DefaultProfilePluginDir) then
+  begin
+    Log('Plugin location: not removing previous folder ' + OldDir + ' (overlaps a current location)');
+    Exit;
+  end;
+  if not FileExists(AddBackslash(OldDir) + '.claude-plugin\marketplace.json') then
+  begin
+    Log('Plugin location: not removing previous folder ' + OldDir + ' (no marketplace manifest)');
+    Exit;
+  end;
+  if DelTree(OldDir, True, True, True) then
+    Log('Plugin location: removed previous installer-created folder ' + OldDir)
+  else
+    Log('Plugin location: could not fully remove previous folder ' + OldDir);
+end;
+
+// Persists the choice for the runtime lookup (LaunchCommandBuilder), upgrades and uninstall.
+// PluginRegisteredProfiles is written by post-install.js, the only party that knows which
+// registrations succeeded.
+procedure SavePluginLocation;
+var
+  NewDir: String;
+  Created: Boolean;
+begin
+  if IsSharedPluginLocation then
+  begin
+    NewDir := GetPluginDir('');
+    // Created if it was absent before this install, OR a previous install created this same
+    // folder (an upgrade finds it present, and must not forget that it owns it).
+    Created := (not PluginDirExistedBefore) or
+               ((PrevPluginCreated = 1) and (CompareText(PrevPluginPath, NewDir) = 0));
+    RegWriteStringValue(HKCU, PluginRegKey, PluginRegPath, NewDir);
+    if Created then
+      RegWriteDWordValue(HKCU, PluginRegKey, PluginRegCreated, 1)
+    else
+      RegWriteDWordValue(HKCU, PluginRegKey, PluginRegCreated, 0);
+    Log('Plugin location: shared ' + NewDir + ' (created by installer: ' + IntToStr(Ord(Created)) + ')');
+  end
+  else
+  begin
+    NewDir := DefaultProfilePluginDir;
+    // Default choice: no stale pointer may survive an upgrade that switched back.
+    RegDeleteValue(HKCU, PluginRegKey, PluginRegPath);
+    RegDeleteValue(HKCU, PluginRegKey, PluginRegCreated);
+    Log('Plugin location: default profile ' + NewDir);
+  end;
+
+  if (PrevPluginPath <> '') and (PrevPluginCreated = 1) and (CompareText(PrevPluginPath, NewDir) <> 0) then
+    RemoveAbandonedPluginDir(PrevPluginPath, NewDir);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if not IsPluginComponentSelected then Exit;
+  if CurStep = ssInstall then
+    PluginDirExistedBefore := DirExists(GetPluginDir(''))
+  else if CurStep = ssPostInstall then
+    SavePluginLocation;
 end;
 
 // Check function used by [Files] entries to conditionally install MCP files
@@ -675,5 +946,14 @@ begin
       if DeleteUserData then
         DelTree(UserDataPath, True, True, True);
     end;
+  end
+  else if CurUninstallStep = usPostUninstall then
+  begin
+    // post-uninstall.js normally removes these after using them; this covers a machine where it
+    // could not run (no Node.js), so no stale pointer outlives the app.
+    RegDeleteValue(HKCU, PluginRegKey, PluginRegPath);
+    RegDeleteValue(HKCU, PluginRegKey, PluginRegCreated);
+    RegDeleteValue(HKCU, PluginRegKey, PluginRegProfiles);
+    RegDeleteKeyIfEmpty(HKCU, PluginRegKey);
   end;
 end;

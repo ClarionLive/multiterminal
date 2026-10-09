@@ -41,7 +41,7 @@ namespace MultiTerminal.Services
 
         internal static IReadOnlyList<Problem> Find(
             string expectedMcpIndexJs,
-            string expectedPluginDir,
+            IReadOnlyList<string> expectedPluginDirs,
             string? pathVariable,
             string? pathExtVariable,
             Func<string, bool> fileExists,
@@ -50,7 +50,9 @@ namespace MultiTerminal.Services
             var problems = new List<Problem>();
             if (!fileExists(expectedMcpIndexJs))
                 problems.Add(Problem.McpServerMissing);
-            if (!directoryExists(expectedPluginDir))
+            // Missing only when NO candidate exists: the plugin is found at the first one that does
+            // (LaunchCommandBuilder.GetMtPluginPath), so any hit means terminals get it.
+            if (!expectedPluginDirs.Any(directoryExists))
                 problems.Add(Problem.PluginMissing);
             if (FindCommandOnPath("node", pathVariable, pathExtVariable, fileExists) == null)
                 problems.Add(Problem.NodeMissing);
@@ -93,7 +95,7 @@ namespace MultiTerminal.Services
         internal static bool ShouldWarn(IReadOnlyList<Problem> problems, string? suppressedFingerprint) =>
             problems.Count > 0 && !string.Equals(Fingerprint(problems), suppressedFingerprint, StringComparison.Ordinal);
 
-        internal static string BuildMessage(IReadOnlyList<Problem> problems, string expectedMcpIndexJs, string expectedPluginDir)
+        internal static string BuildMessage(IReadOnlyList<Problem> problems, string expectedMcpIndexJs, IReadOnlyList<string> expectedPluginDirs)
         {
             var lines = new List<string>
             {
@@ -104,7 +106,10 @@ namespace MultiTerminal.Services
             if (problems.Contains(Problem.McpServerMissing))
                 lines.Add($"• The MultiTerminal MCP server was not found at:\n   {expectedMcpIndexJs}");
             if (problems.Contains(Problem.PluginMissing))
-                lines.Add($"• The MultiTerminal Claude Code plugin was not found at:\n   {expectedPluginDir}");
+                lines.Add(expectedPluginDirs.Count == 1
+                    ? $"• The MultiTerminal Claude Code plugin was not found at:\n   {expectedPluginDirs[0]}"
+                    : "• The MultiTerminal Claude Code plugin was not found in any of these locations:"
+                      + string.Concat(expectedPluginDirs.Select(d => "\n   " + d)));
             if (problems.Contains(Problem.NodeMissing))
                 lines.Add("• Node.js was not found on MultiTerminal's PATH. The agent tools need Node.js 18 or later "
                           + "(https://nodejs.org). If you installed it after starting MultiTerminal, restart MultiTerminal.");

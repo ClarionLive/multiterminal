@@ -8,7 +8,10 @@
  *    opt-in claude\globalreg component was selected at install time (GH#2);
  *    a no-op otherwise, so this script is safe in both modes
  * 4. Removes optional MCP servers from gateway database
- * 5. Removes the plugin marketplace directory
+ * 5. Removes the plugin marketplace directory (default profile — unchanged), and for a shared
+ *    plugin location (ticket c8ee0eec, GH#23): de-registers the marketplace from every profile in
+ *    HKCU\Software\MultiTerminal\PluginRegisteredProfiles, deletes the shared directory only if
+ *    PluginDirCreatedByInstaller=1, and removes the three registry values
  * 6. Restores runtimeconfig.json if framework-dependent backup exists
  *
  * Usage: node post-uninstall.js <installDir> <appDataDir> <userProfileDir>
@@ -142,6 +145,61 @@ function removePluginMarketplace() {
 }
 
 // ============================================================
+// 5b. Shared plugin location (ticket c8ee0eec, GH#23).
+//     Order matters: de-register first (so no profile is left
+//     declaring a marketplace whose directory is gone), then delete
+//     the directory, then the registry values that described it.
+//     Every step is best-effort and logged; nothing fails uninstall.
+// ============================================================
+function removeSharedPluginLocation() {
+    let reg;
+    try {
+        reg = require('./plugin-registration');
+    } catch (e) {
+        console.warn(`  Warning: plugin-registration.js not found (${e.message}); shared plugin cleanup skipped.`);
+        return;
+    }
+
+    const sharedRoot = reg.readReg(reg.REG_PATH);
+    const created = reg.readReg(reg.REG_CREATED);
+    const profiles = reg.parseProfileList(reg.readReg(reg.REG_PROFILES) || '', {});
+
+    if (!sharedRoot && profiles.length === 0) {
+        console.log('  No shared plugin location or registered profiles recorded.');
+    }
+
+    for (const dir of profiles) {
+        const problem = reg.unsafeDirReason(dir);
+        if (problem) {
+            console.warn(`  Could not de-register ${dir}: ${problem}`);
+            continue;
+        }
+        const r = reg.runMarketplace('remove', { configDir: dir, sharedRoot: sharedRoot || '', userProfileDir });
+        const clean = r.ok || r.failureCode === 'not_configured';
+        console.log(`  ${clean ? 'De-registered' : 'Warning: FAILED to de-register'} marketplace from ${dir}${r.message ? `: ${r.message}` : ''}`);
+    }
+
+    if (sharedRoot) {
+        const root = reg.cleanDir(sharedRoot);
+        const hasManifest = fs.existsSync(path.join(root, '.claude-plugin', 'marketplace.json'));
+        const decision = reg.sharedDirRemovalDecision({
+            sharedRoot: root, createdFlag: created, userProfileDir, hasManifest,
+        });
+        if (decision.remove) {
+            safeRmdir(root);
+        } else {
+            console.log(`  Kept shared plugin directory ${root}: ${decision.reason}`);
+        }
+    }
+
+    for (const name of [reg.REG_PATH, reg.REG_CREATED, reg.REG_PROFILES]) {
+        if (reg.readReg(name) !== null && !reg.deleteRegValue(name)) {
+            console.warn(`  Warning: could not delete ${reg.REG_KEY}\\${name}`);
+        }
+    }
+}
+
+// ============================================================
 // 6. Clean up runtimeconfig backup
 // ============================================================
 function cleanupRuntimeConfigBackup() {
@@ -169,6 +227,9 @@ try {
 
     console.log('Removing plugin marketplace...');
     removePluginMarketplace();
+
+    console.log('Removing shared plugin location and profile registrations...');
+    removeSharedPluginLocation();
 
     console.log('Cleaning up runtime config backup...');
     cleanupRuntimeConfigBackup();
