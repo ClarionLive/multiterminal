@@ -343,8 +343,9 @@ Filename: "node"; Parameters: """{app}\post-uninstall.js"" ""{app}"" ""{userappd
 ; Note: Plugin marketplace at %USERPROFILE%\.claude\plugins\... — cleaned up by post-uninstall.js
 ; Note: Shared plugin location (HKCU\Software\MultiTerminal\PluginMarketplacePath) - post-uninstall.js
 ;       de-registers it from every PluginRegisteredProfiles dir and deletes it only if
-;       PluginDirCreatedByInstaller=1. CurUninstallStepChanged(usPostUninstall) also removes the
-;       three registry values, in case the script could not run.
+;       PluginDirCreatedByInstaller=1 AND its .mt-installer-owned marker matches
+;       PluginDirOwnerToken AND it is not a reparse point. CurUninstallStepChanged(usPostUninstall)
+;       also removes the four registry values, in case the script could not run.
 Type: filesandordirs; Name: "{app}\mcp-gateway"
 Type: filesandordirs; Name: "{app}\mcps"
 
@@ -363,6 +364,7 @@ var
   PrevPluginPath: String;
   PrevPluginCreated: Cardinal;
   PrevPluginProfiles: String;
+  PrevPluginToken: String;
   PluginDirExistedBefore: Boolean;
 
 const
@@ -371,6 +373,23 @@ const
   PluginRegPath = 'PluginMarketplacePath';
   PluginRegCreated = 'PluginDirCreatedByInstaller';
   PluginRegProfiles = 'PluginRegisteredProfiles';
+  // Ownership proof for deleting the shared folder (Codex security review): HKCU is writable by
+  // any same-user unelevated process, so the elevated installer deletes a folder only when the
+  // marker file it wrote on CREATING that folder holds the same random token as this value.
+  PluginRegToken = 'PluginDirOwnerToken';
+  PluginOwnerMarker = '.mt-installer-owned';
+  MtReparsePointAttr = $400; // FILE_ATTRIBUTE_REPARSE_POINT
+
+type
+  TMtGuid = record
+    D1: LongWord;
+    D2: Word;
+    D3: Word;
+    D4: array[0..7] of Byte;
+  end;
+
+function MtCoCreateGuid(var Guid: TMtGuid): Integer;
+  external 'CoCreateGuid@ole32.dll stdcall';
 
 // Check if .NET 8 Desktop Runtime is installed (includes WinForms + WPF + NETCore)
 function IsDotNet8DesktopInstalled: Boolean;
@@ -542,6 +561,8 @@ begin
   begin
     Result := Trim(PluginProfilesPage.Values[0]);
     StringChangeEx(Result, '"', '', True);
+    // A trailing '\' would escape the closing quote on the [Run] command line; a ';' after it is
+    // an empty list entry, which post-install.js ignores.
     if (Length(Result) > 0) and (Result[Length(Result)] = '\') then
       Result := Result + ';';
   end;
@@ -589,7 +610,8 @@ begin
     'the marketplace added, not the plugin installed: run "/plugin install" in that profile if ' +
     'you want it enabled there.' + #13#10 + #13#10 +
     'Separate profile directories with a semicolon, e.g. %USERPROFILE%\.claude-work. ' +
-    'Directories that do not exist are skipped.');
+    'Directories that do not exist are skipped, and so is the default profile ' +
+    '(%USERPROFILE%\.claude): only extra profiles are registered here.');
   PluginProfilesPage.Add('Claude Code config directories:', False);
 
   // Upgrade: pre-select the previous choice so an upgrade (including a silent one) never
@@ -601,6 +623,8 @@ begin
     PrevPluginCreated := 0;
   if not RegQueryStringValue(HKCU, PluginRegKey, PluginRegProfiles, PrevPluginProfiles) then
     PrevPluginProfiles := '';
+  if not RegQueryStringValue(HKCU, PluginRegKey, PluginRegToken, PrevPluginToken) then
+    PrevPluginToken := '';
 
   if PrevPluginPath <> '' then
   begin
@@ -660,10 +684,100 @@ begin
   end;
 end;
 
+// A fresh random token for the ownership marker, as a braced GUID; '' if COM could not make one
+// (then no marker is written and the folder is simply never deletable).
+// Upper-case hex, exactly Digits wide (Inno's Pascal Script has no IntToHex).
+function MtHex(Value: LongWord; Digits: Integer): String;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 1 to Digits do
+  begin
+    Result := Copy('0123456789ABCDEF', (Value and $F) + 1, 1) + Result;
+    Value := Value shr 4;
+  end;
+end;
+
+function NewPluginOwnerToken: String;
+var
+  G: TMtGuid;
+  I: Integer;
+begin
+  Result := '';
+  if MtCoCreateGuid(G) <> 0 then Exit;
+  Result := '{' + MtHex(G.D1, 8) + '-' + MtHex(G.D2, 4) + '-' + MtHex(G.D3, 4) + '-' +
+            MtHex(G.D4[0], 2) + MtHex(G.D4[1], 2) + '-';
+  for I := 2 to 7 do
+    Result := Result + MtHex(G.D4[I], 2);
+  Result := Result + '}';
+end;
+
+// Trimmed content of <Dir>\.mt-installer-owned, or '' when absent/unreadable.
+function ReadPluginOwnerMarker(Dir: String): String;
+var
+  S: AnsiString;
+begin
+  Result := '';
+  if LoadStringFromFile(AddBackslash(Dir) + PluginOwnerMarker, S) then
+    Result := Trim(String(S));
+end;
+
+// True only when Dir and every ancestor below the drive root can be inspected and none is a
+// reparse point (symlink/junction). Anything that cannot be checked counts as unsafe.
+function PluginDirHasNoReparsePoint(Dir: String): Boolean;
+var
+  FindRec: TFindRec;
+  D, Parent: String;
+  Ok, Done: Boolean;
+begin
+  Ok := True;
+  Done := False;
+  D := CleanPluginPath(Dir);
+  while Ok and (not Done) and (Length(D) > 3) do
+  begin
+    if FindFirst(D, FindRec) then
+    begin
+      if ((FindRec.Attributes and MtReparsePointAttr) <> 0) or
+         ((FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) = 0) then
+        Ok := False;
+      FindClose(FindRec);
+    end
+    else
+      Ok := False;
+    Parent := ExtractFileDir(D);
+    if (Parent = '') or (CompareText(Parent, D) = 0) then
+      Done := True
+    else
+      D := Parent;
+  end;
+  Result := Ok;
+end;
+
+// Why the installer may NOT delete Dir as its own, or '' when it may: the marker file the
+// installer wrote on creating the folder must hold exactly (ordinal) the HKCU token, and no
+// path component may be a reparse point. Mirrors sharedDirRemovalDecision in plugin-registration.js.
+function PluginDirOwnershipProblem(Dir, Token: String): String;
+var
+  Marker: String;
+begin
+  Result := '';
+  Marker := ReadPluginOwnerMarker(Dir);
+  if (Trim(Token) = '') or (Marker = '') then
+    Result := 'kept: no ownership marker'
+  else if Marker <> Trim(Token) then
+    Result := 'kept: ownership marker does not match ' + PluginRegToken
+  else if not PluginDirHasNoReparsePoint(Dir) then
+    Result := 'kept: folder or a parent is a reparse point (symlink/junction), or could not be checked';
+end;
+
 // Deletes a shared marketplace folder a PREVIOUS install created and this install moved away
-// from. Guarded: it must still look like the marketplace, and must not contain (or sit inside)
-// the folder this install just wrote or the default-profile location.
+// from. Guarded: it must still look like the marketplace, must carry the ownership marker that
+// matches PluginDirOwnerToken, must not be (or sit under) a reparse point, and must not contain
+// (or sit inside) the folder this install just wrote or the default-profile location.
 procedure RemoveAbandonedPluginDir(OldDir, NewDir: String);
+var
+  Problem: String;
 begin
   if (Length(OldDir) <= 3) or not IsAbsoluteDir(OldDir) then Exit;
   if PathsOverlap(OldDir, NewDir) or PathsOverlap(OldDir, DefaultProfilePluginDir) then
@@ -674,6 +788,12 @@ begin
   if not FileExists(AddBackslash(OldDir) + '.claude-plugin\marketplace.json') then
   begin
     Log('Plugin location: not removing previous folder ' + OldDir + ' (no marketplace manifest)');
+    Exit;
+  end;
+  Problem := PluginDirOwnershipProblem(OldDir, PrevPluginToken);
+  if Problem <> '' then
+  begin
+    Log('Plugin location: not removing previous folder ' + OldDir + ' (' + Problem + ')');
     Exit;
   end;
   if DelTree(OldDir, True, True, True) then
@@ -687,7 +807,7 @@ end;
 // registrations succeeded.
 procedure SavePluginLocation;
 var
-  NewDir: String;
+  NewDir, Token: String;
   Created: Boolean;
 begin
   if IsSharedPluginLocation then
@@ -703,6 +823,33 @@ begin
     else
       RegWriteDWordValue(HKCU, PluginRegKey, PluginRegCreated, 0);
     Log('Plugin location: shared ' + NewDir + ' (created by installer: ' + IntToStr(Ord(Created)) + ')');
+
+    // Ownership marker. A new token is minted ONLY when this run created the folder: HKCU alone
+    // (forgeable) must never turn a pre-existing folder into a deletable one. An upgrade into the
+    // same folder keeps the existing token when its marker still matches; it is never rotated.
+    // A pre-existing folder without a valid marker (including one from the Phase-1 build) gets
+    // no token and is therefore never deleted by upgrade or uninstall.
+    Token := '';
+    if not PluginDirExistedBefore then
+    begin
+      Token := NewPluginOwnerToken;
+      if (Token <> '') and not SaveStringToFile(AddBackslash(NewDir) + PluginOwnerMarker, Token, False) then
+        Token := '';
+    end
+    else if (PrevPluginCreated = 1) and (CompareText(PrevPluginPath, NewDir) = 0) and
+            (Trim(PrevPluginToken) <> '') and (ReadPluginOwnerMarker(NewDir) = Trim(PrevPluginToken)) then
+      Token := Trim(PrevPluginToken);
+
+    if Token <> '' then
+    begin
+      RegWriteStringValue(HKCU, PluginRegKey, PluginRegToken, Token);
+      Log('Plugin location: ownership marker in place; uninstall may remove this folder');
+    end
+    else
+    begin
+      RegDeleteValue(HKCU, PluginRegKey, PluginRegToken);
+      Log('Plugin location: no ownership marker; this folder will be kept by upgrade and uninstall');
+    end;
   end
   else
   begin
@@ -710,6 +857,7 @@ begin
     // Default choice: no stale pointer may survive an upgrade that switched back.
     RegDeleteValue(HKCU, PluginRegKey, PluginRegPath);
     RegDeleteValue(HKCU, PluginRegKey, PluginRegCreated);
+    RegDeleteValue(HKCU, PluginRegKey, PluginRegToken);
     Log('Plugin location: default profile ' + NewDir);
   end;
 
@@ -954,6 +1102,7 @@ begin
     RegDeleteValue(HKCU, PluginRegKey, PluginRegPath);
     RegDeleteValue(HKCU, PluginRegKey, PluginRegCreated);
     RegDeleteValue(HKCU, PluginRegKey, PluginRegProfiles);
+    RegDeleteValue(HKCU, PluginRegKey, PluginRegToken);
     RegDeleteKeyIfEmpty(HKCU, PluginRegKey);
   end;
 end;

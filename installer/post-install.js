@@ -305,9 +305,12 @@ function registerPluginProfiles() {
     const prevText = reg.readReg(reg.REG_PROFILES);
     const previous = reg.parseProfileList(prevText || '', {});
     const requested = reg.parseProfileList(pluginProfiles, process.env);
-    const plan = reg.planPostInstall({ mode: pluginMode, requested, previous });
+    const plan = reg.planPostInstall({ mode: pluginMode, requested, previous, userProfileDir });
 
     console.log(`Plugin location: ${pluginMode}${pluginMode === 'shared' ? ` (${pluginRoot})` : ''}`);
+    for (const dir of plan.skippedDefault) {
+        console.log(`  Skipped ${dir}: that is the default Claude Code profile, which gets the plugin via MultiTerminal's --plugin-dir (not registered there).`);
+    }
     if (plan.add.length === 0 && plan.remove.length === 0) {
         console.log('  No Claude Code profiles to register or de-register.');
     }
@@ -316,16 +319,11 @@ function registerPluginProfiles() {
     const rootProblem = reg.unsafeDirReason(pluginRoot);
 
     for (const dir of plan.add) {
-        const problem = rootProblem || reg.unsafeDirReason(dir);
-        if (problem) {
-            console.warn(`  Skipped ${dir}: ${problem}`);
-            results[reg.dirKey(dir)] = { ok: false, failureCode: 'invalid_input' };
-            continue;
-        }
-        if (!fs.existsSync(dir)) {
-            // Setting CLAUDE_CONFIG_DIR at a mistyped path would silently create a new profile.
-            console.warn(`  Skipped ${dir}: directory does not exist (not creating a new profile)`);
-            results[reg.dirKey(dir)] = { ok: false, failureCode: 'missing_dir' };
+        // A missing dir is never run: CLAUDE_CONFIG_DIR at a mistyped path would create a new profile.
+        const skip = reg.profileDirPreflight({ action: 'add', dir, exists: fs.existsSync(dir), rootProblem });
+        if (skip) {
+            console.warn(`  Skipped ${dir}: ${skip.message}`);
+            results[reg.dirKey(dir)] = { ok: false, failureCode: skip.failureCode };
             continue;
         }
         const r = reg.runMarketplace('add', { configDir: dir, sharedRoot: pluginRoot, userProfileDir });
@@ -334,13 +332,15 @@ function registerPluginProfiles() {
     }
 
     for (const dir of plan.remove) {
-        const problem = reg.unsafeDirReason(dir);
-        if (problem) {
-            console.warn(`  Could not de-register ${dir}: ${problem}`);
-            results[reg.dirKey(dir)] = { ok: false, failureCode: 'invalid_input' };
+        // Same rule for a remove: a stored dir that no longer exists is treated as already clean
+        // (not_configured, dropped from the recorded list) and claude is never run against it.
+        const skip = reg.profileDirPreflight({ action: 'remove', dir, exists: fs.existsSync(dir) });
+        if (skip) {
+            console.warn(`  Not de-registering ${dir}: ${skip.message}`);
+            results[reg.dirKey(dir)] = { ok: false, failureCode: skip.failureCode };
             continue;
         }
-        const r = reg.runMarketplace('remove', { configDir: dir, sharedRoot: pluginRoot, userProfileDir });
+        const r = reg.runMarketplace('remove', { configDir: dir, userProfileDir });
         results[reg.dirKey(dir)] = r;
         const clean = r.ok || r.failureCode === 'not_configured';
         console.log(`  ${clean ? 'De-registered' : 'FAILED to de-register'} marketplace from ${dir}${r.message ? `: ${r.message}` : ''}`);
@@ -349,7 +349,7 @@ function registerPluginProfiles() {
     const registered = reg.registeredAfterInstall({ plan, previous, results });
     const ok = registered.length > 0
         ? reg.writeRegString(reg.REG_PROFILES, registered.join(';'))
-        : (prevText === null || reg.deleteRegValue(reg.REG_PROFILES));
+        : (prevText === undefined || reg.deleteRegValue(reg.REG_PROFILES));
     if (!ok) {
         console.warn(`  Warning: could not record ${reg.REG_PROFILES} in ${reg.REG_KEY}; uninstall will not de-register these profiles.`);
     } else if (registered.length > 0) {

@@ -12,8 +12,15 @@
  *   PluginMarketplacePath       REG_SZ    shared MARKETPLACE ROOT; absent = default profile
  *   PluginDirCreatedByInstaller REG_DWORD 1 only if the installer created that directory
  *   PluginRegisteredProfiles    REG_SZ    ';'-separated config dirs the marketplace was added to
- * The .iss writes the first two; post-install.js writes the third (it is the only party that
- * knows which registrations succeeded), and post-uninstall.js removes all three.
+ *   PluginDirOwnerToken         REG_SZ    random token; equals the content of the ownership marker
+ *                                         file <root>\.mt-installer-owned that the installer wrote
+ *                                         when it CREATED the directory (absent = never deletable)
+ * The .iss writes PluginMarketplacePath, PluginDirCreatedByInstaller and PluginDirOwnerToken (and
+ * the marker file); post-install.js writes PluginRegisteredProfiles (it is the only party that
+ * knows which registrations succeeded), and post-uninstall.js removes all four.
+ *
+ * HKCU is writable by any same-user unelevated process and the installer runs elevated, so no
+ * HKCU value alone may authorise a recursive delete: see sharedDirRemovalDecision.
  *
  * CLI behaviour these helpers rely on, measured against Claude Code 2.1.294 with a scratch
  * CLAUDE_CONFIG_DIR (2026-10-09), not assumed:
@@ -38,6 +45,11 @@ const REG_KEY = 'HKCU\\Software\\MultiTerminal';
 const REG_PATH = 'PluginMarketplacePath';
 const REG_CREATED = 'PluginDirCreatedByInstaller';
 const REG_PROFILES = 'PluginRegisteredProfiles';
+const REG_TOKEN = 'PluginDirOwnerToken';
+/** Ownership marker the installer writes inside a shared root it created (content = REG_TOKEN). */
+const OWNER_MARKER_FILE = '.mt-installer-owned';
+/** The section header `reg export` writes for REG_KEY. */
+const REG_EXPORT_SECTION = 'HKEY_CURRENT_USER\\Software\\MultiTerminal';
 const MARKETPLACE_NAME = 'multiterminal-marketplace';
 
 // ------------------------------------------------------------------
@@ -141,14 +153,43 @@ function childEnvFor(configDir, userProfileDir, baseEnv) {
  *   default: add nothing; remove every previous registration (they point at a shared copy the
  *            user just moved away from).
  *   skip:    touch nothing, including the recorded list.
- * Returns { add: [dir], remove: [dir] } or null for skip.
+ * The DEFAULT profile (%USERPROFILE%\.claude, any spelling) is never added or removed (Owner
+ * decision): MT's terminals get the plugin there via --plugin-dir, and the default profile is not
+ * an "extra profile". It is reported in `skippedDefault` for the caller to log, and never recorded.
+ * Returns { add: [dir], remove: [dir], skippedDefault: [dir] } or null for skip.
  */
-function planPostInstall({ mode, requested, previous }) {
+function planPostInstall({ mode, requested, previous, userProfileDir }) {
     if (mode === 'skip') return null;
-    const req = mode === 'shared' ? (requested || []) : [];
-    const prev = previous || [];
+    const skippedDefault = [];
+    const notDefault = d => {
+        if (userProfileDir && isDefaultConfigDir(d, userProfileDir)) {
+            if (!skippedDefault.some(s => sameDir(s, d))) skippedDefault.push(d);
+            return false;
+        }
+        return true;
+    };
+    const req = (mode === 'shared' ? (requested || []) : []).filter(notDefault);
+    const prev = (previous || []).filter(notDefault);
     const remove = prev.filter(p => !req.some(r => sameDir(r, p)));
-    return { add: req.slice(), remove };
+    return { add: req.slice(), remove, skippedDefault };
+}
+
+/**
+ * Whether one profile dir may be handed to the claude CLI, decided before spawning it. Returns
+ * null to proceed, or { failureCode, message } to skip. Running claude with CLAUDE_CONFIG_DIR at a
+ * directory that does not exist CREATES a new, empty profile there, so a missing dir is never run:
+ * for an add it is 'missing_dir'; for a remove it is 'not_configured' (a profile that does not
+ * exist holds no entry, so it is already clean and drops off the recorded list).
+ */
+function profileDirPreflight({ action, dir, exists, rootProblem }) {
+    const problem = (action === 'add' && rootProblem) || unsafeDirReason(dir);
+    if (problem) return { failureCode: 'invalid_input', message: problem };
+    if (!exists) {
+        return action === 'add'
+            ? { failureCode: 'missing_dir', message: 'directory does not exist (not creating a new profile)' }
+            : { failureCode: 'not_configured', message: 'directory does not exist; nothing to de-register (not creating a new profile)' };
+    }
+    return null;
 }
 
 /**
@@ -175,14 +216,25 @@ function registeredAfterInstall({ plan, previous, results }) {
 }
 
 /**
- * Whether uninstall may delete the shared marketplace root. Only when the installer created it
- * (createdFlag === 1), the path is absolute and not a drive root, it is not the default-profile
- * location (that one has its own unchanged cleanup), and it still looks like this marketplace
- * (`hasManifest`: <root>\.claude-plugin\marketplace.json exists). The manifest check stops a
- * corrupted or hand-edited registry value from turning into a recursive delete of some other
- * folder. Returns { remove: boolean, reason: string }.
+ * Whether uninstall may recursively delete the shared marketplace root. Uninstall runs ELEVATED
+ * and every registry input lives in HKCU, which any same-user unelevated process can rewrite, so
+ * a forged PluginMarketplacePath must not be able to aim the delete at some other folder. ALL of
+ * these must hold:
+ *   - createdFlag === 1 (PluginDirCreatedByInstaller);
+ *   - the path is absolute, not a drive root, and not the default-profile location (that one has
+ *     its own unchanged cleanup);
+ *   - it still looks like this marketplace (`hasManifest`: <root>\.claude-plugin\marketplace.json);
+ *   - the ownership marker <root>\.mt-installer-owned exists and its trimmed content equals the
+ *     trimmed HKCU PluginDirOwnerToken exactly (ordinal). The installer writes that marker only
+ *     into a folder it CREATED, so a forged path can reach only a folder already holding one. A
+ *     folder from the Phase-1 build (created flag, no token) is kept;
+ *   - the folder is not a reparse point and resolves to itself: `isReparsePoint` (from lstat) is
+ *     exactly false and `realPath` (fs.realpathSync.native) equals the path case-insensitively.
+ *     lstat alone misses a junction in an ANCESTOR; the realpath comparison catches that.
+ * Inputs are plain values so this stays pure; inspectSharedDir collects them from disk.
+ * Returns { remove: boolean, reason: string }.
  */
-function sharedDirRemovalDecision({ sharedRoot, createdFlag, userProfileDir, hasManifest }) {
+function sharedDirRemovalDecision({ sharedRoot, createdFlag, userProfileDir, hasManifest, markerToken, ownerToken, isReparsePoint, realPath }) {
     if (!sharedRoot) return { remove: false, reason: 'no shared location recorded' };
     const root = cleanDir(sharedRoot);
     if (createdFlag !== 1) return { remove: false, reason: 'not created by the installer (PluginDirCreatedByInstaller != 1)' };
@@ -190,7 +242,13 @@ function sharedDirRemovalDecision({ sharedRoot, createdFlag, userProfileDir, has
     const defaultRoot = path.win32.join(defaultConfigDir(userProfileDir), 'plugins', 'marketplaces', MARKETPLACE_NAME);
     if (sameDir(root, defaultRoot)) return { remove: false, reason: 'is the default-profile location' };
     if (!hasManifest) return { remove: false, reason: 'no .claude-plugin\\marketplace.json inside; not deleting an unrecognised folder' };
-    return { remove: true, reason: 'created by the installer' };
+    const want = typeof ownerToken === 'string' ? ownerToken.trim() : '';
+    const have = typeof markerToken === 'string' ? markerToken.trim() : '';
+    if (!want || !have) return { remove: false, reason: 'kept: no ownership marker' };
+    if (want !== have) return { remove: false, reason: 'kept: ownership marker does not match PluginDirOwnerToken' };
+    if (isReparsePoint !== false) return { remove: false, reason: 'kept: folder is a reparse point (symlink/junction) or could not be checked' };
+    if (!realPath || !sameDir(realPath, root)) return { remove: false, reason: 'kept: folder resolves to a different path (junction or symlink on the way)' };
+    return { remove: true, reason: 'created by the installer (ownership marker matches)' };
 }
 
 /** Command line for `claude plugin marketplace add|remove`. Caller has checked unsafeDirReason. */
@@ -213,18 +271,36 @@ function parseCliResult(stdout, status) {
     return { ok: status === 0, outcome: status === 0 ? 'ok' : 'failed', failureCode: undefined, message: '' };
 }
 
-/** Parses one value out of `reg query <key> /v <name>` output; null when absent. */
-function parseRegQuery(stdout, name) {
-    const re = new RegExp('^\\s+' + name + '\\s+(REG_[A-Z_]+)(?:\\s+(.*))?$', 'i');
-    for (const line of String(stdout || '').split(/\r?\n/)) {
-        const m = re.exec(line);
+/** Undoes `reg export` string escaping: \\ -> \ and \" -> ". */
+function unescapeRegString(text) {
+    return String(text).replace(/\\(.)/g, '$1');
+}
+
+/**
+ * Parses the values of ONE key out of `reg export` text (decoded from UTF-16LE; a leading BOM is
+ * ignored). Only lines under a `[section]` header equal (case-insensitively) to `section` count,
+ * so a subkey's values are ignored. Understands "Name"="string" (with \\ and \" escapes) and
+ * "Name"=dword:xxxxxxxx; other types (hex(...)) and the default value (@) are skipped.
+ * Returns a plain object; an absent value is not a property (reads as undefined).
+ */
+function parseRegExport(text, section) {
+    const out = {};
+    const want = String(section || REG_EXPORT_SECTION).toLowerCase();
+    let inSection = false;
+    for (const raw of String(text || '').replace(/^﻿/, '').split(/\r?\n/)) {
+        const line = raw.replace(/\s+$/, '');
+        const header = /^\[(.*)\]$/.exec(line);
+        if (header) { inSection = header[1].toLowerCase() === want; continue; }
+        if (!inSection) continue;
+        const m = /^"((?:[^"\\]|\\.)*)"=(.*)$/.exec(line);
         if (!m) continue;
-        const type = m[1].toUpperCase();
-        const data = (m[2] || '').trim();
-        if (type === 'REG_DWORD') return parseInt(data, 16);
-        return data;
+        const name = unescapeRegString(m[1]);
+        const str = /^"((?:[^"\\]|\\.)*)"$/.exec(m[2]);
+        if (str) { out[name] = unescapeRegString(str[1]); continue; }
+        const dw = /^dword:([0-9a-fA-F]{8})$/.exec(m[2]);
+        if (dw) out[name] = parseInt(dw[1], 16);
     }
-    return null;
+    return out;
 }
 
 // ------------------------------------------------------------------
@@ -235,10 +311,33 @@ function defaultSpawn() {
     return require('child_process').spawnSync;
 }
 
-function readReg(name, spawn) {
-    const r = (spawn || defaultSpawn())('reg', ['query', REG_KEY, '/v', name], { encoding: 'utf8', windowsHide: true });
-    if (!r || r.status !== 0) return null;
-    return parseRegQuery(r.stdout, name);
+/**
+ * Reads every value of REG_KEY at once via `reg export` to a temp file decoded as UTF-16LE. NOT
+ * `reg query`: its piped stdout is in the OEM code page, so a non-ASCII path (C:\Users\José\...)
+ * came back as U+FFFD. A missing key (reg export exits nonzero) means every value is absent. The
+ * file lives in a fresh mkdtemp directory, removed in finally. `spawn`/`fsImpl` are injectable.
+ */
+function readRegValues(spawn, fsImpl) {
+    const fsx = fsImpl || require('fs');
+    let dir = null;
+    try {
+        dir = fsx.mkdtempSync(path.join(os.tmpdir(), 'mt-reg-'));
+        const file = path.join(dir, 'export.reg');
+        const r = (spawn || defaultSpawn())('reg', ['export', REG_KEY, file, '/y'], { encoding: 'utf8', windowsHide: true });
+        if (!r || r.status !== 0 || !fsx.existsSync(file)) return {};
+        return parseRegExport(fsx.readFileSync(file).toString('utf16le'), REG_EXPORT_SECTION);
+    } catch {
+        return {};
+    } finally {
+        if (dir) {
+            try { fsx.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+        }
+    }
+}
+
+/** One value of REG_KEY (string or number), or undefined when absent. */
+function readReg(name, spawn, fsImpl) {
+    return readRegValues(spawn, fsImpl)[name];
 }
 
 function writeRegString(name, value, spawn) {
@@ -252,10 +351,28 @@ function deleteRegValue(name, spawn) {
 }
 
 /**
+ * Collects sharedDirRemovalDecision's on-disk inputs for `root`. Every probe that fails yields
+ * the KEEP answer (no manifest, no marker, reparse unknown, no realpath).
+ */
+function inspectSharedDir(root, fsImpl) {
+    const fsx = fsImpl || require('fs');
+    const out = { hasManifest: false, markerToken: null, isReparsePoint: null, realPath: null };
+    try { out.hasManifest = fsx.existsSync(path.join(root, '.claude-plugin', 'marketplace.json')); } catch { /* keep */ }
+    try { out.markerToken = String(fsx.readFileSync(path.join(root, OWNER_MARKER_FILE), 'utf8')).replace(/^﻿/, '').trim(); } catch { /* keep */ }
+    try {
+        const st = fsx.lstatSync(root);
+        out.isReparsePoint = st.isSymbolicLink() || !st.isDirectory();
+    } catch { /* keep */ }
+    try { out.realPath = fsx.realpathSync.native(root); } catch { /* keep */ }
+    return out;
+}
+
+/**
  * Runs one `claude plugin marketplace` command for `configDir` with CLAUDE_CONFIG_DIR set in the
  * CHILD env only (see childEnvFor). cwd is the temp dir so no project's settings are in scope.
+ * `sharedRoot` is needed only for 'add'.
  */
-function runMarketplace(action, { configDir, sharedRoot, userProfileDir, baseEnv, spawn }) {
+function runMarketplace(action, { configDir, sharedRoot = '', userProfileDir, baseEnv, spawn }) {
     const cmd = marketplaceCommand(action, sharedRoot);
     const env = childEnvFor(configDir, userProfileDir, baseEnv || process.env);
     const r = (spawn || defaultSpawn())(cmd, [], {
@@ -270,10 +387,10 @@ function runMarketplace(action, { configDir, sharedRoot, userProfileDir, baseEnv
 }
 
 module.exports = {
-    REG_KEY, REG_PATH, REG_CREATED, REG_PROFILES, MARKETPLACE_NAME,
+    REG_KEY, REG_PATH, REG_CREATED, REG_PROFILES, REG_TOKEN, OWNER_MARKER_FILE, REG_EXPORT_SECTION, MARKETPLACE_NAME,
     expandEnvVars, cleanDir, dirKey, sameDir, isAbsoluteWindowsDir, parseProfileList,
     defaultConfigDir, isDefaultConfigDir, unsafeDirReason, childEnvFor,
-    planPostInstall, registeredAfterInstall, sharedDirRemovalDecision,
-    marketplaceCommand, parseCliResult, parseRegQuery,
-    readReg, writeRegString, deleteRegValue, runMarketplace,
+    planPostInstall, profileDirPreflight, registeredAfterInstall, sharedDirRemovalDecision,
+    marketplaceCommand, parseCliResult, unescapeRegString, parseRegExport,
+    readRegValues, readReg, writeRegString, deleteRegValue, inspectSharedDir, runMarketplace,
 };

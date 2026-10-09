@@ -50,9 +50,10 @@ namespace MultiTerminal.Services
             var problems = new List<Problem>();
             if (!fileExists(expectedMcpIndexJs))
                 problems.Add(Problem.McpServerMissing);
-            // Missing only when NO candidate exists: the plugin is found at the first one that does
-            // (LaunchCommandBuilder.GetMtPluginPath), so any hit means terminals get it.
-            if (!expectedPluginDirs.Any(directoryExists))
+            // Missing exactly when the launch lookup would find nothing: this calls the same resolver
+            // GetMtPluginPath uses, so a probe that throws (IO, access, argument) counts as absent here
+            // too, rather than escaping this check as an exception.
+            if (LaunchCommandBuilder.ResolveMtPluginPath(expectedPluginDirs, directoryExists) == null)
                 problems.Add(Problem.PluginMissing);
             if (FindCommandOnPath("node", pathVariable, pathExtVariable, fileExists) == null)
                 problems.Add(Problem.NodeMissing);

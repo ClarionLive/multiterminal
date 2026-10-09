@@ -68,6 +68,23 @@ namespace MultiTerminal.Tests
             Assert.Empty(problems);
         }
 
+        /// <summary>
+        /// Ticket c8ee0eec review: Find uses the launch lookup's own rule (LaunchCommandBuilder.ResolveMtPluginPath),
+        /// so a candidate whose probe throws counts as absent instead of escaping Find. Discriminates: the previous
+        /// <c>expectedPluginDirs.Any(directoryExists)</c> shape threw UnauthorizedAccessException out of this call.
+        /// </summary>
+        [Fact]
+        public void A_throwing_plugin_probe_counts_as_absent_like_the_launch_lookup()
+        {
+            var candidates = new[] { SharedPluginDir, PluginDir };
+            Func<string, bool> probe = d => d == SharedPluginDir ? throw new UnauthorizedAccessException() : d == PluginDir;
+
+            Assert.Empty(ClaudeIntegrationCheck.Find(IndexJs, candidates, NodeDir, null, Existing(IndexJs, NodePath), probe));
+
+            Func<string, bool> onlyThrows = _ => throw new UnauthorizedAccessException();
+            Assert.Equal(new[] { Problem.PluginMissing }, ClaudeIntegrationCheck.Find(IndexJs, candidates, NodeDir, null, Existing(IndexJs, NodePath), onlyThrows));
+        }
+
         /// <summary>When no candidate exists, the warning names every place that was searched.</summary>
         [Fact]
         public void A_missing_plugin_message_names_every_searched_location()
