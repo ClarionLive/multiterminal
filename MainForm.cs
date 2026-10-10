@@ -2058,7 +2058,8 @@ namespace MultiTerminal
                             spawnerName: spawnerName,
                             projectId: project?.Id,
                             gatewayProfile: gatewayProfile,
-                            atomicIdentityUniqueness: true);
+                            atomicIdentityUniqueness: true,
+                            claudeProfileName: project?.ClaudeProfile);
                     }));
                 });
 
@@ -2285,10 +2286,22 @@ namespace MultiTerminal
                         try { agent.Dispose(); } catch { /* teardown is best-effort */ }
                     };
 
+                    // The writer spends the tokens of the task's project, so it runs under that
+                    // project's Claude profile (ticket c8ee0eec).
+                    string glossLabel = $"gloss writer for {taskId}";
+                    string glossProfileName = LookupClaudeProfileName(
+                        () =>
+                        {
+                            string projectId = _mcpServer?.Broker?.GetTask(taskId)?.ProjectId;
+                            return string.IsNullOrEmpty(projectId) ? null : _sharedProjectDatabase?.GetRichProject(projectId)?.ClaudeProfile;
+                        },
+                        glossLabel);
+
                     await agent.SpawnAsync(
                         prompt: prompt,
                         workingDir: AppDomain.CurrentDomain.BaseDirectory,
-                        mcpConfigPath: mcpConfigPath);
+                        mcpConfigPath: mcpConfigPath,
+                        claudeProfile: ResolveLaunchClaudeProfile(glossProfileName, glossLabel, showWarning: false));
 
                     pending = null;   // the exit handler owns it from here
                 }
@@ -2332,6 +2345,12 @@ namespace MultiTerminal
                 // When this identity owns an active task with a materialized
                 // worktree, override cwd AND inject MULTITERMINAL_TASK_WORKTREE
                 // so MCP tools that read the env var see the right path.
+                // The project is read from the requested folder, before the worktree override below
+                // (a worktree sits inside its project's repo, but has no project.json of its own).
+                string agentLabel = $"headless agent '{agentName}'";
+                string requestedDir = workingDir;
+                string agentProfileName = LookupClaudeProfileName(() => _projectService?.DiscoverProject(requestedDir)?.ClaudeProfile, agentLabel);
+
                 string taskWorktreePath = ResolveTaskWorktreePath(agentName);
                 Dictionary<string, string> spawnEnv = null;
                 if (taskWorktreePath != null)
@@ -2348,7 +2367,8 @@ namespace MultiTerminal
                     prompt: initialPrompt,
                     workingDir: workingDir,
                     mcpConfigPath: mcpConfigPath,
-                    environmentVars: spawnEnv);
+                    environmentVars: spawnEnv,
+                    claudeProfile: ResolveLaunchClaudeProfile(agentProfileName, agentLabel, showWarning: false));
 
                 // Register with MessageBroker so other terminals can message this agent.
                 //
@@ -3705,7 +3725,7 @@ namespace MultiTerminal
         /// registration wait and initial-prompt delivery) must key on this, not on the name they asked
         /// for. Existing callers ignore the value.
         /// </summary>
-        public (string Name, string DocId) AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, bool atomicIdentityUniqueness = false, bool failClosedIdentity = false)
+        public (string Name, string DocId) AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, bool atomicIdentityUniqueness = false, bool failClosedIdentity = false, string claudeProfileName = null)
         {
             _debugLogService?.Trace("AddNewTerminal", "===== START =====");
             _debugLogService?.Trace("AddNewTerminal", $"workingDirectory: '{workingDirectory ?? "null"}'");
@@ -3860,7 +3880,9 @@ namespace MultiTerminal
                 _debugLogService?.Trace("AddNewTerminal", $"autoRunCommand: '{autoRunCommand ?? "null"}'");
                 _debugLogService?.Trace("AddNewTerminal", $"taskWorktreePath: '{taskWorktreePath ?? "null"}'");
                 _debugLogService?.Trace("AddNewTerminal", $"Calling doc.StartTerminal('{dir}', '{terminalName}', '{autoRunCommand ?? "null"}', '{spawnerName ?? "null"}', '{projectId ?? "null"}', isTeamLead={isTeamLead}, gatewayProfile='{gatewayProfile ?? "null"}', taskWorktreePath='{taskWorktreePath ?? "null"}')...");
-                doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath);
+                // A spawned helper has nobody at the desk for its launch, so its warning is logged only.
+                var claudeProfile = ResolveLaunchClaudeProfile(claudeProfileName, $"terminal '{terminalName}'", showWarning: string.IsNullOrEmpty(spawnerName));
+                doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, claudeProfile: claudeProfile);
                 _debugLogService?.Trace("AddNewTerminal", "doc.StartTerminal returned");
             }
             else
@@ -4113,7 +4135,10 @@ namespace MultiTerminal
 
                 _debugLogService?.Trace("StartScreen", $"Launching project '{project.Name}' in {launchDir}");
                 _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] Calling doc.StartTerminal: doc.DocId='{doc.DocId}' launchDir='{launchDir}' terminalName='{terminalName}' projectId='{project.Id}' projectName='{project.Name}' isTeamLead={isTeamLead} taskWorktreePath='{taskWorktreePath ?? "null"}'");
-                doc.StartTerminal(launchDir, terminalName, autoRunCommand, projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile, taskWorktreePath: taskWorktreePath);
+                // Always the chosen card's project profile, never one the pane ran under before
+                // (ticket c8ee0eec): a work project must not start under a personal profile.
+                var claudeProfile = ResolveLaunchClaudeProfile(project.ClaudeProfile, $"project '{project.Name}'");
+                doc.StartTerminal(launchDir, terminalName, autoRunCommand, projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile, taskWorktreePath: taskWorktreePath, claudeProfile: claudeProfile);
                 _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] After StartTerminal: doc.CustomTitle='{doc.CustomTitle}' doc.TabText='{doc.TabText}' doc.Text='{doc.Text}'");
 
                 // Apply current font size
@@ -4453,8 +4478,10 @@ namespace MultiTerminal
 
                 // Start terminal in project folder
                 _debugLogService?.Trace("StartScreen", $"Launching new project '{project.Name}' in {launchDir} (taskWorktreePath='{taskWorktreePath2 ?? "null"}')");
+                var claudeProfile2 = ResolveLaunchClaudeProfile(project.ClaudeProfile, $"project '{project.Name}'");
                 sourceDoc.StartTerminal(launchDir, terminalName, autoRunCommand,
-                    projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile2, taskWorktreePath: taskWorktreePath2);
+                    projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile2, taskWorktreePath: taskWorktreePath2,
+                    claudeProfile: claudeProfile2);
 
                 float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
                 sourceDoc.SetFontSize(terminalFontSize);
@@ -4752,6 +4779,52 @@ namespace MultiTerminal
             _debugLogService?.Warning("MainForm", $"Project identity '{identityName}' could not be registered; launch refused (no placeholder fallback). {error}");
             ReleaseGhostRegistration(docId, "MainForm");
             return false;
+        }
+
+        // Claude profile warnings already shown in a dialog this session; every one is still logged.
+        private readonly HashSet<string> _shownClaudeProfileWarnings = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// The Claude Code config profile a launch runs under (ticket c8ee0eec, GitHub #21), resolved from
+        /// the project's profile name (null or blank = Default). A warning from the resolver (a name this
+        /// machine has no profile for, or a profile folder that does not exist) is logged and, when
+        /// <paramref name="showWarning"/> is set, shown once per session in a dialog posted to run after
+        /// the caller has started the terminal. It never stops the launch.
+        /// </summary>
+        private Models.ClaudeProfile ResolveLaunchClaudeProfile(string profileName, string launchLabel, bool showWarning = true)
+        {
+            var resolution = ClaudeProfileResolver.Resolve(profileName, null);
+            if (resolution.HasWarning)
+            {
+                _debugLogService?.Warning("ClaudeProfile", $"{launchLabel}: {resolution.Warning}");
+                if (showWarning && IsHandleCreated && !IsDisposed && _shownClaudeProfileWarnings.Add(resolution.Warning))
+                {
+                    BeginInvoke(new Action(() =>
+                    {
+                        if (!IsDisposed)
+                            MessageBox.Show(this, resolution.Warning, "Claude Profile", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }));
+                }
+            }
+
+            return resolution.Profile;
+        }
+
+        /// <summary>
+        /// The Claude profile name of the project a headless agent works for, or null (Default) when
+        /// there is no project. A failed lookup is logged and also yields null.
+        /// </summary>
+        private string LookupClaudeProfileName(Func<string> lookup, string launchLabel)
+        {
+            try
+            {
+                return lookup();
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Warning("ClaudeProfile", $"{launchLabel}: project lookup failed, using the Default profile: {ex.Message}");
+                return null;
+            }
         }
 
         private void ShowProjectIdentityRefused(string identityName, string error) =>
@@ -5664,11 +5737,15 @@ namespace MultiTerminal
             // the one registered for the launch folder, else the pane's last launch project.
             string quietStartProjectId = _projectService?.DiscoverProject(workingDirectory)?.Id ?? doc.LaunchProjectId;
 
+            // "Launch as..." names no project, so the pane keeps the Claude profile it is running under
+            // (ticket c8ee0eec). Re-resolved by name, in case the profile was edited or removed since.
+            var claudeProfile = ResolveLaunchClaudeProfile(doc.LaunchClaudeProfileName, $"Launch as '{terminalName}'");
+
             // Stop current terminal and restart with new identity
             doc.Terminal.Stop();
             doc.CustomTitle = terminalName;
             doc.StartTerminal(workingDirectory, terminalName, autoRunCommand, taskWorktreePath: taskWorktreePath,
-                quietStartProjectId: quietStartProjectId);
+                quietStartProjectId: quietStartProjectId, claudeProfile: claudeProfile);
 
             // Auto-initialization is handled by OnClaudeCodeDetected when Claude Code's output is detected.
             // This ensures injection happens AFTER Claude Code is ready, not just after WebView2 loads.
@@ -8353,7 +8430,8 @@ namespace MultiTerminal
                 isTeamLead: isTeamLead,
                 gatewayProfile: gatewayProfile,
                 atomicIdentityUniqueness: atomicIdentityUniqueness,
-                failClosedIdentity: launchIdentity.IsProjectDerived);
+                failClosedIdentity: launchIdentity.IsProjectDerived,
+                claudeProfileName: e.Project.ClaudeProfile);
 
             // A refused project identity left the new pane on its start screen: nothing was opened. A
             // project-derived launch only has a name once registered, so null is refusal, broker or not.

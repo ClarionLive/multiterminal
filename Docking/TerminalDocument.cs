@@ -191,6 +191,12 @@ namespace MultiTerminal.Docking
         /// Read by "Launch as..." to keep the pane's Quiet start setting (GitHub #34).</summary>
         public string LaunchProjectId => _launchProjectId;
 
+        /// <summary>The name of the Claude profile this pane was last launched under (ticket c8ee0eec);
+        /// null for Default or a pane that has not launched. Read by "Launch as...", which names no
+        /// project and so keeps the pane's profile. Held in memory only: a restored pane comes back on
+        /// the start screen, where a project card's own profile applies.</summary>
+        public string LaunchClaudeProfileName { get; private set; }
+
         /// <summary>
         /// Event fired when the terminal process exits.
         /// </summary>
@@ -1357,8 +1363,11 @@ namespace MultiTerminal.Docking
         /// <param name="gatewayProfile">MCP Gateway profile name (sets MCP_GATEWAY_PROFILE env var)</param>
         /// <param name="taskWorktreePath">Per-task worktree path resolved from the active task (sets MULTITERMINAL_TASK_WORKTREE env var). Empty when no task worktree is in play.</param>
         /// <param name="quietStartProjectId">The project whose Quiet start setting applies when <paramref name="projectId"/> is null (GitHub #34). Used by "Launch as...", which is not a project launch and must not get a project's role or env, but still opens in a quiet project. Ignored when projectId is set.</param>
-        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string quietStartProjectId = null)
+        /// <param name="claudeProfile">The Claude Code config profile this launch runs under (ticket c8ee0eec), already resolved with <see cref="ClaudeProfileResolver"/>. Null means Default.</param>
+        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string quietStartProjectId = null, MultiTerminal.Models.ClaudeProfile claudeProfile = null)
         {
+            // Per launch, like the role below: a reused pane must not keep the last launch's profile.
+            LaunchClaudeProfileName = claudeProfile == null || claudeProfile.IsDefault ? null : claudeProfile.Name;
             _debugLogService?.Info("TerminalDocument.StartTerminal", $"===== START =====");
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"workingDirectory: '{workingDirectory ?? "null"}'");
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"terminalName: '{terminalName ?? "null"}'");
@@ -1367,6 +1376,7 @@ namespace MultiTerminal.Docking
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"projectId: '{projectId ?? "null"}'");
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"isTeamLead: '{isTeamLead}'");
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"_docId: '{_docId}'");
+            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"claudeProfile: '{claudeProfile?.Name ?? MultiTerminal.Models.ClaudeProfile.DefaultName}'");
 
             // The tab's role label, from the SAME resolver that decides MULTITERMINAL_PROJECT_PM for this
             // launch (task ad7f6721) — so a tab can never advertise a role the session-start hook withheld.
@@ -1458,7 +1468,7 @@ namespace MultiTerminal.Docking
             WriteFallbackStatusline(terminalName, workingDirectory);
 
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"Calling _terminal.Start...");
-            _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, _launch.LaunchNonce);
+            _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, _launch.LaunchNonce, claudeProfile);
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"_terminal.Start returned");
 
             // Update status bar after terminal starts
