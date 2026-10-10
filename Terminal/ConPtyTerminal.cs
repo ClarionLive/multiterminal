@@ -653,7 +653,7 @@ namespace MultiTerminal.Terminal
             catch (ArgumentException ex)
             {
                 DebugLogService?.Error("ConPtyTerminal", $"Launch refused: Claude profile '{claudeProfile?.Name}' cannot be applied: {ex.Message}");
-                throw new InvalidOperationException(
+                throw new Services.ClaudeProfileRefusedException(
                     $"Claude profile '{claudeProfile?.Name}' cannot be applied, so nothing was started. Fix its folder in Settings > Claude Profiles. ({ex.Message})",
                     ex);
             }

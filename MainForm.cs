@@ -4893,10 +4893,11 @@ namespace MultiTerminal
         /// THE Claude profile decision for a launch (ticket c8ee0eec, GitHub #21). Every launch site in
         /// this form calls it (directly, or through <see cref="TryGetLaunchClaudeProfile"/>); none reads
         /// <c>Project.ClaudeProfile</c> off an object it is holding. The rules are
-        /// <see cref="ClaudeProfileLaunchPolicy"/>'s: the project's DATABASE row, else the project that
-        /// owns <paramref name="folder"/>, else the project.json when there is no row, else
-        /// <paramref name="inheritedProfileName"/>, else Default; and a profile this machine cannot honour
-        /// refuses the launch. Shows nothing: the caller decides how a refusal is reported. Safe off the
+        /// <see cref="ClaudeProfileLaunchPolicy"/>'s: the named project's DATABASE row, else the nearest
+        /// registered project at or above <paramref name="folder"/> (a row first, a project.json only
+        /// where no row owns that level), and only when no project owns the folder or any ancestor,
+        /// <paramref name="inheritedProfileName"/>, else Default. A profile this machine cannot honour,
+        /// or two owners of one folder that disagree, refuses the launch. Shows nothing: the caller decides how a refusal is reported. Safe off the
         /// UI thread.
         /// </summary>
         private ClaudeProfileLaunchDecision DecideLaunchClaudeProfile(string projectId, string folder, string launchLabel, string inheritedProfileName = null)
@@ -5078,9 +5079,14 @@ namespace MultiTerminal
             void readyHandler(object s, EventArgs e)
             {
                 doc.TerminalReady -= readyHandler;
+                doc.TerminalStartFailed -= readyHandler;
                 tcs.TrySetResult(doc);
             }
             doc.TerminalReady += readyHandler;
+
+            // A start refused over its Claude profile never becomes ready; without this the restore
+            // that awaits this task would wait forever.
+            doc.TerminalStartFailed += readyHandler;
 
             // Show as tab (for restore, will apply grid layout after all terminals created)
             doc.Show(_dockPanel, DockState.Document);
@@ -5660,6 +5666,14 @@ namespace MultiTerminal
             var docs = _gridManager.GetTerminalDocuments();
             int neededCount = GetTerminalCountForPreset(preset);
 
+            // Every pane this preset adds opens a plain shell in the same folder, so its Claude profile
+            // is decided ONCE here (ticket c8ee0eec): a refusal is one message box, not one per pane,
+            // and the added panes stay on their start screens, unregistered.
+            string presetDir = _settings?.GetLastDirectory();
+            Models.ClaudeProfile presetClaudeProfile = null;
+            bool presetShellsAllowed = docs.Count >= neededCount
+                || TryGetLaunchClaudeProfile(null, presetDir, $"PowerShell in '{presetDir}'", out presetClaudeProfile);
+
             // Add terminals if needed
             while (docs.Count < neededCount)
             {
@@ -5689,7 +5703,10 @@ namespace MultiTerminal
                 doc.Show(_dockPanel, DockState.Document);
 
                 // Pre-register with MessageBroker so the terminal is routable immediately
-                StartPlainShell(doc, _settings?.GetLastDirectory(), () => PreRegisterTerminal(doc.DocId, doc.LaunchNonce));
+                if (presetShellsAllowed)
+                    doc.StartTerminal(presetDir, PreRegisterTerminal(doc.DocId, doc.LaunchNonce), claudeProfile: presetClaudeProfile);
+                else
+                    doc.ShowStartScreen();
                 doc.SetFontSize(_settings?.GetTerminalFontSize() ?? 10f);
 
                 // Grid-preset terminals get the same saved layout as every other creation path.

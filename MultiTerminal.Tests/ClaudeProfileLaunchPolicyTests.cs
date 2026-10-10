@@ -12,8 +12,10 @@ namespace MultiTerminal.Tests
     /// Ticket c8ee0eec (GitHub #21), Phase 2 review fixes: <see cref="ClaudeProfileLaunchPolicy"/>, the one
     /// decision every launch site asks ("which Claude profile, and may it start"). The database rows,
     /// the project.json files and the configured profiles are all handed in, so nothing reads the live
-    /// database, settings.txt or a real project. The worktree facts build a throwaway folder tree under
-    /// the temp directory, because that part of the decision looks for a <c>.git</c> on disk.
+    /// database, settings.txt or a real project. Every fact runs the production
+    /// <see cref="ClaudeProfileLaunchPolicy.CandidateFolders"/> (the ancestor walk) unless it passes its
+    /// own. The worktree facts build a throwaway folder tree under the temp directory, because that part
+    /// of the decision looks for a <c>.git</c> on disk; the other paths are made up and never touched.
     /// <para>NOT covered: that each launch site in MainForm calls the policy, passes the right folder, or
     /// honours a refusal; and how MainForm finds a spawner's pane. Those need a running form.</para>
     /// </summary>
@@ -37,7 +39,8 @@ namespace MultiTerminal.Tests
         private static Project FileProject(string id, string profile) =>
             new Project { Id = id, Name = "File " + id, ClaudeProfile = profile };
 
-        /// <summary>A lookup over fixed rows and files; folders are taken as given (no worktree mapping).</summary>
+        /// <summary>A lookup over fixed rows and files, with the production ancestor walk unless
+        /// <paramref name="candidates"/> replaces it.</summary>
         private static ClaudeProfileLookup Lookup(
             IEnumerable<ClaudeProfileProjectRow> rows = null,
             IDictionary<string, Project> files = null,
@@ -49,7 +52,7 @@ namespace MultiTerminal.Tests
                 RowById: id => rowList.FirstOrDefault(r => r.Id == id),
                 AllRows: () => rowList,
                 LoadProjectFile: folder => folder != null && fileMap.TryGetValue(folder, out var p) ? p : null,
-                CandidateFolders: candidates ?? (folder => folder == null ? Array.Empty<string>() : new[] { folder }));
+                CandidateFolders: candidates ?? ClaudeProfileLaunchPolicy.CandidateFolders);
         }
 
         private static Func<string, ClaudeProfileResolution> Resolver(Func<string, bool> exists = null) =>
@@ -200,16 +203,29 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
-        public void A_task_worktree_is_looked_up_at_itself_and_then_at_its_repo()
+        public void A_task_worktree_is_looked_up_at_itself_then_in_the_main_checkout_then_up_the_tree()
         {
             string repo = MakeRepoWithWorktree(out string worktree);
 
-            Assert.Equal(new[] { worktree, repo }, ClaudeProfileLaunchPolicy.CandidateFolders(worktree));
+            var atWorktree = ClaudeProfileLaunchPolicy.CandidateFolders(worktree);
+            Assert.Equal(new[] { worktree, repo }, atWorktree.Take(2));
 
-            // A folder inside the worktree maps to the same folder in the main checkout, then the repo root.
+            // A folder inside the worktree: itself, the worktree, the same folder in the main checkout,
+            // the repo root, and only then the folders between them and everything above the repo.
+            var inside = ClaudeProfileLaunchPolicy.CandidateFolders(Path.Combine(worktree, "Services"));
             Assert.Equal(
-                new[] { Path.Combine(worktree, "Services"), Path.Combine(repo, "Services"), repo },
-                ClaudeProfileLaunchPolicy.CandidateFolders(Path.Combine(worktree, "Services")));
+                new[]
+                {
+                    Path.Combine(worktree, "Services"),
+                    worktree,
+                    Path.Combine(repo, "Services"),
+                    repo,
+                    Path.Combine(repo, ".claude", "worktrees"),
+                    Path.Combine(repo, ".claude"),
+                    _tempRoot,
+                },
+                inside.Take(7));
+            Assert.Equal(inside.Count, inside.Distinct(StringComparer.OrdinalIgnoreCase).Count());
         }
 
         [Fact]
@@ -241,17 +257,270 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
-        public void An_ordinary_subfolder_of_a_project_is_not_matched_to_it()
+        public void A_worktree_with_any_name_belongs_to_the_project_at_its_repo()
         {
-            // Pins a LIMIT, not a goal: only the project's own folder (and its worktrees) match, so a
-            // pane opened in <repo>\Services belongs to no project and gets Default or the inherited
-            // profile. Recorded here so nobody reads the worktree facts above as "any folder inside".
+            // "c8ee0eec-i5" is not an 8-hex task id, so WorktreeLayout maps it to nothing. The repo is
+            // an ancestor, and that is what finds the project.
             string repo = MakeRepoWithWorktree(out _);
-            string sub = Path.Combine(repo, "Services");
-            var lookup = Lookup(rows: new[] { Row("p1", "Work", path: repo) }, candidates: ClaudeProfileLaunchPolicy.CandidateFolders);
+            string oddWorktree = Path.Combine(repo, ".claude", "worktrees", "c8ee0eec-i5");
+            Assert.False(WorktreeLayout.TryMapWorktreePath(oddWorktree, out _, out _));
+            var lookup = Lookup(rows: new[] { Row("p1", "Work", path: repo) });
 
-            Assert.Equal(new[] { sub }, ClaudeProfileLaunchPolicy.CandidateFolders(sub));
-            Assert.Equal(ClaudeProfileNameSource.None, ClaudeProfileLaunchPolicy.FindProfileName(null, sub, null, lookup).Source);
+            var atWorktree = ClaudeProfileLaunchPolicy.FindProfileName(null, oddWorktree, "Personal", lookup);
+            var below = ClaudeProfileLaunchPolicy.FindProfileName(null, Path.Combine(oddWorktree, "Services"), "Personal", lookup);
+
+            Assert.Equal("Work", atWorktree.ProfileName);
+            Assert.Equal("p1", atWorktree.ProjectId);
+            Assert.Equal("Work", below.ProfileName);
+            Assert.Equal("p1", below.ProjectId);
+        }
+
+        [Fact]
+        public void A_folder_in_a_worktree_belongs_to_the_project_registered_at_that_folder_in_the_main_checkout()
+        {
+            // A project registered at <repo>\Services owns <worktree>\Services ahead of the repo's own
+            // project, for a task-id worktree and for one with any other name.
+            string repo = MakeRepoWithWorktree(out string worktree);
+            string oddWorktree = Path.Combine(repo, ".claude", "worktrees", "c8ee0eec-i5");
+            var lookup = Lookup(rows: new[]
+            {
+                Row("root", "Work", path: repo),
+                Row("sub", "Personal", path: Path.Combine(repo, "Services")),
+            });
+
+            Assert.Equal("sub", ClaudeProfileLaunchPolicy.FindProfileName(null, Path.Combine(worktree, "Services"), null, lookup).ProjectId);
+            Assert.Equal("sub", ClaudeProfileLaunchPolicy.FindProfileName(null, Path.Combine(oddWorktree, "Services"), null, lookup).ProjectId);
+            Assert.Equal("root", ClaudeProfileLaunchPolicy.FindProfileName(null, Path.Combine(oddWorktree, "Docs"), null, lookup).ProjectId);
+        }
+
+        [Fact]
+        public void A_legacy_sibling_worktree_is_found_through_the_layout_mapping_not_the_ancestor_walk()
+        {
+            // <parent>\acme-worktrees\<8-hex id>: the repo is NOT an ancestor of the worktree.
+            string repo = MakeRepoWithWorktree(out _);
+            string sibling = Path.Combine(_tempRoot, "acme-worktrees", "0a1b2c3d");
+            Directory.CreateDirectory(sibling);
+            var lookup = Lookup(rows: new[] { Row("p1", "Work", path: repo) });
+
+            var name = ClaudeProfileLaunchPolicy.FindProfileName(null, Path.Combine(sibling, "Services"), "Personal", lookup);
+
+            Assert.Equal("Work", name.ProfileName);
+            Assert.Equal("p1", name.ProjectId);
+        }
+
+        // ── Subfolders: the nearest registered project at or above the folder ─
+
+        private const string WorkProject = @"H:\Work\A";
+        private const string PersonalProject = @"H:\Personal\B";
+
+        [Fact]
+        public void A_subfolder_belongs_to_the_project_above_it()
+        {
+            // The opposite of the limit this file used to pin. A helper spawned from a Work pane into
+            // H:\Personal\B\src runs under Personal; Just Claude in H:\Work\A\src runs under Work.
+            var lookup = Lookup(rows: new[] { Row("work", "Work", path: WorkProject), Row("personal", "Personal", path: PersonalProject) });
+
+            var helper = ClaudeProfileLaunchPolicy.FindProfileName(null, PersonalProject + @"\src", "Work", lookup);
+            var deep = ClaudeProfileLaunchPolicy.FindProfileName(null, WorkProject + @"\src\a\b\c", null, lookup);
+
+            Assert.Equal("Personal", helper.ProfileName);
+            Assert.Equal(ClaudeProfileNameSource.Database, helper.Source);
+            Assert.Equal("personal", helper.ProjectId);
+            Assert.Equal("Work", deep.ProfileName);
+            Assert.Equal("work", deep.ProjectId);
+        }
+
+        [Fact]
+        public void A_subfolder_is_matched_by_source_path_and_by_a_project_file_with_no_row()
+        {
+            var bySource = Lookup(rows: new[] { Row("p1", "Work", path: @"D:\elsewhere", sourcePath: WorkProject) });
+            var byFile = Lookup(files: new Dictionary<string, Project> { [WorkProject] = FileProject("f1", "Personal") });
+
+            Assert.Equal("Work", ClaudeProfileLaunchPolicy.FindProfileName(null, WorkProject + @"\src", null, bySource).ProfileName);
+
+            var fromFile = ClaudeProfileLaunchPolicy.FindProfileName(null, WorkProject + @"\src", "Work", byFile);
+            Assert.Equal("Personal", fromFile.ProfileName);
+            Assert.Equal(ClaudeProfileNameSource.ProjectFile, fromFile.Source);
+        }
+
+        [Fact]
+        public void A_nested_project_beats_the_project_around_it()
+        {
+            var lookup = Lookup(rows: new[]
+            {
+                Row("outer", "Work", path: WorkProject),
+                Row("inner", "Personal", path: WorkProject + @"\vendor\tool"),
+            });
+
+            Assert.Equal("inner", ClaudeProfileLaunchPolicy.FindProfileName(null, WorkProject + @"\vendor\tool\src", null, lookup).ProjectId);
+            Assert.Equal("inner", ClaudeProfileLaunchPolicy.FindProfileName(null, WorkProject + @"\vendor\tool", null, lookup).ProjectId);
+            Assert.Equal("outer", ClaudeProfileLaunchPolicy.FindProfileName(null, WorkProject + @"\vendor", null, lookup).ProjectId);
+        }
+
+        [Fact]
+        public void A_nearer_project_file_with_no_row_beats_a_farther_row()
+        {
+            // "File only when there is no row" is per level: the inner folder has no row, so its file is
+            // the inner project, and the outer project's row does not reach past it.
+            var lookup = Lookup(
+                rows: new[] { Row("outer", "Work", path: WorkProject) },
+                files: new Dictionary<string, Project> { [WorkProject + @"\vendor\tool"] = FileProject("inner", "Personal") });
+
+            var name = ClaudeProfileLaunchPolicy.FindProfileName(null, WorkProject + @"\vendor\tool\src", null, lookup);
+
+            Assert.Equal("Personal", name.ProfileName);
+            Assert.Equal(ClaudeProfileNameSource.ProjectFile, name.Source);
+        }
+
+        [Fact]
+        public void A_project_does_not_own_a_folder_whose_name_merely_starts_with_its_own()
+        {
+            // H:\Proj must not own H:\Proj2\x. The positive half is here too, so this fact cannot pass
+            // just because nothing is ever matched.
+            var lookup = Lookup(rows: new[] { Row("p1", "Work", path: @"H:\Proj") });
+
+            var sibling = ClaudeProfileLaunchPolicy.FindProfileName(null, @"H:\Proj2\x", null, lookup);
+            var siblingItself = ClaudeProfileLaunchPolicy.FindProfileName(null, @"H:\Proj2", null, lookup);
+            var child = ClaudeProfileLaunchPolicy.FindProfileName(null, @"H:\Proj\x", null, lookup);
+
+            Assert.Equal(ClaudeProfileNameSource.None, sibling.Source);
+            Assert.Equal(ClaudeProfileNameSource.None, siblingItself.Source);
+            Assert.Equal("p1", child.ProjectId);
+        }
+
+        [Theory]
+        [InlineData(@"H:\Work\A\src\")]
+        [InlineData(@"H:/Work/A/src")]
+        [InlineData(@"h:\WORK\a\SRC")]
+        [InlineData(@"H:\Work\A\src\..\src\deep")]
+        public void Ownership_ignores_case_trailing_separators_and_forward_slashes(string folder)
+        {
+            var lookup = Lookup(rows: new[] { Row("p1", "Work", path: @"H:\Work\A\") });
+
+            Assert.Equal("p1", ClaudeProfileLaunchPolicy.FindProfileName(null, folder, null, lookup).ProjectId);
+        }
+
+        [Fact]
+        public void An_owning_project_with_no_profile_means_Default_and_not_the_spawners_profile()
+        {
+            // A personal project that names no profile, entered from a pane running under Work.
+            var lookup = Lookup(rows: new[] { Row("personal", null, path: PersonalProject) });
+
+            var name = ClaudeProfileLaunchPolicy.FindProfileName(null, PersonalProject + @"\src", "Work", lookup);
+
+            Assert.Null(name.ProfileName);
+            Assert.Equal(ClaudeProfileNameSource.Database, name.Source);
+            Assert.Equal("personal", name.ProjectId);
+        }
+
+        [Fact]
+        public void A_nearer_project_with_no_profile_stops_the_search_before_a_farther_project()
+        {
+            var lookup = Lookup(rows: new[]
+            {
+                Row("outer", "Work", path: WorkProject),
+                Row("inner", null, path: WorkProject + @"\vendor\tool"),
+            });
+
+            var name = ClaudeProfileLaunchPolicy.FindProfileName(null, WorkProject + @"\vendor\tool\src", "Personal", lookup);
+
+            Assert.Null(name.ProfileName);
+            Assert.Equal("inner", name.ProjectId);
+        }
+
+        [Fact]
+        public void With_no_owner_at_any_level_the_spawners_profile_applies_else_Default()
+        {
+            var lookup = Lookup(rows: new[] { Row("work", "Work", path: WorkProject) });
+
+            var inherited = ClaudeProfileLaunchPolicy.FindProfileName(null, @"H:\Scratch\a\b", "Personal", lookup);
+            var nothing = ClaudeProfileLaunchPolicy.FindProfileName(null, @"H:\Scratch\a\b", null, lookup);
+
+            Assert.Equal("Personal", inherited.ProfileName);
+            Assert.Equal(ClaudeProfileNameSource.Inherited, inherited.Source);
+            Assert.Null(nothing.ProfileName);
+            Assert.Equal(ClaudeProfileNameSource.None, nothing.Source);
+        }
+
+        [Fact]
+        public void The_volume_root_is_searched_only_when_it_is_the_folder_itself()
+        {
+            // A decision of this implementation, not of the Owner: a project registered at a drive root
+            // does not own every folder on the drive.
+            var lookup = Lookup(rows: new[] { Row("drive", "Work", path: @"H:\") });
+
+            Assert.Equal(new[] { @"H:\a\b", @"H:\a" }, ClaudeProfileLaunchPolicy.CandidateFolders(@"H:\a\b"));
+            Assert.Equal(ClaudeProfileNameSource.None, ClaudeProfileLaunchPolicy.FindProfileName(null, @"H:\a\b", null, lookup).Source);
+            Assert.Equal("drive", ClaudeProfileLaunchPolicy.FindProfileName(null, @"H:\", null, lookup).ProjectId);
+        }
+
+        // ── Two projects at one folder ───────────────────────────────────────
+
+        [Fact]
+        public void Two_projects_at_the_owning_folder_with_different_profiles_refuse_the_launch()
+        {
+            var lookup = Lookup(rows: new[]
+            {
+                Row("p1", "Work", path: WorkProject, name: "Acme"),
+                Row("p2", null, path: @"D:\elsewhere", sourcePath: @"h:\work\a\", name: "Acme copy"),
+            });
+
+            var decision = ClaudeProfileLaunchPolicy.Decide(null, WorkProject + @"\src", "Work", "Claude in 'src'", lookup, Resolver());
+
+            Assert.False(decision.CanLaunch);
+            Assert.Null(decision.Profile);
+            Assert.Contains("Not started: Claude in 'src'", decision.Refusal, StringComparison.Ordinal);
+            Assert.Contains(WorkProject, decision.Refusal, StringComparison.Ordinal);
+            Assert.Contains("'Acme' (Work)", decision.Refusal, StringComparison.Ordinal);
+            Assert.Contains("'Acme copy' (Default)", decision.Refusal, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void Two_projects_at_the_owning_folder_with_the_same_profile_launch_under_it()
+        {
+            var lookup = Lookup(rows: new[]
+            {
+                Row("p1", "Work", path: WorkProject),
+                Row("p2", " work ", path: WorkProject + @"\"),
+            });
+
+            var decision = ClaudeProfileLaunchPolicy.Decide(null, WorkProject + @"\src", null, "Claude in 'src'", lookup, Resolver());
+
+            Assert.True(decision.CanLaunch);
+            Assert.Equal("Work", decision.Profile.Name);
+        }
+
+        [Fact]
+        public void A_conflict_farther_up_does_not_matter_when_a_nearer_project_owns_the_folder()
+        {
+            var lookup = Lookup(rows: new[]
+            {
+                Row("p1", "Work", path: WorkProject),
+                Row("p2", "Personal", path: WorkProject),
+                Row("inner", "Personal", path: WorkProject + @"\vendor\tool"),
+            });
+
+            var inner = ClaudeProfileLaunchPolicy.Decide(null, WorkProject + @"\vendor\tool\src", null, "x", lookup, Resolver());
+            var outer = ClaudeProfileLaunchPolicy.Decide(null, WorkProject + @"\vendor", null, "x", lookup, Resolver());
+
+            Assert.True(inner.CanLaunch);
+            Assert.Equal("Personal", inner.Profile.Name);
+            Assert.False(outer.CanLaunch);
+        }
+
+        [Fact]
+        public void A_folder_whose_file_names_one_project_while_another_is_registered_there_is_a_conflict()
+        {
+            // The file says the folder is p1 (whose row lives at another path); a second row is
+            // registered at the folder itself under a different profile. Both claim it.
+            var lookup = Lookup(
+                rows: new[] { Row("p1", "Work", path: @"D:\old\place"), Row("p2", "Personal", path: WorkProject) },
+                files: new Dictionary<string, Project> { [WorkProject] = FileProject("p1", null) });
+
+            var name = ClaudeProfileLaunchPolicy.FindProfileName(null, WorkProject, null, lookup);
+
+            Assert.NotNull(name.Conflict);
+            Assert.Null(name.ProfileName);
         }
 
         // ── Decide: launch or refuse ─────────────────────────────────────────

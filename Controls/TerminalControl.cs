@@ -103,6 +103,15 @@ namespace MultiTerminal.Controls
         public event EventHandler Ready;
 
         /// <summary>
+        /// Event fired when a start was refused over its Claude profile (ticket c8ee0eec): no process
+        /// exists and <see cref="Ready"/> is not raised. The owner returns the pane to its start screen
+        /// and releases whatever it registered for the launch. Raised after the refusal has been shown,
+        /// and posted to the message loop, so a caller still inside its own start sequence finishes
+        /// first. NOT raised for any other start failure.
+        /// </summary>
+        public event EventHandler StartFailed;
+
+        /// <summary>
         /// Event fired when the WebView2/xterm.js renderer is initialized (before shell starts).
         /// </summary>
         public event EventHandler RendererReady;
@@ -258,12 +267,26 @@ namespace MultiTerminal.Controls
             }
             catch (Exception ex)
             {
-                MessageBox.Show(
-                    "Failed to start terminal: " + ex.Message + "\r\n\r\n" +
-                    "Make sure you're running Windows 10 version 1809 or later.",
-                    "Terminal Error",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                var failure = TerminalStartFailure.Describe(ex);
+                if (failure.IsClaudeProfileRefusal)
+                {
+                    // Nothing was started. Drop the half-built terminal so it cannot be written to.
+                    try { Stop(); }
+                    catch (Exception stopEx) { _debugLogService?.Error("TerminalControl", $"Cleanup after a refused start failed: {stopEx.Message}"); }
+                }
+
+                MessageBox.Show(failure.Message, failure.Title, MessageBoxButtons.OK, failure.IsClaudeProfileRefusal ? MessageBoxIcon.Warning : MessageBoxIcon.Error);
+
+                if (!failure.RaisesReady)
+                {
+                    // Posted, not raised inline: DoStart can run inside the owner's own StartTerminal,
+                    // which must finish before the pane is taken back to its start screen.
+                    if (IsHandleCreated && !IsDisposed)
+                        BeginInvoke(new Action(() => StartFailed?.Invoke(this, EventArgs.Empty)));
+                    else
+                        StartFailed?.Invoke(this, EventArgs.Empty);
+                    return;
+                }
             }
 
             _renderer.Focus();
@@ -1092,5 +1115,26 @@ namespace MultiTerminal.Controls
         {
             get { return _renderer?.Theme ?? TerminalTheme.Dark; }
         }
+    }
+
+    /// <summary>
+    /// What a failed terminal start tells the user and whether the pane still counts as started
+    /// (ticket c8ee0eec). A Claude profile refusal (<see cref="Services.ClaudeProfileRefusedException"/>)
+    /// shows its own message and nothing else, and the pane is NOT ready. Every other failure keeps the
+    /// pseudo-console text with its Windows-version hint and, as before, still raises Ready.
+    /// </summary>
+    internal sealed record TerminalStartFailure(string Message, string Title, bool IsClaudeProfileRefusal)
+    {
+        /// <summary>Whether <c>TerminalControl.Ready</c> is still raised after this failure.</summary>
+        public bool RaisesReady => !IsClaudeProfileRefusal;
+
+        internal static TerminalStartFailure Describe(Exception ex) =>
+            ex is Services.ClaudeProfileRefusedException
+                ? new TerminalStartFailure(ex.Message, "Claude Profile", true)
+                : new TerminalStartFailure(
+                    "Failed to start terminal: " + ex?.Message + "\r\n\r\n" +
+                    "Make sure you're running Windows 10 version 1809 or later.",
+                    "Terminal Error",
+                    false);
     }
 }

@@ -219,6 +219,14 @@ namespace MultiTerminal.Docking
         public event EventHandler TerminalReady;
 
         /// <summary>
+        /// Event fired when a launch was refused over its Claude profile after <see cref="StartTerminal"/>
+        /// was called (ticket c8ee0eec). <see cref="TerminalReady"/> is not raised for that launch. By
+        /// the time this fires the pane is back on its start screen and <see cref="TerminalExited"/> has
+        /// been raised, which is what makes MainForm release the launch's registration.
+        /// </summary>
+        public event EventHandler TerminalStartFailed;
+
+        /// <summary>
         /// Event fired when project.json is created or modified in the terminal's working directory.
         /// </summary>
         public event EventHandler ProjectFileChanged;
@@ -744,6 +752,7 @@ namespace MultiTerminal.Docking
             _terminal.ContextMenuRequested += OnTerminalContextMenuRequested;
             _terminal.ContextMenuDismissRequested += OnTerminalContextMenuDismissRequested;
             _terminal.Ready += (s, e) => TerminalReady?.Invoke(this, EventArgs.Empty);
+            _terminal.StartFailed += OnTerminalStartFailed;
             _terminal.RendererReady += (s, e) => RendererReady?.Invoke(this, EventArgs.Empty);
             _terminal.ClaudeCodeDetected += (s, e) => ClaudeCodeDetected?.Invoke(this, EventArgs.Empty);
             _terminal.TerminalClicked += (s, args) =>
@@ -2411,6 +2420,28 @@ namespace MultiTerminal.Docking
                     ProjectFileChanged?.Invoke(this, EventArgs.Empty);
                 }
             }
+        }
+
+        /// <summary>
+        /// A launch refused over its Claude profile (ticket c8ee0eec). Nothing is running, so the pane
+        /// is treated exactly like one whose process has exited: back to the start screen, launch nonce
+        /// rotated, and <see cref="TerminalExited"/> raised so MainForm unregisters the launch (the same
+        /// release as its ReleaseGhostRegistration). Then <see cref="TerminalStartFailed"/>, for a caller
+        /// that is waiting on <see cref="TerminalReady"/>.
+        /// </summary>
+        private void OnTerminalStartFailed(object sender, EventArgs e)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => OnTerminalStartFailed(sender, e)));
+                return;
+            }
+
+            _debugLogService?.Warning("TerminalDocument", $"Launch refused over its Claude profile; returning pane '{_docId}' to its start screen.");
+            LaunchClaudeProfileName = null;
+            StopStatusLinePolling();
+            OnTerminalProcessExited(sender, e);
+            TerminalStartFailed?.Invoke(this, EventArgs.Empty);
         }
 
         private void OnTerminalProcessExited(object sender, EventArgs e)
