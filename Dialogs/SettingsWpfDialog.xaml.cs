@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Globalization;
+using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
 using System.Windows;
@@ -55,6 +58,12 @@ namespace MultiTerminal.Dialogs
         private string _mcOrigVapidSubject = "";
         private string _mcOrigRelayBaseUrl = "";
 
+        // -------- Claude Profiles tab state (ticket c8ee0eec, GitHub #21) --------
+        private readonly ObservableCollection<ClaudeProfileRow> _claudeProfileRows = new ObservableCollection<ClaudeProfileRow>();
+        private List<ClaudeProfile> _claudeProfilesStored = new List<ClaudeProfile>();
+        // Set by ValidateClaudeProfiles when the grid differs from what is stored; null = leave the setting alone.
+        private IReadOnlyList<ClaudeProfile> _claudeProfilesToSave;
+
         /// <summary>
         /// True if the user edited their owner profile during this settings session.
         /// MainForm checks this to know if the profile was updated.
@@ -100,6 +109,7 @@ namespace MultiTerminal.Dialogs
             LoadSettings();
             LoadProfileSummary();
             LoadMultiConnect();
+            LoadClaudeProfiles();
 
             // Source control accounts manager is only available when its service is injected.
             ManageSourceControlAccountsButton.IsEnabled = _sourceControlAccountService != null;
@@ -256,6 +266,9 @@ namespace MultiTerminal.Dialogs
                 });
 
                 SaveMultiConnect();
+
+                if (_claudeProfilesToSave != null)
+                    _settings.SetClaudeProfiles(_claudeProfilesToSave);
             }
             finally
             {
@@ -594,6 +607,9 @@ namespace MultiTerminal.Dialogs
                 return;
             }
 
+            if (!ValidateClaudeProfiles())
+                return;
+
             SaveSettings();
 
             // If a restart-required Multi-Connect field changed, re-apply the gateway in-process so
@@ -640,6 +656,110 @@ namespace MultiTerminal.Dialogs
         private void CancelBtn_Click(object sender, RoutedEventArgs e)
         {
             DialogResult = false;
+        }
+
+        // =================================================================
+        // Claude Profiles tab (ticket c8ee0eec, GitHub #21)
+        // Rows are edited freely and checked once, on OK. The decisions (which rows count, which
+        // row an error belongs to, what a save removes) live in ClaudeProfileEditorRules.
+        // =================================================================
+
+        private void LoadClaudeProfiles()
+        {
+            ClaudeDefaultProfileText.Text = ClaudeProfileEditorRules.DescribeDefault(
+                ClaudeProfileResolver.DefaultProfile.ConfigDir,
+                ClaudeProfileResolver.InheritedConfigDir);
+
+            _claudeProfilesStored = _settings.GetClaudeProfiles();
+            foreach (var profile in _claudeProfilesStored)
+                _claudeProfileRows.Add(new ClaudeProfileRow { Name = profile.Name, ConfigDir = profile.ConfigDir });
+
+            _claudeProfileRows.CollectionChanged += (s, e) => UpdateClaudeProfilesEmptyText();
+            ClaudeProfilesList.ItemsSource = _claudeProfileRows;
+            UpdateClaudeProfilesEmptyText();
+        }
+
+        private void UpdateClaudeProfilesEmptyText()
+        {
+            ClaudeProfilesEmptyText.Visibility = _claudeProfileRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        private void ClaudeProfileAddButton_Click(object sender, RoutedEventArgs e)
+        {
+            _claudeProfileRows.Add(new ClaudeProfileRow());
+        }
+
+        private void ClaudeProfileRemoveButton_Click(object sender, RoutedEventArgs e)
+        {
+            // Nothing is stored until OK, and OK asks before dropping a stored name.
+            if ((sender as FrameworkElement)?.DataContext is ClaudeProfileRow row)
+                _claudeProfileRows.Remove(row);
+        }
+
+        private void ClaudeProfileBrowseButton_Click(object sender, RoutedEventArgs e)
+        {
+            if ((sender as FrameworkElement)?.DataContext is not ClaudeProfileRow row) return;
+
+            using var dlg = new System.Windows.Forms.FolderBrowserDialog
+            {
+                Description = "Select the Claude Code config folder for this profile",
+                ShowNewFolderButton = true
+            };
+
+            string current = row.ConfigDir?.Trim();
+            if (!string.IsNullOrEmpty(current) && System.IO.Directory.Exists(current))
+                dlg.SelectedPath = current;
+
+            if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                row.ConfigDir = dlg.SelectedPath;
+        }
+
+        /// <summary>
+        /// Checks the grid and decides what OK will store. False means stay in the dialog: either a row
+        /// is wrong (its error line is set and the tab is shown) or the user declined to remove a
+        /// stored profile. Writes nothing; SaveSettings stores <see cref="_claudeProfilesToSave"/>.
+        /// </summary>
+        private bool ValidateClaudeProfiles()
+        {
+            _claudeProfilesToSave = null;
+
+            var rows = _claudeProfileRows.Select(r => (r.Name, r.ConfigDir)).ToList();
+            var result = ClaudeProfileEditorRules.Evaluate(rows, ClaudeProfileResolver.Validate);
+
+            // Untouched grid: nothing to check or write, so a stored profile whose folder is missing
+            // right now does not block OK for an unrelated setting.
+            if (ClaudeProfileEditorRules.IsUnchanged(_claudeProfilesStored, result.ToSave))
+            {
+                foreach (var row in _claudeProfileRows)
+                    row.Error = null;
+                return true;
+            }
+
+            for (int i = 0; i < _claudeProfileRows.Count; i++)
+                _claudeProfileRows[i].Error = result.RowErrors.TryGetValue(i, out string error) ? error : null;
+
+            if (!result.IsValid)
+            {
+                SettingsTabs.SelectedItem = ClaudeProfilesTab;
+                MessageBox.Show(this,
+                    "Fix these before saving:\n\n" + string.Join("\n", result.Messages),
+                    "Claude Profiles", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return false;
+            }
+
+            var removed = ClaudeProfileEditorRules.RemovedNames(_claudeProfilesStored, result.ToSave);
+            if (removed.Count > 0)
+            {
+                SettingsTabs.SelectedItem = ClaudeProfilesTab;
+                var answer = MessageBox.Show(this,
+                    ClaudeProfileEditorRules.RemovalWarning(removed),
+                    "Claude Profiles", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
+                if (answer != MessageBoxResult.Yes)
+                    return false;
+            }
+
+            _claudeProfilesToSave = result.ToSave;
+            return true;
         }
 
         // =================================================================
@@ -996,6 +1116,49 @@ namespace MultiTerminal.Dialogs
             {
                 MC_TailscaleStatusText.Text = "Copy failed: " + ex.Message;
             }
+        }
+    }
+
+    // =====================================================================
+    // One editable row of the Claude Profiles tab
+    // =====================================================================
+
+    /// <summary>
+    /// A row in the Settings dialog's Claude Profiles tab. Public because WPF data binding only reads
+    /// public types; it is the dialog's view state, not a stored model (that is <see cref="ClaudeProfile"/>).
+    /// </summary>
+    public sealed class ClaudeProfileRow : INotifyPropertyChanged
+    {
+        private string _name = "";
+        private string _configDir = "";
+        private string _error;
+
+        public event PropertyChangedEventHandler PropertyChanged;
+
+        public string Name
+        {
+            get => _name;
+            set => Set(ref _name, value ?? "", nameof(Name));
+        }
+
+        public string ConfigDir
+        {
+            get => _configDir;
+            set => Set(ref _configDir, value ?? "", nameof(ConfigDir));
+        }
+
+        /// <summary>The row's validation error from the last OK, or null. Shown under the row.</summary>
+        public string Error
+        {
+            get => _error;
+            set => Set(ref _error, value, nameof(Error));
+        }
+
+        private void Set(ref string field, string value, string propertyName)
+        {
+            if (string.Equals(field, value, StringComparison.Ordinal)) return;
+            field = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
         }
     }
 
