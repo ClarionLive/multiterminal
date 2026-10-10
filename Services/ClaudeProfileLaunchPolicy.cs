@@ -15,7 +15,8 @@ namespace MultiTerminal.Services
         /// <summary>The project's database row (the authority).</summary>
         Database,
 
-        /// <summary>The folder's .claude/project.json, used only because the project has no database row.</summary>
+        /// <summary>The launch folder's own .claude/project.json, used only because no database row is
+        /// registered at that folder.</summary>
         ProjectFile,
 
         /// <summary>No project owns the folder; the name was handed down (a helper's spawner, or the
@@ -32,9 +33,9 @@ namespace MultiTerminal.Services
     /// </summary>
     /// <param name="RowById">Project id → its database row, or null when there is none.</param>
     /// <param name="AllRows">Every project row (for the folder match).</param>
-    /// <param name="LoadProjectFile">Folder → the project in its .claude/project.json, or null. Called
-    /// once per level of <paramref name="CandidateFolders"/>, so it is the only disk probe the ancestor
-    /// walk makes for project files.</param>
+    /// <param name="LoadProjectFile">Folder → the project in its .claude/project.json, or null. Asked
+    /// only for the launch folder itself and its main-checkout twin, never for a folder above them
+    /// (see <see cref="ClaudeProfileLaunchPolicy.LaunchLevels"/>).</param>
     /// <param name="CandidateFolders">Folder → the levels to look for an owning project at, nearest
     /// first: the folder, its ancestors, and a worktree's main checkout
     /// (see <see cref="ClaudeProfileLaunchPolicy.CandidateFolders"/>).</param>
@@ -99,8 +100,15 @@ namespace MultiTerminal.Services
     ///   <item>Any other launch (Just Claude, Open PowerShell, Launch as, a spawned helper) belongs to
     ///   the NEAREST registered project at or above its folder: the folder itself, then each ancestor
     ///   up to (not including) the volume root, with a task worktree also looked up in its main
-    ///   checkout. At each level a database row decides; a project.json counts only when no row owns
-    ///   that level. A nearer project always beats a farther one.</item>
+    ///   checkout. A nearer project always beats a farther one.</item>
+    ///   <item>ABOVE the launch folder only a database row registered at that exact level (path or
+    ///   source path) owns the launch. A project.json there is never read: a stale or copied file in a
+    ///   broad parent folder must not choose the profile for everything beneath it.</item>
+    ///   <item>AT the launch folder (and the same folder in the main checkout, for a worktree) a row
+    ///   registered there decides. With no such row, that folder's project.json counts, by the profile
+    ///   name written in it. The file's project id is followed to a database row only when that row is
+    ///   registered at the launch folder or its twin; a row registered anywhere else is not this
+    ///   folder's project, and the file is then a copy with no row.</item>
     ///   <item>The owning project's profile is final, including "none set" (Default): the search stops
     ///   there and nothing is inherited.</item>
     ///   <item>Two projects registered at the same owning folder with different profiles REFUSE the
@@ -113,7 +121,8 @@ namespace MultiTerminal.Services
     internal static class ClaudeProfileLaunchPolicy
     {
         /// <summary>
-        /// Which profile name the launch asks for. Pure apart from <paramref name="lookup"/>; an
+        /// Which profile name the launch asks for. Reads the outside world only through
+        /// <paramref name="lookup"/> and the <c>.git</c> check in <see cref="LaunchLevels"/>; an
         /// exception from the lookup (an unreadable database) propagates, and <see cref="Decide"/> turns
         /// it into a refusal rather than a guess.
         /// </summary>
@@ -137,24 +146,15 @@ namespace MultiTerminal.Services
             // project's profile is: an owner with no profile set means Default, and must not fall
             // through to a farther project or to the inherited name.
             var levels = lookup.CandidateFolders?.Invoke(folder) ?? Array.Empty<string>();
+            var launchLevels = LaunchLevels(folder);
             IReadOnlyList<ClaudeProfileProjectRow> rows = null;
             Project worktreeFile = null;
             foreach (string level in levels)
             {
-                var file = lookup.LoadProjectFile?.Invoke(level);
                 rows ??= lookup.AllRows?.Invoke() ?? Array.Empty<ClaudeProfileProjectRow>();
 
-                // Database rows that claim this level: the row its project.json names (the file only
-                // says WHICH project the folder is; the row says its profile), and every row registered
-                // at this path.
+                // Every database row registered at this level.
                 var owners = new List<ClaudeProfileProjectRow>();
-                if (!string.IsNullOrWhiteSpace(file?.Id))
-                {
-                    var byFileId = lookup.RowById?.Invoke(file.Id);
-                    if (byFileId != null)
-                        owners.Add(byFileId);
-                }
-
                 foreach (var row in rows)
                 {
                     if (row != null
@@ -165,16 +165,36 @@ namespace MultiTerminal.Services
                     }
                 }
 
+                // A project.json is read only at the launch folder and its main-checkout twin. Above
+                // them a file is not evidence of anything: only a registered row owns from above.
+                bool isLaunchLevel = launchLevels.Exists(l => SameFolder(l, level));
+                var file = isLaunchLevel ?lookup.LoadProjectFile?.Invoke(level) : null;
+
+                // The file's id is followed to its row only when that row is registered at the launch
+                // folder or its twin (a worktree's copy of the repo's project.json). A row registered
+                // anywhere else is a different folder's project and must not be pulled in by a copied
+                // or stale file.
+                if (!string.IsNullOrWhiteSpace(file?.Id))
+                {
+                    var byFileId = lookup.RowById?.Invoke(file.Id);
+                    if (byFileId != null
+                        && launchLevels.Exists(l => SameFolder(byFileId.Path, l) || SameFolder(byFileId.SourcePath, l))
+                        && !owners.Exists(o => string.Equals(o.Id, byFileId.Id, StringComparison.Ordinal)))
+                    {
+                        owners.Add(byFileId);
+                    }
+                }
+
                 if (owners.Count > 0)
                     return FromOwners(level, owners);
 
                 if (file == null)
                     continue;
 
-                // No row owns this level, so its project.json is all there is. One exception: a
+                // No row owns this launch level, so its project.json is all there is. One exception: a
                 // project.json INSIDE a worktree checkout is a copy of the repo's, so a row farther up
                 // (the repo's project) still beats it. It is kept and used if no row turns up.
-                if (IsInsideWorktreeCheckout(level))
+                if (IsInsideWorktreeCheckout(ClaudeProfileResolver.Canonicalize(level)))
                 {
                     worktreeFile ??= file;
                     continue;
@@ -275,9 +295,11 @@ namespace MultiTerminal.Services
         ///   ancestor, so it is reached only through <see cref="WorktreeLayout.TryMapWorktreePath"/>,
         ///   which needs an 8-hex task id and a <c>.git</c> at the repo.</item>
         /// </list>
-        /// <para>The main-checkout levels come right after the worktree directory itself, so a project
-        /// registered at <c>&lt;repo&gt;\Sub</c> owns <c>&lt;worktree&gt;\Sub</c> ahead of the project
-        /// at the repo root. Reads the disk only for those <c>.git</c> checks.</para>
+        /// <para>Each level at or under the worktree directory is followed at once by the same folder in
+        /// the main checkout: <c>&lt;worktree&gt;\Sub</c>, <c>&lt;repo&gt;\Sub</c>,
+        /// <c>&lt;worktree&gt;</c>, <c>&lt;repo&gt;</c>. So a project registered at
+        /// <c>&lt;repo&gt;\Sub</c> owns <c>&lt;worktree&gt;\Sub</c> ahead of anything at the worktree
+        /// directory or the repo root. Reads the disk only for those <c>.git</c> checks.</para>
         /// </summary>
         internal static IReadOnlyList<string> CandidateFolders(string folder)
         {
@@ -293,28 +315,72 @@ namespace MultiTerminal.Services
             if (start == null)
                 return result;
 
-            // The main checkout's equivalent of the folder, when it sits at or under a worktree.
-            string worktreeDir = null;
-            if (TryMapClaudeWorktree(start, out string repoRoot, out string mapped) || WorktreeLayout.TryMapWorktreePath(start, out repoRoot, out mapped))
-            {
-                repoRoot = ClaudeProfileResolver.Canonicalize(repoRoot);
-                mapped = ClaudeProfileResolver.Canonicalize(mapped);
-                int suffixLength = repoRoot == null || mapped == null ? -1 : mapped.Length - repoRoot.Length;
-                if (suffixLength >= 0 && suffixLength < start.Length)
-                    worktreeDir = start.Substring(0, start.Length - suffixLength);
-            }
-
+            // Each worktree-side level is paired with the same folder in the main checkout, down to
+            // the worktree directory itself (whose twin is the repo root).
+            string twin = TryFindMainCheckout(start, out string worktreeDir, out string mapped) ? mapped : null;
             foreach (string level in SelfAndAncestors(start, stopAt: null))
             {
                 Add(level);
-                if (worktreeDir != null && string.Equals(level, worktreeDir, StringComparison.OrdinalIgnoreCase))
-                {
-                    foreach (string checkoutLevel in SelfAndAncestors(mapped, stopAt: repoRoot))
-                        Add(checkoutLevel);
-                }
+                if (twin == null)
+                    continue;
+
+                Add(twin);
+                twin = string.Equals(level, worktreeDir, StringComparison.OrdinalIgnoreCase)
+                    ? null
+                    : ClaudeProfileResolver.Canonicalize(Path.GetDirectoryName(twin));
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// The only folders whose project.json may count for a launch in <paramref name="folder"/>: the
+        /// folder itself and, when it is at or under a worktree, the same folder in the main checkout.
+        /// Canonical. Never a folder above either of them. Reads the disk only for the <c>.git</c> check
+        /// that finds the main checkout.
+        /// </summary>
+        internal static List<string> LaunchLevels(string folder)
+        {
+            var result = new List<string>();
+            string start = ClaudeProfileResolver.Canonicalize(folder);
+            if (start == null)
+                return result;
+
+            result.Add(start);
+            if (TryFindMainCheckout(start, out _, out string mapped)
+                && !string.Equals(mapped, start, StringComparison.OrdinalIgnoreCase))
+            {
+                result.Add(mapped);
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// For a canonical folder at or under a worktree: the worktree directory and the same folder in
+        /// the main checkout (both canonical). False for any other folder.
+        /// </summary>
+        private static bool TryFindMainCheckout(string start, out string worktreeDir, out string mapped)
+        {
+            worktreeDir = null;
+            if (!TryMapClaudeWorktree(start, out string repoRoot, out mapped)
+                && !WorktreeLayout.TryMapWorktreePath(start, out repoRoot, out mapped))
+            {
+                mapped = null;
+                return false;
+            }
+
+            repoRoot = ClaudeProfileResolver.Canonicalize(repoRoot);
+            mapped = ClaudeProfileResolver.Canonicalize(mapped);
+            int suffixLength = repoRoot == null || mapped == null ? -1 : mapped.Length - repoRoot.Length;
+            if (suffixLength < 0 || suffixLength >= start.Length)
+            {
+                mapped = null;
+                return false;
+            }
+
+            worktreeDir = start.Substring(0, start.Length - suffixLength);
+            return true;
         }
 
         /// <summary>
