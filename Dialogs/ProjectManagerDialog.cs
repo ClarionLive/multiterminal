@@ -254,8 +254,8 @@ namespace MultiTerminal.Dialogs
                     {
                         // The broker wrote project.json before the dialog stored the profile.
                         var created = dialog.ResultProject;
-                        if (created != null && !string.IsNullOrWhiteSpace(created.Path))
-                            _projectService.UpdateProjectJsonClaudeProfile(created.Path, created.Id, created.ClaudeProfile);
+                        if (created != null)
+                            WarnIfProjectJsonProfileIsStale(created, _projectService.SyncProjectJsonClaudeProfile(created.Path, created.Id, created.ClaudeProfile));
 
                         LoadProjects();
                     }
@@ -325,25 +325,47 @@ namespace MultiTerminal.Dialogs
                         var resultProject = dialog.ResultProject;
                         if (resultProject != null)
                         {
-                            // Sync name/description back to JSON registry for backward compatibility
-                            var entry = _projectService.GetAllRegisteredProjects()
-                                .FirstOrDefault(e2 => e2.Id == resultProject.Id);
-                            if (entry != null)
+                            // The dialog has already saved the database row, profile included. What follows
+                            // only copies the edit into project.json, and a failure there must not read as
+                            // "the project was not saved": it is caught, the profile copy is checked on its
+                            // own below, and only then is the original failure reported.
+                            Exception syncFailure = null;
+                            string projectJsonFolder = resultProject.Path;
+                            try
                             {
-                                var legacyProject = _projectService.LoadProject(entry);
-                                if (legacyProject != null)
+                                // Sync name/description back to JSON registry for backward compatibility
+                                var entry = _projectService.GetAllRegisteredProjects()
+                                    .FirstOrDefault(e2 => e2.Id == resultProject.Id);
+                                if (entry != null)
                                 {
-                                    legacyProject.Name = resultProject.Name;
-                                    legacyProject.Description = resultProject.Description;
-                                    legacyProject.ChangeLog = resultProject.ChangeLog;
-                                    // Without this the file keeps the profile it had before the edit.
-                                    // The database is unaffected either way (SaveRichProject leaves an
-                                    // existing row's claude_profile alone); this keeps project.json true
-                                    // for a later import or another machine.
-                                    legacyProject.ClaudeProfile = resultProject.ClaudeProfile;
-                                    _projectService.SaveProject(legacyProject);
+                                    projectJsonFolder = entry.Path;
+                                    var legacyProject = _projectService.LoadProject(entry);
+                                    if (legacyProject != null)
+                                    {
+                                        legacyProject.Name = resultProject.Name;
+                                        legacyProject.Description = resultProject.Description;
+                                        legacyProject.ChangeLog = resultProject.ChangeLog;
+                                        // Without this the file keeps the profile it had before the edit.
+                                        // The database is unaffected either way (SaveRichProject leaves an
+                                        // existing row's claude_profile alone); this keeps project.json true
+                                        // for a later import or another machine.
+                                        legacyProject.ClaudeProfile = resultProject.ClaudeProfile;
+                                        _projectService.SaveProject(legacyProject);
+                                    }
                                 }
                             }
+                            catch (Exception ex)
+                            {
+                                syncFailure = ex;
+                            }
+
+                            // Covers every way the copy can be left behind: no registry entry, a file that
+                            // would not load, or the save above throwing. Writes the profile itself when it can.
+                            string staleReason = _projectService.SyncProjectJsonClaudeProfile(projectJsonFolder, resultProject.Id, resultProject.ClaudeProfile);
+                            WarnIfProjectJsonProfileIsStale(resultProject, staleReason);
+
+                            if (syncFailure != null && staleReason == null)
+                                throw new InvalidOperationException(syncFailure.Message, syncFailure);
                         }
 
                         LoadProjects();
@@ -359,6 +381,27 @@ namespace MultiTerminal.Dialogs
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Tells the user, plainly, that the Claude profile WAS saved (the database is what a launch
+        /// reads) but the project.json copy was not, so nobody concludes the edit failed and nobody is
+        /// surprised by the old value after a re-import. Nothing is rolled back.
+        /// </summary>
+        private void WarnIfProjectJsonProfileIsStale(MultiTerminal.Models.Project project, string staleReason)
+        {
+            if (staleReason == null)
+                return;
+
+            string profile = MultiTerminal.Models.ClaudeProfile.NormalizeName(project.ClaudeProfile) ?? MultiTerminal.Models.ClaudeProfile.DefaultName;
+            MessageBox.Show(
+                this,
+                $"The Claude profile for '{project.Name}' was saved in MultiTerminal: it will launch under '{profile}'.\n\n"
+                + $"The copy in the project's .claude\\project.json could not be updated ({staleReason}), so that file is out of date. "
+                + "This only matters if the folder is imported into MultiTerminal again (or on another machine): the import would read the old value.",
+                "Claude Profile",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
         }
 
         private void RemoveButton_Click(object sender, EventArgs e)

@@ -682,6 +682,8 @@ namespace MultiTerminal.Docking
                 case "gitAutoCommit": _currentProject.GitAutoCommit = value == "true" || value == "1"; break;
                 case "quietStart": _currentProject.QuietStart = value == "true" || value == "1"; break;
                 case "sourceControlAccountId": _currentProject.SourceControlAccountId = value; break;
+                // Display only: a launch reads the profile from the database row, never from this object.
+                case "claudeProfile": _currentProject.ClaudeProfile = MultiTerminal.Models.ClaudeProfile.NormalizeName(value); break;
                 case "changeLog": _currentProject.ChangeLog = value; break;
                 case "teamLead": _currentProject.TeamLead = value; break;
                 case "createdBy": _currentProject.CreatedBy = value; break;

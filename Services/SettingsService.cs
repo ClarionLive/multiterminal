@@ -333,7 +333,8 @@ namespace MultiTerminal.Services
                     throw new ArgumentException($"Claude profile '{p?.Name}' needs a name other than '{ClaudeProfile.DefaultName}' and an absolute folder.", nameof(profiles));
                 if (!names.Add(p.Name.Trim()))
                     throw new ArgumentException($"More than one Claude profile is named '{p.Name.Trim()}'.", nameof(profiles));
-                list.Add(new ClaudeProfile(p.Name.Trim(), p.ConfigDir.Trim()));
+                // The canonical folder, which is what Validate judged. IsStorable guarantees it is not null.
+                list.Add(new ClaudeProfile(p.Name.Trim(), ClaudeProfileResolver.Canonicalize(p.ConfigDir)));
             }
 
             return list.Count == 0 ? null : System.Text.Json.JsonSerializer.Serialize(list, ClaudeProfilesJsonOptions);

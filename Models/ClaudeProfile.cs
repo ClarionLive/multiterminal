@@ -30,7 +30,22 @@ namespace MultiTerminal.Models
 
         /// <summary>True for the implicit Default profile (decided by name, case-insensitive).</summary>
         [JsonIgnore]
-        public bool IsDefault => string.Equals(Name?.Trim(), DefaultName, StringComparison.OrdinalIgnoreCase);
+        public bool IsDefault => !string.IsNullOrWhiteSpace(Name) && NormalizeName(Name) == null;
+
+        /// <summary>
+        /// The one rule for what a profile NAME means: trimmed, and null for a blank name or
+        /// <c>Default</c> (any case). Null therefore always reads as "the Default profile", and a
+        /// non-null result is the name of a stored profile, compared ordinal-ignore-case elsewhere.
+        /// Every place that stores, compares or resolves a profile name goes through this.
+        /// </summary>
+        public static string NormalizeName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                return null;
+
+            string trimmed = name.Trim();
+            return string.Equals(trimmed, DefaultName, StringComparison.OrdinalIgnoreCase) ? null : trimmed;
+        }
 
         public ClaudeProfile()
         {

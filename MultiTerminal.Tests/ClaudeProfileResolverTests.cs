@@ -103,6 +103,71 @@ namespace MultiTerminal.Tests
             Assert.StartsWith("$env:CLAUDE_CONFIG_DIR = 'D:\\O''Brien\\.claude'; ", ClaudeProfileResolver.GetPrologue(p, Ctx(configured: p)));
         }
 
+        [Theory]
+        [InlineData('\u2018')]
+        [InlineData('\u2019')]
+        [InlineData('\u201A')]
+        [InlineData('\u201B')]
+        public void A_typographic_single_quote_in_dir_is_doubled_too(char quote)
+        {
+            // PowerShell accepts each of these as a single-quote character, so an undoubled one ends the
+            // string. Proves the escaping only: no PowerShell is run here.
+            var p = new ClaudeProfile("Odd", $@"D:\O{quote}Brien\.claude");
+
+            string prologue = ClaudeProfileResolver.GetPrologue(p, Ctx(configured: p));
+
+            Assert.StartsWith($"$env:CLAUDE_CONFIG_DIR = 'D:\\O{quote}{quote}Brien\\.claude'; ", prologue);
+        }
+
+        [Theory]
+        [InlineData('\u2018')]
+        [InlineData('\u2019')]
+        [InlineData('\u201A')]
+        [InlineData('\u201B')]
+        public void Validate_rejects_a_typographic_single_quote_in_the_folder(char quote)
+        {
+            string dir = $@"D:\O{quote}Brien";
+            var errors = ClaudeProfileResolver.Validate(new[] { new ClaudeProfile("Odd", dir) }, Ctx(exists: _ => true));
+
+            var error = Assert.Single(errors);
+            Assert.Equal(0, error.Index);
+            Assert.Contains("curly quote", error.Message, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void Validate_still_accepts_an_ASCII_apostrophe_in_the_folder()
+        {
+            Assert.Empty(ClaudeProfileResolver.Validate(new[] { new ClaudeProfile("Odd", @"D:\O'Brien") }, Ctx(exists: _ => true)));
+        }
+
+        // ── The one Default-name rule ────────────────────────────────────────
+
+        [Theory]
+        [InlineData(null, null)]
+        [InlineData("", null)]
+        [InlineData("   ", null)]
+        [InlineData("Default", null)]
+        [InlineData("  dEFAULT ", null)]
+        [InlineData("Work", "Work")]
+        [InlineData("  Work  ", "Work")]
+        [InlineData("Defaults", "Defaults")]
+        public void NormalizeName_is_null_for_blank_or_Default_and_trimmed_otherwise(string input, string expected)
+        {
+            Assert.Equal(expected, ClaudeProfile.NormalizeName(input));
+        }
+
+        [Fact]
+        public void IsDefault_follows_the_name_rule_but_a_blank_name_is_not_Default()
+        {
+            Assert.True(new ClaudeProfile(" default ", null).IsDefault);
+            Assert.False(new ClaudeProfile("Work", null).IsDefault);
+
+            // A profile with no name is malformed, not Default: treating it as Default would make
+            // GetConfigDir ignore its folder.
+            Assert.False(new ClaudeProfile("  ", @"D:\x").IsDefault);
+            Assert.False(new ClaudeProfile(null, @"D:\x").IsDefault);
+        }
+
         // ── Resolve ──────────────────────────────────────────────────────────
 
         [Fact]
@@ -117,29 +182,52 @@ namespace MultiTerminal.Tests
 
             var none = ClaudeProfileResolver.Resolve(null, null, ctx);
             Assert.True(none.Profile.IsDefault);
-            Assert.False(none.HasWarning);
+            Assert.True(none.CanLaunch);
 
             var explicitDefault = ClaudeProfileResolver.Resolve("default", null, ctx);
             Assert.True(explicitDefault.Profile.IsDefault);
-            Assert.False(explicitDefault.HasWarning);
+            Assert.True(explicitDefault.CanLaunch);
+
+            // An explicit Default override selects Default; it does not fall through to the project's.
+            var overrideDefault = ClaudeProfileResolver.Resolve("Work", "Default", ctx);
+            Assert.True(overrideDefault.Profile.IsDefault);
+            Assert.True(overrideDefault.CanLaunch);
         }
 
+        // Owner decision 2026-10-10: these two used to launch (on Default, and on the missing folder)
+        // with a warning. They now refuse, and hand back no profile to launch on by mistake.
+
         [Fact]
-        public void Unknown_name_falls_back_to_default_with_a_warning()
+        public void Unknown_name_is_blocked_and_returns_no_profile()
         {
             var r = ClaudeProfileResolver.Resolve("ClientX", null, Ctx(configured: Work));
-            Assert.True(r.Profile.IsDefault);
+
+            Assert.False(r.CanLaunch);
+            Assert.Null(r.Profile);
             Assert.Equal("ClientX", r.RequestedName);
-            Assert.True(r.HasWarning);
-            Assert.Contains("ClientX", r.Warning);
+            Assert.Contains("'ClientX' is not configured on this machine", r.BlockedReason, StringComparison.Ordinal);
         }
 
         [Fact]
-        public void Known_profile_with_missing_folder_is_kept_with_a_warning()
+        public void Known_profile_with_missing_folder_is_blocked_and_returns_no_profile()
         {
             var r = ClaudeProfileResolver.Resolve("Work", null, Ctx(exists: _ => false, configured: Work));
+
+            Assert.False(r.CanLaunch);
+            Assert.Null(r.Profile);
+            Assert.Contains(WorkDir, r.BlockedReason, StringComparison.Ordinal);
+            Assert.Contains("does not exist", r.BlockedReason, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void Known_profile_with_an_existing_folder_launches()
+        {
+            var r = ClaudeProfileResolver.Resolve("work", null, Ctx(configured: Work));
+
+            Assert.True(r.CanLaunch);
+            Assert.Null(r.BlockedReason);
             Assert.Equal("Work", r.Profile.Name);
-            Assert.True(r.HasWarning);
+            Assert.Equal(WorkDir, r.Profile.ConfigDir);
         }
 
         // ── Roots ────────────────────────────────────────────────────────────
@@ -176,7 +264,10 @@ namespace MultiTerminal.Tests
         [Fact]
         public void Validate_reports_each_rule()
         {
-            var exists = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { WorkDir, @"D:\a" };
+            // Every folder that is not itself the subject of a folder rule EXISTS, so a row is flagged
+            // by the one rule its comment names and by nothing else. (Rows 1 and 3 used to point at
+            // folders that did not exist, so they were flagged with or without their name rule.)
+            var exists = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { WorkDir, @"D:\a", @"D:\b", @"D:\c" };
             var ctx = Ctx(exists: exists.Contains);
 
             Assert.Empty(ClaudeProfileResolver.Validate(new[] { Work, new ClaudeProfile("A", @"D:\a") }, ctx));
@@ -194,9 +285,25 @@ namespace MultiTerminal.Tests
                 new ClaudeProfile("Missing", @"D:\nope"),   // 8 does not exist
                 new ClaudeProfile("Shared", WorkDir + @"\"),// 9 same folder as Work
             };
-            var flagged = ClaudeProfileResolver.Validate(bad, ctx).Select(e => e.Index).ToHashSet();
+            var expected = new Dictionary<int, string>
+            {
+                [0] = "a name is required",
+                [1] = "is reserved for the built-in profile",
+                [3] = "more than one profile named 'work'",
+                [4] = "must be an absolute path",
+                [5] = "cannot be a drive root",
+                [6] = "cannot be your user folder",
+                [7] = "is the Default profile's folder",
+                [8] = "does not exist",
+                [9] = "is already used by profile 'Work'",
+            };
 
-            Assert.Equal(new HashSet<int> { 0, 1, 3, 4, 5, 6, 7, 8, 9 }, flagged);
+            var errors = ClaudeProfileResolver.Validate(bad, ctx);
+
+            // One error per flagged row, carrying that row's rule; row 2 is clean.
+            Assert.Equal(expected.Keys.OrderBy(i => i), errors.Select(e => e.Index).OrderBy(i => i));
+            foreach (var error in errors)
+                Assert.Contains(expected[error.Index], error.Message, StringComparison.Ordinal);
         }
 
         // ── Settings round-trip ──────────────────────────────────────────────
@@ -213,6 +320,29 @@ namespace MultiTerminal.Tests
 
             svc.SetClaudeProfiles(Array.Empty<ClaudeProfile>());
             Assert.Empty(new SettingsService(_settingsDir).GetClaudeProfiles());
+        }
+
+        [Fact]
+        public void Settings_store_the_canonical_folder()
+        {
+            // What Validate judged is what gets stored: no trailing separator, no "..", no quotes.
+            string json = SettingsService.SerializeClaudeProfiles(new[]
+            {
+                new ClaudeProfile("A", @"  ""D:\cfg\sub\..\a\""  "),
+            });
+
+            var stored = Assert.Single(SettingsService.ParseClaudeProfiles(json));
+            Assert.Equal(@"D:\cfg\a", stored.ConfigDir);
+        }
+
+        [Fact]
+        public void A_value_stored_before_canonical_storage_still_loads_as_written()
+        {
+            // Written by the earlier build: trimmed, but with its trailing separator.
+            var stored = Assert.Single(SettingsService.ParseClaudeProfiles("[{\"name\":\"A\",\"configDir\":\"D:\\\\cfg\\\\a\\\\\"}]"));
+
+            Assert.Equal(@"D:\cfg\a\", stored.ConfigDir);
+            Assert.Equal(@"D:\cfg\a", ClaudeProfileResolver.GetConfigDir(stored, Ctx(configured: stored)));
         }
 
         [Fact]

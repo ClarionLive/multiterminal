@@ -130,12 +130,18 @@ namespace MultiTerminal.API.Controllers
                     statusCode: 400);
             }
 
+            // The pane that is asking, from its launch nonce (never from spawnerName, which is whatever the
+            // caller typed). Resolved before the spawn because the helper may inherit that pane's Claude
+            // profile (ticket c8ee0eec), and used again below for close_helper.
+            var provenSpawner = _broker?.GetConnectedPaneByLaunchNonce(launchNonce);
+
             var (success, docId, error, terminalName) = await _spawnService.SpawnTeammateAsync(
                 agentName,
                 agentType: null,
                 workingDir,
                 initialPrompt: initialPrompt,
-                spawnerName: spawnerName);
+                spawnerName: spawnerName,
+                spawnerDocId: provenSpawner?.DocId);
 
             if (!success)
                 return Problem(detail: error, statusCode: 400);
@@ -147,7 +153,6 @@ namespace MultiTerminal.API.Controllers
             //
             // Recorded after the pane exists. If the Owner closes it in the moment between, Forget runs
             // first and an orphan entry remains; the close endpoint's "pane already gone" branch drops it.
-            var provenSpawner = _broker?.GetConnectedPaneByLaunchNonce(launchNonce);
             bool closableBySpawner = _spawnService.Panes.Record(docId, terminalName, provenSpawner?.DocId, provenSpawner == null ? null : launchNonce);
 
             // What "success" means here (pipeline Run 1, cross-model adversary): the PANE exists and

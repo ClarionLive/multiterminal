@@ -936,19 +936,11 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// The stored form of a profile name: trimmed, and null for blank or "Default" (any case), so
-        /// the Default profile has exactly one representation in the column.
+        /// The stored form of a profile name. A forwarder: the rule itself is
+        /// <see cref="MultiTerminal.Models.ClaudeProfile.NormalizeName"/>.
         /// </summary>
-        internal static string NormalizeClaudeProfileName(string profileName)
-        {
-            if (string.IsNullOrWhiteSpace(profileName))
-                return null;
-
-            string trimmed = profileName.Trim();
-            return string.Equals(trimmed, MultiTerminal.Models.ClaudeProfile.DefaultName, StringComparison.OrdinalIgnoreCase)
-                ? null
-                : trimmed;
-        }
+        internal static string NormalizeClaudeProfileName(string profileName) =>
+            MultiTerminal.Models.ClaudeProfile.NormalizeName(profileName);
 
         private MultiTerminal.Models.Project ReadRichProject(SQLiteDataReader reader)
         {

@@ -239,22 +239,14 @@ namespace MultiTerminal.Services
             return false;
         }
 
-        /// <summary>Root → canonical full path + one trailing separator, or null if unusable or a volume root.</summary>
+        /// <summary>Root → canonical full path + one trailing separator, or null if unusable or a volume root.
+        /// Canonicalised by the same function the profile resolver uses, so the guard and the roots it is
+        /// handed cannot disagree about what a folder is.</summary>
         private static string CanonicalRootPrefix(string root)
         {
-            if (string.IsNullOrWhiteSpace(root)) return null;
-            try
-            {
-                if (!Path.IsPathFullyQualified(root)) return null;
-                string full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
-                string volume = Path.TrimEndingDirectorySeparator(Path.GetPathRoot(full) ?? string.Empty);
-                if (full.Length == 0 || string.Equals(full, volume, StringComparison.OrdinalIgnoreCase)) return null;
-                return full + Path.DirectorySeparatorChar;
-            }
-            catch (Exception ex) when (ex is ArgumentException || ex is NotSupportedException || ex is PathTooLongException)
-            {
-                return null;
-            }
+            string full = ClaudeProfileResolver.Canonicalize(root);
+            if (full == null || ClaudeProfileResolver.IsVolumeRoot(full)) return null;
+            return full + Path.DirectorySeparatorChar;
         }
 
         /// <summary>

@@ -192,9 +192,10 @@ namespace MultiTerminal.Docking
         public string LaunchProjectId => _launchProjectId;
 
         /// <summary>The name of the Claude profile this pane was last launched under (ticket c8ee0eec);
-        /// null for Default or a pane that has not launched. Read by "Launch as...", which names no
-        /// project and so keeps the pane's profile. Held in memory only: a restored pane comes back on
-        /// the start screen, where a project card's own profile applies.</summary>
+        /// null for Default or a pane that has not launched. Read when a launch lands in a folder no
+        /// project owns: by "Launch as..." (the pane keeps its profile) and for a helper this pane spawns
+        /// (the helper inherits it). A folder that belongs to a project always takes that project's
+        /// profile instead. Held in memory only: a restored pane comes back on the start screen.</summary>
         public string LaunchClaudeProfileName { get; private set; }
 
         /// <summary>

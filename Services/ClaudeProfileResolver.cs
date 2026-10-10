@@ -6,17 +6,19 @@ using MultiTerminal.Models;
 namespace MultiTerminal.Services
 {
     /// <summary>
-    /// The outcome of <see cref="ClaudeProfileResolver.Resolve(string, string)"/>: the profile to launch
-    /// under, plus a warning the caller should surface when the requested profile could not be honoured
-    /// as asked (Owner decision Q4: an unknown name falls back to Default WITH a warning).
+    /// The outcome of <see cref="ClaudeProfileResolver.Resolve(string, string)"/>: either the profile to
+    /// launch under, or the reason the launch must not happen (Owner decision 2026-10-10: a profile
+    /// name this machine has no profile for, or a profile whose folder is missing or invalid, REFUSES
+    /// the launch. There is no fallback to Default and no "launch anyway").
     /// </summary>
-    /// <param name="Profile">The profile to use. Never null.</param>
+    /// <param name="Profile">The profile to use. Null exactly when the launch is blocked, so a caller
+    /// that ignores <see cref="CanLaunch"/> cannot start anything on a profile nobody chose.</param>
     /// <param name="RequestedName">The non-blank name that was asked for (override, else project), or null.</param>
-    /// <param name="Warning">A one-line, user-facing warning, or null when there is nothing to report.</param>
-    public sealed record ClaudeProfileResolution(ClaudeProfile Profile, string RequestedName, string Warning)
+    /// <param name="BlockedReason">Why the launch is refused (one user-facing sentence), or null when it may proceed.</param>
+    public sealed record ClaudeProfileResolution(ClaudeProfile Profile, string RequestedName, string BlockedReason)
     {
-        /// <summary>True when <see cref="Warning"/> should be shown.</summary>
-        public bool HasWarning => !string.IsNullOrEmpty(Warning);
+        /// <summary>True when the launch may proceed under <see cref="Profile"/>.</summary>
+        public bool CanLaunch => string.IsNullOrEmpty(BlockedReason);
     }
 
     /// <summary>One problem found by <see cref="ClaudeProfileResolver.Validate(IReadOnlyList{ClaudeProfile})"/>.</summary>
@@ -77,8 +79,10 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Which profile to launch under. Precedence: <paramref name="launchOverrideName"/> →
-        /// <paramref name="projectProfileName"/> → Default (blank counts as not given). A name this machine
-        /// has no profile for resolves to Default with a warning.
+        /// <paramref name="projectProfileName"/> → Default (blank counts as not given; "Default" selects
+        /// Default). A name this machine has no profile for, or a profile whose folder is invalid or does
+        /// not exist, is BLOCKED: <see cref="ClaudeProfileResolution.CanLaunch"/> is false and no profile
+        /// is returned.
         /// </summary>
         public static ClaudeProfileResolution Resolve(string projectProfileName, string launchOverrideName) =>
             Resolve(projectProfileName, launchOverrideName, CurrentContext());
@@ -118,9 +122,10 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Validates a complete list of stored profiles (the editor's whole grid). Empty result = valid.
-        /// Rules: name non-blank, unique (case-insensitive), not "Default"; directory absolute, existing,
-        /// not a drive root, not %USERPROFILE% or an ancestor of it, not %USERPROFILE%\.claude, not the
-        /// Default profile's directory, and not shared with another profile.
+        /// Rules: name non-blank, unique (case-insensitive), not "Default"; directory absolute, free of
+        /// typographic single quotes (PowerShell reads them as the end of a string), existing, not a drive
+        /// root, not %USERPROFILE% or an ancestor of it, not %USERPROFILE%\.claude, not the Default
+        /// profile's directory, and not shared with another profile.
         /// </summary>
         public static IReadOnlyList<ClaudeProfileValidationError> Validate(IReadOnlyList<ClaudeProfile> profiles) =>
             Validate(profiles, CurrentContext());
@@ -147,37 +152,32 @@ namespace MultiTerminal.Services
 
         internal static ClaudeProfileResolution Resolve(string projectProfileName, string launchOverrideName, ClaudeProfileContext ctx)
         {
-            string requested = NullIfBlank(launchOverrideName) ?? NullIfBlank(projectProfileName);
-            if (requested == null || string.Equals(requested, ClaudeProfile.DefaultName, StringComparison.OrdinalIgnoreCase))
-                return new ClaudeProfileResolution(GetDefaultProfile(ctx), requested, null);
+            // First non-blank wins, THEN the Default rule: an explicit "Default" override selects Default
+            // rather than falling through to the project's profile.
+            string asked = NullIfBlank(launchOverrideName) ?? NullIfBlank(projectProfileName);
+            string requested = ClaudeProfile.NormalizeName(asked);
+            if (requested == null)
+                return new ClaudeProfileResolution(GetDefaultProfile(ctx), asked, null);
 
             foreach (var p in Stored(ctx))
             {
                 if (!string.Equals(p.Name.Trim(), requested, StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                var match = new ClaudeProfile(p.Name.Trim(), p.ConfigDir);
+                string name = p.Name.Trim();
                 string dir = Canonicalize(p.ConfigDir);
-                string warning = null;
                 if (dir == null)
-                {
-                    warning = $"Claude profile '{match.Name}' has an invalid folder '{p.ConfigDir}'.";
-                }
-                else if (!SafeExists(ctx, dir))
-                {
-                    // Deliberately NOT a fallback to Default: that would put this project's work in the
-                    // wrong profile. Claude Code creates the folder and starts with no login or settings.
-                    warning = $"Claude profile '{match.Name}' points at '{dir}', which does not exist; Claude Code will start there with no login or settings.";
-                }
+                    return new ClaudeProfileResolution(null, requested, $"Claude profile '{name}' has an invalid folder ('{p.ConfigDir}').");
 
-                return new ClaudeProfileResolution(match, requested, warning);
+                // Never a launch into a folder that is not there: Claude Code would create it and start
+                // with no login or settings, which looks like a working session on the wrong account.
+                if (!SafeExists(ctx, dir))
+                    return new ClaudeProfileResolution(null, requested, $"Claude profile '{name}' points at '{dir}', which does not exist.");
+
+                return new ClaudeProfileResolution(new ClaudeProfile(name, p.ConfigDir), requested, null);
             }
 
-            var fallback = GetDefaultProfile(ctx);
-            return new ClaudeProfileResolution(
-                fallback,
-                requested,
-                $"Claude profile '{requested}' is not configured on this machine; using the Default profile ({fallback.ConfigDir}).");
+            return new ClaudeProfileResolution(null, requested, $"Claude profile '{requested}' is not configured on this machine.");
         }
 
         internal static string GetConfigDir(ClaudeProfile profile, ClaudeProfileContext ctx)
@@ -194,7 +194,7 @@ namespace MultiTerminal.Services
             string value = ConfigDirValue(profile, ctx);
             string configLine = value == null
                 ? $"Remove-Item Env:{ConfigDirVariable} -ErrorAction SilentlyContinue; "
-                : $"$env:{ConfigDirVariable} = '{value.Replace("'", "''")}'; ";
+                : $"$env:{ConfigDirVariable} = '{EscapeForSingleQuotedPowerShell(value)}'; ";
             return configLine + $"$env:{AgentTeamsVariable} = '1'; ";
         }
 
@@ -217,7 +217,7 @@ namespace MultiTerminal.Services
             foreach (string raw in dirs)
             {
                 string dir = Canonicalize(raw);
-                if (dir == null || IsDriveRoot(dir) || IsUserProfileOrAncestor(dir, ctx.UserProfile))
+                if (dir == null || IsVolumeRoot(dir) || IsUserProfileOrAncestor(dir, ctx.UserProfile))
                     continue;
 
                 string root = dir + Path.DirectorySeparatorChar;
@@ -247,7 +247,7 @@ namespace MultiTerminal.Services
 
                 if (name == null)
                     errors.Add(new ClaudeProfileValidationError(i, $"Profile {label}: a name is required."));
-                else if (string.Equals(name, ClaudeProfile.DefaultName, StringComparison.OrdinalIgnoreCase))
+                else if (ClaudeProfile.NormalizeName(name) == null)
                     errors.Add(new ClaudeProfileValidationError(i, $"'{ClaudeProfile.DefaultName}' is reserved for the built-in profile; choose another name."));
                 else if (!names.Add(name))
                     errors.Add(new ClaudeProfileValidationError(i, $"There is more than one profile named '{name}'."));
@@ -260,7 +260,9 @@ namespace MultiTerminal.Services
                     continue;
                 }
 
-                if (IsDriveRoot(dir))
+                if (ContainsPowerShellQuoteLookalike(dir))
+                    errors.Add(new ClaudeProfileValidationError(i, $"Profile {label}: the folder path contains a curly quote (\u2018 \u2019 \u201A or \u201B), which PowerShell reads as the end of a string; rename the folder or choose another."));
+                else if (IsVolumeRoot(dir))
                     errors.Add(new ClaudeProfileValidationError(i, $"Profile {label}: the folder cannot be a drive root ({dir})."));
                 else if (IsUserProfileOrAncestor(dir, ctx.UserProfile))
                     errors.Add(new ClaudeProfileValidationError(i, $"Profile {label}: the folder cannot be your user folder or a folder above it ({dir})."));
@@ -328,8 +330,13 @@ namespace MultiTerminal.Services
             }
         }
 
-        /// <summary>Full path without a trailing separator, or null for blank / relative / malformed input.</summary>
-        internal static string Canonicalize(string path)
+        /// <summary>
+        /// The one folder canonicaliser for Claude config directories (also used by the token meter's
+        /// transcript guard): full path without a trailing separator, or null for blank / relative /
+        /// malformed input. Surrounding whitespace and double quotes are dropped first. Does not touch
+        /// the disk and does not resolve symlinks or junctions.
+        /// </summary>
+        public static string Canonicalize(string path)
         {
             string trimmed = NullIfBlank(path)?.Trim('"');
             if (trimmed == null)
@@ -346,10 +353,45 @@ namespace MultiTerminal.Services
             }
         }
 
-        private static bool IsDriveRoot(string canonical)
+        /// <summary>
+        /// True when <paramref name="canonical"/> (from <see cref="Canonicalize"/>) is a whole volume: a
+        /// drive root or a UNC share root.
+        /// </summary>
+        public static bool IsVolumeRoot(string canonical)
         {
+            if (string.IsNullOrEmpty(canonical))
+                return false;
             string root = Path.GetPathRoot(canonical);
             return root != null && SamePath(Path.TrimEndingDirectorySeparator(root), canonical);
+        }
+
+        // PowerShell accepts these four as single-quote characters too, so one inside a single-quoted
+        // string ends it exactly as an ASCII apostrophe would.
+        private const string PowerShellQuoteLookalikes = "\u2018\u2019\u201A\u201B";
+
+        internal static bool ContainsPowerShellQuoteLookalike(string value) =>
+            value != null && value.IndexOfAny(PowerShellQuoteLookalikes.ToCharArray()) >= 0;
+
+        /// <summary>
+        /// Escapes a value for the inside of a single-quoted PowerShell string by doubling every character
+        /// PowerShell accepts as a single quote: the ASCII apostrophe and the four typographic ones.
+        /// Validate rejects the typographic ones in a profile folder; this covers a value stored before
+        /// that rule existed, or written into settings.txt by hand.
+        /// </summary>
+        internal static string EscapeForSingleQuotedPowerShell(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+                return value;
+
+            var sb = new System.Text.StringBuilder(value.Length + 8);
+            foreach (char c in value)
+            {
+                sb.Append(c);
+                if (c == '\'' || PowerShellQuoteLookalikes.IndexOf(c) >= 0)
+                    sb.Append(c);
+            }
+
+            return sb.ToString();
         }
 
         /// <summary>True when <paramref name="canonical"/> is %USERPROFILE% or a folder that contains it.</summary>

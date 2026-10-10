@@ -408,13 +408,18 @@ namespace MultiTerminal.Terminal
 
         /// <summary>
         /// The Claude Code part of the launch environment, appended last to <c>envSetup</c>: the
-        /// flicker-free renderer flag, then <paramref name="profilePrologue"/> (from
-        /// <see cref="Services.ClaudeProfileResolver.GetPrologue(Models.ClaudeProfile)"/>) when
-        /// <see cref="AppliesClaudeProfile"/> says this launch gets one.
+        /// flicker-free renderer flag, then the profile prologue when <see cref="AppliesClaudeProfile"/>
+        /// says this launch gets one. That decision is made here and nowhere else:
+        /// <paramref name="getProfilePrologue"/> (normally
+        /// <see cref="Services.ClaudeProfileResolver.GetPrologue(Models.ClaudeProfile)"/>) is only called
+        /// for a launch that gets a prologue.
+        /// <para>An exception from <paramref name="getProfilePrologue"/> is NOT caught: a launch whose
+        /// profile cannot be applied does not start. The same rule as a headless agent, where
+        /// <c>GetEnvironment</c> throws out of <c>AgentProcess.SpawnAsync</c> before any process exists.</para>
         /// </summary>
-        internal static string BuildClaudeEnvSetup(string autoRunCommand, string profilePrologue) =>
+        internal static string BuildClaudeEnvSetup(string autoRunCommand, Func<string> getProfilePrologue) =>
             AppliesClaudeProfile(autoRunCommand)
-                ? NoFlickerAssignment + (profilePrologue ?? "")
+                ? NoFlickerAssignment + (getProfilePrologue() ?? "")
                 : NoFlickerAssignment;
 
         /// <summary>
@@ -638,27 +643,20 @@ namespace MultiTerminal.Terminal
             // Enable flicker-free alternate-screen renderer for Claude Code, then put the launch under
             // its Claude profile (ticket c8ee0eec). The prologue comes from the resolver and nowhere
             // else: it is what keeps the Default profile from ever pointing CLAUDE_CONFIG_DIR at
-            // %USERPROFILE%\.claude. A profile whose prologue cannot be built keeps the shell's own
-            // environment rather than being moved onto Default.
-            string profilePrologue = null;
-            if (AppliesClaudeProfile(autoRunCommand))
+            // %USERPROFILE%\.claude. A profile whose prologue cannot be built REFUSES the launch (Owner
+            // decision 2026-10-10): running on the shell's own environment would be a silent move to
+            // another profile. MainForm refuses such a profile before it gets here; this is the backstop.
+            try
             {
-                try
-                {
-                    profilePrologue = Services.ClaudeProfileResolver.GetPrologue(claudeProfile);
-                    DebugLogService?.Trace("ConPtyTerminal", $"Claude profile '{claudeProfile?.Name ?? Models.ClaudeProfile.DefaultName}': {profilePrologue}");
-                }
-                catch (ArgumentException ex)
-                {
-                    DebugLogService?.Error("ConPtyTerminal", $"Claude profile '{claudeProfile?.Name}' not applied, {Services.ClaudeProfileResolver.ConfigDirVariable} left as the shell has it: {ex.Message}");
-                }
+                envSetup += BuildClaudeEnvSetup(autoRunCommand, () => Services.ClaudeProfileResolver.GetPrologue(claudeProfile));
             }
-            else
+            catch (ArgumentException ex)
             {
-                DebugLogService?.Trace("ConPtyTerminal", "Auto-run command is not a Claude launch - no Claude profile prologue");
+                DebugLogService?.Error("ConPtyTerminal", $"Launch refused: Claude profile '{claudeProfile?.Name}' cannot be applied: {ex.Message}");
+                throw new InvalidOperationException(
+                    $"Claude profile '{claudeProfile?.Name}' cannot be applied, so nothing was started. Fix its folder in Settings > Claude Profiles. ({ex.Message})",
+                    ex);
             }
-
-            envSetup += BuildClaudeEnvSetup(autoRunCommand, profilePrologue);
 
             string promptFunc = "function prompt { $Host.UI.RawUI.WindowTitle = $PWD.Path; return \\\"PS $($PWD.Path)> \\\" }";
 

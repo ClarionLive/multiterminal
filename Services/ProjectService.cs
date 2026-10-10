@@ -480,6 +480,39 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Brings a folder's project.json copy of the Claude profile name into line with the database
+        /// value (ticket c8ee0eec), and says so when it cannot. The database is the authority and is NOT
+        /// touched here; this only stops the portable copy going stale, which matters when the folder is
+        /// imported again or carried to another machine.
+        /// </summary>
+        /// <returns>Null when the copy now matches, or there is no project.json to be stale. Otherwise
+        /// one sentence saying why the file still disagrees.</returns>
+        public string SyncProjectJsonClaudeProfile(string projectPath, string projectId, string profileName)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(projectPath) || !IsProjectDirectory(projectPath))
+                    return null;
+
+                var fileProject = LoadProject(projectPath);
+                if (fileProject == null)
+                    return $"the file in '{projectPath}' could not be read";
+                if (!string.Equals(fileProject.Id, projectId, StringComparison.Ordinal))
+                    return $"the file in '{projectPath}' belongs to a different project id ('{fileProject.Id}')";
+                if (string.Equals(Models.ClaudeProfile.NormalizeName(fileProject.ClaudeProfile), Models.ClaudeProfile.NormalizeName(profileName), StringComparison.OrdinalIgnoreCase))
+                    return null;
+
+                return UpdateProjectJsonClaudeProfile(projectPath, projectId, profileName)
+                    ? null
+                    : $"the file in '{projectPath}' could not be updated";
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException || ex is NotSupportedException || ex is System.Security.SecurityException)
+            {
+                return $"writing the file in '{projectPath}' failed: {ex.Message}";
+            }
+        }
+
+        /// <summary>
         /// Sets a project's default terminal CLI. Writes SQLite AND the portable
         /// project.json, mirroring <see cref="ToggleProjectPinned"/>. DefaultTerminal is
         /// serialized to project.json (unlike Status), so a DB-only write would be silently
@@ -687,7 +720,7 @@ namespace MultiTerminal.Services
             // machine or re-imported keeps its profile. The key is omitted for Default, and an absent
             // key reads as Default. The stale-value problem above cannot recur: SaveRichProject uses
             // the file's value only when it inserts a new row.
-            string claudeProfile = ProjectDatabase.NormalizeClaudeProfileName(project.ClaudeProfile);
+            string claudeProfile = Models.ClaudeProfile.NormalizeName(project.ClaudeProfile);
             if (claudeProfile != null)
                 sb.AppendLine($"  \"claudeProfile\": {JsonEscape(claudeProfile)},");
             sb.AppendLine("  \"prompts\": [");
@@ -847,7 +880,7 @@ namespace MultiTerminal.Services
                             project.DefaultTerminal = TerminalKindHelper.Normalize(ParseJsonString(json, ref pos));
                             break;
                         case "claudeprofile":
-                            project.ClaudeProfile = ProjectDatabase.NormalizeClaudeProfileName(ParseJsonString(json, ref pos));
+                            project.ClaudeProfile = Models.ClaudeProfile.NormalizeName(ParseJsonString(json, ref pos));
                             break;
                         case "sourcecontrolaccountid":
                             // Consume-and-discard: SQLite is the source of truth for this field

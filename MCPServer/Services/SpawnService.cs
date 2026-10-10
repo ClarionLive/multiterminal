@@ -13,13 +13,16 @@ namespace MultiTerminal.MCPServer.Services
     {
         /// <summary>
         /// Callback to spawn a new ConPTY terminal.
-        /// Parameters: (agentName, agentType, workingDir, initialPrompt, spawnerName)
+        /// Parameters: (agentName, agentType, workingDir, initialPrompt, spawnerName, spawnerDocId).
+        /// spawnerDocId is the pane the caller's launch nonce PROVED, or null (ticket c8ee0eec: a helper
+        /// in a folder no project owns inherits that pane's Claude profile); spawnerName is only what
+        /// the caller said its name was.
         /// Returns: (success, docId, errorMessage, terminalName) — terminalName is the identity the
         /// broker ACTUALLY registered (task 77d1182f): a requested name that was already held comes
         /// back suffixed ("Name-2"), so callers must report and address the returned name, not the
         /// one they asked for.
         /// </summary>
-        public Func<string, string, string, string, string, Task<(bool success, string docId, string error, string terminalName)>> OnSpawnRequested { get; set; }
+        public Func<string, string, string, string, string, string, Task<(bool success, string docId, string error, string terminalName)>> OnSpawnRequested { get; set; }
 
         /// <summary>
         /// Callback to spawn a headless AgentProcess.
@@ -80,7 +83,8 @@ namespace MultiTerminal.MCPServer.Services
             string agentType,
             string workingDir,
             string initialPrompt,
-            string spawnerName)
+            string spawnerName,
+            string spawnerDocId = null)
         {
             if (OnSpawnRequested == null)
             {
@@ -110,7 +114,7 @@ namespace MultiTerminal.MCPServer.Services
 
             try
             {
-                var result = await OnSpawnRequested(agentName, agentType, workingDir, initialPrompt, spawnerName);
+                var result = await OnSpawnRequested(agentName, agentType, workingDir, initialPrompt, spawnerName, spawnerDocId);
                 return result;
             }
             catch (Exception ex)

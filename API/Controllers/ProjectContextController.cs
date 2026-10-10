@@ -118,15 +118,50 @@ namespace MultiTerminal.API.Controllers
             var updated = new List<string>();
             var rejected = new List<string>();
 
+            bool claudeProfileWritten = false;
             foreach (var kvp in request.Fields)
             {
                 if (_projectDb.UpdateProjectField(projectId, kvp.Key, kvp.Value))
+                {
                     updated.Add(kvp.Key);
+                    claudeProfileWritten |= IsClaudeProfileField(kvp.Key);
+                }
                 else
+                {
                     rejected.Add(kvp.Key);
+                }
             }
 
+            // The database row is the authority and is already written. Bring the project.json copy
+            // along so it does not go stale (ticket c8ee0eec); a failure is logged and never fails the
+            // request, because the edit DID happen.
+            if (claudeProfileWritten)
+                SyncProjectJsonClaudeProfile(projectId);
+
             return Ok(new { updated, rejected });
+        }
+
+        private static bool IsClaudeProfileField(string field) =>
+            string.Equals(field, "claudeProfile", System.StringComparison.OrdinalIgnoreCase)
+            || string.Equals(field, "claude_profile", System.StringComparison.OrdinalIgnoreCase);
+
+        private void SyncProjectJsonClaudeProfile(string projectId)
+        {
+            try
+            {
+                var row = _projectDb.GetRichProject(projectId);
+                var projectService = _broker?.ProjectService;
+                if (row == null || projectService == null)
+                    return;
+
+                string staleReason = projectService.SyncProjectJsonClaudeProfile(row.Path, row.Id, row.ClaudeProfile);
+                if (staleReason != null)
+                    _broker.DebugLogService?.Warning("ProjectContextController", $"Project '{row.Name}' ({row.Id}): the Claude profile was saved in the database, but its project.json copy is stale: {staleReason}.");
+            }
+            catch (System.Exception ex)
+            {
+                _broker?.DebugLogService?.Warning("ProjectContextController", $"Project {projectId}: the Claude profile was saved in the database, but syncing its project.json copy failed: {ex.Message}");
+            }
         }
 
         /// <summary>

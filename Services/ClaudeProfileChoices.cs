@@ -68,7 +68,7 @@ namespace MultiTerminal.Services
                 }
             }
 
-            string stored = ProjectDatabase.NormalizeClaudeProfileName(storedName);
+            string stored = ClaudeProfile.NormalizeName(storedName);
             selectedIndex = 0;
             if (stored == null)
                 return choices;

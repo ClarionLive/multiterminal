@@ -127,7 +127,7 @@ namespace MultiTerminal.Dialogs
                 : "These Claude profiles will no longer exist: " + string.Join(", ", list.Select(n => $"'{n}'"));
 
             return which + " (a renamed profile counts as removed)." + Environment.NewLine + Environment.NewLine
-                + "Any project still set to one of them will start under the Default profile, with a warning, "
+                + "Any project still set to one of them will refuse to start "
                 + "until you pick another profile for it in Edit Project. The folders themselves are not deleted."
                 + Environment.NewLine + Environment.NewLine
                 + "Save anyway?";
