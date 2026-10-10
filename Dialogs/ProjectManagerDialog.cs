@@ -252,6 +252,11 @@ namespace MultiTerminal.Dialogs
                 {
                     try
                     {
+                        // The broker wrote project.json before the dialog stored the profile.
+                        var created = dialog.ResultProject;
+                        if (created != null && !string.IsNullOrWhiteSpace(created.Path))
+                            _projectService.UpdateProjectJsonClaudeProfile(created.Path, created.Id, created.ClaudeProfile);
+
                         LoadProjects();
                     }
                     catch (Exception ex)
@@ -331,6 +336,11 @@ namespace MultiTerminal.Dialogs
                                     legacyProject.Name = resultProject.Name;
                                     legacyProject.Description = resultProject.Description;
                                     legacyProject.ChangeLog = resultProject.ChangeLog;
+                                    // Without this the file keeps the profile it had before the edit.
+                                    // The database is unaffected either way (SaveRichProject leaves an
+                                    // existing row's claude_profile alone); this keeps project.json true
+                                    // for a later import or another machine.
+                                    legacyProject.ClaudeProfile = resultProject.ClaudeProfile;
                                     _projectService.SaveProject(legacyProject);
                                 }
                             }

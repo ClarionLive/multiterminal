@@ -38,6 +38,7 @@ namespace MultiTerminal.Dialogs
         private TextBox descriptionTextBox;
         private ComboBox projectTypeComboBox;
         private ComboBox statusComboBox;
+        private ComboBox claudeProfileComboBox;
         private TextBox currentVersionTextBox;
         private TextBox changeLogTextBox;
         private TextBox iconTextBox;
@@ -337,6 +338,32 @@ namespace MultiTerminal.Dialogs
             // Normalize null/legacy values to a canonical item so FindStringExact always hits.
             int statusIdx = statusComboBox.FindStringExact(Project.NormalizeStatus(project.Status));
             statusComboBox.SelectedIndex = statusIdx >= 0 ? statusIdx : 0;
+            PopulateClaudeProfiles(project.ClaudeProfile);
+        }
+
+        /// <summary>
+        /// Fills the Claude profile combo (Default first) and selects the project's stored profile.
+        /// A stored name this machine has no profile for is added as its own entry and stays
+        /// selected, so saving without touching the combo keeps it (see <see cref="ClaudeProfileChoices"/>).
+        /// </summary>
+        private void PopulateClaudeProfiles(string storedName)
+        {
+            IReadOnlyList<ClaudeProfile> profiles = null;
+            try
+            {
+                profiles = ClaudeProfileResolver.GetAllProfiles();
+            }
+            catch (Exception ex)
+            {
+                // Unreadable settings: the list is Default plus the stored name, which stays selected.
+                System.Diagnostics.Trace.WriteLine($"[EditProjectDialog] Failed to load Claude profiles: {ex.Message}");
+            }
+
+            var choices = ClaudeProfileChoices.Build(profiles, storedName, out int selected);
+            claudeProfileComboBox.Items.Clear();
+            foreach (var choice in choices)
+                claudeProfileComboBox.Items.Add(choice);
+            claudeProfileComboBox.SelectedIndex = selected;
         }
 
         /// <summary>
@@ -587,6 +614,8 @@ namespace MultiTerminal.Dialogs
             string selType = projectTypeComboBox.SelectedItem as string;
             _workingProject.ProjectType = string.IsNullOrWhiteSpace(selType) ? null : selType;
             _workingProject.Status = Project.NormalizeStatus(statusComboBox.SelectedItem as string);
+            // Null = Default. A "(not configured on this machine)" entry carries the stored name.
+            _workingProject.ClaudeProfile = (claudeProfileComboBox.SelectedItem as ClaudeProfileChoice)?.Name;
 
             // Tab 1 - Paths & Commands (only read if user visited this tab)
             if (_visitedTabs.Contains(1))
@@ -631,6 +660,9 @@ namespace MultiTerminal.Dialogs
             // the binding — set OR clear — out-of-band via the dedicated setter so this dialog is
             // the authoritative writer of the project's account selection.
             _projectDb.SetSourceControlAccount(pid, ResultProject.SourceControlAccountId);
+            // SaveRichProject never changes an existing row's claude_profile (a stale project.json
+            // must not be able to), so this setter is how the choice, including Default, is stored.
+            _projectDb.SetClaudeProfile(pid, ResultProject.ClaudeProfile);
             SaveAgentsFromGrid(pid);
             SaveSpecialistsFromGrid(pid);
             SaveMcpFromGrid(pid);
@@ -957,6 +989,17 @@ namespace MultiTerminal.Dialogs
             this.statusComboBox.SelectedIndex = 0; // Active
             y += rh;
 
+            var lClaudeProfile = MkLbl("Claude profile:", lx, y);
+            this.claudeProfileComboBox = new ComboBox
+            {
+                Location = new Point(fx, y),
+                Size = new Size(360, 23),
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Name = "claudeProfileComboBox"
+            };
+            PopulateClaudeProfiles(null); // a new project starts on Default
+            y += rh;
+
             var l4 = MkLbl("Version:", lx, y);
             this.currentVersionTextBox = MkTxt(fx, y, 120);
             y += rh;
@@ -988,6 +1031,7 @@ namespace MultiTerminal.Dialogs
                 l2, this.descriptionTextBox,
                 l3, this.projectTypeComboBox,
                 lStatus, this.statusComboBox,
+                lClaudeProfile, this.claudeProfileComboBox,
                 l4, this.currentVersionTextBox,
                 l5, this.iconTextBox,
                 l6, this.iconColorTextBox,
