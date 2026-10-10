@@ -447,7 +447,7 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <TabControl Grid.Row="0" Margin="16,16,16,8" Style="{StaticResource DarkTabControl}">
+        <TabControl x:Name="SettingsTabs" Grid.Row="0" Margin="16,16,16,8" Style="{StaticResource DarkTabControl}">
             <TabItem Header="General" Style="{StaticResource DarkTabItem}">
 
         <!-- Two-column form content (scrollable so all sections are reachable at any window height) -->
@@ -1131,6 +1131,129 @@
 
                             </StackPanel>
                         </Grid>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- Claude Profiles (ticket c8ee0eec, GitHub #21): named CLAUDE_CONFIG_DIR folders -->
+            <TabItem x:Name="ClaudeProfilesTab" Header="Claude Profiles" Style="{StaticResource DarkTabItem}">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="16,16,16,16">
+                        <TextBlock Text="Run different projects under different Claude Code accounts and settings, so work and personal projects stay separate."
+                                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="12"
+                                   Margin="4,4,4,16"
+                                   TextWrapping="Wrap"/>
+
+                        <GroupBox Header="Default profile"
+                                  Style="{StaticResource DarkGroupBox}"
+                                  Margin="0,0,0,10">
+                            <StackPanel Margin="8,12,8,8">
+                                <TextBox x:Name="ClaudeDefaultProfileText"
+                                         Style="{StaticResource DarkTextBox}"
+                                         Height="28"
+                                         IsReadOnly="True"
+                                         IsTabStop="False"
+                                         ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+                                <TextBlock Text="Built in and not editable. Used by every project that has no profile of its own."
+                                           Foreground="#808080" FontFamily="Segoe UI" FontSize="11"
+                                           Margin="0,3,0,0"
+                                           TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </GroupBox>
+
+                        <GroupBox Header="Additional profiles"
+                                  Style="{StaticResource DarkGroupBox}"
+                                  Margin="0,0,0,10">
+                            <StackPanel Margin="8,12,8,8">
+                                <Grid Margin="0,0,0,6">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="180"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="Name"
+                                               Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                               FontWeight="SemiBold"/>
+                                    <TextBlock Grid.Column="1" Text="Config folder"
+                                               Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                               FontWeight="SemiBold" Margin="6,0,0,0"/>
+                                </Grid>
+
+                                <TextBlock x:Name="ClaudeProfilesEmptyText"
+                                           Text="No additional profiles yet."
+                                           Foreground="#808080" FontFamily="Segoe UI" FontSize="12"
+                                           Margin="0,2,0,8"/>
+
+                                <ItemsControl x:Name="ClaudeProfilesList" Focusable="False">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Margin="0,0,0,8">
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="180"/>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBox Grid.Column="0"
+                                                             Style="{StaticResource DarkTextBox}"
+                                                             Height="28"
+                                                             Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}"/>
+                                                    <TextBox Grid.Column="1"
+                                                             Style="{StaticResource DarkTextBox}"
+                                                             Height="28"
+                                                             Margin="6,0,0,0"
+                                                             Text="{Binding ConfigDir, UpdateSourceTrigger=PropertyChanged}"
+                                                             ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+                                                    <Button Grid.Column="2"
+                                                            Content="Browse…"
+                                                            Style="{StaticResource SmallActionButton}"
+                                                            Width="80" Height="28"
+                                                            Margin="6,0,0,0"
+                                                            Click="ClaudeProfileBrowseButton_Click"/>
+                                                    <Button Grid.Column="3"
+                                                            Content="Remove"
+                                                            Style="{StaticResource SmallActionButton}"
+                                                            Width="80" Height="28"
+                                                            Margin="6,0,0,0"
+                                                            Click="ClaudeProfileRemoveButton_Click"/>
+                                                </Grid>
+                                                <TextBlock Text="{Binding Error}"
+                                                           FontFamily="Segoe UI" FontSize="11"
+                                                           Foreground="#F48771"
+                                                           Margin="0,3,0,0"
+                                                           TextWrapping="Wrap">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding Error}" Value="{x:Null}">
+                                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                                </DataTrigger>
+                                                                <DataTrigger Binding="{Binding Error}" Value="">
+                                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+
+                                <Button x:Name="ClaudeProfileAddButton"
+                                        Content="Add profile"
+                                        Style="{StaticResource SmallActionButton}"
+                                        Height="28"
+                                        HorizontalAlignment="Left"
+                                        Padding="16,0,16,0"
+                                        Click="ClaudeProfileAddButton_Click"/>
+                            </StackPanel>
+                        </GroupBox>
+
+                        <TextBlock Foreground="#808080" FontFamily="Segoe UI" FontSize="11"
+                                   Margin="4,0,4,0"
+                                   TextWrapping="Wrap"
+                                   Text="Each profile is its own Claude Code config folder (CLAUDE_CONFIG_DIR), with its own login, settings, plugins and history. Set one up once: create the folder, then run claude in a terminal with CLAUDE_CONFIG_DIR set to it and sign in. Projects pick their profile in Edit Project."/>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
