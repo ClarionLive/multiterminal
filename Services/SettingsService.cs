@@ -259,6 +259,86 @@ namespace MultiTerminal.Services
             Set(WorktreeModeKey, normalized);
         }
 
+        // Claude Code config profiles (ticket c8ee0eec, GitHub #21). One line of JSON:
+        // [{"name":"Work","configDir":"C:\\Users\\me\\.claude-work"}, ...]. The implicit Default profile
+        // is never stored (ClaudeProfileResolver supplies it).
+        private const string ClaudeProfilesKey = "ClaudeProfiles";
+
+        private static readonly System.Text.Json.JsonSerializerOptions ClaudeProfilesJsonOptions = new System.Text.Json.JsonSerializerOptions
+        {
+            PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+            PropertyNameCaseInsensitive = true,
+            WriteIndented = false, // settings.txt is one key=value per line
+        };
+
+        /// <summary>
+        /// The stored Claude Code config profiles (never includes Default), in stored order. Entries that
+        /// break the structural rules (blank or reserved name, later duplicate name, non-absolute folder)
+        /// are skipped; unreadable JSON reads as no profiles. Does not check that folders exist.
+        /// </summary>
+        public List<ClaudeProfile> GetClaudeProfiles() => ParseClaudeProfiles(Get(ClaudeProfilesKey));
+
+        /// <summary>
+        /// Replaces the stored profile list. Run <see cref="ClaudeProfileResolver.Validate(IReadOnlyList{ClaudeProfile})"/>
+        /// first to show the user what is wrong; this method only refuses entries that could never be read
+        /// back (blank or reserved name, duplicate name, non-absolute folder). Null or empty clears the list.
+        /// </summary>
+        /// <exception cref="ArgumentException">An entry breaks a structural rule; nothing is written.</exception>
+        public void SetClaudeProfiles(IEnumerable<ClaudeProfile> profiles)
+        {
+            string json = SerializeClaudeProfiles(profiles);
+            if (json == null)
+                Remove(ClaudeProfilesKey);
+            else
+                Set(ClaudeProfilesKey, json);
+        }
+
+        /// <summary>Pure: settings value → profiles. See <see cref="GetClaudeProfiles"/>.</summary>
+        internal static List<ClaudeProfile> ParseClaudeProfiles(string json)
+        {
+            var result = new List<ClaudeProfile>();
+            if (string.IsNullOrWhiteSpace(json))
+                return result;
+
+            List<ClaudeProfile> parsed;
+            try
+            {
+                parsed = System.Text.Json.JsonSerializer.Deserialize<List<ClaudeProfile>>(json, ClaudeProfilesJsonOptions);
+            }
+            catch (System.Text.Json.JsonException ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Unreadable {ClaudeProfilesKey} setting: {ex.Message}");
+                return result;
+            }
+
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var p in parsed ?? new List<ClaudeProfile>())
+            {
+                if (!ClaudeProfileResolver.IsStorable(p) || !names.Add(p.Name.Trim()))
+                    continue;
+                result.Add(new ClaudeProfile(p.Name.Trim(), p.ConfigDir.Trim()));
+            }
+
+            return result;
+        }
+
+        /// <summary>Pure: profiles → settings value (null for an empty list). See <see cref="SetClaudeProfiles"/>.</summary>
+        internal static string SerializeClaudeProfiles(IEnumerable<ClaudeProfile> profiles)
+        {
+            var list = new List<ClaudeProfile>();
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var p in profiles ?? Array.Empty<ClaudeProfile>())
+            {
+                if (!ClaudeProfileResolver.IsStorable(p))
+                    throw new ArgumentException($"Claude profile '{p?.Name}' needs a name other than '{ClaudeProfile.DefaultName}' and an absolute folder.", nameof(profiles));
+                if (!names.Add(p.Name.Trim()))
+                    throw new ArgumentException($"More than one Claude profile is named '{p.Name.Trim()}'.", nameof(profiles));
+                list.Add(new ClaudeProfile(p.Name.Trim(), p.ConfigDir.Trim()));
+            }
+
+            return list.Count == 0 ? null : System.Text.Json.JsonSerializer.Serialize(list, ClaudeProfilesJsonOptions);
+        }
+
         // Codex CLI settings (Phase 1 Codex integration).
         private const string CodexBinaryPathKey = "CodexBinaryPath";
         private const string CodexModelKey = "CodexModel";

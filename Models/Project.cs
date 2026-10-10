@@ -184,6 +184,15 @@ namespace MultiTerminal.Models
         /// </summary>
         public string SourceControlAccountId { get; set; }
 
+        /// <summary>
+        /// Name of the Claude Code config profile this project's terminals launch under (ticket c8ee0eec,
+        /// GitHub #21). The profile NAME, never a path, so a machine with the profile in a different
+        /// folder still matches. Null or blank = the implicit Default profile. Resolve it with
+        /// <see cref="ClaudeProfileResolver.Resolve(string, string)"/>, which falls back to Default with a
+        /// warning when this machine has no profile of that name.
+        /// </summary>
+        public string ClaudeProfile { get; set; }
+
         // ── Legacy collections (loaded from .claude/project.json) ─────────────
 
         /// <summary>

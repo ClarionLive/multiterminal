@@ -1,0 +1,381 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using MultiTerminal.Models;
+
+namespace MultiTerminal.Services
+{
+    /// <summary>
+    /// The outcome of <see cref="ClaudeProfileResolver.Resolve(string, string)"/>: the profile to launch
+    /// under, plus a warning the caller should surface when the requested profile could not be honoured
+    /// as asked (Owner decision Q4: an unknown name falls back to Default WITH a warning).
+    /// </summary>
+    /// <param name="Profile">The profile to use. Never null.</param>
+    /// <param name="RequestedName">The non-blank name that was asked for (override, else project), or null.</param>
+    /// <param name="Warning">A one-line, user-facing warning, or null when there is nothing to report.</param>
+    public sealed record ClaudeProfileResolution(ClaudeProfile Profile, string RequestedName, string Warning)
+    {
+        /// <summary>True when <see cref="Warning"/> should be shown.</summary>
+        public bool HasWarning => !string.IsNullOrEmpty(Warning);
+    }
+
+    /// <summary>One problem found by <see cref="ClaudeProfileResolver.Validate(IReadOnlyList{ClaudeProfile})"/>.</summary>
+    /// <param name="Index">Zero-based index of the offending profile in the list that was validated.</param>
+    /// <param name="Message">User-facing description.</param>
+    public sealed record ClaudeProfileValidationError(int Index, string Message)
+    {
+        public override string ToString() => Message;
+    }
+
+    /// <summary>
+    /// Everything the resolver reads from the outside world, injected so every decision is testable
+    /// without touching settings.txt, the process environment or the disk.
+    /// </summary>
+    /// <param name="Configured">The stored profiles (never includes Default).</param>
+    /// <param name="InheritedConfigDir">MT's own CLAUDE_CONFIG_DIR at startup, or null.</param>
+    /// <param name="UserProfile">%USERPROFILE%.</param>
+    /// <param name="DirectoryExists">Directory probe.</param>
+    internal sealed record ClaudeProfileContext(
+        IReadOnlyList<ClaudeProfile> Configured,
+        string InheritedConfigDir,
+        string UserProfile,
+        Func<string, bool> DirectoryExists);
+
+    /// <summary>
+    /// Ticket c8ee0eec (GitHub #21): which Claude Code config directory a terminal runs under, and the
+    /// environment that puts it there. Static and pure: each public method reads the live machine state
+    /// and delegates to an internal overload that takes a <see cref="ClaudeProfileContext"/>.
+    /// <para><b>The trap this class exists to avoid:</b> when <c>CLAUDE_CONFIG_DIR</c> is set, Claude Code
+    /// reads <c>.claude.json</c> from INSIDE that directory instead of <c>%USERPROFILE%\.claude.json</c>.
+    /// So setting it to <c>%USERPROFILE%\.claude</c> to "explicitly select the default" silently moves
+    /// the user's login, onboarding and global MCP state. The Default profile therefore never sets the
+    /// variable to that folder: it repeats MT's inherited value if there was one, and otherwise REMOVES
+    /// the variable, so a shell profile that sets it cannot leak another profile in.</para>
+    /// </summary>
+    public static class ClaudeProfileResolver
+    {
+        /// <summary>The variable Claude Code reads its config directory from.</summary>
+        public const string ConfigDirVariable = "CLAUDE_CONFIG_DIR";
+
+        /// <summary>Set to <c>1</c> on every launch (Owner decision Q5), so agent teams do not depend on
+        /// each profile's settings.json.</summary>
+        public const string AgentTeamsVariable = "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS";
+
+        /// <summary>
+        /// MT's own <c>CLAUDE_CONFIG_DIR</c>, read once when this class is first used. Nothing in MT sets
+        /// that variable in its own process, so this is what MT was started with. Null when unset or blank.
+        /// </summary>
+        public static string InheritedConfigDir { get; } = NullIfBlank(Environment.GetEnvironmentVariable(ConfigDirVariable));
+
+        // ── Public API (live machine state) ───────────────────────────────────
+
+        /// <summary>The implicit Default profile. Not stored, not editable; a new instance per call.</summary>
+        public static ClaudeProfile DefaultProfile => GetDefaultProfile(CurrentContext());
+
+        /// <summary>Default first, then every stored profile in stored order (for pickers and dropdowns).</summary>
+        public static IReadOnlyList<ClaudeProfile> GetAllProfiles() => GetAllProfiles(CurrentContext());
+
+        /// <summary>
+        /// Which profile to launch under. Precedence: <paramref name="launchOverrideName"/> →
+        /// <paramref name="projectProfileName"/> → Default (blank counts as not given). A name this machine
+        /// has no profile for resolves to Default with a warning.
+        /// </summary>
+        public static ClaudeProfileResolution Resolve(string projectProfileName, string launchOverrideName) =>
+            Resolve(projectProfileName, launchOverrideName, CurrentContext());
+
+        /// <summary>
+        /// The profile's config directory as a canonical full path without a trailing separator. For
+        /// Default (or null): the inherited CLAUDE_CONFIG_DIR, else %USERPROFILE%\.claude.
+        /// </summary>
+        /// <exception cref="ArgumentException">A non-default profile whose ConfigDir is not an absolute path.</exception>
+        public static string GetConfigDir(ClaudeProfile profile) => GetConfigDir(profile, CurrentContext());
+
+        /// <summary>
+        /// PowerShell statements for the pane launch prologue, in the same shape as ConPtyTerminal's
+        /// <c>envSetup</c>: each statement ends in <c>"; "</c>, so the string can be appended directly.
+        /// Always two statements: the config-dir one (<c>$env:CLAUDE_CONFIG_DIR = '&lt;dir&gt;'; </c> or
+        /// <c>Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue; </c>), then
+        /// <c>$env:CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = '1'; </c>.
+        /// </summary>
+        public static string GetPrologue(ClaudeProfile profile) => GetPrologue(profile, CurrentContext());
+
+        /// <summary>
+        /// The same decision as <see cref="GetPrologue(ClaudeProfile)"/> as variable/value pairs for a
+        /// <c>ProcessStartInfo.Environment</c>. A null value means REMOVE the variable from the child's
+        /// environment (do not set it to null or empty).
+        /// </summary>
+        public static IReadOnlyList<KeyValuePair<string, string>> GetEnvironment(ClaudeProfile profile) =>
+            GetEnvironment(profile, CurrentContext());
+
+        /// <summary>
+        /// Every config directory MT may read from: Default's plus each stored profile's, as canonical full
+        /// paths WITH a trailing separator (so <c>.claude-other\</c> does not prefix <c>.claude-otherX</c>),
+        /// de-duplicated case-insensitively. Built only from MT's settings and startup environment, never
+        /// from caller input. A drive root, %USERPROFILE% itself or any ancestor of it, and any non-absolute
+        /// path are dropped, so a bad setting can never widen a path guard to the whole profile or disk.
+        /// </summary>
+        public static IReadOnlyList<string> GetAllRoots() => GetAllRoots(CurrentContext());
+
+        /// <summary>
+        /// Validates a complete list of stored profiles (the editor's whole grid). Empty result = valid.
+        /// Rules: name non-blank, unique (case-insensitive), not "Default"; directory absolute, existing,
+        /// not a drive root, not %USERPROFILE% or an ancestor of it, not %USERPROFILE%\.claude, not the
+        /// Default profile's directory, and not shared with another profile.
+        /// </summary>
+        public static IReadOnlyList<ClaudeProfileValidationError> Validate(IReadOnlyList<ClaudeProfile> profiles) =>
+            Validate(profiles, CurrentContext());
+
+        // ── Pure core ─────────────────────────────────────────────────────────
+
+        internal static ClaudeProfileContext CurrentContext() =>
+            new ClaudeProfileContext(
+                SettingsService.Default.GetClaudeProfiles(),
+                InheritedConfigDir,
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                Directory.Exists);
+
+        internal static ClaudeProfile GetDefaultProfile(ClaudeProfileContext ctx) =>
+            new ClaudeProfile(ClaudeProfile.DefaultName, DefaultConfigDir(ctx));
+
+        internal static IReadOnlyList<ClaudeProfile> GetAllProfiles(ClaudeProfileContext ctx)
+        {
+            var result = new List<ClaudeProfile> { GetDefaultProfile(ctx) };
+            foreach (var p in Stored(ctx))
+                result.Add(new ClaudeProfile(p.Name.Trim(), p.ConfigDir));
+            return result;
+        }
+
+        internal static ClaudeProfileResolution Resolve(string projectProfileName, string launchOverrideName, ClaudeProfileContext ctx)
+        {
+            string requested = NullIfBlank(launchOverrideName) ?? NullIfBlank(projectProfileName);
+            if (requested == null || string.Equals(requested, ClaudeProfile.DefaultName, StringComparison.OrdinalIgnoreCase))
+                return new ClaudeProfileResolution(GetDefaultProfile(ctx), requested, null);
+
+            foreach (var p in Stored(ctx))
+            {
+                if (!string.Equals(p.Name.Trim(), requested, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var match = new ClaudeProfile(p.Name.Trim(), p.ConfigDir);
+                string dir = Canonicalize(p.ConfigDir);
+                string warning = null;
+                if (dir == null)
+                {
+                    warning = $"Claude profile '{match.Name}' has an invalid folder '{p.ConfigDir}'.";
+                }
+                else if (!SafeExists(ctx, dir))
+                {
+                    // Deliberately NOT a fallback to Default: that would put this project's work in the
+                    // wrong profile. Claude Code creates the folder and starts with no login or settings.
+                    warning = $"Claude profile '{match.Name}' points at '{dir}', which does not exist; Claude Code will start there with no login or settings.";
+                }
+
+                return new ClaudeProfileResolution(match, requested, warning);
+            }
+
+            var fallback = GetDefaultProfile(ctx);
+            return new ClaudeProfileResolution(
+                fallback,
+                requested,
+                $"Claude profile '{requested}' is not configured on this machine; using the Default profile ({fallback.ConfigDir}).");
+        }
+
+        internal static string GetConfigDir(ClaudeProfile profile, ClaudeProfileContext ctx)
+        {
+            if (profile == null || profile.IsDefault)
+                return DefaultConfigDir(ctx);
+
+            return Canonicalize(profile.ConfigDir)
+                ?? throw new ArgumentException($"Claude profile '{profile.Name}' has no absolute config folder ('{profile.ConfigDir}').", nameof(profile));
+        }
+
+        internal static string GetPrologue(ClaudeProfile profile, ClaudeProfileContext ctx)
+        {
+            string value = ConfigDirValue(profile, ctx);
+            string configLine = value == null
+                ? $"Remove-Item Env:{ConfigDirVariable} -ErrorAction SilentlyContinue; "
+                : $"$env:{ConfigDirVariable} = '{value.Replace("'", "''")}'; ";
+            return configLine + $"$env:{AgentTeamsVariable} = '1'; ";
+        }
+
+        internal static IReadOnlyList<KeyValuePair<string, string>> GetEnvironment(ClaudeProfile profile, ClaudeProfileContext ctx) =>
+            new[]
+            {
+                new KeyValuePair<string, string>(ConfigDirVariable, ConfigDirValue(profile, ctx)),
+                new KeyValuePair<string, string>(AgentTeamsVariable, "1"),
+            };
+
+        internal static IReadOnlyList<string> GetAllRoots(ClaudeProfileContext ctx)
+        {
+            var roots = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            var dirs = new List<string> { DefaultConfigDir(ctx) };
+            foreach (var p in Stored(ctx))
+                dirs.Add(p.ConfigDir);
+
+            foreach (string raw in dirs)
+            {
+                string dir = Canonicalize(raw);
+                if (dir == null || IsDriveRoot(dir) || IsUserProfileOrAncestor(dir, ctx.UserProfile))
+                    continue;
+
+                string root = dir + Path.DirectorySeparatorChar;
+                if (seen.Add(root))
+                    roots.Add(root);
+            }
+
+            return roots;
+        }
+
+        internal static IReadOnlyList<ClaudeProfileValidationError> Validate(IReadOnlyList<ClaudeProfile> profiles, ClaudeProfileContext ctx)
+        {
+            var errors = new List<ClaudeProfileValidationError>();
+            if (profiles == null)
+                return errors;
+
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var dirs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            string defaultDir = DefaultConfigDir(ctx);
+            string homeClaude = HomeClaudeDir(ctx);
+
+            for (int i = 0; i < profiles.Count; i++)
+            {
+                var p = profiles[i];
+                string name = NullIfBlank(p?.Name);
+                string label = name ?? $"#{i + 1}";
+
+                if (name == null)
+                    errors.Add(new ClaudeProfileValidationError(i, $"Profile {label}: a name is required."));
+                else if (string.Equals(name, ClaudeProfile.DefaultName, StringComparison.OrdinalIgnoreCase))
+                    errors.Add(new ClaudeProfileValidationError(i, $"'{ClaudeProfile.DefaultName}' is reserved for the built-in profile; choose another name."));
+                else if (!names.Add(name))
+                    errors.Add(new ClaudeProfileValidationError(i, $"There is more than one profile named '{name}'."));
+
+                string rawDir = NullIfBlank(p?.ConfigDir);
+                string dir = Canonicalize(rawDir);
+                if (dir == null)
+                {
+                    errors.Add(new ClaudeProfileValidationError(i, $"Profile {label}: the folder must be an absolute path."));
+                    continue;
+                }
+
+                if (IsDriveRoot(dir))
+                    errors.Add(new ClaudeProfileValidationError(i, $"Profile {label}: the folder cannot be a drive root ({dir})."));
+                else if (IsUserProfileOrAncestor(dir, ctx.UserProfile))
+                    errors.Add(new ClaudeProfileValidationError(i, $"Profile {label}: the folder cannot be your user folder or a folder above it ({dir})."));
+                else if (homeClaude != null && SamePath(dir, homeClaude))
+                    errors.Add(new ClaudeProfileValidationError(i, $"Profile {label}: {dir} is the Default profile's folder; use the Default profile for it."));
+                else if (defaultDir != null && SamePath(dir, defaultDir))
+                    errors.Add(new ClaudeProfileValidationError(i, $"Profile {label}: {dir} is the Default profile's folder."));
+                else if (dirs.TryGetValue(dir, out string other))
+                    errors.Add(new ClaudeProfileValidationError(i, $"Profile {label}: {dir} is already used by profile '{other}'."));
+                else if (!SafeExists(ctx, dir))
+                    errors.Add(new ClaudeProfileValidationError(i, $"Profile {label}: the folder {dir} does not exist."));
+
+                if (!dirs.ContainsKey(dir))
+                    dirs[dir] = label;
+            }
+
+            return errors;
+        }
+
+        /// <summary>
+        /// Structural rules only (no filesystem): what <see cref="SettingsService.GetClaudeProfiles"/>
+        /// keeps when reading settings. True when the entry is usable.
+        /// </summary>
+        internal static bool IsStorable(ClaudeProfile p) =>
+            p != null
+            && NullIfBlank(p.Name) != null
+            && !p.IsDefault
+            && Canonicalize(p.ConfigDir) != null;
+
+        // ── Helpers ───────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// The value CLAUDE_CONFIG_DIR must have in the child, or null to remove it. The single place the
+        /// trap rule lives: never point the variable at %USERPROFILE%\.claude unless MT itself was started
+        /// with exactly that value.
+        /// </summary>
+        private static string ConfigDirValue(ClaudeProfile profile, ClaudeProfileContext ctx)
+        {
+            string inherited = Canonicalize(ctx.InheritedConfigDir);
+            if (profile == null || profile.IsDefault)
+                return inherited;
+
+            string dir = GetConfigDir(profile, ctx);
+            string homeClaude = HomeClaudeDir(ctx);
+            if (homeClaude != null && SamePath(dir, homeClaude))
+                return inherited != null && SamePath(inherited, homeClaude) ? inherited : null;
+
+            return dir;
+        }
+
+        private static string DefaultConfigDir(ClaudeProfileContext ctx) =>
+            Canonicalize(ctx.InheritedConfigDir) ?? HomeClaudeDir(ctx);
+
+        private static string HomeClaudeDir(ClaudeProfileContext ctx) =>
+            NullIfBlank(ctx.UserProfile) == null ? null : Canonicalize(Path.Combine(ctx.UserProfile, ".claude"));
+
+        private static IEnumerable<ClaudeProfile> Stored(ClaudeProfileContext ctx)
+        {
+            if (ctx.Configured == null)
+                yield break;
+            foreach (var p in ctx.Configured)
+            {
+                if (IsStorable(p))
+                    yield return p;
+            }
+        }
+
+        /// <summary>Full path without a trailing separator, or null for blank / relative / malformed input.</summary>
+        internal static string Canonicalize(string path)
+        {
+            string trimmed = NullIfBlank(path)?.Trim('"');
+            if (trimmed == null)
+                return null;
+            try
+            {
+                if (!Path.IsPathFullyQualified(trimmed))
+                    return null;
+                return Path.TrimEndingDirectorySeparator(Path.GetFullPath(trimmed));
+            }
+            catch (Exception ex) when (ex is ArgumentException || ex is NotSupportedException || ex is PathTooLongException)
+            {
+                return null;
+            }
+        }
+
+        private static bool IsDriveRoot(string canonical)
+        {
+            string root = Path.GetPathRoot(canonical);
+            return root != null && SamePath(Path.TrimEndingDirectorySeparator(root), canonical);
+        }
+
+        /// <summary>True when <paramref name="canonical"/> is %USERPROFILE% or a folder that contains it.</summary>
+        private static bool IsUserProfileOrAncestor(string canonical, string userProfile)
+        {
+            string home = Canonicalize(userProfile);
+            if (home == null)
+                return false;
+            return SamePath(canonical, home)
+                || home.StartsWith(canonical + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool SamePath(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+
+        private static bool SafeExists(ClaudeProfileContext ctx, string dir)
+        {
+            try
+            {
+                return ctx.DirectoryExists?.Invoke(dir) == true;
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException)
+            {
+                return false;
+            }
+        }
+
+        private static string NullIfBlank(string s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
+    }
+}

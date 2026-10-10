@@ -289,6 +289,7 @@ namespace MultiTerminal.Docking
                 // string is truthy — so the selection silently fell back to "(None)" while
                 // SQLite still held the correct value.
                 SourceControlAccountId = project.SourceControlAccountId,
+                ClaudeProfile = project.ClaudeProfile,
                 // Same omission, worse symptom: Project initialises DefaultTerminal to
                 // "claude-code", so leaving it out did not blank the dropdown — it silently
                 // rendered a Codex project AS Claude Code on every re-render.
