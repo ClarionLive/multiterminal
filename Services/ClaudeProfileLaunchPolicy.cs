@@ -16,7 +16,9 @@ namespace MultiTerminal.Services
         Database,
 
         /// <summary>The launch folder's own .claude/project.json, used only because no database row is
-        /// registered at that folder.</summary>
+        /// registered at that folder. When the file's project id has a row registered at another
+        /// folder, the file is used only if that row names the same profile; otherwise the launch is
+        /// refused.</summary>
         ProjectFile,
 
         /// <summary>No project owns the folder; the name was handed down (a helper's spawner, or the
@@ -49,9 +51,12 @@ namespace MultiTerminal.Services
     internal sealed record ClaudeProfileNameDecision(string ProfileName, ClaudeProfileNameSource Source, string ProjectId, string ProjectName)
     {
         /// <summary>
-        /// Set when the nearest owning folder is registered to more than one project and they do not
-        /// all name the same profile: the sentence naming the folder and the projects. There is then no
-        /// profile name to use, and <see cref="ClaudeProfileLaunchPolicy.Decide"/> refuses the launch.
+        /// Set when two sources claim the launch and do not name the same profile: the nearest owning
+        /// folder is registered to more than one project, or the launch folder's project.json names a
+        /// project whose database row is registered at another folder under a different profile. The
+        /// text says what was found and how to fix it. There is then no profile name to use, and
+        /// <see cref="ClaudeProfileLaunchPolicy.Decide"/> refuses the launch with this text after
+        /// "Not started: (what)."
         /// </summary>
         public string Conflict { get; init; }
     }
@@ -106,9 +111,12 @@ namespace MultiTerminal.Services
     ///   broad parent folder must not choose the profile for everything beneath it.</item>
     ///   <item>AT the launch folder (and the same folder in the main checkout, for a worktree) a row
     ///   registered there decides. With no such row, that folder's project.json counts, by the profile
-    ///   name written in it. The file's project id is followed to a database row only when that row is
-    ///   registered at the launch folder or its twin; a row registered anywhere else is not this
-    ///   folder's project, and the file is then a copy with no row.</item>
+    ///   name written in it. The file's project id is followed to a database row, which owns the
+    ///   launch only when it is registered at the launch folder or its twin. A row registered anywhere
+    ///   else does not own the folder, but it is the same project, so the file may not contradict it:
+    ///   if the file and that row name the same profile the launch runs under it, and if they differ
+    ///   the launch is REFUSED (the folder was moved or copied, and the file may be stale). A file
+    ///   whose id has no row at all counts as written.</item>
     ///   <item>The owning project's profile is final, including "none set" (Default): the search stops
     ///   there and nothing is inherited.</item>
     ///   <item>Two projects registered at the same owning folder with different profiles REFUSE the
@@ -148,7 +156,7 @@ namespace MultiTerminal.Services
             var levels = lookup.CandidateFolders?.Invoke(folder) ?? Array.Empty<string>();
             var launchLevels = LaunchLevels(folder);
             IReadOnlyList<ClaudeProfileProjectRow> rows = null;
-            Project worktreeFile = null;
+            ClaudeProfileNameDecision worktreeFile = null;
             foreach (string level in levels)
             {
                 rows ??= lookup.AllRows?.Invoke() ?? Array.Empty<ClaudeProfileProjectRow>();
@@ -168,20 +176,22 @@ namespace MultiTerminal.Services
                 // A project.json is read only at the launch folder and its main-checkout twin. Above
                 // them a file is not evidence of anything: only a registered row owns from above.
                 bool isLaunchLevel = launchLevels.Exists(l => SameFolder(l, level));
-                var file = isLaunchLevel ?lookup.LoadProjectFile?.Invoke(level) : null;
+                var file = isLaunchLevel ? lookup.LoadProjectFile?.Invoke(level) : null;
 
-                // The file's id is followed to its row only when that row is registered at the launch
-                // folder or its twin (a worktree's copy of the repo's project.json). A row registered
-                // anywhere else is a different folder's project and must not be pulled in by a copied
-                // or stale file.
+                // The file's id is followed to its row. That row OWNS the launch only when it is
+                // registered at the launch folder or its twin (a worktree's copy of the repo's
+                // project.json). A row registered anywhere else does not own this folder, but it is
+                // kept: the file may not contradict it (see FromFileChecked).
+                ClaudeProfileProjectRow rowElsewhere = null;
                 if (!string.IsNullOrWhiteSpace(file?.Id))
                 {
                     var byFileId = lookup.RowById?.Invoke(file.Id);
-                    if (byFileId != null
-                        && launchLevels.Exists(l => SameFolder(byFileId.Path, l) || SameFolder(byFileId.SourcePath, l))
-                        && !owners.Exists(o => string.Equals(o.Id, byFileId.Id, StringComparison.Ordinal)))
+                    if (byFileId != null)
                     {
-                        owners.Add(byFileId);
+                        if (!launchLevels.Exists(l => SameFolder(byFileId.Path, l) || SameFolder(byFileId.SourcePath, l)))
+                            rowElsewhere = byFileId;
+                        else if (!owners.Exists(o => string.Equals(o.Id, byFileId.Id, StringComparison.Ordinal)))
+                            owners.Add(byFileId);
                     }
                 }
 
@@ -191,20 +201,22 @@ namespace MultiTerminal.Services
                 if (file == null)
                     continue;
 
-                // No row owns this launch level, so its project.json is all there is. One exception: a
-                // project.json INSIDE a worktree checkout is a copy of the repo's, so a row farther up
-                // (the repo's project) still beats it. It is kept and used if no row turns up.
+                // No row owns this launch level, so its project.json decides, unless it contradicts
+                // the row its id belongs to. One exception: a project.json INSIDE a worktree checkout
+                // is a copy of the repo's, so a row farther up (the repo's project) still beats it. Its
+                // decision is kept and used if no row turns up.
+                var fromFile = FromFileChecked(level, file, rowElsewhere);
                 if (IsInsideWorktreeCheckout(ClaudeProfileResolver.Canonicalize(level)))
                 {
-                    worktreeFile ??= file;
+                    worktreeFile ??= fromFile;
                     continue;
                 }
 
-                return FromFile(worktreeFile ?? file);
+                return worktreeFile ?? fromFile;
             }
 
             if (worktreeFile != null)
-                return FromFile(worktreeFile);
+                return worktreeFile;
 
             string inherited = ClaudeProfile.NormalizeName(inheritedProfileName);
             return inherited != null
@@ -246,7 +258,7 @@ namespace MultiTerminal.Services
             {
                 return new ClaudeProfileLaunchDecision(
                     null, null, name.Source, null,
-                    $"Not started: {launchLabel}. {name.Conflict} MultiTerminal will not pick one. Give those projects the same Claude profile in Edit Project, or remove the duplicate project.");
+                    $"Not started: {launchLabel}. {name.Conflict}");
             }
 
             if (resolution.CanLaunch)
@@ -480,7 +492,7 @@ namespace MultiTerminal.Services
                 $"'{o.Name}' ({ClaudeProfile.NormalizeName(o.ClaudeProfile) ?? ClaudeProfile.DefaultName})"));
             return new ClaudeProfileNameDecision(null, ClaudeProfileNameSource.Database, null, null)
             {
-                Conflict = $"The folder '{level}' is registered to more than one project, and they are set to different Claude profiles: {list}.",
+                Conflict = $"The folder '{level}' is registered to more than one project, and they are set to different Claude profiles: {list}. MultiTerminal will not pick one. Give those projects the same Claude profile in Edit Project, or remove the duplicate project.",
             };
         }
 
@@ -489,6 +501,41 @@ namespace MultiTerminal.Services
 
         private static ClaudeProfileNameDecision FromFile(Project file) =>
             new ClaudeProfileNameDecision(ClaudeProfile.NormalizeName(file.ClaudeProfile), ClaudeProfileNameSource.ProjectFile, file.Id, file.Name);
+
+        /// <summary>
+        /// The decision for a launch-level project.json that no registered row overrides.
+        /// <paramref name="rowElsewhere"/> is the database row the file's project id belongs to when
+        /// that row is registered at some OTHER folder (null when the id has no row). That is what a
+        /// moved or copied project folder looks like, and the file's profile may be out of date. So the
+        /// file is used only when it names the same profile as the row (one rule:
+        /// <see cref="ClaudeProfile.NormalizeName"/>, then ordinal-ignore-case; blank and Default are
+        /// the same). When they differ, in either direction, the result is a conflict and the launch is
+        /// refused. Agreement keeps <see cref="ClaudeProfileNameSource.ProjectFile"/> as the source:
+        /// the row does not own this folder, it only failed to contradict the file.
+        /// </summary>
+        private static ClaudeProfileNameDecision FromFileChecked(string level, Project file, ClaudeProfileProjectRow rowElsewhere)
+        {
+            var fromFile = FromFile(file);
+            if (rowElsewhere == null)
+                return fromFile;
+
+            string rowProfile = ClaudeProfile.NormalizeName(rowElsewhere.ClaudeProfile);
+            if (string.Equals(fromFile.ProfileName, rowProfile, StringComparison.OrdinalIgnoreCase))
+                return fromFile;
+
+            string registeredPath = !string.IsNullOrWhiteSpace(rowElsewhere.Path) ? rowElsewhere.Path : rowElsewhere.SourcePath;
+            string registeredAt = string.IsNullOrWhiteSpace(registeredPath) ? "with no folder" : $"at '{registeredPath}'";
+            string fileName = string.IsNullOrWhiteSpace(file.Name) ? rowElsewhere.Name : file.Name;
+            return new ClaudeProfileNameDecision(null, ClaudeProfileNameSource.ProjectFile, null, null)
+            {
+                Conflict =
+                    $"The folder '{level}' has a .claude\\project.json that says it is project '{fileName}' with the Claude profile '{fromFile.ProfileName ?? ClaudeProfile.DefaultName}', "
+                    + $"but MultiTerminal has that project registered as '{rowElsewhere.Name}' {registeredAt} with the Claude profile '{rowProfile ?? ClaudeProfile.DefaultName}'. "
+                    + "The folder looks moved or copied, and MultiTerminal will not guess which profile is right. "
+                    + "If the folder was moved, update the project's folder in Edit Project. "
+                    + "If it is a copy, remove or correct .claude\\project.json in this folder.",
+            };
+        }
 
         private static bool SameFolder(string a, string b)
         {

@@ -19,8 +19,11 @@ namespace MultiTerminal.Tests
     /// <para>Ownership as pinned here: above the launch folder only a database row registered at that
     /// exact folder owns the launch, and a project.json there is never read. At the launch folder (and
     /// the same folder in the main checkout, for a worktree) a registered row decides; with none, that
-    /// folder's project.json counts by the profile name written in it, and its project id is followed
-    /// to a row only when that row is registered at the launch folder or its twin.</para>
+    /// folder's project.json counts by the profile name written in it. Its project id is followed to a
+    /// row: a row registered at the launch folder or its twin owns the launch; a row registered at any
+    /// other folder (a moved or copied project folder) does not own it, but the file is used only when
+    /// it names the same profile as that row, and a difference refuses the launch. A file whose id has
+    /// no row counts as written.</para>
     /// <para>NOT covered: that each launch site in MainForm calls the policy, passes the right folder, or
     /// honours a refusal; and how MainForm finds a spawner's pane. Those need a running form.</para>
     /// </summary>
@@ -104,28 +107,128 @@ namespace MultiTerminal.Tests
             Assert.Equal(ClaudeProfileNameSource.Database, byId.Source);
         }
 
+        // ── A moved or copied folder: the file names a project registered at another path ──
+
+        private const string OldPlace = @"D:\old\place";
+
         [Fact]
-        public void A_file_at_the_launch_folder_naming_a_project_registered_elsewhere_is_a_copy_with_no_row()
+        public void A_moved_folder_whose_file_names_another_profile_than_its_row_is_refused()
         {
-            // The file's id belongs to a row registered at ANOTHER path. That row is a different
-            // folder's project, so the id is not followed: the folder takes the profile written in its
-            // own file. Following the id would give Work here, so the two rules are distinguishable.
+            // p1 was switched from Personal to Work in MultiTerminal, then its folder was moved. The row
+            // still has the old path; the file at the new folder still says Personal. Neither the stale
+            // file nor a spawner's profile may start it.
             var lookup = Lookup(
-                rows: new[] { Row("p1", "Work", path: @"D:\old\place") },
+                rows: new[] { Row("p1", "Work", path: OldPlace, name: "Acme") },
+                files: new Dictionary<string, Project> { [Repo] = FileProject("p1", "Personal") });
+
+            var name = ClaudeProfileLaunchPolicy.FindProfileName(null, Repo, "Personal", lookup);
+            var decision = ClaudeProfileLaunchPolicy.Decide(null, Repo, "Personal", "Claude in 'acme'", lookup, Resolver());
+
+            Assert.NotNull(name.Conflict);
+            Assert.Null(name.ProfileName);
+            Assert.False(decision.CanLaunch);
+            Assert.Null(decision.Profile);
+            Assert.Null(decision.ProfileName);
+            Assert.StartsWith("Not started: Claude in 'acme'. ", decision.Refusal, StringComparison.Ordinal);
+            Assert.Contains("'" + Repo + "'", decision.Refusal, StringComparison.Ordinal);
+            Assert.Contains("'" + OldPlace + "'", decision.Refusal, StringComparison.Ordinal);
+            Assert.Contains("project 'File p1' with the Claude profile 'Personal'", decision.Refusal, StringComparison.Ordinal);
+            Assert.Contains("registered as 'Acme'", decision.Refusal, StringComparison.Ordinal);
+            Assert.Contains("with the Claude profile 'Work'", decision.Refusal, StringComparison.Ordinal);
+            Assert.Contains(@".claude\project.json", decision.Refusal, StringComparison.Ordinal);
+            Assert.Contains("Edit Project", decision.Refusal, StringComparison.Ordinal);
+
+            // The advice for two projects registered at one folder does not apply here.
+            Assert.DoesNotContain("duplicate project", decision.Refusal, StringComparison.Ordinal);
+        }
+
+        [Theory]
+        [InlineData(null, "Work", "Default", "Work")]
+        [InlineData("Default", "Work", "Default", "Work")]
+        [InlineData("Work", null, "Work", "Default")]
+        [InlineData("Work", " ", "Work", "Default")]
+        [InlineData("Work", "default", "Work", "Default")]
+        public void A_moved_folder_is_refused_when_only_one_side_names_a_profile(
+            string rowProfile, string fileProfile, string rowShown, string fileShown)
+        {
+            // Default against a named profile is a difference, in either direction. The inherited
+            // profile is the one a silent launch would be most likely to pick, so it is supplied.
+            var lookup = Lookup(
+                rows: new[] { Row("p1", rowProfile, path: OldPlace, name: "Acme") },
+                files: new Dictionary<string, Project> { [Repo] = FileProject("p1", fileProfile) });
+
+            var decision = ClaudeProfileLaunchPolicy.Decide(null, Repo, "Work", "Claude in 'acme'", lookup, Resolver());
+
+            Assert.False(decision.CanLaunch);
+            Assert.Null(decision.Profile);
+            Assert.Contains($"project 'File p1' with the Claude profile '{fileShown}'", decision.Refusal, StringComparison.Ordinal);
+            Assert.Contains($"'{OldPlace}' with the Claude profile '{rowShown}'", decision.Refusal, StringComparison.Ordinal);
+        }
+
+        [Theory]
+        [InlineData("Work", "Work", "Work")]
+        [InlineData(" work ", "Work", "Work")]
+        [InlineData(null, "Default", null)]
+        [InlineData("", null, null)]
+        [InlineData("DEFAULT", "  ", null)]
+        public void A_moved_folder_whose_file_and_row_name_the_same_profile_launches_under_it(
+            string rowProfile, string fileProfile, string expected)
+        {
+            // Same profile under the one normalisation rule: nothing to refuse. The source stays the
+            // file, because the row is registered elsewhere and does not own this folder. The spawner
+            // is on Personal, which neither side names, so an "inherited" answer would show.
+            var lookup = Lookup(
+                rows: new[] { Row("p1", rowProfile, path: OldPlace, name: "Acme") },
+                files: new Dictionary<string, Project> { [Repo] = FileProject("p1", fileProfile) });
+
+            var name = ClaudeProfileLaunchPolicy.FindProfileName(null, Repo, "Personal", lookup);
+            var decision = ClaudeProfileLaunchPolicy.Decide(null, Repo, "Personal", "Claude in 'acme'", lookup, Resolver());
+
+            Assert.Null(name.Conflict);
+            Assert.Equal(expected, name.ProfileName);
+            Assert.Equal(ClaudeProfileNameSource.ProjectFile, name.Source);
+            Assert.Equal("p1", name.ProjectId);
+            Assert.True(decision.CanLaunch);
+            Assert.Equal(expected ?? ClaudeProfile.DefaultName, decision.Profile.Name);
+        }
+
+        [Fact]
+        public void A_file_whose_project_id_has_no_row_counts_as_written_whatever_other_rows_say()
+        {
+            // "p1" has no row. Another project's row, registered elsewhere under another profile, is
+            // not this file's project and is not compared with it.
+            var lookup = Lookup(
+                rows: new[] { Row("other", "Work", path: OldPlace) },
                 files: new Dictionary<string, Project> { [Repo] = FileProject("p1", "Personal") });
 
             var name = ClaudeProfileLaunchPolicy.FindProfileName(null, Repo, "Work", lookup);
 
+            Assert.Null(name.Conflict);
             Assert.Equal("Personal", name.ProfileName);
             Assert.Equal(ClaudeProfileNameSource.ProjectFile, name.Source);
+        }
 
-            // A file that names no profile means Default there, and still does not reach the row.
-            var blank = ClaudeProfileLaunchPolicy.FindProfileName(null, Repo, "Work", Lookup(
-                rows: new[] { Row("p1", "Work", path: @"D:\old\place") },
-                files: new Dictionary<string, Project> { [Repo] = FileProject("p1", null) }));
+        [Fact]
+        public void A_worktrees_project_file_that_contradicts_its_row_elsewhere_is_refused_only_when_no_row_owns_the_launch()
+        {
+            // The worktree's file names p1, whose row is registered outside this repo under Work.
+            string repo = MakeRepoWithWorktree(out string worktree);
+            var files = new Dictionary<string, Project> { [worktree] = FileProject("p1", "Personal") };
 
-            Assert.Null(blank.ProfileName);
-            Assert.Equal(ClaudeProfileNameSource.ProjectFile, blank.Source);
+            // Nothing is registered at or above the worktree: the file would decide, and it
+            // contradicts its row, so the launch is refused.
+            var unowned = ClaudeProfileLaunchPolicy.FindProfileName(
+                null, worktree, null, Lookup(new[] { Row("p1", "Work", path: OldPlace) }, files));
+            Assert.NotNull(unowned.Conflict);
+            Assert.Null(unowned.ProfileName);
+
+            // A project registered at the repo owns the worktree, so the file is never used and there
+            // is nothing to refuse.
+            var owned = ClaudeProfileLaunchPolicy.FindProfileName(
+                null, worktree, null, Lookup(new[] { Row("p1", "Work", path: OldPlace), Row("repo", "Personal", path: repo) }, files));
+            Assert.Null(owned.Conflict);
+            Assert.Equal("Personal", owned.ProfileName);
+            Assert.Equal("repo", owned.ProjectId);
         }
 
         [Theory]
@@ -353,7 +456,7 @@ namespace MultiTerminal.Tests
         [Fact]
         public void A_worktrees_project_file_is_followed_to_the_row_registered_at_its_main_checkout()
         {
-            // The one case where a file's id IS followed past the launch folder: the row is registered
+            // The one case where a row found through a file's id OWNS the launch: the row is registered
             // at the launch folder's twin. A second project registered at the worktree itself under
             // another profile then makes two claims on the launch, which refuses. Without following the
             // id, the worktree's own row would win alone.
