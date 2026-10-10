@@ -459,6 +459,27 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Rewrites the Claude profile name in a folder's .claude/project.json, and nothing else
+        /// (ticket c8ee0eec). File only, like <see cref="UpdateProjectJsonNameAndDescription"/>: the
+        /// database value is set by ProjectDatabase.SetClaudeProfile. Returns false, writing nothing,
+        /// when the folder has no project.json or the file answers to a different id.
+        /// </summary>
+        public bool UpdateProjectJsonClaudeProfile(string projectPath, string projectId, string profileName)
+        {
+            var fileProject = LoadProject(projectPath);
+            if (fileProject == null || !string.Equals(fileProject.Id, projectId, StringComparison.Ordinal))
+                return false;
+
+            fileProject.ClaudeProfile = profileName;
+
+            // CA3003: projectPath is an app-managed project root from the database, not web input.
+#pragma warning disable CA3003
+            File.WriteAllText(GetProjectConfigPath(projectPath), SerializeProjectJson(fileProject));
+#pragma warning restore CA3003
+            return true;
+        }
+
+        /// <summary>
         /// Sets a project's default terminal CLI. Writes SQLite AND the portable
         /// project.json, mirroring <see cref="ToggleProjectPinned"/>. DefaultTerminal is
         /// serialized to project.json (unlike Status), so a DB-only write would be silently
@@ -662,6 +683,13 @@ namespace MultiTerminal.Services
             // gitDefaultBranch / gitAutoCommit). Serializing it here let a stale on-disk value
             // re-assert itself through LoadProject -> SaveProject -> SaveRichProject (COALESCE),
             // silently reverting account changes/clears made via the edit dialog.
+            // claudeProfile (ticket c8ee0eec) IS written, as a NAME, so a project carried to another
+            // machine or re-imported keeps its profile. The key is omitted for Default, and an absent
+            // key reads as Default. The stale-value problem above cannot recur: SaveRichProject uses
+            // the file's value only when it inserts a new row.
+            string claudeProfile = ProjectDatabase.NormalizeClaudeProfileName(project.ClaudeProfile);
+            if (claudeProfile != null)
+                sb.AppendLine($"  \"claudeProfile\": {JsonEscape(claudeProfile)},");
             sb.AppendLine("  \"prompts\": [");
 
             for (int i = 0; i < project.Prompts.Count; i++)
@@ -817,6 +845,9 @@ namespace MultiTerminal.Services
                             break;
                         case "defaultterminal":
                             project.DefaultTerminal = TerminalKindHelper.Normalize(ParseJsonString(json, ref pos));
+                            break;
+                        case "claudeprofile":
+                            project.ClaudeProfile = ProjectDatabase.NormalizeClaudeProfileName(ParseJsonString(json, ref pos));
                             break;
                         case "sourcecontrolaccountid":
                             // Consume-and-discard: SQLite is the source of truth for this field

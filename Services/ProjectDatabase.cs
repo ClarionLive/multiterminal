@@ -199,7 +199,10 @@ namespace MultiTerminal.Services
                 ("status",             "TEXT DEFAULT 'active'"),
                 // No DEFAULT: NULL reads as off, so every existing project keeps today's startup
                 // (Owner decision, GitHub #34 / task e0fa9d90). Project.QuietStart explains why null.
-                ("quiet_start",        "INTEGER")
+                ("quiet_start",        "INTEGER"),
+                // Claude Code config profile NAME (ticket c8ee0eec, GitHub #21). NULL = the implicit
+                // Default profile, so every existing project keeps launching as it does today.
+                ("claude_profile",     "TEXT")
             };
 
             foreach (var (colName, colDef) in newColumns)
@@ -418,7 +421,7 @@ namespace MultiTerminal.Services
             "build_command", "deploy_command", "launch_command", "project_type", "current_version",
             "change_log", "icon", "icon_color", "git_repo_url", "git_default_branch", "git_auto_commit",
             "is_pinned", "status", "created_by", "last_opened_at", "team_lead", "default_terminal",
-            "source_control_account_id", "quiet_start"
+            "source_control_account_id", "quiet_start", "claude_profile"
         };
 
         // Map camelCase JS field names to snake_case SQLite column names.
@@ -437,6 +440,7 @@ namespace MultiTerminal.Services
             ["teamLead"] = "team_lead", ["defaultTerminal"] = "default_terminal",
             ["sourceControlAccountId"] = "source_control_account_id",
             ["quietStart"] = "quiet_start",
+            ["claudeProfile"] = "claude_profile",
         };
 
         // Fields that map to INTEGER 0/1 booleans in the database.
@@ -483,6 +487,11 @@ namespace MultiTerminal.Services
                 // unwatchable repo root. projectName is unavailable here; the id traces the correction.
                 string existingSourcePath = ReadProjectSourcePath(projectId);
                 paramValue = (object)CanonicalizeProjectPath(value, existingSourcePath, projectId, projectId) ?? DBNull.Value;
+            }
+            else if (string.Equals(fieldName, "claude_profile", StringComparison.OrdinalIgnoreCase))
+            {
+                // Blank or "Default" clears the column, the same as SetClaudeProfile.
+                paramValue = (object)NormalizeClaudeProfileName(value) ?? DBNull.Value;
             }
             else
             {
@@ -614,7 +623,8 @@ namespace MultiTerminal.Services
                            source_path, deploy_path, build_output_path, build_command, deploy_command,
                            launch_command, project_type, current_version, change_log, is_pinned,
                            icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
-                           team_lead, default_terminal, source_control_account_id, status, quiet_start
+                           team_lead, default_terminal, source_control_account_id, status, quiet_start,
+                           claude_profile
                     FROM projects
                     WHERE id = @id
                 ";
@@ -646,7 +656,8 @@ namespace MultiTerminal.Services
                            source_path, deploy_path, build_output_path, build_command, deploy_command,
                            launch_command, project_type, current_version, change_log, is_pinned,
                            icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
-                           team_lead, default_terminal, source_control_account_id, status, quiet_start
+                           team_lead, default_terminal, source_control_account_id, status, quiet_start,
+                           claude_profile
                     FROM projects
                     ORDER BY is_pinned DESC, created_at DESC
                 ";
@@ -725,6 +736,11 @@ namespace MultiTerminal.Services
             // bump), so a null here must NOT erase the SQLite binding. The deliberate
             // "(None)"/clear is applied out-of-band by ProjectDatabase.SetSourceControlAccount
             // (EditProjectDialog) and UpdateProjectField (ProjectPanel), never via this UPSERT.
+            // claude_profile is stricter still: it is written on INSERT only and the ON CONFLICT
+            // branch leaves it alone. project.json DOES carry the profile name, so a COALESCE would
+            // let a stale file value replace a profile changed since (the re-savers above), and a
+            // terminal would then launch under the wrong account with nothing said. An existing
+            // row's profile changes only through SetClaudeProfile / UpdateProjectField.
             lock (_dbLock)
             {
                 const string sql = @"
@@ -732,12 +748,14 @@ namespace MultiTerminal.Services
                            source_path, deploy_path, build_output_path, build_command, deploy_command,
                            launch_command, project_type, current_version, change_log, is_pinned,
                            icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
-                           team_lead, default_terminal, source_control_account_id, status, quiet_start)
+                           team_lead, default_terminal, source_control_account_id, status, quiet_start,
+                           claude_profile)
                     VALUES (@id, @name, @description, @path, @createdBy, @createdAt, @updatedAt,
                            @sourcePath, @deployPath, @buildOutputPath, @buildCommand, @deployCommand,
                            @launchCommand, @projectType, @currentVersion, @changeLog, @isPinned,
                            @icon, @iconColor, @lastOpenedAt, @gitRepoUrl, @gitDefaultBranch, @gitAutoCommit,
-                           @teamLead, @defaultTerminal, @sourceControlAccountId, @status, @quietStart)
+                           @teamLead, @defaultTerminal, @sourceControlAccountId, @status, @quietStart,
+                           @claudeProfile)
                     ON CONFLICT(id) DO UPDATE SET
                         name = COALESCE(@name, projects.name),
                         description = COALESCE(@description, projects.description),
@@ -808,6 +826,9 @@ namespace MultiTerminal.Services
                 // NULL when unset so the COALESCE keeps the stored value (see Project.QuietStart).
                 command.Parameters.AddWithValue("@quietStart",
                     project.QuietStart.HasValue ? (object)(project.QuietStart.Value ? 1 : 0) : DBNull.Value);
+                // Used by the INSERT only; the ON CONFLICT branch never mentions claude_profile.
+                command.Parameters.AddWithValue("@claudeProfile",
+                    (object)NormalizeClaudeProfileName(project.ClaudeProfile) ?? DBNull.Value);
 
                 command.ExecuteNonQuery();
             }
@@ -888,6 +909,47 @@ namespace MultiTerminal.Services
             }
         }
 
+        /// <summary>
+        /// Sets a project's Claude Code config profile by NAME (ticket c8ee0eec, GitHub #21), or clears
+        /// it: null, blank or "Default" stores NULL, which reads as the implicit Default profile. This
+        /// and <see cref="UpdateProjectField"/> are the only writers for an existing row; the
+        /// SaveRichProject UPSERT deliberately leaves the column alone on update.
+        /// </summary>
+        /// <returns>True if a row was updated, false if the project was not found.</returns>
+        public bool SetClaudeProfile(string projectId, string profileName)
+        {
+            if (string.IsNullOrWhiteSpace(projectId))
+                return false;
+
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand(
+                    "UPDATE projects SET claude_profile = @claudeProfile, updated_at = @updatedAt WHERE id = @id",
+                    _connection);
+                command.Parameters.AddWithValue("@claudeProfile",
+                    (object)NormalizeClaudeProfileName(profileName) ?? DBNull.Value);
+                command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
+                command.Parameters.AddWithValue("@id", projectId);
+
+                return command.ExecuteNonQuery() > 0;
+            }
+        }
+
+        /// <summary>
+        /// The stored form of a profile name: trimmed, and null for blank or "Default" (any case), so
+        /// the Default profile has exactly one representation in the column.
+        /// </summary>
+        internal static string NormalizeClaudeProfileName(string profileName)
+        {
+            if (string.IsNullOrWhiteSpace(profileName))
+                return null;
+
+            string trimmed = profileName.Trim();
+            return string.Equals(trimmed, MultiTerminal.Models.ClaudeProfile.DefaultName, StringComparison.OrdinalIgnoreCase)
+                ? null
+                : trimmed;
+        }
+
         private MultiTerminal.Models.Project ReadRichProject(SQLiteDataReader reader)
         {
             return new MultiTerminal.Models.Project
@@ -921,7 +983,8 @@ namespace MultiTerminal.Services
                 SourceControlAccountId = reader.IsDBNull(25) ? null : reader.GetString(25),
                 Status = MultiTerminal.Models.Project.NormalizeStatus(
                     reader.IsDBNull(26) ? null : reader.GetString(26)),
-                QuietStart = reader.IsDBNull(27) ? (bool?)null : reader.GetInt32(27) == 1
+                QuietStart = reader.IsDBNull(27) ? (bool?)null : reader.GetInt32(27) == 1,
+                ClaudeProfile = reader.IsDBNull(28) ? null : reader.GetString(28)
             };
         }
 
