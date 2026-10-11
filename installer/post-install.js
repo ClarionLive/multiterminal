@@ -2,7 +2,8 @@
  * MultiTerminal Post-Install Script
  *
  * Runs after Inno Setup copies files. Handles:
- * 1. Setting CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS env in ~/.claude/settings.json
+ * 1. (Retired, Owner decision Q5 2026-10-09: ~/.claude/settings.json is no longer written.
+ *    The numbers below are kept because other comments refer to them.)
  * 2. OPT-IN (--global-reg=yes, GH#2): registering MCP servers in ~/.claude.json so
  *    Claude Code sessions started OUTSIDE MultiTerminal see them. MT-spawned terminals
  *    never need this — the app creates %APPDATA%\multiterminal\.mcp.json at startup if it is
@@ -47,7 +48,6 @@ if (!installDir || !appDataDir || !userProfileDir) {
 const isFrameworkDependent = (dotnetFlag === '--framework-dependent');
 const selectedMcps = mcpsFlag.replace('--mcps=', '').split(',').filter(m => m && m !== 'none');
 const globalRegistration = (globalRegFlag === '--global-reg=yes');
-const claudeGlobalDir = path.join(userProfileDir, '.claude');
 
 // Named --plugin-* flags (ticket c8ee0eec). Read by prefix so the positional args above keep
 // their meaning; an older .iss that passes none of them leaves step 5 a no-op.
@@ -66,34 +66,11 @@ function ensureDir(dir) {
     }
 }
 
-// ============================================================
-// 1. Enable experimental agent teams via ~/.claude/settings.json
-//    Required for Team Agents / AgentPanel.
-// ============================================================
-function setExperimentalAgentTeamsEnv() {
-    const settingsPath = path.join(claudeGlobalDir, 'settings.json');
-
-    let settings = {};
-    if (fs.existsSync(settingsPath)) {
-        try {
-            const backupPath = settingsPath + '.pre-multiterminal.bak';
-            fs.copyFileSync(settingsPath, backupPath);
-            settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-        } catch (e) {
-            console.warn('Warning: Could not parse existing settings.json, creating new one');
-            settings = {};
-        }
-    }
-
-    if (!settings.env) {
-        settings.env = {};
-    }
-    settings.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
-
-    ensureDir(claudeGlobalDir);
-    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
-    console.log(`Set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 in: ${settingsPath}`);
-}
+// 1. (Retired.) The installer used to write CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 into
+//    ~/.claude/settings.json. MultiTerminal now sets it on every Claude launch it makes
+//    (ClaudeProfileResolver), which covers every Claude profile rather than only the default
+//    one and leaves the user's own settings alone. A value an older install wrote is NOT
+//    removed on upgrade: sessions started outside MultiTerminal may rely on it.
 
 // ============================================================
 // 2. Register MCP servers in ~/.claude.json (user-level config)
@@ -369,7 +346,6 @@ try {
     console.log(`  Global MCP reg: ${globalRegistration ? 'yes (opt-in selected)' : 'no (default — MT terminals use --mcp-config)'}`);
     console.log('');
 
-    setExperimentalAgentTeamsEnv();
     registerMcpServers();
     registerOptionalMcps();
     patchRuntimeConfig();

@@ -315,7 +315,7 @@ Name: "{group}\{#AppName} Documentation"; Filename: "{app}\docs\html\index.html"
 ; POST-INSTALL: Configure Claude Code integration
 ; ============================================================
 [Run]
-; Run post-install script to merge hooks into settings.json and generate configs
+; Run post-install script to generate configs (it does not write Claude Code's settings.json)
 Filename: "node"; Parameters: """{tmp}\post-install.js"" ""{app}"" ""{userappdata}"" ""{%USERPROFILE}"" {code:GetDotNetFlag} {code:GetSelectedMcps} {code:GetGlobalRegFlag} {code:GetPluginModeArg} ""--plugin-root={code:GetPluginDir}"" ""--plugin-profiles={code:GetPluginProfilesArg}"""; \
   StatusMsg: "Configuring Claude Code integration..."; \
   Components: claude; Flags: runhidden waituntilterminated

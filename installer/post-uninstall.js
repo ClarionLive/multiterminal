@@ -2,7 +2,8 @@
  * MultiTerminal Post-Uninstall Script
  *
  * Runs during uninstall to clean up Claude Code integration:
- * 1. Removes CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS env var from settings.json
+ * 1. (Retired, Owner decision Q5 2026-10-09: ~/.claude/settings.json is left alone.
+ *    The numbers below are kept because other comments refer to them.)
  * 2. Removes MultiTerminal MCP server files from AppData
  * 3. Removes MCP server entries from ~/.claude.json — present only when the
  *    opt-in claude\globalreg component was selected at install time (GH#2);
@@ -54,27 +55,10 @@ function safeRmdir(dirPath) {
     }
 }
 
-// ============================================================
-// 1. Remove CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS env from settings.json
-// ============================================================
-function removeExperimentalAgentTeamsEnv() {
-    const settingsPath = path.join(claudeGlobalDir, 'settings.json');
-    if (!fs.existsSync(settingsPath)) return;
-
-    try {
-        const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-        if (settings.env && settings.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS !== undefined) {
-            delete settings.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
-            if (Object.keys(settings.env).length === 0) {
-                delete settings.env;
-            }
-            fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
-            console.log('  Removed CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS from settings.json');
-        }
-    } catch (e) {
-        console.warn(`  Warning: Could not update settings.json: ${e.message}`);
-    }
-}
+// 1. (Retired.) Uninstall used to delete CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS from
+//    ~/.claude/settings.json. The installer no longer writes it, and no marker was ever
+//    recorded for the installs that did, so a value found there cannot be told apart from
+//    one the user set. It is left in place: harmless, and theirs to remove.
 
 // ============================================================
 // 2. Remove MCP server files from AppData
@@ -226,9 +210,6 @@ function cleanupRuntimeConfigBackup() {
 try {
     console.log('MultiTerminal uninstall cleanup...');
     console.log('');
-
-    console.log('Removing agent-teams env var from settings...');
-    removeExperimentalAgentTeamsEnv();
 
     console.log('Removing MCP server files...');
     removeMcpServerFiles();
