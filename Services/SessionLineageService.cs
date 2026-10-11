@@ -68,7 +68,8 @@ namespace MultiTerminal.Services
             string parentSessionId = null,
             string sessionType = null)
         {
-            // CA3003: sessionFilePath is always a Claude Code JSONL under %USERPROFILE%/.claude/projects —
+            // CA3003: sessionFilePath is always a Claude Code JSONL under the projects folder of a
+            // configured Claude profile (ticket c8ee0eec; %USERPROFILE%/.claude/projects for Default) —
             // every caller feeds it either a Directory.GetFiles result (ImportAllSessionsFromFolder/
             // SyncNewSessions) or a DB-stored SessionFilePath written earlier from the same trusted source.
 #pragma warning disable CA3003
@@ -172,7 +173,7 @@ namespace MultiTerminal.Services
         /// machine, has no folder, or cannot be decided.
         /// </summary>
         public static string GetClaudeProjectFolder(string projectPath) =>
-            GetClaudeProjectFolder(projectPath, ClaudeProfileDataRoots.CurrentLookup(), ClaudeProfileResolver.CurrentContext());
+            GetClaudeProjectFolder(projectPath, ClaudeProfileProjectLookup.Current(), ClaudeProfileResolver.CurrentContext());
 
         /// <summary>
         /// As <see cref="GetClaudeProjectFolder(string)"/>, for a caller that has the PANE: the folder
@@ -232,7 +233,7 @@ namespace MultiTerminal.Services
             var result = new SyncResult();
 
             // CA3003: claudeProjectPath is produced by GetClaudeProjectFolder (internal builder that
-            // anchors to %USERPROFILE%/.claude/projects and strips ':' / '/') or an equivalent trusted
+            // anchors to a configured Claude profile's projects folder and strips ':' / '/') or an equivalent trusted
             // helper. Existence check only; the enumeration below is bounded to that directory tree.
 #pragma warning disable CA3003
             if (!Directory.Exists(claudeProjectPath))
@@ -293,7 +294,7 @@ namespace MultiTerminal.Services
                 string subagentsDir = Path.Combine(sessionDir, "subagents");
                 // CA3003: subagentsDir is Path.Combine(sessionDir, "subagents") where sessionDir comes
                 // from Directory.GetDirectories(claudeProjectPath) — so it is an existing child of a
-                // directory already validated as being under %USERPROFILE%/.claude/projects (guarded by
+                // directory already validated as being under a configured Claude profile's projects folder (guarded by
                 // SessionLineageController.SyncSessions and SafeProjectRoot-style prefix check).
 #pragma warning disable CA3003
                 if (!Directory.Exists(subagentsDir))

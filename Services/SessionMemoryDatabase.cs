@@ -171,8 +171,9 @@ namespace MultiTerminal.Services
         {
             using var gate = _gate.Enter();
             // CA3003: jsonlPath reaches this sink only through sanitized flows — SessionMemoryController.
-            // IndexSession canonicalizes with Path.GetFullPath and rejects anything outside %USERPROFILE%/
-            // .claude, and IndexProjectSessions walks files enumerated from Directory.GetFiles under a
+            // IndexSession canonicalizes with Path.GetFullPath and rejects anything outside a configured
+            // Claude profile folder (ClaudeProfileDataRoots.IsUnderAnyRoot; ticket c8ee0eec), and
+            // IndexProjectSessions walks files enumerated from Directory.GetFiles under a
             // GetClaudeProjectFolder-anchored directory. No raw user path reaches here.
 #pragma warning disable CA3003
             if (!File.Exists(jsonlPath)) return 0;
@@ -306,8 +307,9 @@ namespace MultiTerminal.Services
                 string subagentsDir = Path.Combine(sessionDir, "subagents");
                 // CA3003: subagentsDir is Path.Combine(sessionDir, "subagents") where sessionDir comes
                 // from Directory.GetDirectories(claudeFolder), and claudeFolder is the result of
-                // SessionLineageService.GetClaudeProjectFolder — always anchored to %USERPROFILE%/
-                // .claude/projects with separators stripped from the folder-name segment.
+                // SessionLineageService.GetClaudeProjectFolder — always anchored to the projects folder
+                // of a configured Claude profile (ticket c8ee0eec), with separators stripped from the
+                // folder-name segment.
 #pragma warning disable CA3003
                 if (!Directory.Exists(subagentsDir)) continue;
 #pragma warning restore CA3003

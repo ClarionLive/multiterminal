@@ -399,28 +399,23 @@ namespace MultiTerminal.Terminal
         internal const string NoFlickerAssignment = "$env:CLAUDE_CODE_NO_FLICKER = '1'; ";
 
         /// <summary>
-        /// Whether a launch gets the Claude profile prologue (ticket c8ee0eec): a Claude launch, or a plain
-        /// shell (no auto-run command), so a <c>claude</c> typed there later uses the same profile. Any
-        /// other auto-run command, such as the Codex launcher, is left alone.
-        /// </summary>
-        internal static bool AppliesClaudeProfile(string autoRunCommand) =>
-            string.IsNullOrEmpty(autoRunCommand) || IsClaudeLaunch(autoRunCommand);
-
-        /// <summary>
         /// The Claude Code part of the launch environment, appended last to <c>envSetup</c>: the
-        /// flicker-free renderer flag, then the profile prologue when <see cref="AppliesClaudeProfile"/>
-        /// says this launch gets one. That decision is made here and nowhere else:
-        /// <paramref name="getProfilePrologue"/> (normally
-        /// <see cref="Services.ClaudeProfileResolver.GetPrologue(Models.ClaudeProfile)"/>) is only called
-        /// for a launch that gets a prologue.
-        /// <para>An exception from <paramref name="getProfilePrologue"/> is NOT caught: a launch whose
-        /// profile cannot be applied does not start. The same rule as a headless agent, where
-        /// <c>GetEnvironment</c> throws out of <c>AgentProcess.SpawnAsync</c> before any process exists.</para>
+        /// flicker-free renderer flag, then the Claude profile prologue (ticket c8ee0eec).
+        /// <para>EVERY pane MT starts gets the prologue, whatever its auto-run command is. This method
+        /// is deliberately not given the command, so it cannot make the prologue depend on it. It once
+        /// did (only a command whose first token was <c>claude</c>, or a plain shell, got one), and a
+        /// pane started through a full path to <c>claude.exe</c> or a wrapper script then ran Claude
+        /// under whatever CLAUDE_CONFIG_DIR the shell already had: another profile, with nothing on
+        /// screen to say so. A command that does not read the two variables (the Codex launcher) is
+        /// unaffected by having them set, so there is nothing to protect by leaving them out.</para>
+        /// <para>An exception from <paramref name="getProfilePrologue"/> (normally
+        /// <see cref="Services.ClaudeProfileResolver.GetPrologue(Models.ClaudeProfile)"/>) is NOT
+        /// caught: a launch whose profile cannot be applied does not start. The same rule as a headless
+        /// agent, where <c>GetEnvironment</c> throws out of <c>AgentProcess.SpawnAsync</c> before any
+        /// process exists.</para>
         /// </summary>
-        internal static string BuildClaudeEnvSetup(string autoRunCommand, Func<string> getProfilePrologue) =>
-            AppliesClaudeProfile(autoRunCommand)
-                ? NoFlickerAssignment + (getProfilePrologue() ?? "")
-                : NoFlickerAssignment;
+        internal static string BuildClaudeEnvSetup(Func<string> getProfilePrologue) =>
+            NoFlickerAssignment + (getProfilePrologue() ?? "");
 
         /// <summary>
         /// Redacts the <c>MULTITERMINAL_LAUNCH_NONCE</c> assignment from a launch command line before it
@@ -641,14 +636,15 @@ namespace MultiTerminal.Terminal
             }
 
             // Enable flicker-free alternate-screen renderer for Claude Code, then put the launch under
-            // its Claude profile (ticket c8ee0eec). The prologue comes from the resolver and nowhere
+            // its Claude profile (ticket c8ee0eec), whatever the pane runs: a plain shell, `claude`, a
+            // full path to claude.exe, a wrapper script or Codex. The prologue comes from the resolver and nowhere
             // else: it is what keeps the Default profile from ever pointing CLAUDE_CONFIG_DIR at
             // %USERPROFILE%\.claude. A profile whose prologue cannot be built REFUSES the launch (Owner
             // decision 2026-10-10): running on the shell's own environment would be a silent move to
             // another profile. MainForm refuses such a profile before it gets here; this is the backstop.
             try
             {
-                envSetup += BuildClaudeEnvSetup(autoRunCommand, () => Services.ClaudeProfileResolver.GetPrologue(claudeProfile));
+                envSetup += BuildClaudeEnvSetup(() => Services.ClaudeProfileResolver.GetPrologue(claudeProfile));
             }
             catch (ArgumentException ex)
             {

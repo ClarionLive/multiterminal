@@ -504,10 +504,12 @@ namespace MultiTerminal
             // Shared project database for the start screen (one connection, shared across all terminals)
             _sharedProjectDatabase = new Services.ProjectDatabase();
 
-            // Ticket c8ee0eec items 10/11: session readers and writers ask which Claude profile owns a
-            // folder through the same project lookup the launch decision uses.
-            Services.ClaudeProfileDataRoots.Configure(
-                _sharedProjectDatabase, _projectService, m => _debugLogService?.Warning("ClaudeProfile", m));
+            // Ticket c8ee0eec: the one project lookup behind every Claude profile decision. The launch
+            // decision (DecideLaunchClaudeProfile), the profile pickers, and the session readers and
+            // writers (ClaudeProfileDataRoots, items 10/11) all ask this same wiring which project owns
+            // a folder.
+            Services.ClaudeProfileProjectLookup.Configure(_sharedProjectDatabase, _projectService);
+            Services.ClaudeProfileDataRoots.Configure(m => _debugLogService?.Warning("ClaudeProfile", m));
 
             // Initialize project panel (combines project info and prompts)
             _projectPanel = new ProjectPanelDocument();
@@ -4926,7 +4928,7 @@ namespace MultiTerminal
         private ClaudeProfileLaunchDecision DecideLaunchClaudeProfile(string projectId, string folder, string launchLabel, string inheritedProfileName = null, string requestedProfileName = null, bool unattended = false)
         {
             var decision = ClaudeProfileLaunchPolicy.Decide(
-                projectId, folder, inheritedProfileName, launchLabel, BuildClaudeProfileLookup(),
+                projectId, folder, inheritedProfileName, launchLabel, ClaudeProfileProjectLookup.Current(),
                 name => ClaudeProfileResolver.Resolve(name, null),
                 requestedProfileName,
                 unattended ? ClaudeProfileResolver.DescribeNeverUsed : null);
@@ -4939,22 +4941,10 @@ namespace MultiTerminal
             return decision;
         }
 
-        /// <summary>The live database and project.json readers the profile policy asks.</summary>
-        private ClaudeProfileLookup BuildClaudeProfileLookup()
-        {
-            var db = _sharedProjectDatabase;
-            var projects = _projectService;
-            return new ClaudeProfileLookup(
-                RowById: id => ToClaudeProfileRow(db?.GetRichProject(id)),
-                AllRows: () => (db?.GetAllRichProjects() ?? new List<Models.Project>()).Select(ToClaudeProfileRow).ToList(),
-                LoadProjectFile: f => projects?.DiscoverProject(f),
-                CandidateFolders: ClaudeProfileLaunchPolicy.CandidateFolders);
-        }
-
         /// <summary>What a "Claude profile" picker may offer for <paramref name="folder"/> (item 8): a
         /// free choice when no project owns it, else the owner's profile as fixed text.</summary>
-        private ClaudeProfileLaunchChoice DescribeClaudeProfileChoice(string folder) =>
-            ClaudeProfileLaunchPolicy.DescribeChoice(folder, BuildClaudeProfileLookup());
+        private static ClaudeProfileLaunchChoice DescribeClaudeProfileChoice(string folder) =>
+            ClaudeProfileLaunchPolicy.DescribeChoice(folder, ClaudeProfileProjectLookup.Current());
 
         /// <summary>Every profile name for a picker, Default first.</summary>
         private static List<string> GetClaudeProfileNamesForPicker() =>
@@ -4980,9 +4970,6 @@ namespace MultiTerminal
                 return null;
             }
         }
-
-        private static ClaudeProfileProjectRow ToClaudeProfileRow(Models.Project p) =>
-            p == null ? null : new ClaudeProfileProjectRow(p.Id, p.Name, p.Path, p.SourcePath, p.ClaudeProfile);
 
         /// <summary>
         /// <see cref="DecideLaunchClaudeProfile"/> for a launch with a human at the desk: a refusal is

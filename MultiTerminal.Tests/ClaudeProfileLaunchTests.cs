@@ -13,6 +13,10 @@ namespace MultiTerminal.Tests
     /// environment) and <see cref="AgentProcess.ApplyEnvironment"/> (a headless agent's environment).
     /// Prologues and environments come from the resolver's context overloads, so nothing reads the real
     /// settings.txt or process environment.
+    /// <para>Every pane gets the prologue whatever it runs. That is pinned by the SHAPE of
+    /// <c>BuildClaudeEnvSetup</c>, not by a list of commands: it is not given the auto-run command, so
+    /// it cannot skip the prologue for one. Giving it the command back stops this file compiling, at
+    /// every call below.</para>
     /// <para>NOT covered: that <c>ConPtyTerminal.StartProcess</c> and <c>AgentProcess.SpawnAsync</c> call
     /// these with the launch's profile, or that any caller in MainForm passes the right profile (which
     /// profile a launch gets is <see cref="ClaudeProfileLaunchPolicyTests"/>). No process is started
@@ -26,7 +30,6 @@ namespace MultiTerminal.Tests
         private const string SetWorkLine = "$env:CLAUDE_CONFIG_DIR = '" + WorkDir + "'; ";
         private const string RemoveLine = "Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue; ";
         private const string TeamsLine = "$env:CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = '1'; ";
-        private const string ClaudeLaunch = "claude --mcp-config 'C:\\x\\.mcp.json'; exit";
 
         private static readonly ClaudeProfile Work = new ClaudeProfile("Work", WorkDir);
 
@@ -36,70 +39,61 @@ namespace MultiTerminal.Tests
         // ── Pane launch: the tail of envSetup ────────────────────────────────
 
         [Fact]
-        public void A_Claude_launch_under_a_profile_sets_its_folder_right_after_the_flicker_flag()
+        public void A_pane_under_a_profile_sets_its_folder_right_after_the_flicker_flag()
         {
-            string envSetup = ConPtyTerminal.BuildClaudeEnvSetup(ClaudeLaunch, () => ClaudeProfileResolver.GetPrologue(Work, Ctx()));
+            string envSetup = ConPtyTerminal.BuildClaudeEnvSetup(() => ClaudeProfileResolver.GetPrologue(Work, Ctx()));
 
             Assert.Equal(NoFlicker + SetWorkLine + TeamsLine, envSetup);
         }
 
         [Fact]
-        public void A_Claude_launch_under_Default_removes_the_variable()
+        public void A_pane_under_Default_removes_the_variable()
         {
-            string envSetup = ConPtyTerminal.BuildClaudeEnvSetup(ClaudeLaunch, () => ClaudeProfileResolver.GetPrologue(null, Ctx()));
+            string envSetup = ConPtyTerminal.BuildClaudeEnvSetup(() => ClaudeProfileResolver.GetPrologue(null, Ctx()));
 
             Assert.Equal(NoFlicker + RemoveLine + TeamsLine, envSetup);
         }
 
-        [Theory]
-        [InlineData(null)]
-        [InlineData("")]
-        public void A_plain_shell_gets_the_profile_too(string autoRunCommand)
+        [Fact]
+        public void Every_pane_asks_for_its_prologue_exactly_once()
         {
-            // Proves one thing: with no auto-run command, the environment tail carries the prologue of
-            // whatever profile it is handed. It does NOT prove which profile a plain shell is handed
-            // (the project owning its folder; see ClaudeProfileLaunchPolicyTests), nor that a `claude`
-            // typed in that shell later picks the variable up.
-            string envSetup = ConPtyTerminal.BuildClaudeEnvSetup(autoRunCommand, () => ClaudeProfileResolver.GetPrologue(Work, Ctx()));
+            // The environment tail has no way to leave the prologue out: it is asked for on every call.
+            // Before, a pane whose command did not start with the token `claude` (a full path to
+            // claude.exe, a wrapper script, the Codex launcher) was never asked, and ran under whatever
+            // CLAUDE_CONFIG_DIR the shell already had. Proves the tail always carries what it is handed.
+            // Does NOT prove StartProcess puts the tail on the command line, nor which profile it hands in.
+            int asked = 0;
 
-            Assert.Equal(NoFlicker + SetWorkLine + TeamsLine, envSetup);
-        }
+            string envSetup = ConPtyTerminal.BuildClaudeEnvSetup(() => { asked++; return "PROLOGUE; "; });
 
-        [Theory]
-        [InlineData("& 'C:\\Users\\Dev\\AppData\\Roaming\\multiterminal\\codex\\launch.ps1'; exit")]
-        [InlineData("codex")]
-        [InlineData("claudette --help")]
-        [InlineData("& 'C:\\tools\\claude\\other.exe'")]
-        public void Another_auto_run_command_gets_no_prologue(string autoRunCommand)
-        {
-            string envSetup = ConPtyTerminal.BuildClaudeEnvSetup(autoRunCommand, () => ClaudeProfileResolver.GetPrologue(Work, Ctx()));
-
-            Assert.Equal(NoFlicker, envSetup);
+            Assert.Equal(1, asked);
+            Assert.Equal(NoFlicker + "PROLOGUE; ", envSetup);
         }
 
         [Fact]
-        public void A_launch_that_gets_no_prologue_never_asks_for_one()
+        public void The_environment_tail_cannot_see_the_command_so_it_cannot_skip_a_pane()
         {
-            // The "does this launch get a profile" decision is made once, inside BuildClaudeEnvSetup.
-            int asked = 0;
+            // The structural pin. One parameter, the prologue source: no auto-run command to branch on.
+            var method = typeof(ConPtyTerminal).GetMethod(
+                nameof(ConPtyTerminal.BuildClaudeEnvSetup),
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
 
-            ConPtyTerminal.BuildClaudeEnvSetup("codex", () => { asked++; return "never used"; });
-
-            Assert.Equal(0, asked);
+            Assert.NotNull(method);
+            var parameter = Assert.Single(method.GetParameters());
+            Assert.Equal(typeof(Func<string>), parameter.ParameterType);
         }
 
-        [Theory]
-        [InlineData(ClaudeLaunch)]
-        [InlineData(null)]
-        public void A_prologue_that_cannot_be_built_stops_the_launch(string autoRunCommand)
+        [Fact]
+        public void A_prologue_that_cannot_be_built_stops_the_launch()
         {
             // Owner decision 2026-10-10. This used to be swallowed, and the pane launched on the shell's
             // own environment. Now the failure reaches StartProcess, which refuses to start. Proves the
             // exception is not swallowed HERE; that StartProcess lets it stop the launch is not exercised.
+            // Since the prologue reaches every pane, this also holds for a pane that runs Codex.
             var noFolder = new ClaudeProfile("Broken", @"relative\folder");
 
             Assert.Throws<ArgumentException>(() =>
-                ConPtyTerminal.BuildClaudeEnvSetup(autoRunCommand, () => ClaudeProfileResolver.GetPrologue(noFolder, Ctx())));
+                ConPtyTerminal.BuildClaudeEnvSetup(() => ClaudeProfileResolver.GetPrologue(noFolder, Ctx())));
         }
 
         // ── Headless agent: ProcessStartInfo.Environment ─────────────────────

@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using MultiTerminal.Models;
 
 namespace MultiTerminal.Services
@@ -38,29 +37,19 @@ namespace MultiTerminal.Services
 
         private static readonly object Sync = new object();
         private static readonly HashSet<string> Logged = new HashSet<string>(StringComparer.Ordinal);
-        private static Func<ClaudeProfileLookup> _lookupFactory;
         private static Action<string> _warn;
 
         /// <summary>
-        /// Called once by MainForm when the project database exists. Until then
-        /// <see cref="ForFolder(string)"/> and <see cref="ForProject(string, string)"/> answer null:
-        /// with no project registry to ask, "which profile owns this folder" is unknown, and unknown is
-        /// not Default.
+        /// Called once by MainForm: where each skip/refusal message goes (once per message). The
+        /// project registry itself is <see cref="ClaudeProfileProjectLookup"/>, the same lookup a launch
+        /// uses; until MainForm has configured that, <see cref="ForFolder(string)"/> and
+        /// <see cref="ForProject(string, string)"/> answer null: with no project registry to ask,
+        /// "which profile owns this folder" is unknown, and unknown is not Default.
         /// </summary>
-        /// <param name="warn">Receives each skip/refusal message once.</param>
-        internal static void Configure(ProjectDatabase db, ProjectService projects, Action<string> warn)
+        internal static void Configure(Action<string> warn)
         {
-            Func<ClaudeProfileLookup> factory = () => new ClaudeProfileLookup(
-                RowById: id => ToRow(db?.GetRichProject(id)),
-                AllRows: () => (db?.GetAllRichProjects() ?? new List<Project>()).Select(ToRow).ToList(),
-                LoadProjectFile: f => projects?.DiscoverProject(f),
-                CandidateFolders: ClaudeProfileLaunchPolicy.CandidateFolders);
-
             lock (Sync)
-            {
-                _lookupFactory = factory;
                 _warn = warn;
-            }
         }
 
         // ── Live machine state ────────────────────────────────────────────────
@@ -81,17 +70,7 @@ namespace MultiTerminal.Services
         /// <summary>As <see cref="ForFolder(string)"/>, for a caller that also knows the project id (its
         /// database row then decides, as it does for a launch that names the project).</summary>
         internal static ClaudeDataRoot ForProject(string projectId, string folder) =>
-            ForProject(projectId, folder, CurrentLookup(), ClaudeProfileResolver.CurrentContext());
-
-        /// <summary>The live project lookup, or null before <see cref="Configure"/> has run.</summary>
-        internal static ClaudeProfileLookup CurrentLookup()
-        {
-            Func<ClaudeProfileLookup> factory;
-            lock (Sync)
-                factory = _lookupFactory;
-
-            return factory?.Invoke();
-        }
+            ForProject(projectId, folder, ClaudeProfileProjectLookup.Current(), ClaudeProfileResolver.CurrentContext());
 
         /// <summary>
         /// True when <paramref name="path"/> lies inside a configured profile folder (inside its
@@ -230,9 +209,6 @@ namespace MultiTerminal.Services
 
             return new ClaudeDataRoot(profile.Name, dir);
         }
-
-        private static ClaudeProfileProjectRow ToRow(Project p) =>
-            p == null ? null : new ClaudeProfileProjectRow(p.Id, p.Name, p.Path, p.SourcePath, p.ClaudeProfile);
 
         private static bool Exists(ClaudeProfileContext ctx, string dir)
         {

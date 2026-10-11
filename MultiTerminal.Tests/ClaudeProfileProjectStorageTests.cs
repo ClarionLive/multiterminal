@@ -291,6 +291,38 @@ namespace MultiTerminal.Tests
             Assert.Equal("Client-X", chosen.Name); // what an untouched save writes back
         }
 
+        // ── The live lookup (ClaudeProfileProjectLookup) ────────────────────
+
+        [Fact]
+        public void The_live_lookup_reads_the_database_row_and_the_folders_project_file()
+        {
+            // ClaudeProfileProjectLookup.Build is the one wiring behind the launch decision, the profile
+            // pickers and the session-data roots. Proves the wiring reads a real database and a real
+            // project.json, and that the policy over it gives a launch in the folder the row's profile.
+            // Does NOT prove MainForm calls Configure, or that any caller uses Current().
+            var project = SeedProject("Work");
+            var lookup = ClaudeProfileProjectLookup.Build(_projectDb, _service);
+
+            Assert.Equal("Work", lookup.RowById(project.Id).ClaudeProfile);
+            Assert.Null(lookup.RowById("no-such-project"));
+            Assert.Equal(project.Id, Assert.Single(lookup.AllRows()).Id);
+            Assert.Equal(project.Id, lookup.LoadProjectFile(_projectDir).Id);
+
+            var name = ClaudeProfileLaunchPolicy.FindProfileName(null, _projectDir, null, lookup);
+            Assert.Equal("Work", name.ProfileName);
+            Assert.Equal(ClaudeProfileNameSource.Database, name.Source);
+        }
+
+        [Fact]
+        public void The_live_lookup_without_a_database_or_project_service_finds_nothing()
+        {
+            var lookup = ClaudeProfileProjectLookup.Build(null, null);
+
+            Assert.Null(lookup.RowById("any"));
+            Assert.Empty(lookup.AllRows());
+            Assert.Null(lookup.LoadProjectFile(_projectDir));
+        }
+
         [Fact]
         public void With_no_profile_list_at_all_the_stored_name_is_still_kept()
         {

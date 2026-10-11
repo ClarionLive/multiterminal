@@ -613,8 +613,10 @@ namespace MultiTerminal.Services
         /// malformed) is ignored, so the lookup falls through to the default rather than throwing or
         /// resolving against MT's current directory.</item>
         /// <item>The default profile's marketplace checkout under <paramref name="userProfile"/>.
-        /// CLAUDE_CONFIG_DIR is deliberately NOT honoured: "default profile" means
-        /// <c>%USERPROFILE%\.claude</c> until profile support lands.</item>
+        /// CLAUDE_CONFIG_DIR is deliberately NOT honoured, and neither is a pane's Claude profile
+        /// (ticket c8ee0eec): the plugin is installed once, at the installer's shared location or in
+        /// <c>%USERPROFILE%\.claude</c>, and handed to every terminal with <c>--plugin-dir</c>
+        /// whichever profile that terminal runs under.</item>
         /// </list>
         /// The default profile's plugin CACHE (<c>~\.claude\plugins\cache\...</c>) is deliberately not a
         /// candidate: Claude Code copies it once at <c>/plugin install</c> time and MultiTerminal's updater
