@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Claude profiles in MultiTerminal: run each project under its own Claude Code config folder (CLAUDE_CONFIG_DIR) so work and personal accounts stay apart.">
+  <title>Claude Profiles - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Hamburger (mobile) -->
+  <button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+  <!-- Sidebar overlay (mobile) -->
+  <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+  <div class="page-wrapper">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">MT</span>
+          <span class="logo-text">MultiTerminal</span>
+        </div>
+        <span class="version">Documentation</span>
+      </div>
+        <div class="doc-search">
+          <input type="search" id="mt-search" class="doc-search-input" placeholder="Search docs…  ( / )" autocomplete="off" spellcheck="false" aria-label="Search documentation">
+          <div id="mt-search-results" class="doc-search-results" hidden></div>
+        </div>
+            <nav class="sidebar-nav">
+        <div class="nav-section-title">Getting Started</div>
+        <a href="getting-started.html" class="nav-link">Getting Started</a>
+        <a href="kanban-workflow.html" class="nav-link">Kanban Workflow</a>
+        <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
+
+        <div class="nav-section-title">Features</div>
+        <a href="features.html" class="nav-link">Features</a>
+        <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="claude-profiles.html" class="nav-link active">Claude Profiles</a>
+        <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
+        <a href="presence.html" class="nav-link">Presence Sensors</a>
+        <a href="code-graph.html" class="nav-link">Code Graph</a>
+
+        <div class="nav-section-title">Reference</div>
+        <a href="api-reference.html" class="nav-link">REST API</a>
+        <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <a href="knowledge-sessions.html" class="nav-link">Knowledge &amp; Sessions</a>
+        <a href="branch-outcomes-wiki.html" class="nav-link">Branch Outcomes &amp; Wiki</a>
+
+        <div class="nav-section-title">Technical</div>
+        <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
+        <a href="distribution.html" class="nav-link">Distribution</a>
+        <a href="deployment.html" class="nav-link">Deployment</a>
+
+        <div class="nav-section-title">Extending</div>
+        <a href="skills.html" class="nav-link">Skills &amp; Commands</a>
+        <a href="hooks.html" class="nav-link">Hooks</a>
+        <a href="channels.html" class="nav-link">Channels (Messaging)</a>
+        <a href="plugin.html" class="nav-link">Plugin &amp; Distribution</a>
+
+        <div class="nav-section-title">Help</div>
+        <a href="troubleshooting.html" class="nav-link">Troubleshooting / FAQ</a>
+        <a href="api-examples.html" class="nav-link">API Examples</a>
+
+        <div class="nav-section-title"></div>
+        <a href="index.html" class="nav-link">&larr; Home</a>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="content-container">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127763;</button>
+
+        <h1>Claude Profiles</h1>
+        <p class="lead">A Claude profile is a separate Claude Code config folder with its own login, settings and history. MultiTerminal lets each project name the profile it runs under, so work projects and personal projects stay apart, and it refuses to start a terminal rather than run a project under the wrong one.</p>
+
+        <div class="card">
+          <h3>Typical flow</h3>
+          <ol>
+            <li>Create a folder for the second profile, for example <code>C:\Users\you\.claude-work</code>, and sign in to Claude Code there once.</li>
+            <li>Add it in <strong>Settings &rarr; Claude Profiles</strong> with a name such as <code>Work</code>.</li>
+            <li>Open <strong>Edit Project</strong> for each work project and choose <code>Work</code> under <strong>Claude profile</strong>.</li>
+            <li>Launch as usual. Every terminal in that project's folder now runs under <code>Work</code>; everything else keeps using <code>Default</code>.</li>
+          </ol>
+        </div>
+
+        <div class="card">
+          <h3>On This Page</h3>
+          <ol>
+            <li><a href="#what">What a profile is, and why</a></li>
+            <li><a href="#setup">Setting up a second profile</a></li>
+            <li><a href="#settings">Adding it in Settings</a></li>
+            <li><a href="#project">Choosing a profile for a project</a></li>
+            <li><a href="#picks">How a launch picks its profile</a></li>
+            <li><a href="#refusals">When MultiTerminal refuses to start</a></li>
+            <li><a href="#per-profile">What is separate per profile</a></li>
+            <li><a href="#plugin">The MultiTerminal plugin</a></li>
+            <li><a href="#default">The Default profile</a></li>
+            <li><a href="#not-yet">What is not separated yet</a></li>
+            <li><a href="#installer">Installer: shared plugin location</a></li>
+          </ol>
+        </div>
+
+        <h2 id="what">What a profile is, and why</h2>
+        <p>Claude Code keeps everything about "you" in one config folder: who you are signed in as, your <code>settings.json</code>, installed plugins, your own skills and agents, and the history of every session. Normally that folder is <code>%USERPROFILE%\.claude</code>. Claude Code uses a different folder when the environment variable <code>CLAUDE_CONFIG_DIR</code> points at one.</p>
+        <p>A <strong>Claude profile</strong> in MultiTerminal is a name for one such folder. The usual reason to have two is to keep a work account and a personal account apart: different logins, different billing, different settings, and no shared history between them.</p>
+        <p>MultiTerminal sets the variable for you, per terminal, from the project the terminal belongs to. You do not set <code>CLAUDE_CONFIG_DIR</code> by hand for terminals MultiTerminal starts.</p>
+
+        <h2 id="setup">Setting up a second profile</h2>
+        <p>A profile has to be signed in once before it is useful. There are two ways to do that.</p>
+        <div class="card">
+          <h3>Option A: outside MultiTerminal</h3>
+          <ol>
+            <li>Create the folder, for example <code>C:\Users\you\.claude-work</code>.</li>
+            <li>Open any terminal, point Claude Code at it, and start Claude:
+              <pre><code>$env:CLAUDE_CONFIG_DIR = 'C:\Users\you\.claude-work'
+claude</code></pre>
+            </li>
+            <li>Sign in and answer the first-run questions. Then add the profile in Settings (next section).</li>
+          </ol>
+        </div>
+        <div class="card">
+          <h3>Option B: inside MultiTerminal</h3>
+          <ol>
+            <li>Create the folder (it must exist before it can be added).</li>
+            <li>Add it in <strong>Settings &rarr; Claude Profiles</strong>.</li>
+            <li>On a start screen choose <strong>Just Claude</strong>, pick a folder that <em>no project owns</em>, and choose the new profile under <strong>Claude profile</strong>. MultiTerminal notes that the profile has never been used and that Claude will ask you to sign in.</li>
+            <li>Sign in and answer the first-run questions in that terminal.</li>
+          </ol>
+        </div>
+        <p>A new profile starts from nothing. Expect Claude Code's onboarding, the "do you trust this folder" question for each folder, and permission prompts again, exactly as on a fresh machine. Nothing is copied from your Default profile.</p>
+
+        <h2 id="settings">Adding it in Settings</h2>
+        <p>Open <strong>Settings</strong> and go to the <strong>Claude Profiles</strong> tab.</p>
+        <ul>
+          <li><strong>Default profile</strong> is shown at the top with its folder. It is built in and cannot be edited.</li>
+          <li>Under <strong>Additional profiles</strong>, click <strong>Add profile</strong>, type a <strong>Name</strong> and choose the <strong>Config folder</strong> (<strong>Browse&hellip;</strong> helps).</li>
+          <li><strong>Remove</strong> takes a profile off the list. The folder itself is never deleted.</li>
+        </ul>
+        <p>Saving checks every row and tells you which one is wrong. A profile needs:</p>
+        <ul>
+          <li>a name that is not blank, not <code>Default</code>, and not used by another profile;</li>
+          <li>a folder given as a full path that already exists;</li>
+          <li>a folder that is not a drive root, not your user folder or anything above it, not the Default profile's folder, and not already used by another profile.</li>
+        </ul>
+        <p>Profiles are a setting of <em>this machine</em>. If you remove or rename one that projects still use, MultiTerminal warns you first: those projects will refuse to start until you pick another profile for them.</p>
+
+        <h2 id="project">Choosing a profile for a project</h2>
+        <p>Open <strong>Edit Project</strong> and choose from the <strong>Claude profile</strong> list. <code>Default</code> means the project has no profile of its own.</p>
+        <p>A project remembers its profile by <em>name</em>. The name also travels with the project in its <code>.claude\project.json</code>, so the same project on another machine asks for the same profile name. If that machine has no profile with that name, the list shows it as <code>(not configured on this machine)</code> and the project will not launch there until you either add a profile with that name in Settings or choose another one for the project.</p>
+
+        <h2 id="picks">How a launch picks its profile</h2>
+        <p>You never choose a profile for a terminal that belongs to a project. The project decides.</p>
+        <table>
+          <thead>
+            <tr><th>What you start</th><th>Profile it runs under</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>A project (from its card, the project list, or a new project)</td><td>That project's profile.</td></tr>
+            <tr><td>Any terminal in a project's folder, however it was opened: <strong>Just Claude</strong>, <strong>Open PowerShell</strong>, <strong>Launch as</strong>, a grid preset</td><td>The profile of the project that owns the folder.</td></tr>
+            <tr><td>A terminal in a <em>subfolder</em> of a project, or in one of its task worktrees</td><td>The profile of the nearest project at or above that folder.</td></tr>
+            <tr><td>A helper an agent spawns</td><td>The profile of the project that owns the helper's folder. If no project owns it, the profile of the terminal that spawned it.</td></tr>
+            <tr><td>A terminal in a folder no project owns</td><td><code>Default</code>, unless you pick another one (below).</td></tr>
+          </tbody>
+        </table>
+        <p>The <strong>Claude profile</strong> choice in <strong>Just Claude</strong> and <strong>Launch as</strong> appears only when it is a real choice: you have more than one profile, and the folder belongs to no project. For a folder a project owns, <strong>Just Claude</strong> shows that project's profile as fixed, and <strong>Launch as</strong> does not ask at all. To change it, change the project in <strong>Edit Project</strong>.</p>
+        <p>A plain PowerShell terminal gets the same profile as a Claude terminal would in that folder, so typing <code>claude</code> in it later lands in the right place. This applies to every terminal MultiTerminal starts, whatever command it runs.</p>
+        <p>After you restart MultiTerminal, a restored pane shows its start screen. Whatever you start from there is decided again by the rules above.</p>
+
+        <h2 id="refusals">When MultiTerminal refuses to start</h2>
+        <p>If a terminal's profile cannot be used, MultiTerminal does not start it and does not quietly use another profile instead. You get one message that begins <strong>Not started:</strong> and says what was being started, which project and profile were involved, and where to fix it. Helpers and background agents fail with the same explanation, reported back to whoever asked for them.</p>
+        <table>
+          <thead>
+            <tr><th>The message says</th><th>What it means</th><th>How to fix it</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>The profile "is not configured on this machine"</td>
+              <td>The project names a profile this machine does not have. Common after moving a project between machines, or after removing or renaming a profile.</td>
+              <td>Add a profile with that name in <strong>Settings &rarr; Claude Profiles</strong>, or choose another profile for the project in <strong>Edit Project</strong>.</td>
+            </tr>
+            <tr>
+              <td>The profile "points at" a folder "which does not exist"</td>
+              <td>The profile is on the list but its folder is gone (deleted, renamed, or on a drive that is not connected).</td>
+              <td>Restore the folder, or correct the profile's folder in Settings.</td>
+            </tr>
+            <tr>
+              <td>The profile "has never been used on this machine"</td>
+              <td>Only for launches nobody is watching: a spawned helper or a background agent. A profile that has never run Claude would stop at the sign-in and first-run questions, and nobody is there to answer them.</td>
+              <td>Open a terminal under that profile yourself once and sign in, then try again. Terminals you open yourself are never refused for this reason; that is how a profile gets set up.</td>
+            </tr>
+            <tr>
+              <td>"The folder looks moved or copied"</td>
+              <td>The folder's <code>.claude\project.json</code> says it is a project that MultiTerminal has registered at a <em>different</em> folder, and the two disagree about the profile. MultiTerminal will not guess which is right.</td>
+              <td>If you moved the project, update its folder in <strong>Edit Project</strong>. If the folder is a copy, remove or correct the <code>.claude\project.json</code> inside it.</td>
+            </tr>
+            <tr>
+              <td>The folder "is registered to more than one project" with different profiles</td>
+              <td>Two projects claim the same folder and are set to different profiles.</td>
+              <td>Give both projects the same profile in <strong>Edit Project</strong>, or remove the duplicate project.</td>
+            </tr>
+            <tr>
+              <td>A profile "was chosen for it, but its folder belongs to project&hellip;"</td>
+              <td>A profile was picked for a folder that a project owns, and it is not that project's profile.</td>
+              <td>Start it without picking, or change the project's profile in <strong>Edit Project</strong>.</td>
+            </tr>
+            <tr>
+              <td>MultiTerminal "could not work out which Claude profile it belongs under"</td>
+              <td>The project list could not be read at that moment.</td>
+              <td>Try again. If it keeps happening, check the debug log.</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>These refusals apply to Codex terminals too. Codex itself does not use Claude profiles, but a project whose profile is broken does not start any terminal until the profile is fixed.</p>
+
+        <h2 id="per-profile">What is separate per profile</h2>
+        <p>Everything Claude Code keeps in its config folder belongs to one profile only:</p>
+        <ul>
+          <li><strong>Login</strong> and account.</li>
+          <li><strong>settings.json</strong>, including permissions and hooks you configured yourself.</li>
+          <li><strong>Plugins</strong> you installed, and your own user-level <strong>skills</strong> and <strong>agents</strong>.</li>
+          <li><strong>Sessions and transcripts</strong>. MultiTerminal's session history, token meter and resume lists read a project's sessions from that project's profile.</li>
+          <li><strong>Agent teams</strong>. A team created under one profile is tracked separately from a team with the same name under another.</li>
+          <li><strong>Memory</strong> that Claude Code and MultiTerminal keep per project folder.</li>
+          <li><strong>First-run state</strong>: onboarding, folder trust, and permission prompts. A new profile asks all of these again.</li>
+        </ul>
+        <p>You do not need to enable agent teams in each profile's settings. MultiTerminal switches them on for every terminal it starts.</p>
+        <p>The task board, projects, and the knowledge base are MultiTerminal's own and are <em>not</em> per profile. One board shows all your projects; each project simply runs under its own profile.</p>
+
+        <h2 id="plugin">The MultiTerminal plugin</h2>
+        <p>The MultiTerminal plugin (the hooks, skills and agents that connect a terminal to the board) is handed to Claude Code by MultiTerminal each time it starts a terminal. It does not need to be installed in each profile, and a brand-new profile gets it straight away.</p>
+        <p>Other plugins are different: they are installed per profile, so a plugin you rely on in Default has to be installed again in a second profile. See <a href="plugin.html">Plugin &amp; Distribution</a> for what the MultiTerminal plugin contains.</p>
+
+        <h2 id="default">The Default profile</h2>
+        <p><code>Default</code> is what you had before profiles existed: Claude Code's normal folder, <code>%USERPROFILE%\.claude</code>. It is always there, cannot be renamed or removed, and is used by every project that has no profile of its own.</p>
+        <p>For a Default terminal MultiTerminal makes sure <code>CLAUDE_CONFIG_DIR</code> is <em>not set</em>, so Claude Code behaves exactly as it does when you run it by hand. This also means a value set in your PowerShell profile script cannot leak into a Default terminal and move it to another account without you noticing.</p>
+        <div class="card">
+          <h3>If MultiTerminal itself is started with CLAUDE_CONFIG_DIR set</h3>
+          <p>Then that folder <em>is</em> your Default profile. MultiTerminal assumes you started it that way on purpose and keeps the value for Default terminals. The <strong>Claude Profiles</strong> tab shows the folder and notes that it came from MultiTerminal's own <code>CLAUDE_CONFIG_DIR</code>. The value is read once at startup; restart MultiTerminal after changing it.</p>
+        </div>
+
+        <h2 id="not-yet">What is not separated yet</h2>
+        <p>Profiles currently separate what Claude Code stores and which account a terminal uses. Some of MultiTerminal's own features still span profiles. These are planned, not done:</p>
+        <ul>
+          <li><strong>Messaging between agents.</strong> An agent in one profile can still message, and see in the terminal list, an agent in another profile.</li>
+          <li><strong>The shared pool.</strong> There is one pool for all terminals, not one per profile.</li>
+          <li><strong>Session-memory search.</strong> Searching past sessions is not limited to the profile you are in.</li>
+          <li><strong>The Oracle</strong> always runs under Default.</li>
+        </ul>
+        <p>Until then, treat profiles as keeping accounts, settings and Claude Code's own history apart, not as a wall between agents that are running at the same time.</p>
+
+        <h2 id="installer">Installer: shared plugin location</h2>
+        <p>The installer has a <strong>Plugin location</strong> page. The default installs the MultiTerminal plugin into your Default profile, as earlier versions did. If you use more than one profile, choose <strong>Shared location</strong> instead: one copy is installed outside every profile, and MultiTerminal terminals use it whichever profile they run under. An upgrade keeps whichever choice you made before.</p>
+        <p>An optional further page can make the plugin marketplace known to other profiles, for plain <code>claude</code> sessions started outside MultiTerminal. That adds the marketplace only; it does not install or enable the plugin there. MultiTerminal's own terminals do not need it.</p>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+    function toggleSidebar() {
+      document.querySelector('.sidebar').classList.toggle('open');
+      document.querySelector('.sidebar-overlay').classList.toggle('visible');
+    }
+  </script>
+  <script src="search-index.js"></script>
+  <script src="search.js"></script>
+</body>
+</html>
