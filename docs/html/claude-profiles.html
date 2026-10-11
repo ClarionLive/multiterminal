@@ -164,6 +164,7 @@ claude</code></pre>
           </tbody>
         </table>
         <p>The <strong>Claude profile</strong> choice in <strong>Just Claude</strong> and <strong>Launch as</strong> appears only when it is a real choice: you have more than one profile, and the folder belongs to no project. For a folder a project owns, <strong>Just Claude</strong> shows that project's profile as fixed, and <strong>Launch as</strong> does not ask at all. To change it, change the project in <strong>Edit Project</strong>.</p>
+        <p><strong>Launch as</strong> preselects the profile the terminal is already running under. If that profile has since been removed from this machine, it is shown as <code>(not configured on this machine)</code> and <strong>Launch</strong> stays disabled until you pick a profile that exists. It does not fall back to <code>Default</code> for you.</p>
         <p>A plain PowerShell terminal gets the same profile as a Claude terminal would in that folder, so typing <code>claude</code> in it later lands in the right place. This applies to every terminal MultiTerminal starts, whatever command it runs.</p>
         <p>After you restart MultiTerminal, a restored pane shows its start screen. Whatever you start from there is decided again by the rules above.</p>
 
@@ -185,6 +186,16 @@ claude</code></pre>
               <td>Restore the folder, or correct the profile's folder in Settings.</td>
             </tr>
             <tr>
+              <td>The profile "has an invalid folder"</td>
+              <td>The profile is on the list, but what is stored as its folder is not a usable full path (for example a relative path, or one with characters Windows does not allow). The settings file was probably edited by hand.</td>
+              <td>Correct the profile's folder in <strong>Settings &rarr; Claude Profiles</strong>.</td>
+            </tr>
+            <tr>
+              <td>The profile "cannot be applied, so nothing was started"</td>
+              <td>A last check, made at the moment the terminal starts: the profile passed the checks above, but its environment could not be built from its folder. You should rarely see this one; it exists so that such a terminal stops instead of starting under whatever profile the shell happened to have.</td>
+              <td>Correct the profile's folder in <strong>Settings &rarr; Claude Profiles</strong>, then start the terminal again.</td>
+            </tr>
+            <tr>
               <td>The profile "has never been used on this machine"</td>
               <td>Only for launches nobody is watching: a spawned helper or a background agent. A profile that has never run Claude would stop at the sign-in and first-run questions, and nobody is there to answer them.</td>
               <td>Open a terminal under that profile yourself once and sign in, then try again. Terminals you open yourself are never refused for this reason; that is how a profile gets set up.</td>
@@ -201,7 +212,7 @@ claude</code></pre>
             </tr>
             <tr>
               <td>A profile "was chosen for it, but its folder belongs to project&hellip;"</td>
-              <td>A profile was picked for a folder that a project owns, and it is not that project's profile.</td>
+              <td>A profile was picked for a folder that a project owns, and it is not that project's profile. With <strong>Launch as</strong> this can also appear after you picked: the identity turned out to have its work in a project's folder, not the folder you were asked about. The terminal is stopped and returned to its start screen; the project's profile is not used in place of your pick.</td>
               <td>Start it without picking, or change the project's profile in <strong>Edit Project</strong>.</td>
             </tr>
             <tr>
@@ -219,7 +230,7 @@ claude</code></pre>
           <li><strong>Login</strong> and account.</li>
           <li><strong>settings.json</strong>, including permissions and hooks you configured yourself.</li>
           <li><strong>Plugins</strong> you installed, and your own user-level <strong>skills</strong> and <strong>agents</strong>.</li>
-          <li><strong>Sessions and transcripts</strong>. MultiTerminal's session history, token meter and resume lists read a project's sessions from that project's profile.</li>
+          <li><strong>Sessions and transcripts</strong>. MultiTerminal's session history, token meter and resume lists read a project's sessions from that project's profile. What belongs to one terminal (its Sessions and Activities tabs, the sessions it registers, what is saved for it when MultiTerminal closes) follows the profile that terminal is running under, also in a folder no project owns.</li>
           <li><strong>Agent teams</strong>. A team created under one profile is tracked separately from a team with the same name under another.</li>
           <li><strong>Memory</strong> that Claude Code and MultiTerminal keep per project folder.</li>
           <li><strong>First-run state</strong>: onboarding, folder trust, and permission prompts. A new profile asks all of these again.</li>

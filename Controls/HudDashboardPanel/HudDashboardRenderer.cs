@@ -227,6 +227,16 @@ namespace MultiTerminal.Controls
         }
 
         /// <summary>
+        /// Ticket c8ee0eec item 33: the terminal this tab belongs to says which Claude profile it was
+        /// launched under, so the "latest session" shown is that pane's. Asked at each refresh. Not
+        /// set (a host with no terminal), or answering null (the pane has not launched), means the
+        /// folder decides.
+        /// </summary>
+        internal void SetPaneProfileSource(Func<MultiTerminal.Services.ClaudePaneProfile> paneProfile) => _paneProfile = paneProfile;
+
+        private Func<MultiTerminal.Services.ClaudePaneProfile> _paneProfile;
+
+        /// <summary>
         /// Sets the project context for this dashboard.
         /// </summary>
         public void SetProject(string projectId, string projectPath, string projectName)
@@ -348,7 +358,7 @@ namespace MultiTerminal.Controls
                 var sessionLineageService = _broker.SessionLineageService;
                 if (sessionLineageService != null && !string.IsNullOrEmpty(_projectPath))
                 {
-                    var latestSession = sessionLineageService.GetMostRecentSessionForProject(_projectPath);
+                    var latestSession = sessionLineageService.GetMostRecentSessionForPane(_projectPath, _paneProfile?.Invoke());
                     if (latestSession != null && !string.IsNullOrEmpty(latestSession.Summary))
                     {
                         sessionSummary = latestSession.Summary;

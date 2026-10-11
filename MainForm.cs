@@ -511,6 +511,10 @@ namespace MultiTerminal
             Services.ClaudeProfileProjectLookup.Configure(_sharedProjectDatabase, _projectService);
             Services.ClaudeProfileDataRoots.Configure(m => _debugLogService?.Warning("ClaudeProfile", m));
 
+            // Item 33: the session services and REST controllers hold an agent NAME; this is how they
+            // reach the profile of the terminal that agent runs in, instead of deciding by folder.
+            Services.ClaudeProfilePaneLookup.Configure(FindPaneClaudeProfileForAgent);
+
             // Initialize project panel (combines project info and prompts)
             _projectPanel = new ProjectPanelDocument();
             _projectPanel.SetServices(_projectService, _promptService);
@@ -5020,6 +5024,26 @@ namespace MultiTerminal
             return spawner?.LaunchClaudeProfileName;
         }
 
+        /// <summary>
+        /// The Claude profile of the RUNNING terminal registered as <paramref name="agentName"/>, or
+        /// null when there is none (ticket c8ee0eec item 33; behind
+        /// <see cref="ClaudeProfilePaneLookup"/>). Called from REST request threads and timers, not the
+        /// UI thread: the map is read under its own lock, and a pane's profile is one immutable
+        /// reference replaced whole at launch, so the answer is a consistent value that can only be
+        /// stale by one launch. A terminal that is not running (a pane back on its start screen) is not
+        /// a match, so a name no live terminal holds is decided by folder. A running terminal with no
+        /// recorded launch answers <see cref="ClaudePaneProfile.Unknown"/> (its data is skipped).
+        /// </summary>
+        private ClaudePaneProfile FindPaneClaudeProfileForAgent(string agentName)
+        {
+            lock (_terminalDocMapLock)
+            {
+                var running = _terminalDocMap.Values.Where(d => d.Terminal?.IsRunning == true).ToList();
+                var doc = TerminalDocument.FindByIdentity(running, agentName);
+                return doc == null ? null : doc.LaunchClaudeProfile ?? ClaudePaneProfile.Unknown;
+            }
+        }
+
         private static bool SameLaunchFolder(string a, string b)
         {
             string ca = ClaudeProfileResolver.Canonicalize(a);
@@ -5954,13 +5978,15 @@ namespace MultiTerminal
             // Item 8: when that folder belongs to no project and there is more than one profile, ask
             // which one, with the pane's current profile preselected. A folder a project owns is never
             // asked about. Asked before the running session is touched, so Cancel changes nothing.
+            // Item 34: a pane whose current profile is no longer configured shows that name as a
+            // selected entry that cannot be launched, so Enter does not move the pane to Default.
             string pickedProfileName = null;
-            var profileNames = GetClaudeProfileNamesForPicker();
-            if (profileNames.Count > 1 && DescribeClaudeProfileChoice(predictedFolder).CanChoose)
+            var pickerProfiles = ClaudeProfileResolver.GetAllProfiles();
+            if (pickerProfiles.Count > 1 && DescribeClaudeProfileChoice(predictedFolder).CanChoose)
             {
                 using var profilePicker = new Dialogs.IdentityPickerProfileDialog(
-                    identityName, predictedFolder, profileNames,
-                    paneProfileName ?? Models.ClaudeProfile.DefaultName, _currentTheme, DescribeClaudeProfileHint);
+                    identityName, predictedFolder, pickerProfiles,
+                    paneProfileName, _currentTheme, DescribeClaudeProfileHint);
                 if (profilePicker.ShowDialog(this) != DialogResult.OK)
                     return;
 
@@ -6000,12 +6026,17 @@ namespace MultiTerminal
             // name has its own active task or none, so the folder can differ from the predicted one. The
             // profile follows the real folder. The old session is already unregistered by now, so a
             // refusal here stops it and returns the pane to its start screen rather than leave it
-            // running under a name the broker no longer knows. A profile picked above was picked for
-            // the predicted folder, so here it is passed only as the name a folder with no owner gets:
-            // if the real folder belongs to a project, that project's profile is used, not refused.
+            // running under a name the broker no longer knows.
+            //
+            // Item 34: a profile the human picked above is passed here as the REQUESTED profile again.
+            // It was picked for the predicted folder; if the real folder belongs to a project that
+            // uses another profile, the policy refuses ("was chosen for it, but its folder belongs to
+            // project ...") instead of the project's profile silently replacing the pick. When
+            // nothing was picked (no prompt was shown) there is nothing to contradict, and the real
+            // folder's owner decides.
             string launchFolder = string.IsNullOrEmpty(taskWorktreePath) ? workingDirectory : taskWorktreePath;
             if (!SameLaunchFolder(launchFolder, predictedFolder)
-                && !TryGetLaunchClaudeProfile(null, launchFolder, launchAsLabel, out claudeProfile, inheritedProfileName: paneProfileName))
+                && !TryGetLaunchClaudeProfile(null, launchFolder, launchAsLabel, out claudeProfile, inheritedProfileName: paneProfileName, requestedProfileName: pickedProfileName))
             {
                 ReleaseGhostRegistration(doc.DocId, "MainForm.OnLaunchAsIdentityRequested");
                 doc.Terminal.Stop();
@@ -6115,37 +6146,57 @@ namespace MultiTerminal
                         .Where(d => d.Terminal?.ConPty != null && d.Terminal.IsRunning)
                         .ToList();
 
-                    // Save context for each registered terminal
-                    foreach (var doc in terminals)
+                    // Ticket c8ee0eec item 33: both saves below are PANE-scoped. Each pane's name, folder
+                    // and Claude profile are read here, on the UI thread, once.
+                    var panes = terminals
+                        .Select(d => new Services.ClaudePaneSnapshot(d.CustomTitle, d.GetWorkingDirectory(), d.LaunchClaudeProfile))
+                        .ToList();
+
+                    // There is ONE context file, for one project folder (SessionContextWriter.ContextProjectDir),
+                    // written once. It is written for a pane that sits in that folder when there is one,
+                    // and then under THAT pane's profile; if that profile has no usable folder here,
+                    // nothing is written (never Default, never the folder's profile). Only when no pane
+                    // is in that folder does the first named pane supply the agent name alone, and the
+                    // folder decides the profile, as it would for a launch there.
+                    var contextPane = Services.SessionContextWriter.ChooseContextPane(
+                        Services.SessionContextWriter.ContextProjectDir, panes, out bool contextPaneInProject);
+                    if (contextPane != null && !contextPaneInProject)
                     {
-                        string name = doc.CustomTitle;
-                        if (!string.IsNullOrEmpty(name))
-                        {
-                            await Services.SessionContextWriter.WriteContextAsync(name);
-                            break; // Write once with the active terminal's perspective
-                        }
+                        await Services.SessionContextWriter.WriteContextAsync(contextPane.AgentName);
+                    }
+                    else if (contextPane != null)
+                    {
+                        var contextRoot = contextPane.Profile == null
+                            ? null
+                            : Services.ClaudeProfileDataRoots.ForPaneOrFolder(contextPane.Profile, contextPane.Folder);
+                        if (contextRoot == null)
+                            _debugLogService?.Warning("ClaudeProfile", $"Session context not written for '{contextPane.AgentName}': the Claude profile its terminal runs under is not known or has no usable folder on this machine.");
+                        else
+                            await Services.SessionContextWriter.WriteContextAsync(contextPane.AgentName, _ => contextRoot);
                     }
 
-                    // Flush session memory — index any completed sessions that haven't been embedded yet
+                    // Flush session memory — index any completed sessions that haven't been embedded yet.
+                    // Each pane's sessions are read under the profile that pane runs under, once per
+                    // distinct (profile folder, working folder): two panes in one folder under two
+                    // profiles are two flushes.
                     var sessionMemDb = _mcpServer?.Broker?.SessionMemoryDb;
                     if (sessionMemDb != null)
                     {
                         await System.Threading.Tasks.Task.Run(() =>
                         {
-                            var flushedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                            foreach (var doc in terminals)
+                            var flushes = Services.ClaudeProfileDataRoots.PlanPaneFlush(
+                                panes,
+                                pane => Services.ClaudeProfileDataRoots.ForProfileName(pane.ProfileName),
+                                m => _debugLogService?.Warning("ClaudeProfile", m));
+                            foreach (var flush in flushes)
                             {
-                                string projectPath = doc.GetWorkingDirectory();
-                                if (!string.IsNullOrEmpty(projectPath) && flushedPaths.Add(projectPath))
+                                try
                                 {
-                                    try
-                                    {
-                                        sessionMemDb.IndexProjectSessions(projectPath, doc.CustomTitle);
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        _debugLogService?.Error("MainForm", $"Session memory flush failed for {projectPath}: {ex.Message}");
-                                    }
+                                    sessionMemDb.IndexProjectSessionsUnder(flush.Root, flush.Folder, flush.AgentName);
+                                }
+                                catch (Exception ex)
+                                {
+                                    _debugLogService?.Error("MainForm", $"Session memory flush failed for {flush.Folder}: {ex.Message}");
                                 }
                             }
                         });
@@ -7508,12 +7559,13 @@ namespace MultiTerminal
 
                     if (InvokeRequired)
                     {
-                        try { BeginInvoke(new Action(() => CleanupTeamPanels(e.TeamKey, e.MemberNames, e.TranscriptPaths))); }
+                        try { BeginInvoke(new Action(() => CleanupTeamPanels(e.TeamKey, e.ConfigRoot, e.IsDefaultRoot, e.MemberNames, e.TranscriptPaths))); }
                         catch (ObjectDisposedException) { }
+                        catch (InvalidOperationException) { } // no window handle yet, or it is gone: there are no panels to close
                     }
                     else
                     {
-                        CleanupTeamPanels(e.TeamKey, e.MemberNames, e.TranscriptPaths);
+                        CleanupTeamPanels(e.TeamKey, e.ConfigRoot, e.IsDefaultRoot, e.MemberNames, e.TranscriptPaths);
                     }
                 };
 
@@ -7563,7 +7615,10 @@ namespace MultiTerminal
 
                     _debugLogService?.Info("MainForm", $"Non-team subagent discovered: {e.MemberName}, spawner: {resolvedSpawner ?? "(unknown)"}, desc: \"{e.TaskDescription ?? ""}\"");
 
-                    string panelKey = $"subagent:{e.MemberName}";
+                    // Built by the watcher, with the Claude profile folder in it for any profile but
+                    // Default: a same-named subagent under a second profile is another panel, not a
+                    // duplicate of the first to be dropped (which also left its tailer running).
+                    string panelKey = e.SubagentPanelKey;
 
                     void DoCreate()
                     {
@@ -7729,38 +7784,27 @@ namespace MultiTerminal
         // Oracle terminal management removed — OracleService now owns the terminal
         // via OracleTerminalForm (always-on, hidden popup, auto-restart)
 
-        private void CleanupTeamPanels(string teamKey, List<string> memberNames = null, List<string> transcriptPaths = null)
+        private void CleanupTeamPanels(string teamKey, string configRoot, bool isDefaultRoot, List<string> memberNames = null, List<string> transcriptPaths = null)
         {
-            // teamKey is TeamWatcherService's (profile folder, team name) identity, the same value the
-            // panel keys were built from, so removing one profile's team never closes another's panels.
+            // Three matches, each confined to the removed team's own Claude profile folder:
+            //  1. team panels, by teamKey: TeamWatcherService's (profile folder, team name) identity,
+            //     the value those panel keys were built from;
+            //  2. orphan subagent panels by member name, only among panels whose key says they are
+            //     under configRoot (TeamWatcherService.SelectOrphanSubagentPanels);
+            //  3. orphan panels by transcript path, and the team's transcripts are under its root.
+            // So removing one profile's team (or dropping a whole profile, which removes each of its
+            // teams) does not close a panel that belongs to another profile.
             string prefix = $"team:{teamKey}:";
 
             // Close and remove team-keyed embedded panels
             var embeddedKeys = _embeddedAgentMap.Keys.Where(k => k.StartsWith(prefix)).ToList();
 
-            // Also remove orphan panels that match the team's agent names.
-            // Uses fuzzy matching (contains) to handle name variants like "Agent Alice" vs "Alice".
-            if (memberNames != null)
+            // Also remove orphan panels that match the team's agent names. The match is by name in
+            // either direction ("Agent Alice" vs "Alice"), among this root's subagent panels only.
+            foreach (var key in TeamWatcherService.SelectOrphanSubagentPanels(_embeddedAgentMap.Keys, memberNames, configRoot, isDefaultRoot))
             {
-                foreach (var name in memberNames)
-                {
-                    // Exact match
-                    string orphanKey = $"subagent:{name}";
-                    if (_embeddedAgentMap.ContainsKey(orphanKey) && !embeddedKeys.Contains(orphanKey))
-                        embeddedKeys.Add(orphanKey);
-
-                    // Fuzzy match: orphan keyed as "subagent:Agent Alice" when member is "Alice" (or vice versa)
-                    foreach (var key in _embeddedAgentMap.Keys)
-                    {
-                        if (!key.StartsWith("subagent:") || embeddedKeys.Contains(key)) continue;
-                        var orphanName = key.Substring("subagent:".Length);
-                        if (orphanName.Contains(name, StringComparison.OrdinalIgnoreCase) ||
-                            name.Contains(orphanName, StringComparison.OrdinalIgnoreCase))
-                        {
-                            embeddedKeys.Add(key);
-                        }
-                    }
-                }
+                if (!embeddedKeys.Contains(key))
+                    embeddedKeys.Add(key);
             }
 
             // Match orphan panels by transcript path stored in the agent's slot tag

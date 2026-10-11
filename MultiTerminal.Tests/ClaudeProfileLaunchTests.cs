@@ -71,9 +71,11 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
-        public void The_environment_tail_cannot_see_the_command_so_it_cannot_skip_a_pane()
+        public void The_environment_tail_is_not_given_the_command_so_it_cannot_branch_on_it()
         {
             // The structural pin. One parameter, the prologue source: no auto-run command to branch on.
+            // That is all it proves. Whether a pane gets the prologue also depends on StartProcess
+            // calling this helper and using its result, and nothing here looks at that call site.
             var method = typeof(ConPtyTerminal).GetMethod(
                 nameof(ConPtyTerminal.BuildClaudeEnvSetup),
                 System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);

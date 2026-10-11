@@ -159,7 +159,9 @@ namespace MultiTerminal.API.Controllers
             if (service == null)
                 return ServiceUnavailable();
 
-            string claudeFolder = SessionLineageService.GetClaudeProjectFolder(request.ProjectPath);
+            // The terminal's own Claude profile when a live terminal is registered under that name, else
+            // the folder decision (ticket c8ee0eec item 33).
+            string claudeFolder = SessionLineageService.GetClaudeProjectFolderForAgent(request.ProjectPath, request.TerminalName);
             if (claudeFolder == null)
                 return Problem(detail: "Claude project folder not found for the given path", statusCode: 404);
 

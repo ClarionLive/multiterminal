@@ -120,6 +120,22 @@ namespace MultiTerminal.Tests
             // Not Default: a pane whose profile is unknown or whose folder is missing belongs to no root.
             Assert.Null(TeamWatcherService.GetConfigRootForProfileName("Nobody", ctx));
             Assert.Null(TeamWatcherService.GetConfigRootForProfileName("Gone", ctx));
+
+            // One pane-to-folder resolver (item 35): for every name the watcher's answer is
+            // ClaudeProfileDataRoots.ForProfileName's folder plus the separator, and null where that is null.
+            foreach (string name in new[] { null, "  ", "work", "Nobody", "Gone" })
+            {
+                var root = ClaudeProfileDataRoots.ForProfileName(name, ctx);
+                Assert.Equal(
+                    root == null ? null : root.ConfigDir + Path.DirectorySeparatorChar,
+                    TeamWatcherService.GetConfigRootForProfileName(name, ctx));
+            }
+
+            // That resolver also requires Default's own folder to exist: with none, a Default pane
+            // matches no root (there is no folder a team of its could be in).
+            var noDefaultFolder = ctx with { DirectoryExists = dir => dir.EndsWith("work", StringComparison.OrdinalIgnoreCase) };
+            Assert.Null(TeamWatcherService.GetConfigRootForProfileName(null, noDefaultFolder));
+            Assert.Equal(WorkRoot, TeamWatcherService.GetConfigRootForProfileName("Work", noDefaultFolder));
         }
 
         // ── Real folders ─────────────────────────────────────────────────────
@@ -233,6 +249,200 @@ namespace MultiTerminal.Tests
             Assert.All(h.Discovered, e => Assert.Equal(rootA, e.ConfigRoot));
         }
 
+        // ── Item 35: the first team of a fresh profile ───────────────────────
+
+        /// <summary>
+        /// Claude Code creates teams\ and the first team's folder together. The teams folder is moved in
+        /// whole here, so the only way this team can be found is the one-off look at a teams folder the
+        /// service had seen missing: no Created event for the team folder exists to find it by.
+        /// </summary>
+        [Fact]
+        public async Task The_team_already_inside_a_teams_folder_that_appears_is_discovered()
+        {
+            string rootA = MakeRoot("a");
+            string rootB = Path.Combine(_base, "b") + Path.DirectorySeparatorChar;
+            Directory.CreateDirectory(Path.Combine(rootB, "projects")); // the profile folder exists; teams\ does not
+            using var h = new Harness(new[] { rootA, rootB }, rootA);
+            h.Service.StartWatching();
+
+            string transcript = AddTeamsFolderWithTeam(rootB, "team-" + _id, "bee-" + _id, @"H:\Lead\Dir", Guid.NewGuid().ToString());
+
+            var found = await h.WaitForDiscovery(e => e.MemberName == "bee-" + _id);
+
+            Assert.NotNull(found);
+            Assert.Equal(rootB, found.ConfigRoot);
+            Assert.True(((TranscriptTailer)found.Tailer).HasTranscriptFile(transcript));
+        }
+
+        /// <summary>The same one level up: the whole profile folder did not exist at the last refresh.</summary>
+        [Fact]
+        public async Task The_team_already_inside_a_profile_folder_that_appears_is_discovered_at_the_next_refresh()
+        {
+            string rootA = MakeRoot("a");
+            string rootC = Path.Combine(_base, "c") + Path.DirectorySeparatorChar; // not created
+            using var h = new Harness(new[] { rootA, rootC }, rootA);
+            h.Service.StartWatching();
+
+            Directory.CreateDirectory(Path.Combine(rootC, "projects"));
+            AddTeamsFolderWithTeam(rootC, "team-" + _id, "cee-" + _id, @"H:\Lead\Dir", Guid.NewGuid().ToString());
+            h.Service.RefreshRoots();
+
+            var found = await h.WaitForDiscovery(e => e.MemberName == "cee-" + _id);
+
+            Assert.NotNull(found);
+            Assert.Equal(rootC, found.ConfigRoot);
+        }
+
+        /// <summary>
+        /// "Nothing from a previous session is restored" still holds: a teams folder that was there
+        /// when watching began is not looked into. The control is a team added afterwards to the same
+        /// root, which went through the same watcher and arrived.
+        /// </summary>
+        [Fact]
+        public async Task A_team_that_was_already_there_when_watching_began_is_not_restored()
+        {
+            string rootA = MakeRoot("a");
+            AddTeam(rootA, "old-" + _id, "old-member-" + _id, @"H:\Lead\Dir", Guid.NewGuid().ToString());
+            using var h = new Harness(new[] { rootA }, rootA);
+            h.Service.StartWatching();
+
+            AddTeam(rootA, "new-" + _id, "new-member-" + _id, @"H:\Lead\Dir", Guid.NewGuid().ToString());
+
+            Assert.NotNull(await h.WaitForDiscovery(e => e.MemberName == "new-member-" + _id));
+            await Task.Delay(1000); // longer than the one-off scan's delay, had one been scheduled
+            Assert.DoesNotContain(h.Discovered, e => e.MemberName == "old-member-" + _id);
+        }
+
+        // ── Item 35: a root stopped under a delayed callback ─────────────────
+
+        /// <summary>
+        /// The root is stopped at exactly the point a delayed callback has passed its own "is this root
+        /// still watched" check (the hook; waiting cannot arrange that). The callback then goes on to
+        /// read the team's config. It must not leave a team behind under the stopped root: nothing
+        /// would ever clean it up, and the same folder configured again would be handed that entry.
+        /// </summary>
+        [Fact]
+        public async Task A_delayed_callback_cannot_leave_a_team_under_a_root_that_was_stopped_meanwhile()
+        {
+            string rootA = MakeRoot("a");
+            string rootB = MakeRoot("b");
+            using var h = new Harness(new[] { rootA, rootB }, rootA);
+            h.Service.StartWatching();
+
+            string team = "team-" + _id;
+            string member = "bee-" + _id;
+            int stops = 0;
+            var ended = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            h.Service.ProcessTeamHook = (phase, name) =>
+            {
+                if (name != team) return;
+                if (phase == "start")
+                {
+                    if (System.Threading.Interlocked.Increment(ref stops) == 1)
+                    {
+                        h.Roots = new[] { rootA };
+                        h.Service.RefreshRoots();
+                    }
+                }
+                else
+                {
+                    ended.TrySetResult(true);
+                }
+            };
+
+            AddTeam(rootB, team, member, @"H:\Lead\Dir", Guid.NewGuid().ToString());
+
+            await Task.WhenAny(ended.Task, Task.Delay(Wait));
+            Assert.True(ended.Task.IsCompleted, "the team folder was never processed, so nothing was tested");
+            Assert.Equal(1, stops);
+
+            Assert.Equal(0, h.Service.ActiveTeamCount);
+            Assert.DoesNotContain(h.Discovered, e => e.MemberName == member);
+        }
+
+        // ── Item 35: the refresh must survive a failing subscriber ───────────
+
+        /// <summary>
+        /// RefreshRoots runs on a timer thread, where an exception that escapes ends the process. A
+        /// TeamRemoved subscriber that throws is the cheapest way to make stopping a root fail.
+        /// </summary>
+        [Fact]
+        public async Task Dropping_a_root_does_not_throw_when_a_TeamRemoved_subscriber_does()
+        {
+            string rootA = MakeRoot("a");
+            string rootB = MakeRoot("b");
+            using var h = new Harness(new[] { rootA, rootB }, rootA);
+            h.Service.StartWatching();
+            AddTeam(rootB, "team-" + _id, "bee-" + _id, @"H:\Lead\Dir", Guid.NewGuid().ToString());
+            Assert.NotNull(await h.WaitForDiscovery(e => e.MemberName == "bee-" + _id));
+
+            int thrown = 0;
+            h.Service.TeamRemoved += (s, e) =>
+            {
+                thrown++;
+                throw new InvalidOperationException("subscriber failed");
+            };
+
+            h.Roots = new[] { rootA };
+            var escaped = Record.Exception(() => h.Service.RefreshRoots());
+
+            Assert.Null(escaped);
+            Assert.Equal(1, thrown); // the subscriber did run and did throw: the refresh swallowed it
+            Assert.Equal(0, h.Service.ActiveTeamCount);
+        }
+
+        // ── Item 35: subagent panels are per profile folder too ──────────────
+
+        [Fact]
+        public void Subagent_panel_key_is_the_bare_name_under_Default_and_carries_the_root_under_any_other()
+        {
+            string underDefault = TeamWatcherService.BuildSubagentPanelKey(DefaultRoot, "Alice", isDefaultRoot: true);
+            string underWork = TeamWatcherService.BuildSubagentPanelKey(WorkRoot, "Alice", isDefaultRoot: false);
+
+            Assert.Equal("subagent:Alice", underDefault);
+            Assert.Equal("subagent:Alice|" + WorkRoot, underWork);
+
+            // The key says which root it is under, and only that one.
+            Assert.Equal("Alice", TeamWatcherService.SubagentNameIfUnderRoot(underDefault, DefaultRoot, isDefaultRoot: true));
+            Assert.Null(TeamWatcherService.SubagentNameIfUnderRoot(underDefault, WorkRoot, isDefaultRoot: false));
+            Assert.Equal("Alice", TeamWatcherService.SubagentNameIfUnderRoot(underWork, WorkRoot.ToUpperInvariant(), isDefaultRoot: false));
+            Assert.Null(TeamWatcherService.SubagentNameIfUnderRoot(underWork, DefaultRoot, isDefaultRoot: true));
+            Assert.Null(TeamWatcherService.SubagentNameIfUnderRoot(underWork, @"D:\cfg\", isDefaultRoot: false));
+            Assert.Null(TeamWatcherService.SubagentNameIfUnderRoot("team:review:Alice", DefaultRoot, isDefaultRoot: true));
+            Assert.Null(TeamWatcherService.SubagentNameIfUnderRoot(null, DefaultRoot, isDefaultRoot: true));
+        }
+
+        /// <summary>
+        /// The discriminator: the SAME subagent names under two roots. A removed team may take only
+        /// the panels under its own root, by name in either direction.
+        /// </summary>
+        [Fact]
+        public void A_removed_team_selects_orphan_subagent_panels_under_its_own_root_only()
+        {
+            string defaultAlice = TeamWatcherService.BuildSubagentPanelKey(DefaultRoot, "Alice", true);
+            string defaultAgentAlice = TeamWatcherService.BuildSubagentPanelKey(DefaultRoot, "Agent Alice", true);
+            string workAlice = TeamWatcherService.BuildSubagentPanelKey(WorkRoot, "Alice", false);
+            string workAgentAlice = TeamWatcherService.BuildSubagentPanelKey(WorkRoot, "Agent Alice", false);
+            string workBob = TeamWatcherService.BuildSubagentPanelKey(WorkRoot, "Bob", false);
+            var panels = new[] { defaultAlice, defaultAgentAlice, workAlice, workAgentAlice, workBob, "team:review:Alice", "team:review|" + WorkRoot + ":Alice" };
+
+            Assert.Equal(
+                new[] { workAlice, workAgentAlice },
+                TeamWatcherService.SelectOrphanSubagentPanels(panels, new[] { "alice" }, WorkRoot, isDefaultRoot: false));
+            Assert.Equal(
+                new[] { defaultAlice, defaultAgentAlice },
+                TeamWatcherService.SelectOrphanSubagentPanels(panels, new[] { "Alice" }, DefaultRoot, isDefaultRoot: true));
+
+            // The member name is longer than the panel's: still a match, still only under its root.
+            Assert.Equal(
+                new[] { workAlice, workAgentAlice },
+                TeamWatcherService.SelectOrphanSubagentPanels(panels, new[] { "Agent Alice" }, WorkRoot, isDefaultRoot: false));
+
+            Assert.Empty(TeamWatcherService.SelectOrphanSubagentPanels(panels, new[] { "Alice" }, @"D:\cfg\", isDefaultRoot: false));
+            Assert.Empty(TeamWatcherService.SelectOrphanSubagentPanels(panels, null, WorkRoot, isDefaultRoot: false));
+            Assert.Empty(TeamWatcherService.SelectOrphanSubagentPanels(panels, new[] { "" }, WorkRoot, isDefaultRoot: false));
+        }
+
         // ── Helpers ──────────────────────────────────────────────────────────
 
         /// <summary>A profile folder with empty teams and projects folders. Returned with a trailing separator.</summary>
@@ -252,22 +462,47 @@ namespace MultiTerminal.Tests
         /// </summary>
         private string AddTeam(string root, string teamName, string memberName, string leadCwd, string leadSessionId)
         {
+            string transcript = WriteTranscript(root, leadCwd, leadSessionId);
+
+            string staging = Path.Combine(_base, "staging", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(staging);
+            File.WriteAllText(Path.Combine(staging, "config.json"), ConfigJson(memberName, leadCwd, leadSessionId));
+            Directory.Move(staging, Path.Combine(root, "teams", teamName));
+            return transcript;
+        }
+
+        /// <summary>
+        /// As <see cref="AddTeam"/>, for a root that has NO teams folder yet: the teams folder is moved
+        /// in whole with the team already inside it, so no Created event for the team folder can ever
+        /// reach a watcher on teams\ (there was no teams\ to watch when it was made).
+        /// </summary>
+        private string AddTeamsFolderWithTeam(string root, string teamName, string memberName, string leadCwd, string leadSessionId)
+        {
+            string transcript = WriteTranscript(root, leadCwd, leadSessionId);
+
+            string stagedTeams = Path.Combine(_base, "staging", Guid.NewGuid().ToString("N"), "teams");
+            Directory.CreateDirectory(Path.Combine(stagedTeams, teamName));
+            File.WriteAllText(Path.Combine(stagedTeams, teamName, "config.json"), ConfigJson(memberName, leadCwd, leadSessionId));
+            Directory.Move(stagedTeams, Path.Combine(root, "teams"));
+            return transcript;
+        }
+
+        private static string WriteTranscript(string root, string leadCwd, string leadSessionId)
+        {
             string subagents = Path.Combine(TeamWatcherService.GetLeadProjectDir(root, leadCwd), leadSessionId, "subagents");
             Directory.CreateDirectory(subagents);
             string transcript = Path.Combine(subagents, $"agent-{Guid.NewGuid():N}.jsonl");
             File.WriteAllText(transcript, "{}\n");
+            return transcript;
+        }
 
+        private static string ConfigJson(string memberName, string leadCwd, string leadSessionId)
+        {
             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            string config =
+            return
                 "{\"leadSessionId\":\"" + leadSessionId + "\",\"members\":[" +
                 "{\"name\":\"team-lead\",\"agentType\":\"team-lead\",\"cwd\":\"" + leadCwd.Replace("\\", "\\\\") + "\",\"joinedAt\":" + now + "}," +
                 "{\"name\":\"" + memberName + "\",\"agentType\":\"general-purpose\",\"joinedAt\":" + now + "}]}";
-
-            string staging = Path.Combine(_base, "staging", Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(staging);
-            File.WriteAllText(Path.Combine(staging, "config.json"), config);
-            Directory.Move(staging, Path.Combine(root, "teams", teamName));
-            return transcript;
         }
 
         private sealed class Harness : IDisposable

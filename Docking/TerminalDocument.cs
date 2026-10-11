@@ -196,7 +196,18 @@ namespace MultiTerminal.Docking
         /// project owns: by "Launch as..." (the pane keeps its profile) and for a helper this pane spawns
         /// (the helper inherits it). A folder that belongs to a project always takes that project's
         /// profile instead. Held in memory only: a restored pane comes back on the start screen.</summary>
-        public string LaunchClaudeProfileName { get; private set; }
+        public string LaunchClaudeProfileName => _launchClaudeProfile?.ProfileName;
+
+        /// <summary>
+        /// The same fact as <see cref="LaunchClaudeProfileName"/>, able to tell "launched under Default"
+        /// (an instance whose name is null) from "has not launched, or its launch was refused" (null).
+        /// Session-data readers and writers need that difference (ticket c8ee0eec item 33): a launched
+        /// pane's data is under ITS profile, and only a pane with no launch is decided by folder.
+        /// One immutable reference replaced whole, so it can be read from any thread.
+        /// </summary>
+        internal MultiTerminal.Services.ClaudePaneProfile LaunchClaudeProfile => _launchClaudeProfile;
+
+        private volatile MultiTerminal.Services.ClaudePaneProfile _launchClaudeProfile;
 
         /// <summary>
         /// Event fired when the terminal process exits.
@@ -808,7 +819,11 @@ namespace MultiTerminal.Docking
             // Add permanent HUD tabs (Tasks is already tab 0). The dashboard pane is
             // titled "Activities" (Owner request d788da4b) - its tab ID stays
             // "__dashboard__" so SwitchToTabById deep-links keep working.
+            // Both session-reading tabs belong to THIS terminal, so they read under the profile this
+            // pane was launched under (ticket c8ee0eec item 33). A live closure, not a value: the
+            // profile is set at each launch, long after these tabs are built.
             _hudDashboard = new HudDashboardRenderer();
+            _hudDashboard.SetPaneProfileSource(() => LaunchClaudeProfile);
             _hudTabContainer.AddPermanentTab("__dashboard__", "\u26a1 Activities", _hudDashboard);
 
             _hudNotes = new HudNotesRenderer();
@@ -818,6 +833,7 @@ namespace MultiTerminal.Docking
             _hudTabContainer.AddPermanentTab("__knowledge__", "\ud83d\udcda Knowledge", _hudKnowledge);
 
             _hudSessions = new HudSessionsRenderer();
+            _hudSessions.SetPaneProfileSource(() => LaunchClaudeProfile);
             _hudTabContainer.AddPermanentTab("__sessions__", "\ud83d\udd52 Sessions", _hudSessions);
 
             // \ud83d\udd00 Git \u2014 per-project read-only git tab. Lives after Tasks per the
@@ -1377,7 +1393,8 @@ namespace MultiTerminal.Docking
         public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string quietStartProjectId = null, MultiTerminal.Models.ClaudeProfile claudeProfile = null)
         {
             // Per launch, like the role below: a reused pane must not keep the last launch's profile.
-            LaunchClaudeProfileName = claudeProfile == null || claudeProfile.IsDefault ? null : claudeProfile.Name;
+            _launchClaudeProfile = new MultiTerminal.Services.ClaudePaneProfile(
+                claudeProfile == null || claudeProfile.IsDefault ? null : claudeProfile.Name);
             _debugLogService?.Info("TerminalDocument.StartTerminal", $"===== START =====");
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"workingDirectory: '{workingDirectory ?? "null"}'");
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"terminalName: '{terminalName ?? "null"}'");
@@ -2438,7 +2455,7 @@ namespace MultiTerminal.Docking
             }
 
             _debugLogService?.Warning("TerminalDocument", $"Launch refused over its Claude profile; returning pane '{_docId}' to its start screen.");
-            LaunchClaudeProfileName = null;
+            _launchClaudeProfile = null;
             StopStatusLinePolling();
             OnTerminalProcessExited(sender, e);
             TerminalStartFailed?.Invoke(this, EventArgs.Empty);

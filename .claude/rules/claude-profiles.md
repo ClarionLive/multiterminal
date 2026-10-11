@@ -21,8 +21,9 @@ of the machine (`SettingsService`, key `ClaudeProfiles`); a project stores a pro
 | Launch sites | `MainForm.DecideLaunchClaudeProfile`, `MainForm.TryGetLaunchClaudeProfile` | Every pane, helper, headless agent and the gloss writer asks one of these two. `TryGet...` is the human-at-the-desk form (one message box per refusal). |
 | Pane environment | `ConPtyTerminal.BuildClaudeEnvSetup` | Appends the prologue to every pane's `envSetup`. |
 | Headless environment | `AgentProcess.ApplyEnvironment` | Applies the same decision to `ProcessStartInfo.Environment`, after the caller's variables. |
-| Session data | `Services/ClaudeProfileDataRoots` | Which config folder is read or written: `ForProfileName`, `ForFolder` / `ForProject`, `AllExisting`, `IsUnderAnyRoot`. |
-| Agent teams | `Services/TeamWatcherService` | Watches every root; `BuildTeamKey`. |
+| Session data | `Services/ClaudeProfileDataRoots` | Which config folder is read or written: `ForProfileName`, `ForPaneOrFolder` / `ForAgentOrFolder`, `ForFolder` / `ForProject`, `AllExisting`; the path guards `IsUnderAnyRoot` and `IsSessionTranscriptPath`; `PlanPaneFlush`. |
+| Agent name to pane | `Services/ClaudeProfilePaneLookup` | The one seam from an agent name to the profile of the live terminal registered under it. `Configure`d once in MainForm's constructor. |
+| Agent teams | `Services/TeamWatcherService` | Watches every root; `BuildTeamKey`, `BuildSubagentPanelKey`. |
 | UI | `Dialogs/SettingsWpfDialog` + `Dialogs/ClaudeProfileEditorRules`, `Dialogs/EditProjectDialog` + `Services/ClaudeProfileChoices`, `Dialogs/IdentityPickerDialog`, `Dialogs/IdentityPickerProfileDialog` | Editing the list, choosing per project, picking per launch. |
 
 ## Invariants a change must not break
@@ -68,14 +69,16 @@ of the machine (`SettingsService`, key `ClaudeProfiles`); a project stores a pro
    human opened is not: that is how a profile gets set up. "Cannot tell" counts as used
    (`HasBeenUsed`), because the answer is used to refuse.
 
-6. **Every pane MT starts gets the prologue, whatever it runs.** `BuildClaudeEnvSetup` is not given
-   the auto-run command. It used to be, and applied the prologue only when the first token was
-   `claude` or the pane was a plain shell; a pane started through a full path to `claude.exe` or a
-   wrapper script then ran under whatever the shell already had. Do not give it the command back.
-   Pinned by
-   `ClaudeProfileLaunchTests.The_environment_tail_cannot_see_the_command_so_it_cannot_skip_a_pane`.
-   Consequence: a Codex pane carries the variables too (Codex ignores them), and a project with a
-   broken profile refuses its Codex launch like any other.
+6. **The prologue helper cannot skip a pane; the call site is unpinned.** `BuildClaudeEnvSetup` is
+   not given the auto-run command. It used to be, and applied the prologue only when the first token
+   was `claude` or the pane was a plain shell; a pane started through a full path to `claude.exe` or
+   a wrapper script then ran under whatever the shell already had. Do not give it the command back.
+   `ClaudeProfileLaunchTests.The_environment_tail_is_not_given_the_command_so_it_cannot_branch_on_it`
+   pins exactly that: the helper has one parameter and it is not the command. That every pane MT
+   starts actually gets the prologue also needs `ConPtyTerminal.StartProcess` to call the helper
+   and put its result on the command line, and no test looks at that call site (see gaps).
+   Consequence of the intended behaviour: a Codex pane carries the variables too (Codex ignores
+   them), and a project with a broken profile refuses its Codex launch like any other.
 
 7. **Roots come only from settings.** `ClaudeProfileResolver.GetAllRoots` is built from the stored
    profiles and MT's startup environment, never from a path a caller supplies. It drops a drive
@@ -84,19 +87,47 @@ of the machine (`SettingsService`, key `ClaudeProfiles`); a project stores a pro
    `TokenMeterService.IsAllowedTranscriptPath`, `ClaudeProfileDataRoots.IsUnderAnyRoot` (the session
    lineage and session memory controllers).
 
-8. **A reader that has the pane uses that pane's profile; one that has a folder uses the launch
-   decision; only one with no context reads every root.** That is `ForProfileName`
-   (`TerminalDocument.LaunchClaudeProfileName`, for example through
-   `SessionLineageService.GetClaudeProjectFolderForProfile`), `ForFolder` / `ForProject`, and
-   `AllExisting`, in that order of preference. Do not build a `.claude` path from
-   `SpecialFolder.UserProfile` in a reader or writer.
+8. **Session data follows the PANE wherever a pane is known; the folder decides only when there is
+   none; only a caller with no context reads every root.** The folder decision answers Default for
+   a folder no project owns, while the pane in it may run under a profile it inherited from its
+   spawner or that the human picked. So a caller that has, or may have, a pane must not ask by
+   folder:
+   - it holds the pane: `ForProfileName(doc.LaunchClaudeProfileName)`;
+   - it may hold one (a terminal's HUD tab, the app-close save): `ForPaneOrFolder(pane, folder)`
+     with `TerminalDocument.LaunchClaudeProfile`, a `ClaudePaneProfile` that is null only for a pane
+     with no launch (`SessionLineageService.GetClaudeProjectFolderForPane`,
+     `GetMostRecentSessionForPane`, `ClaudeProfileDataRoots.PlanPaneFlush`);
+   - it holds an agent NAME (the session services, the REST controllers):
+     `ForAgentOrFolder(agentName, folder)` / `SessionLineageService.GetClaudeProjectFolderForAgent`.
+     The name reaches a pane through `ClaudeProfilePaneLookup`, `Configure`d once in MainForm's
+     constructor with `FindPaneClaudeProfileForAgent` (the registered-terminal map under its own
+     lock; running terminals only).
 
-9. **Team keys are (root, name).** Two profiles can each have a team with the same name.
-   `TeamWatcherService.BuildTeamKey` gives the bare name under the Default root and name plus root
-   under any other; subscribers key on the event's `TeamKey`, never `TeamName`.
-   `GetConfigRootForProfileName` returns null, not Default's root, for a profile that cannot be
-   resolved. Pinned by
-   `TeamWatcherServiceRootsTests.Team_key_is_the_bare_name_under_Default_and_differs_for_the_same_name_under_another_root`.
+   A pane whose profile cannot be honoured gets NO folder (skipped and logged), never the
+   folder's profile and never Default; so does a pane lookup that throws
+   (`ClaudePaneProfile.Unknown`). Then `ForFolder` / `ForProject`, then `AllExisting`. Do not build
+   a `.claude` path from `SpecialFolder.UserProfile` in a reader or writer. Pinned by
+   `ClaudeProfilePaneScopeTests` (the pure choice; the call sites are wiring no test executes).
+
+   Still path-only, because no pane exists to ask: the startup session sync and crash-recovery
+   indexing and the periodic sync (MainForm, over registered projects); the Project panel
+   (`ProjectPanelDocument`, the selected project); View Session (`MainForm`, a project path from
+   the session list); `SessionSyncService` and `SessionDiscovery` (a project path, or every root);
+   `SessionLineageService.GetUnsummarizedSessions`; `SessionMemoryDatabase.FindUnindexedSessions`;
+   the REST calls that carry a path and no terminal name; and any call naming an agent that is not
+   a live MT terminal (a headless agent, a ClarionAssistant tab).
+
+9. **Team keys are (root, name), and so are subagent panel keys.** Two profiles can each have a
+   team, or a subagent, with the same name. `TeamWatcherService.BuildTeamKey` gives the bare name
+   under the Default root and name plus root under any other; `BuildSubagentPanelKey` is the same
+   rule for a non-team subagent's panel. Subscribers key on the event's `TeamKey` /
+   `SubagentPanelKey`, never `TeamName` / `MemberName`. When a team is removed, MainForm closes
+   orphan subagent panels by member name only among panels under that team's root
+   (`SelectOrphanSubagentPanels`), since dropping a profile removes each of its teams.
+   `GetConfigRootForProfileName` is `ClaudeProfileDataRoots.ForProfileName` plus a separator, so it
+   returns null, not Default's root, for a profile that cannot be resolved. Pinned by
+   `TeamWatcherServiceRootsTests.Team_key_is_the_bare_name_under_Default_and_differs_for_the_same_name_under_another_root`
+   and `A_removed_team_selects_orphan_subagent_panels_under_its_own_root_only`.
 
 10. **Comparisons are one rule.** Profile names: `ClaudeProfile.NormalizeName`, then
     ordinal-ignore-case (blank and `Default` are the same). Folders:
@@ -150,8 +181,19 @@ of the machine (`SettingsService`, key `ClaudeProfiles`); a project stores a pro
   `~/.codex/config.toml` is one file shared by every Codex terminal.
 - **Path guards do not follow links.** `Canonicalize` does not resolve symlinks or junctions
   (ticket 47484cc4).
+- **Session data for an agent that is not a live MT terminal is decided by folder.** A headless
+  agent spawned into a folder no project owns runs under its spawner's profile, but it has no pane,
+  so its session data is looked for under Default (invariant 8's last paragraph).
+- **A team's state has no lock.** `TeamWatcherService._activeTeams` is a concurrent map; the
+  collections inside each `TeamState` are not synchronised. A callback that fetched its state just
+  before the root was stopped can go on adding to a state that was already cleaned up.
+- **"Launch as" asks about a predicted folder.** The broker can register another name than the one
+  asked for, whose work is in another folder. A pick that the real folder's project contradicts is
+  refused then (the pane goes to its start screen), which is after the old session was unregistered.
 - **A profile removed while panes run under it** leaves those panes running; their session data is
   then skipped (`ForProfileName` returns null) rather than read from Default.
 - **Not executed live.** The suite covers the pure decisions. That `StartProcess` puts the prologue
-  on the command line, and that each MainForm site passes the decided profile on, is covered by no
-  test.
+  on the command line, that each MainForm site passes the decided profile on, and that the
+  pane-scoped session callers (the app-close save, the two HUD tabs, the controllers, and MainForm's
+  terminal lookup behind `ClaudeProfilePaneLookup`) call what `ClaudeProfilePaneScopeTests` tests,
+  is covered by no test.

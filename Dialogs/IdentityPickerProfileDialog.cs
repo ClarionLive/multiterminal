@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Windows.Forms;
+using MultiTerminal.Models;
+using MultiTerminal.Services;
 using MultiTerminal.Terminal;
 
 namespace MultiTerminal.Dialogs
@@ -12,6 +14,11 @@ namespace MultiTerminal.Dialogs
     /// is a real choice: more than one profile exists and no project owns the folder (the caller
     /// checks both; a folder a project owns always uses that project's profile and is never asked
     /// about). The pane's current profile is preselected, so Enter keeps it.
+    /// <para>The list is built by <see cref="ClaudeProfileChoices.Build"/>, as Edit Project's is. A
+    /// pane whose current profile is no longer configured on this machine therefore shows that name
+    /// as its own selected "(not configured on this machine)" entry, which cannot be launched: the
+    /// Launch button stays disabled until a configured profile is picked. Default is never
+    /// preselected in its place, so Enter cannot move the pane to Default (item 34).</para>
     /// </summary>
     public class IdentityPickerProfileDialog : Form
     {
@@ -19,6 +26,7 @@ namespace MultiTerminal.Dialogs
 #pragma warning disable CA2213
         private readonly ComboBox _profileCombo;
         private readonly Label _note;
+        private readonly Button _okButton;
 #pragma warning restore CA2213
         private readonly Func<string, string> _profileHint;
 
@@ -27,14 +35,14 @@ namespace MultiTerminal.Dialogs
 
         /// <param name="identityName">The identity being launched, for the prompt.</param>
         /// <param name="folder">The folder it will run in, for the prompt.</param>
-        /// <param name="claudeProfileNames">Every profile name, Default first.</param>
-        /// <param name="preselectedName">The pane's current profile; null or unknown selects the first.</param>
+        /// <param name="claudeProfiles">Every configured profile (<see cref="ClaudeProfileResolver.GetAllProfiles()"/>).</param>
+        /// <param name="paneProfileName">The pane's current profile; null or blank = Default.</param>
         /// <param name="profileHint">Profile name → a one-line note to show under the choice, or null.</param>
         public IdentityPickerProfileDialog(
             string identityName,
             string folder,
-            IReadOnlyList<string> claudeProfileNames,
-            string preselectedName,
+            IReadOnlyList<ClaudeProfile> claudeProfiles,
+            string paneProfileName,
             TerminalTheme theme,
             Func<string, string> profileHint = null)
         {
@@ -74,8 +82,9 @@ namespace MultiTerminal.Dialogs
                 DropDownStyle = ComboBoxStyle.DropDownList,
                 Font = new Font("Segoe UI", 9.5f)
             };
-            foreach (var name in claudeProfileNames ?? Array.Empty<string>())
-                _profileCombo.Items.Add(name);
+            var choices = ClaudeProfileChoices.Build(claudeProfiles, paneProfileName, out int selectedIndex);
+            foreach (var choice in choices)
+                _profileCombo.Items.Add(choice);
             Controls.Add(_profileCombo);
 
             _note = new Label
@@ -93,11 +102,14 @@ namespace MultiTerminal.Dialogs
                 Location = new Point(286, 146),
                 Size = new Size(80, 30)
             };
+            _okButton = okButton;
             okButton.Click += (s, e) =>
             {
-                if (_profileCombo.SelectedItem == null)
+                // Checked again here, not only through Enabled: Enter reaches AcceptButton's click.
+                var picked = _profileCombo.SelectedItem as ClaudeProfileChoice;
+                if (!ClaudeProfileChoices.CanLaunch(picked))
                     return;
-                SelectedClaudeProfileName = _profileCombo.SelectedItem.ToString();
+                SelectedClaudeProfileName = picked.Name ?? ClaudeProfile.DefaultName;
                 DialogResult = DialogResult.OK;
             };
             Controls.Add(okButton);
@@ -114,14 +126,25 @@ namespace MultiTerminal.Dialogs
             AcceptButton = okButton;
             CancelButton = cancelButton;
 
-            _profileCombo.SelectedIndexChanged += (s, e) =>
-                _note.Text = _profileCombo.SelectedItem == null ? "" : _profileHint?.Invoke(_profileCombo.SelectedItem.ToString()) ?? "";
+            _profileCombo.SelectedIndexChanged += (s, e) => OnProfileSelectionChanged();
 
-            int preselected = string.IsNullOrWhiteSpace(preselectedName) ? -1 : _profileCombo.FindStringExact(preselectedName.Trim());
-            if (_profileCombo.Items.Count > 0)
-                _profileCombo.SelectedIndex = preselected >= 0 ? preselected : 0;
+            // The pane's own profile, even when it is the "(not configured on this machine)" entry:
+            // Build put it in the list so that it, and not Default, is what is selected.
+            _profileCombo.SelectedIndex = selectedIndex;
+            OnProfileSelectionChanged();
 
             ApplyTheme(theme);
+        }
+
+        private void OnProfileSelectionChanged()
+        {
+            var picked = _profileCombo.SelectedItem as ClaudeProfileChoice;
+            _okButton.Enabled = ClaudeProfileChoices.CanLaunch(picked);
+            _note.Text = picked == null
+                ? ""
+                : ClaudeProfileChoices.DescribeUnlaunchable(picked)
+                    ?? _profileHint?.Invoke(picked.Name ?? ClaudeProfile.DefaultName)
+                    ?? "";
         }
 
         private void ApplyTheme(TerminalTheme theme)

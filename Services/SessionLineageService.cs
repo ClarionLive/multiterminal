@@ -184,13 +184,33 @@ namespace MultiTerminal.Services
         public static string GetClaudeProjectFolderForProfile(string projectPath, string paneProfileName) =>
             GetClaudeProjectFolderForProfile(projectPath, paneProfileName, ClaudeProfileResolver.CurrentContext());
 
+        /// <summary>
+        /// For a caller that MAY have a pane (a HUD tab of a terminal): under <paramref name="pane"/>'s
+        /// profile when there is one, else (null) the folder decision of
+        /// <see cref="GetClaudeProjectFolder(string)"/>. A pane whose profile cannot be honoured gives
+        /// null, never the folder's profile and never Default.
+        /// </summary>
+        internal static string GetClaudeProjectFolderForPane(string projectPath, ClaudePaneProfile pane) =>
+            GetClaudeProjectFolderUnder(ClaudeProfileDataRoots.ForPaneOrFolder(pane, projectPath), projectPath);
+
+        /// <summary>
+        /// For a caller that holds an AGENT NAME (ticket c8ee0eec item 33): under the profile of the
+        /// live terminal registered as <paramref name="agentName"/> when there is one
+        /// (<see cref="ClaudeProfilePaneLookup"/>), else the folder decision. A folder no project owns
+        /// answers Default by folder, while the agent's pane may run under another profile.
+        /// </summary>
+        internal static string GetClaudeProjectFolderForAgent(string projectPath, string agentName) =>
+            GetClaudeProjectFolderUnder(ClaudeProfileDataRoots.ForAgentOrFolder(agentName, projectPath), projectPath);
+
         internal static string GetClaudeProjectFolder(string projectPath, ClaudeProfileLookup lookup, ClaudeProfileContext ctx) =>
             GetClaudeProjectFolderUnder(ClaudeProfileDataRoots.ForProject(null, projectPath, lookup, ctx), projectPath);
 
         internal static string GetClaudeProjectFolderForProfile(string projectPath, string paneProfileName, ClaudeProfileContext ctx) =>
             GetClaudeProjectFolderUnder(ClaudeProfileDataRoots.ForProfileName(paneProfileName, ctx), projectPath);
 
-        private static string GetClaudeProjectFolderUnder(ClaudeDataRoot root, string projectPath)
+        /// <summary>The folder for <paramref name="projectPath"/> under an already-decided
+        /// <paramref name="root"/> (null root = null: the caller skips).</summary>
+        internal static string GetClaudeProjectFolderUnder(ClaudeDataRoot root, string projectPath)
         {
             if (root == null || string.IsNullOrEmpty(projectPath))
                 return null;
@@ -378,8 +398,12 @@ namespace MultiTerminal.Services
             // and non-write I/O must not sit inside the global write gate — that is the same shape the
             // census's ORDERING_EXEMPT exists to avoid, and holding the gate across it would lengthen the
             // hold for every other writer for no benefit.
+            //
+            // Ticket c8ee0eec item 33: the session belongs to the agent's TERMINAL, so its file is
+            // under that terminal's Claude profile. The folder decision is used only when no live
+            // terminal is registered under this name.
             string sessionFilePath = null;
-            string claudeFolder = GetClaudeProjectFolder(projectPath);
+            string claudeFolder = GetClaudeProjectFolderForAgent(projectPath, agentName);
             if (claudeFolder != null)
                 sessionFilePath = Path.Combine(claudeFolder, $"{sessionId}.jsonl");
 
@@ -541,14 +565,30 @@ namespace MultiTerminal.Services
         /// Returns the most recent session for the given project path by converting the
         /// project path to its .claude/projects/ folder and querying by file path prefix.
         /// Returns null if the project folder doesn't exist or no sessions are found.
+        /// <para>Which profile's folder (ticket c8ee0eec item 33): the one of the live terminal
+        /// registered as <paramref name="agentName"/> when there is one, else the folder decision.</para>
         /// </summary>
         public SessionLineageRecord GetMostRecentSessionForProject(string projectPath, string agentName = null, string excludeSessionId = null, int skip = 0)
         {
-            string claudeFolder = GetClaudeProjectFolder(projectPath);
+            string claudeFolder = GetClaudeProjectFolderForAgent(projectPath, agentName);
             if (claudeFolder == null)
                 return null;
 
             return _db.GetMostRecentSessionByFolder(claudeFolder, agentName, excludeSessionId, skip);
+        }
+
+        /// <summary>
+        /// As <see cref="GetMostRecentSessionForProject(string, string, string, int)"/> with no agent
+        /// filter, for a caller that may have a pane (a terminal's HUD): the session is looked for
+        /// under <paramref name="pane"/>'s profile, or by folder when <paramref name="pane"/> is null.
+        /// </summary>
+        internal SessionLineageRecord GetMostRecentSessionForPane(string projectPath, ClaudePaneProfile pane)
+        {
+            string claudeFolder = GetClaudeProjectFolderForPane(projectPath, pane);
+            if (claudeFolder == null)
+                return null;
+
+            return _db.GetMostRecentSessionByFolder(claudeFolder, null, null, 0);
         }
 
         /// <summary>

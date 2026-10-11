@@ -119,6 +119,16 @@ namespace MultiTerminal.Controls
             }
         }
 
+        /// <summary>
+        /// Ticket c8ee0eec item 33: the terminal this tab belongs to says which Claude profile it was
+        /// launched under, so the sessions listed are that pane's and not those of whichever profile
+        /// the folder would get. Asked at each refresh. Not set (a host with no terminal), or
+        /// answering null (the pane has not launched), means the folder decides.
+        /// </summary>
+        internal void SetPaneProfileSource(Func<ClaudePaneProfile> paneProfile) => _paneProfile = paneProfile;
+
+        private Func<ClaudePaneProfile> _paneProfile;
+
         public void SetProject(string projectPath)
         {
             _projectPath = projectPath;
@@ -149,7 +159,7 @@ namespace MultiTerminal.Controls
 
             try
             {
-                string claudeFolder = SessionLineageService.GetClaudeProjectFolder(_projectPath);
+                string claudeFolder = SessionLineageService.GetClaudeProjectFolderForPane(_projectPath, _paneProfile?.Invoke());
                 if (string.IsNullOrEmpty(claudeFolder))
                 {
                     Send(new { type = "sessions", sessions = Array.Empty<object>() });

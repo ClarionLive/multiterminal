@@ -44,6 +44,13 @@ namespace MultiTerminal.Services
         /// team name can exist under two profiles. Null for a non-team subagent.
         /// </summary>
         public string TeamKey { get; set; }
+        /// <summary>
+        /// For a non-team subagent: the key of its panel
+        /// (<see cref="TeamWatcherService.BuildSubagentPanelKey"/>), which carries the config root for
+        /// any profile but Default, so two profiles can each have a subagent of the same name. Null
+        /// for a team member.
+        /// </summary>
+        public string SubagentPanelKey { get; set; }
     }
 
     /// <summary>
@@ -60,6 +67,9 @@ namespace MultiTerminal.Services
         public List<string> TranscriptPaths { get; set; } = new();
         /// <summary>The Claude config directory (canonical, trailing separator) the team lived under.</summary>
         public string ConfigRoot { get; set; }
+        /// <summary>True when <see cref="ConfigRoot"/> is the Default profile's directory (its subagent
+        /// panel keys carry no root; see <see cref="TeamWatcherService.BuildSubagentPanelKey"/>).</summary>
+        public bool IsDefaultRoot { get; set; }
         /// <summary>The team's identity across profiles; see <see cref="TeammateDiscoveredEventArgs.TeamKey"/>.</summary>
         public string TeamKey { get; set; }
     }
@@ -116,6 +126,9 @@ namespace MultiTerminal.Services
         // Keyed on BuildTeamKey(root, name), NOT the team name: two profiles can each have a team
         // called "review", and they must never share a TeamState. Concurrent because each root's
         // watchers call in on their own threads: two roots can add a team at the same instant.
+        // That covers THIS MAP ONLY (adding, finding and removing a TeamState). The collections inside
+        // a TeamState are plain ones, read and changed from watcher callbacks, timers and cleanup with
+        // no lock of their own.
         private readonly ConcurrentDictionary<string, TeamState> _activeTeams = new ConcurrentDictionary<string, TeamState>();
 
         private volatile bool _disposed;
@@ -221,6 +234,71 @@ namespace MultiTerminal.Services
         internal static string BuildTeamKey(string root, string teamName, bool isDefaultRoot) =>
             isDefaultRoot ? teamName : teamName + "|" + root;
 
+        /// <summary>Prefix of every non-team subagent panel key.</summary>
+        internal const string SubagentPanelPrefix = "subagent:";
+
+        /// <summary>
+        /// Pure: the panel key of a non-team subagent. The same (root, name) rule as
+        /// <see cref="BuildTeamKey"/>: <c>subagent:name</c> under the Default root (as before profiles
+        /// existed), <c>subagent:name|root</c> under any other, so a same-named subagent under a second
+        /// profile gets its own panel instead of being taken for the first one's.
+        /// </summary>
+        internal static string BuildSubagentPanelKey(string root, string memberName, bool isDefaultRoot) =>
+            SubagentPanelPrefix + BuildTeamKey(root, memberName, isDefaultRoot);
+
+        /// <summary>
+        /// Pure: when <paramref name="panelKey"/> is a subagent panel key that belongs to
+        /// <paramref name="root"/>, its subagent name; else null. A key with no root part belongs to
+        /// the Default root and to no other. The root is what follows the LAST '|': a root cannot
+        /// contain one, a name could. (A Default-root subagent whose name contains '|' therefore reads
+        /// as belonging to no configured root and is matched by nothing here; a removed team still
+        /// finds its panel by transcript path.)
+        /// </summary>
+        internal static string SubagentNameIfUnderRoot(string panelKey, string root, bool isDefaultRoot)
+        {
+            if (panelKey == null || !panelKey.StartsWith(SubagentPanelPrefix, StringComparison.Ordinal))
+                return null;
+
+            string rest = panelKey.Substring(SubagentPanelPrefix.Length);
+            int bar = rest.LastIndexOf('|');
+            if (bar < 0)
+                return isDefaultRoot ? rest : null;
+
+            return !isDefaultRoot && string.Equals(rest.Substring(bar + 1), root, StringComparison.OrdinalIgnoreCase)
+                ? rest.Substring(0, bar)
+                : null;
+        }
+
+        /// <summary>
+        /// Pure: which orphan subagent panels a removed team takes with it. Only panels under the
+        /// team's OWN root (<see cref="SubagentNameIfUnderRoot"/>) are candidates, so removing one
+        /// profile's team never closes another profile's subagent panels. Within the root a panel
+        /// matches a member by name, in either direction and ignoring case ("Agent Alice" for member
+        /// "Alice", or the reverse), as it did before profiles existed.
+        /// </summary>
+        internal static List<string> SelectOrphanSubagentPanels(IEnumerable<string> panelKeys, IEnumerable<string> memberNames, string root, bool isDefaultRoot)
+        {
+            var selected = new List<string>();
+            var names = (memberNames ?? Enumerable.Empty<string>()).Where(n => !string.IsNullOrEmpty(n)).ToList();
+            if (names.Count == 0 || panelKeys == null)
+                return selected;
+
+            foreach (string key in panelKeys)
+            {
+                string orphanName = SubagentNameIfUnderRoot(key, root, isDefaultRoot);
+                if (string.IsNullOrEmpty(orphanName))
+                    continue;
+
+                if (names.Any(name => orphanName.Contains(name, StringComparison.OrdinalIgnoreCase)
+                                      || name.Contains(orphanName, StringComparison.OrdinalIgnoreCase)))
+                {
+                    selected.Add(key);
+                }
+            }
+
+            return selected;
+        }
+
         /// <summary>
         /// Pure: where the transcripts of a session started in <paramref name="leadCwd"/> live for the
         /// profile whose config directory is <paramref name="root"/>.
@@ -233,16 +311,17 @@ namespace MultiTerminal.Services
         /// with an event's ConfigRoot. Null or blank = Default. Returns null when that profile cannot be
         /// resolved (removed from Settings, folder gone): the caller must then treat the pane as
         /// belonging to no known root rather than to Default.
+        /// <para>The pane-to-folder answer is <see cref="ClaudeProfileDataRoots.ForProfileName(string)"/>,
+        /// the one resolver every session-data reader uses (it also requires the folder to exist and
+        /// logs a skip once); this only adds the separator the watcher's roots carry.</para>
         /// </summary>
         public static string GetConfigRootForProfileName(string profileName) =>
             GetConfigRootForProfileName(profileName, ClaudeProfileResolver.CurrentContext());
 
         internal static string GetConfigRootForProfileName(string profileName, ClaudeProfileContext ctx)
         {
-            var resolution = ClaudeProfileResolver.Resolve(null, profileName, ctx);
-            if (!resolution.CanLaunch || resolution.Profile == null) return null;
-            string dir = ClaudeProfileResolver.GetConfigDir(resolution.Profile, ctx);
-            return dir == null ? null : dir + Path.DirectorySeparatorChar;
+            var root = ClaudeProfileDataRoots.ForProfileName(profileName, ctx);
+            return root == null ? null : root.ConfigDir + Path.DirectorySeparatorChar;
         }
 
         private static string WithTrailingSeparator(string path)
@@ -272,7 +351,47 @@ namespace MultiTerminal.Services
             RefreshRoots();
 
             if (_refreshInterval > TimeSpan.Zero && _refreshTimer == null)
-                _refreshTimer = new Timer(_ => RefreshRoots(), null, _refreshInterval, _refreshInterval);
+                _refreshTimer = new Timer(_ => RefreshRootsFromTimer(), null, _refreshInterval, _refreshInterval);
+        }
+
+        /// <summary>
+        /// The timer's entry point. An exception that leaves a timer callback ends the process, so
+        /// whatever a refresh throws (a subscriber of TeamRemoved, a watcher that will not dispose) is
+        /// logged here and the next tick tries again.
+        /// </summary>
+        private void RefreshRootsFromTimer()
+        {
+            try
+            {
+                RefreshRoots();
+            }
+#pragma warning disable CA1031 // Timer thread: any escape terminates MultiTerminal.
+            catch (Exception ex)
+#pragma warning restore CA1031
+            {
+                LogError($"Refreshing the Claude profile folders failed; will retry: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Raise TeamRemoved for teams taken down while <c>_rootsLock</c> was held, now that it is not:
+        /// a subscriber must not run inside the lock. One failing subscriber does not stop the rest.
+        /// </summary>
+        private void RaiseTeamsRemoved(List<TeamRemovedEventArgs> removed)
+        {
+            foreach (var args in removed)
+            {
+                try
+                {
+                    TeamRemoved?.Invoke(this, args);
+                }
+#pragma warning disable CA1031 // A subscriber's failure must not leave the other removed teams' panels open, nor reach the timer thread.
+                catch (Exception ex)
+#pragma warning restore CA1031
+                {
+                    LogError($"A TeamRemoved subscriber failed for team '{args.TeamName}': {ex.Message}");
+                }
+            }
         }
 
         /// <summary>
@@ -285,6 +404,7 @@ namespace MultiTerminal.Services
         {
             if (_disposed || !_started) return;
             if (!Monitor.TryEnter(_rootsLock)) return;
+            var removed = new List<TeamRemovedEventArgs>();
             try
             {
                 if (_disposed || !_started) return;
@@ -306,8 +426,17 @@ namespace MultiTerminal.Services
                 foreach (var stale in _roots.Values.Where(r => !wanted.Contains(r.Plan.Root)).ToList())
                 {
                     _roots.Remove(stale.Plan.Root);
-                    StopRoot(stale);
-                    LogInfo($"Stopped watching (no longer a configured Claude profile folder): {stale.Plan.Root}");
+                    try
+                    {
+                        StopRoot(stale, removed);
+                        LogInfo($"Stopped watching (no longer a configured Claude profile folder): {stale.Plan.Root}");
+                    }
+#pragma warning disable CA1031 // One root that will not stop cleanly must not keep the others from being reconciled (or reach the timer thread).
+                    catch (Exception ex)
+#pragma warning restore CA1031
+                    {
+                        LogError($"Error while stopping the watchers for '{stale.Plan.Root}': {ex.Message}");
+                    }
                 }
 
                 foreach (var entry in plan)
@@ -325,6 +454,7 @@ namespace MultiTerminal.Services
             finally
             {
                 Monitor.Exit(_rootsLock);
+                RaiseTeamsRemoved(removed);
             }
         }
 
@@ -342,6 +472,7 @@ namespace MultiTerminal.Services
 
                     if (!Directory.Exists(root.Plan.Root))
                     {
+                        root.TeamsSeenMissing = true;
                         if (!root.MissingLogged)
                         {
                             root.MissingLogged = true;
@@ -369,6 +500,7 @@ namespace MultiTerminal.Services
 
             if (!Directory.Exists(teamsDir))
             {
+                root.TeamsSeenMissing = true;
                 if (root.TeamsRootWatcher != null) return; // already waiting for it
 
                 Log($" Teams directory does not exist yet: {teamsDir}");
@@ -420,15 +552,86 @@ namespace MultiTerminal.Services
 
             // Never restore old agent panels from previous sessions.
             // Only react to NEW team directories created during this session via the FileSystemWatcher.
+            //
+            // One exception, which is not a restore: a teams folder this service SAW MISSING (or whose
+            // profile folder it saw missing) and that exists now was created during this session, and
+            // so was everything in it. Claude Code makes teams\ and the first team's folder in one go,
+            // so that team is already inside by the time this watcher goes live and no Created event
+            // will ever come for it. Look once.
+            if (root.TeamsSeenMissing)
+            {
+                root.TeamsSeenMissing = false;
+                ScanTeamsCreatedBeforeWatching(root, teamsDir);
+            }
+        }
+
+        /// <summary>How long the one-off scan waits before processing what it found: longer than the
+        /// 200 ms a Created event waits, so a folder that got BOTH (it appeared in the instant between
+        /// the watcher going live and the listing below) has its state from the event by then and is
+        /// skipped here.</summary>
+        private static readonly TimeSpan TeamScanDelay = TimeSpan.FromMilliseconds(600);
+
+        /// <summary>
+        /// Process the team folders that are in <paramref name="teamsDir"/> at the moment its watcher
+        /// goes live. The listing is taken NOW, on the caller's thread (anything created later gets a
+        /// Created event); the processing happens off it, after <see cref="TeamScanDelay"/>.
+        /// </summary>
+        private void ScanTeamsCreatedBeforeWatching(RootState root, string teamsDir)
+        {
+            string[] present;
+            try
+            {
+                present = Directory.GetDirectories(teamsDir);
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                LogError($"Could not list '{teamsDir}' for teams created before it was watched: {ex.Message}");
+                return;
+            }
+
+            if (present.Length == 0) return;
+
+            Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(TeamScanDelay);
+
+                    foreach (string teamDir in present)
+                    {
+                        if (Gone(root)) return;
+                        string teamName = Path.GetFileName(teamDir);
+                        if (!Directory.Exists(teamDir) ||
+                            _activeTeams.ContainsKey(BuildTeamKey(root.Plan.Root, teamName, root.Plan.IsDefault)))
+                        {
+                            continue;
+                        }
+
+                        LogInfo($"Team directory found in a teams folder created this session: {teamName} ({root.Plan.Root})");
+                        ProcessTeamDirectory(root, teamName);
+                    }
+                }
+#pragma warning disable CA1031 // Unobserved task: log, as ProcessTeamDirectory does for a single team.
+                catch (Exception ex)
+#pragma warning restore CA1031
+                {
+                    LogError($"Error scanning '{teamsDir}' for teams created before it was watched: {ex.Message}");
+                }
+            });
         }
 
         /// <summary>
         /// Stop everything under one root: its watchers, its teams (TeamRemoved is raised for each, so
         /// their panels close) and its orphan tailers. Caller holds <c>_rootsLock</c> and has already
         /// taken the root out of <c>_roots</c>.
+        /// <para>TeamRemoved is NOT raised here: each removed team's event is added to
+        /// <paramref name="removed"/>, and the caller raises them (<see cref="RaiseTeamsRemoved"/>)
+        /// after it has released <c>_rootsLock</c>.</para>
         /// </summary>
-        private void StopRoot(RootState root)
+        private void StopRoot(RootState root, List<TeamRemovedEventArgs> removed)
         {
+            // Set BEFORE the sweep below: a delayed callback that adds a TeamState after the sweep
+            // re-checks this flag in GetOrAddTeam and takes its own entry out again.
             root.Stopped = true;
 
             lock (root.Sync)
@@ -443,8 +646,17 @@ namespace MultiTerminal.Services
 
             foreach (var kvp in _activeTeams.Where(k => ReferenceEquals(k.Value.Root, root)).ToList())
             {
-                if (_activeTeams.TryRemove(kvp.Key, out var state))
-                    CleanupTeam(state.TeamName, state);
+                if (!_activeTeams.TryRemove(kvp)) continue;
+                try
+                {
+                    CleanupTeam(kvp.Value.TeamName, kvp.Value, removed);
+                }
+#pragma warning disable CA1031 // One team that will not clean up must not leave the root's other teams and tailers running.
+                catch (Exception ex)
+#pragma warning restore CA1031
+                {
+                    LogError($"Error cleaning up team '{kvp.Value.TeamName}' under '{root.Plan.Root}': {ex.Message}");
+                }
             }
 
             var orphans = new List<TranscriptTailer>();
@@ -497,11 +709,52 @@ namespace MultiTerminal.Services
             }
         }
 
-        /// <summary>The state for (root, team name), created on first use.</summary>
+        /// <summary>
+        /// The state for (root, team name), created on first use; NULL when <paramref name="root"/> is
+        /// no longer watched (every caller returns on null).
+        /// <para>Callers are delayed callbacks that checked <see cref="Gone"/> some time ago. StopRoot
+        /// may have swept the root's teams since, and an entry added after that sweep would never be
+        /// cleaned up: worse, if the same folder is configured again it gets a NEW RootState but the
+        /// same key, and would be handed this entry, bound for good to the stopped one. So the stopped
+        /// flag is checked again AFTER the add (StopRoot sets it before it sweeps, so one of the two
+        /// always sees the other), and an entry that belongs to another RootState than the live one
+        /// asking is replaced.</para>
+        /// <para>What this does not cover: a caller that got its state just before the sweep goes on
+        /// using it after the sweep cleaned it up. See the note on <c>_activeTeams</c>.</para>
+        /// </summary>
         private TeamState GetOrAddTeam(RootState root, string teamName)
         {
             string teamKey = BuildTeamKey(root.Plan.Root, teamName, root.Plan.IsDefault);
-            return _activeTeams.GetOrAdd(teamKey, key => new TeamState { TeamName = teamName, TeamKey = key, Root = root });
+            if (Gone(root)) return null;
+
+            TeamState state;
+            while (true)
+            {
+                state = _activeTeams.GetOrAdd(teamKey, key => new TeamState { TeamName = teamName, TeamKey = key, Root = root });
+                if (ReferenceEquals(state.Root, root)) break;
+
+                // Same key, another RootState. The caller's root is live (checked above and below), so
+                // the entry is a leftover of a stopped one. Swap it out; if somebody else changed the
+                // entry first, look again.
+                var fresh = new TeamState { TeamName = teamName, TeamKey = teamKey, Root = root };
+                if (_activeTeams.TryUpdate(teamKey, fresh, state))
+                {
+                    LogInfo($"Replaced the state of team '{teamName}' left by a stopped watcher of '{root.Plan.Root}'");
+                    CleanupTeam(state.TeamName, state);
+                    state = fresh;
+                    break;
+                }
+            }
+
+            if (Gone(root))
+            {
+                // Only this exact entry: a concurrent replacement is not ours to remove.
+                if (_activeTeams.TryRemove(new KeyValuePair<string, TeamState>(teamKey, state)))
+                    CleanupTeam(state.TeamName, state);
+                return null;
+            }
+
+            return state;
         }
 
 
@@ -513,6 +766,7 @@ namespace MultiTerminal.Services
             try
             {
                 if (Gone(root)) return;
+                ProcessTeamHook?.Invoke("start", teamName);
                 string configPath = Path.Combine(root.Plan.TeamsDir, teamName, "config.json");
 
                 if (!File.Exists(configPath))
@@ -526,6 +780,7 @@ namespace MultiTerminal.Services
 
                 // Watch config.json for changes (new members added)
                 var state = GetOrAddTeam(root, teamName);
+                if (state == null) return; // the root stopped being watched meanwhile
                 if (state.ConfigWatcher == null)
                 {
                     string teamDir = Path.Combine(root.Plan.TeamsDir, teamName);
@@ -549,13 +804,36 @@ namespace MultiTerminal.Services
                             ReadAndProcessConfig(root, teamName, configPath);
                         });
                     };
+
+                    // The root may have been stopped, and this state swept, after GetOrAddTeam handed
+                    // it over: nothing would dispose a watcher attached to it now.
+                    if (Gone(root))
+                    {
+                        try { state.ConfigWatcher?.Dispose(); } catch { }
+                        state.ConfigWatcher = null;
+                    }
                 }
             }
             catch (Exception ex)
             {
                 LogError($"Error processing team '{teamName}': {ex.Message}");
             }
+            finally
+            {
+                ProcessTeamHook?.Invoke("end", teamName);
+            }
         }
+
+        /// <summary>
+        /// Test seam (InternalsVisibleTo), null in production: called with "start" when a team folder
+        /// is about to be processed (after the stopped check) and with "end" when that pass is over,
+        /// on the processing thread. It lets a test stop the root at exactly the point a delayed
+        /// callback has got past its check, which no amount of waiting can arrange.
+        /// </summary>
+        internal Action<string, string> ProcessTeamHook { get; set; }
+
+        /// <summary>Test seam (InternalsVisibleTo): how many teams the service is holding state for.</summary>
+        internal int ActiveTeamCount => _activeTeams.Count;
 
         private void WatchForConfigFile(RootState root, string teamName)
         {
@@ -566,6 +844,7 @@ namespace MultiTerminal.Services
             // and CleanupTeam/StopWatching dispose it deterministically — even if
             // the Created event never fires (no config.json ever appears).
             var state = GetOrAddTeam(root, teamName);
+            if (state == null) return; // the root stopped being watched meanwhile
 
             // Construct with events OFF so we can wire the Created handler before
             // any event can fire. This closes the construct-to-subscribe race
@@ -653,6 +932,7 @@ namespace MultiTerminal.Services
                 }
 
                 var state = GetOrAddTeam(root, teamName);
+                if (state == null) return; // the root stopped being watched meanwhile
                 state.LeadSessionId = leadSessionId;
 
                 if (!config.TryGetProperty("members", out var membersArr)) return;
@@ -1957,7 +2237,8 @@ namespace MultiTerminal.Services
                     TaskDescription = tracking.TaskDescription,
                     SubagentType = tracking.SubagentType,
                     ParentSessionId = parentSessionId,
-                    ConfigRoot = root.Plan.Root
+                    ConfigRoot = root.Plan.Root,
+                    SubagentPanelKey = BuildSubagentPanelKey(root.Plan.Root, displayName, root.Plan.IsDefault)
                 });
             }
             catch (Exception ex)
@@ -2207,19 +2488,38 @@ namespace MultiTerminal.Services
             try { _refreshTimer?.Dispose(); } catch { }
             _refreshTimer = null;
 
+            var removed = new List<TeamRemovedEventArgs>();
             lock (_rootsLock)
             {
                 // Each root takes its own watchers, teams and orphan tailers down with it.
                 foreach (var root in _roots.Values.ToList())
                 {
-                    StopRoot(root);
+                    try
+                    {
+                        StopRoot(root, removed);
+                    }
+#pragma warning disable CA1031 // Shutdown: one root that will not stop cleanly must not leave the others running.
+                    catch (Exception ex)
+#pragma warning restore CA1031
+                    {
+                        LogError($"Error while stopping the watchers for '{root.Plan.Root}': {ex.Message}");
+                    }
                 }
                 _roots.Clear();
 
                 foreach (var kvp in _activeTeams.ToArray())
                 {
-                    if (_activeTeams.TryRemove(kvp.Key, out var state))
-                        CleanupTeam(state.TeamName, state);
+                    if (!_activeTeams.TryRemove(kvp)) continue;
+                    try
+                    {
+                        CleanupTeam(kvp.Value.TeamName, kvp.Value, removed);
+                    }
+#pragma warning disable CA1031 // As above.
+                    catch (Exception ex)
+#pragma warning restore CA1031
+                    {
+                        LogError($"Error cleaning up team '{kvp.Value.TeamName}': {ex.Message}");
+                    }
                 }
 
                 List<TranscriptTailer> leftovers;
@@ -2234,9 +2534,13 @@ namespace MultiTerminal.Services
                     try { tailer.Dispose(); } catch { }
                 }
             }
+
+            RaiseTeamsRemoved(removed);
         }
 
-        private void CleanupTeam(string teamName, TeamState state)
+        /// <param name="deferred">When given, the TeamRemoved event is added to it instead of being
+        /// raised: the caller holds <c>_rootsLock</c> and raises it after releasing the lock.</param>
+        private void CleanupTeam(string teamName, TeamState state, List<TeamRemovedEventArgs> deferred = null)
         {
             // Collect member names before disposal for panel cleanup and orphan prevention
             var memberNames = state.KnownMembers.Select(m => m.name).ToList();
@@ -2296,7 +2600,7 @@ namespace MultiTerminal.Services
                 }
             }
 
-            state.ConfigWatcher?.Dispose();
+            try { state.ConfigWatcher?.Dispose(); } catch { }
             state.ConfigWatcher = null;
 
             foreach (var watcher in state.Watchers)
@@ -2305,14 +2609,19 @@ namespace MultiTerminal.Services
             }
             state.Watchers.Clear();
 
-            TeamRemoved?.Invoke(this, new TeamRemovedEventArgs
+            var removedArgs = new TeamRemovedEventArgs
             {
                 TeamName = teamName,
                 MemberNames = memberNames,
                 TranscriptPaths = state.MatchedTranscripts.ToList(),
                 ConfigRoot = state.Root.Plan.Root,
+                IsDefaultRoot = state.Root.Plan.IsDefault,
                 TeamKey = state.TeamKey
-            });
+            };
+            if (deferred != null)
+                deferred.Add(removedArgs);
+            else
+                TeamRemoved?.Invoke(this, removedArgs);
 
             // Prune expired retired names (older than 60 seconds)
             var cutoff = now.AddSeconds(-60);
@@ -2415,6 +2724,10 @@ namespace MultiTerminal.Services
             public bool ProjectsStarted;
             public bool MissingLogged;
             public bool ProjectsMissingLogged;
+
+            /// <summary>True once this root's teams folder (or the root itself) was seen NOT to exist:
+            /// whatever is in it when it does exist was created during this session. Guarded by Sync.</summary>
+            public bool TeamsSeenMissing;
             public readonly List<FileSystemWatcher> ProjectWatchers = new List<FileSystemWatcher>();
         }
     }

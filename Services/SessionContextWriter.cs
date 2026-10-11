@@ -26,11 +26,50 @@ namespace MultiTerminal.Services
         // hardcoding, so this works for any checkout/machine. Mirrors the canonical encoder in
         // SessionSyncService.GetClaudeProjectFolderName (issue #5 follow-up).
         //
-        // WHICH config folder (ticket c8ee0eec): the one of the Claude profile that project folder runs
-        // under, decided at each write. This writer knows a project folder and an agent NAME, not a
-        // pane, so the project's profile is the only one it can stand behind. When that profile is not
-        // configured here, has no folder, or cannot be decided, nothing is written: the file is never
-        // put in the Default profile's folder instead, and no profile folder is created.
+        // WHICH config folder (ticket c8ee0eec): decided at each write by the caller's rootForFolder.
+        // There is ONE context file, for one project folder (ContextProjectDir). The app-close save
+        // picks the pane it is written for with ChooseContextPane: a pane sitting in that project
+        // folder supplies its own profile's folder (item 33); with no such pane the profile is the one
+        // a launch in that folder would get. When the profile is not configured here, has no folder,
+        // or cannot be decided, nothing is written: the file is never put in the Default profile's
+        // folder instead, and no profile folder is created.
+
+        /// <summary>The one project folder whose ACTIVE-CONTEXT.md this writer maintains.</summary>
+        internal static string ContextProjectDir => ResolveProjectDir();
+
+        /// <summary>
+        /// Pure: which pane the single context file is written for. The first pane whose folder is
+        /// <paramref name="projectDir"/> or beneath it (<paramref name="inProject"/> true: that pane's
+        /// profile decides where the file goes); else the first pane, which then supplies only the
+        /// agent name (<paramref name="inProject"/> false: no pane is in the folder, so the folder
+        /// decides). Null when there are no named panes.
+        /// </summary>
+        internal static ClaudePaneSnapshot ChooseContextPane(string projectDir, System.Collections.Generic.IEnumerable<ClaudePaneSnapshot> panes, out bool inProject)
+        {
+            inProject = false;
+            var list = (panes ?? Enumerable.Empty<ClaudePaneSnapshot>()).Where(p => p != null && !string.IsNullOrEmpty(p.AgentName)).ToList();
+            if (list.Count == 0)
+                return null;
+
+            string project = ClaudeProfileResolver.Canonicalize(projectDir);
+            if (project != null)
+            {
+                string prefix = project + Path.DirectorySeparatorChar;
+                foreach (var pane in list)
+                {
+                    string folder = ClaudeProfileResolver.Canonicalize(pane.Folder);
+                    if (folder != null
+                        && (string.Equals(folder, project, StringComparison.OrdinalIgnoreCase)
+                            || folder.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        inProject = true;
+                        return pane;
+                    }
+                }
+            }
+
+            return list[0];
+        }
 
         /// <summary>
         /// The ACTIVE-CONTEXT.md path for <paramref name="projectDir"/>, or null (with
@@ -100,12 +139,21 @@ namespace MultiTerminal.Services
         /// Writes ACTIVE-CONTEXT.md by querying the REST API for active task state.
         /// Fast, mechanical, no Claude involvement. Returns true on success; false also when the
         /// project's Claude profile has no usable folder on this machine (nothing is written then).
+        /// Path-only: the profile is the one a launch in the context project folder would get.
         /// </summary>
-        public static async Task<bool> WriteContextAsync(string agentName = null)
+        public static Task<bool> WriteContextAsync(string agentName = null) =>
+            WriteContextAsync(agentName, ClaudeProfileDataRoots.ForFolder);
+
+        /// <summary>
+        /// As <see cref="WriteContextAsync(string)"/>, with the config folder decided by the caller
+        /// (ticket c8ee0eec item 33: from the PANE's profile where a pane is known). A
+        /// <paramref name="rootForFolder"/> that answers null writes nothing.
+        /// </summary>
+        internal static async Task<bool> WriteContextAsync(string agentName, Func<string, ClaudeDataRoot> rootForFolder)
         {
             try
             {
-                string contextFile = ResolveContextFile(ResolveProjectDir(), ClaudeProfileDataRoots.ForFolder, out string refusal);
+                string contextFile = ResolveContextFile(ResolveProjectDir(), rootForFolder, out string refusal);
                 if (contextFile == null)
                 {
                     System.Diagnostics.Debug.WriteLine($"[SessionContextWriter] Not written: {refusal}.");

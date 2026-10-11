@@ -86,5 +86,18 @@ namespace MultiTerminal.Services
             selectedIndex = choices.Count - 1;
             return choices;
         }
+
+        /// <summary>
+        /// For a picker that STARTS something under the picked profile ("Launch as"): an entry for a
+        /// name this machine has no profile for is shown, so the current value is not misreported as
+        /// Default, but it cannot be launched. Nothing selected cannot be launched either.
+        /// </summary>
+        public static bool CanLaunch(ClaudeProfileChoice choice) => choice != null && !choice.IsMissing;
+
+        /// <summary>The note a launch picker shows for an entry <see cref="CanLaunch"/> rejects, else null.</summary>
+        public static string DescribeUnlaunchable(ClaudeProfileChoice choice) =>
+            choice != null && choice.IsMissing
+                ? $"'{choice.Name}' is not configured on this machine. Pick another profile, or add it in Settings > Claude Profiles."
+                : null;
     }
 }
