@@ -7470,8 +7470,12 @@ namespace MultiTerminal
                             foreach (var kvp in _terminalDocMap)
                             {
                                 string termCwd = kvp.Value.GetWorkingDirectory();
+                                // c8ee0eec item 12: the team was found under one Claude profile's folder, so
+                                // only a pane launched under THAT profile can be its lead. A pane of another
+                                // profile sitting in the same folder is not a match.
                                 if (!string.IsNullOrEmpty(termCwd) &&
-                                    termCwd.Equals(e.LeadCwd, StringComparison.OrdinalIgnoreCase))
+                                    termCwd.Equals(e.LeadCwd, StringComparison.OrdinalIgnoreCase) &&
+                                    string.Equals(TeamWatcherService.GetConfigRootForProfileName(kvp.Value.LaunchClaudeProfileName), e.ConfigRoot, StringComparison.OrdinalIgnoreCase))
                                 {
                                     spawnerDoc = kvp.Value;
                                     resolvedSpawner = kvp.Value.CustomTitle ?? kvp.Value.TabText ?? kvp.Key;
@@ -7484,7 +7488,8 @@ namespace MultiTerminal
 
                     _debugLogService?.Info("MainForm", $"Native teammate discovered: {e.MemberName} in team {e.TeamName}, spawner: {resolvedSpawner ?? "(unknown)"}");
 
-                    string panelKey = $"team:{e.TeamName}:{e.MemberName}";
+                    // TeamKey, not TeamName: the same team name can exist under two Claude profiles.
+                    string panelKey = $"team:{e.TeamKey}:{e.MemberName}";
 
                     void DoCreate()
                     {
@@ -7511,18 +7516,18 @@ namespace MultiTerminal
 
                     if (InvokeRequired)
                     {
-                        try { BeginInvoke(new Action(() => CleanupTeamPanels(e.TeamName, e.MemberNames, e.TranscriptPaths))); }
+                        try { BeginInvoke(new Action(() => CleanupTeamPanels(e.TeamKey, e.MemberNames, e.TranscriptPaths))); }
                         catch (ObjectDisposedException) { }
                     }
                     else
                     {
-                        CleanupTeamPanels(e.TeamName, e.MemberNames, e.TranscriptPaths);
+                        CleanupTeamPanels(e.TeamKey, e.MemberNames, e.TranscriptPaths);
                     }
                 };
 
                 _teamWatcher.MemberRemoved += (s, e) =>
                 {
-                    string panelKey = $"team:{e.TeamName}:{e.MemberName}";
+                    string panelKey = $"team:{e.TeamKey}:{e.MemberName}";
                     _debugLogService?.Info("MainForm", $"Native teammate removed: {e.MemberName} from team {e.TeamName}, closing panel");
 
                     void CloseAgentPanel()
@@ -7732,9 +7737,11 @@ namespace MultiTerminal
         // Oracle terminal management removed — OracleService now owns the terminal
         // via OracleTerminalForm (always-on, hidden popup, auto-restart)
 
-        private void CleanupTeamPanels(string teamName, List<string> memberNames = null, List<string> transcriptPaths = null)
+        private void CleanupTeamPanels(string teamKey, List<string> memberNames = null, List<string> transcriptPaths = null)
         {
-            string prefix = $"team:{teamName}:";
+            // teamKey is TeamWatcherService's (profile folder, team name) identity, the same value the
+            // panel keys were built from, so removing one profile's team never closes another's panels.
+            string prefix = $"team:{teamKey}:";
 
             // Close and remove team-keyed embedded panels
             var embeddedKeys = _embeddedAgentMap.Keys.Where(k => k.StartsWith(prefix)).ToList();

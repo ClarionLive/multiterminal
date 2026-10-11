@@ -32,6 +32,18 @@ namespace MultiTerminal.Services
         /// Used to resolve the spawner terminal when SpawnerName is unknown.
         /// </summary>
         public string ParentSessionId { get; set; }
+        /// <summary>
+        /// The Claude config directory (canonical, trailing separator) this team or transcript was
+        /// found under. Roots come only from <see cref="ClaudeProfileResolver.GetAllRoots()"/>.
+        /// </summary>
+        public string ConfigRoot { get; set; }
+        /// <summary>
+        /// The team's identity across profiles (see <see cref="TeamWatcherService.BuildTeamKey"/>):
+        /// the bare team name under the Default root, name plus root under any other. Subscribers
+        /// that key anything on a team must use this, never <see cref="TeamName"/>, because the same
+        /// team name can exist under two profiles. Null for a non-team subagent.
+        /// </summary>
+        public string TeamKey { get; set; }
     }
 
     /// <summary>
@@ -46,10 +58,25 @@ namespace MultiTerminal.Services
         /// Used by MainForm to find and clean up orphan panels by transcript path match.
         /// </summary>
         public List<string> TranscriptPaths { get; set; } = new();
+        /// <summary>The Claude config directory (canonical, trailing separator) the team lived under.</summary>
+        public string ConfigRoot { get; set; }
+        /// <summary>The team's identity across profiles; see <see cref="TeammateDiscoveredEventArgs.TeamKey"/>.</summary>
+        public string TeamKey { get; set; }
     }
 
+    /// <summary>One Claude config directory the team watcher covers, and the folders it watches there.</summary>
+    /// <param name="Root">The config directory, canonical with a trailing separator.</param>
+    /// <param name="TeamsDir">The root's teams folder.</param>
+    /// <param name="ProjectsDir">The root's projects folder.</param>
+    /// <param name="AppProjectDir">The folder under ProjectsDir for the slug of MT's own working directory.</param>
+    /// <param name="IsDefault">True for the Default profile's directory.</param>
+    internal sealed record TeamWatchRoot(string Root, string TeamsDir, string ProjectsDir, string AppProjectDir, bool IsDefault);
+
+    /// <summary>What the watcher is told to cover: every configured root, and which one is Default's.</summary>
+    internal sealed record TeamWatchRootSet(IReadOnlyList<string> Roots, string DefaultRoot);
+
     /// <summary>
-    /// Watches ~/.claude/teams/ for native Claude Code agent teams and creates
+    /// Watches teams/ under every configured Claude profile folder for native Claude Code agent teams and creates
     /// TranscriptTailer instances for each discovered teammate. This is the
     /// "tmux replacement" — making invisible in-process teammates visible
     /// in MultiTerminal's Agent Panel.
@@ -58,29 +85,54 @@ namespace MultiTerminal.Services
     ///   ~/.claude/teams/{team-name}/config.json     → team config with members
     ///   ~/.claude/teams/{team-name}/inboxes/{name}.json → per-agent inbox
     ///   ~/.claude/projects/{slug}/{session}/subagents/agent-{id}.jsonl → transcripts
+    ///
+    /// Ticket c8ee0eec item 12: "~/.claude" above stands for EACH root in
+    /// <see cref="ClaudeProfileResolver.GetAllRoots()"/>. A pane running under a second profile writes
+    /// its teams and projects folders under that profile's folder. Rules:
+    ///   - Roots come only from the resolver; nothing else is ever watched. The set is re-read every
+    ///     <see cref="DefaultRefreshInterval"/> (there is no settings-changed signal to hook), which is
+    ///     also what picks up a profile folder that did not exist yet and drops a removed profile.
+    ///   - A team is keyed on (root, name), never on the name alone: see <see cref="BuildTeamKey"/>.
+    ///   - A team's transcripts are looked for under the SAME root its config.json was found in. The
+    ///     lead's Claude Code process wrote both, so that root is the lead pane's profile by
+    ///     construction; no terminal lookup is involved.
     /// </summary>
     public class TeamWatcherService : IDisposable
     {
-        private readonly string _teamsDir;
-        private readonly string _projectDir;
-        private readonly Dictionary<string, TeamState> _activeTeams = new Dictionary<string, TeamState>();
-        private FileSystemWatcher _teamsRootWatcher;
+        /// <summary>How often the configured root set is re-read from the resolver.</summary>
+        internal static readonly TimeSpan DefaultRefreshInterval = TimeSpan.FromSeconds(30);
 
-        private bool _disposed;
+        private readonly string _projectSlug;
+        private readonly Func<TeamWatchRootSet> _rootsProvider;
+        private readonly TimeSpan _refreshInterval;
+
+        // Guards _roots and the add/remove of whole roots. Order: _rootsLock, then RootState.Sync,
+        // then _trackedSubagentFiles. Watcher callbacks take only the last two.
+        private readonly object _rootsLock = new object();
+        private readonly Dictionary<string, RootState> _roots = new Dictionary<string, RootState>(StringComparer.OrdinalIgnoreCase);
+        private Timer _refreshTimer;
+        private volatile bool _started;
+
+        // Keyed on BuildTeamKey(root, name), NOT the team name: two profiles can each have a team
+        // called "review", and they must never share a TeamState. Concurrent because each root's
+        // watchers call in on their own threads: two roots can add a team at the same instant.
+        private readonly ConcurrentDictionary<string, TeamState> _activeTeams = new ConcurrentDictionary<string, TeamState>();
+
+        private volatile bool _disposed;
 
         // Project-level subagent watching (non-team agents)
         private readonly HashSet<string> _trackedSubagentFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, TranscriptTailer> _orphanTailers = new Dictionary<string, TranscriptTailer>(StringComparer.OrdinalIgnoreCase);
-        private readonly List<FileSystemWatcher> _projectWatchers = new List<FileSystemWatcher>();
         private readonly HashSet<string> _watchedProjectDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // Track agent names from recently-deleted teams to prevent orphan watcher from
-        // creating stale panels. Entries auto-expire after 60 seconds.
+        // creating stale panels. Entries auto-expire after 60 seconds. Keyed on RetiredKey(root, name):
+        // a team deleted under one profile must not hide a same-named subagent of another.
         private readonly ConcurrentDictionary<string, DateTime> _retiredTeamAgentNames = new(StringComparer.OrdinalIgnoreCase);
 
         public event EventHandler<TeammateDiscoveredEventArgs> TeammateDiscovered;
         public event EventHandler<TeamRemovedEventArgs> TeamRemoved;
-        public event EventHandler<(string TeamName, string MemberName)> MemberRemoved;
+        public event EventHandler<(string TeamName, string MemberName, string TeamKey)> MemberRemoved;
         public event EventHandler<TeammateDiscoveredEventArgs> SubagentDiscovered;
         public event EventHandler<(string TeamName, string MemberName, AgentMessage Message, string SpawnerName)> TeamMessageSent;
 
@@ -105,129 +157,378 @@ namespace MultiTerminal.Services
         }
 
         public TeamWatcherService(string projectSlug)
+            : this(projectSlug, ResolverRoots, DefaultRefreshInterval)
         {
-            string userHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            _teamsDir = Path.Combine(userHome, ".claude", "teams");
-            _projectDir = Path.Combine(userHome, ".claude", "projects", projectSlug);
-
-            Log($"Teams dir: {_teamsDir}");
-            Log($"Project dir: {_projectDir}");
         }
 
         /// <summary>
-        /// Start watching for native agent teams.
-        /// Scans existing teams on startup and watches for new team directories.
+        /// Test seam (InternalsVisibleTo): the root set comes from <paramref name="rootsProvider"/>
+        /// instead of the resolver, and a zero <paramref name="refreshInterval"/> means no timer (the
+        /// test calls <see cref="RefreshRoots"/> itself).
+        /// </summary>
+        internal TeamWatcherService(string projectSlug, Func<TeamWatchRootSet> rootsProvider, TimeSpan refreshInterval)
+        {
+            _projectSlug = projectSlug;
+            _rootsProvider = rootsProvider ?? throw new ArgumentNullException(nameof(rootsProvider));
+            _refreshInterval = refreshInterval;
+        }
+
+        /// <summary>The production root set: every configured profile folder, from the resolver only.</summary>
+        private static TeamWatchRootSet ResolverRoots()
+        {
+            string defaultDir = ClaudeProfileResolver.GetConfigDir(null);
+            return new TeamWatchRootSet(
+                ClaudeProfileResolver.GetAllRoots(),
+                defaultDir == null ? null : defaultDir + Path.DirectorySeparatorChar);
+        }
+
+        // ── Pure decisions (unit-tested) ──────────────────────────────────────
+
+        /// <summary>
+        /// Pure: the folders to watch for a list of config roots. Blank roots are dropped, a missing
+        /// trailing separator is added, and duplicates (case-insensitive) collapse to the first. Nothing
+        /// is added that is not in <paramref name="roots"/>.
+        /// </summary>
+        internal static IReadOnlyList<TeamWatchRoot> BuildWatchPlan(IReadOnlyList<string> roots, string defaultRoot, string projectSlug)
+        {
+            var plan = new List<TeamWatchRoot>();
+            if (roots == null) return plan;
+
+            string normalizedDefault = WithTrailingSeparator(defaultRoot);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string raw in roots)
+            {
+                string root = WithTrailingSeparator(raw);
+                if (root == null || !seen.Add(root)) continue;
+
+                string projectsDir = Path.Combine(root, "projects");
+                plan.Add(new TeamWatchRoot(
+                    root,
+                    Path.Combine(root, "teams"),
+                    projectsDir,
+                    Path.Combine(projectsDir, projectSlug ?? "unknown"),
+                    normalizedDefault != null && string.Equals(root, normalizedDefault, StringComparison.OrdinalIgnoreCase)));
+            }
+            return plan;
+        }
+
+        /// <summary>
+        /// Pure: a team's identity. Under the Default root it is the bare team name, so everything
+        /// keyed on it behaves exactly as it did before profiles existed. Under any other root it is
+        /// <c>name|root</c>. '|' cannot appear in a Windows folder name, so a non-default key can
+        /// never equal a default one.
+        /// </summary>
+        internal static string BuildTeamKey(string root, string teamName, bool isDefaultRoot) =>
+            isDefaultRoot ? teamName : teamName + "|" + root;
+
+        /// <summary>
+        /// Pure: where the transcripts of a session started in <paramref name="leadCwd"/> live for the
+        /// profile whose config directory is <paramref name="root"/>.
+        /// </summary>
+        internal static string GetLeadProjectDir(string root, string leadCwd) =>
+            Path.Combine(root, "projects", GetClaudeProjectSlug(leadCwd));
+
+        /// <summary>
+        /// The config root (trailing separator) of the profile a pane was launched under, for comparing
+        /// with an event's ConfigRoot. Null or blank = Default. Returns null when that profile cannot be
+        /// resolved (removed from Settings, folder gone): the caller must then treat the pane as
+        /// belonging to no known root rather than to Default.
+        /// </summary>
+        public static string GetConfigRootForProfileName(string profileName) =>
+            GetConfigRootForProfileName(profileName, ClaudeProfileResolver.CurrentContext());
+
+        internal static string GetConfigRootForProfileName(string profileName, ClaudeProfileContext ctx)
+        {
+            var resolution = ClaudeProfileResolver.Resolve(null, profileName, ctx);
+            if (!resolution.CanLaunch || resolution.Profile == null) return null;
+            string dir = ClaudeProfileResolver.GetConfigDir(resolution.Profile, ctx);
+            return dir == null ? null : dir + Path.DirectorySeparatorChar;
+        }
+
+        private static string WithTrailingSeparator(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return null;
+            return Path.EndsInDirectorySeparator(path) ? path : path + Path.DirectorySeparatorChar;
+        }
+
+        private static string RetiredKey(RootState root, string agentName) => root.Plan.Root + "\n" + agentName;
+
+        private bool Gone(RootState root) => _disposed || root.Stopped;
+
+        private static bool IsUnder(RootState root, string path) =>
+            path != null && path.StartsWith(root.Plan.Root, StringComparison.OrdinalIgnoreCase);
+
+        // ── Root lifecycle ────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Start watching for native agent teams under every configured root, and keep the root set
+        /// current. Only NEW team directories are reacted to; nothing from a previous session is restored.
         /// </summary>
         public void StartWatching()
         {
             if (_disposed) return;
+            _started = true;
 
-            // Ensure teams directory exists
-            if (!Directory.Exists(_teamsDir))
-            {
-                Log($" Teams directory does not exist yet: {_teamsDir}");
-                // Watch for the directory to be created
-                string parentDir = Path.GetDirectoryName(_teamsDir);
-                if (parentDir != null && Directory.Exists(parentDir))
-                {
-                    _teamsRootWatcher = new FileSystemWatcher(parentDir)
-                    {
-                        Filter = "teams",
-                        NotifyFilter = NotifyFilters.DirectoryName,
-                        EnableRaisingEvents = true
-                    };
-                    _teamsRootWatcher.Created += (s, e) =>
-                    {
-                        _teamsRootWatcher?.Dispose();
-                        _teamsRootWatcher = null;
-                        StartWatchingTeamsDir();
-                    };
-                }
-                // Still watch for non-team subagents even when no teams dir exists
-                StartProjectSubagentWatching();
-                return;
-            }
+            RefreshRoots();
 
-            StartWatchingTeamsDir();
-
-            // Also watch for non-team subagents at the project level
-            StartProjectSubagentWatching();
+            if (_refreshInterval > TimeSpan.Zero && _refreshTimer == null)
+                _refreshTimer = new Timer(_ => RefreshRoots(), null, _refreshInterval, _refreshInterval);
         }
 
-        private void StartWatchingTeamsDir()
+        /// <summary>
+        /// Re-read the configured roots and reconcile: stop watching a root that is no longer
+        /// configured (its teams are removed and its panels closed), start a new one, and retry the
+        /// parts of a known root whose folders did not exist last time. Runs on a timer; safe to call
+        /// directly (e.g. from a future settings-changed signal). A run that overlaps another is skipped.
+        /// </summary>
+        public void RefreshRoots()
         {
-            if (!Directory.Exists(_teamsDir)) return;
+            if (_disposed || !_started) return;
+            if (!Monitor.TryEnter(_rootsLock)) return;
+            try
+            {
+                if (_disposed || !_started) return;
+
+                IReadOnlyList<TeamWatchRoot> plan;
+                try
+                {
+                    var set = _rootsProvider();
+                    plan = BuildWatchPlan(set?.Roots, set?.DefaultRoot, _projectSlug);
+                }
+                catch (Exception ex)
+                {
+                    // Keep what we have: a settings read that failed says nothing about which roots exist.
+                    LogError($"Could not read the Claude profile folders; keeping the current set: {ex.Message}");
+                    return;
+                }
+
+                var wanted = new HashSet<string>(plan.Select(p => p.Root), StringComparer.OrdinalIgnoreCase);
+                foreach (var stale in _roots.Values.Where(r => !wanted.Contains(r.Plan.Root)).ToList())
+                {
+                    _roots.Remove(stale.Plan.Root);
+                    StopRoot(stale);
+                    LogInfo($"Stopped watching (no longer a configured Claude profile folder): {stale.Plan.Root}");
+                }
+
+                foreach (var entry in plan)
+                {
+                    if (!_roots.TryGetValue(entry.Root, out var root))
+                    {
+                        root = new RootState(entry);
+                        _roots[entry.Root] = root;
+                        Log($"Teams dir: {entry.TeamsDir}");
+                        Log($"Project dir: {entry.AppProjectDir}");
+                    }
+                    StartRoot(root);
+                }
+            }
+            finally
+            {
+                Monitor.Exit(_rootsLock);
+            }
+        }
+
+        /// <summary>
+        /// Idempotent: start whatever part of this root is not running yet. A root whose folder does not
+        /// exist (a profile never used) is skipped and logged once; the next refresh tries again.
+        /// </summary>
+        private void StartRoot(RootState root)
+        {
+            try
+            {
+                lock (root.Sync)
+                {
+                    if (Gone(root)) return;
+
+                    if (!Directory.Exists(root.Plan.Root))
+                    {
+                        if (!root.MissingLogged)
+                        {
+                            root.MissingLogged = true;
+                            LogInfo($"Claude profile folder does not exist yet; it will be watched once it appears: {root.Plan.Root}");
+                        }
+                        return;
+                    }
+                    root.MissingLogged = false;
+
+                    EnsureTeamsWatching(root);
+                    EnsureProjectSubagentWatching(root);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError($"Error starting watchers for '{root.Plan.Root}': {ex.Message}");
+            }
+        }
+
+        /// <summary>Caller holds <c>root.Sync</c>.</summary>
+        private void EnsureTeamsWatching(RootState root)
+        {
+            if (root.TeamsStarted) return;
+            string teamsDir = root.Plan.TeamsDir;
+
+            if (!Directory.Exists(teamsDir))
+            {
+                if (root.TeamsRootWatcher != null) return; // already waiting for it
+
+                Log($" Teams directory does not exist yet: {teamsDir}");
+
+                // Watch for the directory to be created
+                var pending = new FileSystemWatcher(Path.TrimEndingDirectorySeparator(root.Plan.Root))
+                {
+                    Filter = "teams",
+                    NotifyFilter = NotifyFilters.DirectoryName
+                };
+                pending.Created += (s, e) =>
+                {
+                    if (Gone(root)) return;
+                    try
+                    {
+                        lock (root.Sync)
+                        {
+                            if (!Gone(root)) EnsureTeamsWatching(root);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        LogError($"Error starting teams watcher for '{teamsDir}': {ex.Message}");
+                    }
+                };
+                root.TeamsRootWatcher = pending;
+                pending.EnableRaisingEvents = true;
+
+                // The folder may have appeared between the check and the watcher going live.
+                if (!Directory.Exists(teamsDir)) return;
+            }
+
+            // The placeholder (if any) has done its job.
+            root.TeamsRootWatcher?.Dispose();
+            root.TeamsRootWatcher = null;
 
             // Watch for new team subdirectories
-            _teamsRootWatcher = new FileSystemWatcher(_teamsDir)
+            var watcher = new FileSystemWatcher(teamsDir)
             {
-                NotifyFilter = NotifyFilters.DirectoryName,
-                EnableRaisingEvents = true
+                NotifyFilter = NotifyFilters.DirectoryName
             };
-            _teamsRootWatcher.Created += OnTeamDirectoryCreated;
-            _teamsRootWatcher.Deleted += OnTeamDirectoryDeleted;
+            watcher.Created += (s, e) => OnTeamDirectoryCreated(root, e);
+            watcher.Deleted += (s, e) => OnTeamDirectoryDeleted(root, e);
+            root.TeamsRootWatcher = watcher;
+            root.TeamsStarted = true;
+            watcher.EnableRaisingEvents = true;
 
-            LogInfo($"Started watching: {_teamsDir}");
-
+            LogInfo($"Started watching: {teamsDir}");
 
             // Never restore old agent panels from previous sessions.
             // Only react to NEW team directories created during this session via the FileSystemWatcher.
         }
 
-        private void OnTeamDirectoryCreated(object sender, FileSystemEventArgs e)
+        /// <summary>
+        /// Stop everything under one root: its watchers, its teams (TeamRemoved is raised for each, so
+        /// their panels close) and its orphan tailers. Caller holds <c>_rootsLock</c> and has already
+        /// taken the root out of <c>_roots</c>.
+        /// </summary>
+        private void StopRoot(RootState root)
+        {
+            root.Stopped = true;
+
+            lock (root.Sync)
+            {
+                try { root.TeamsRootWatcher?.Dispose(); } catch { }
+                root.TeamsRootWatcher = null;
+                root.TeamsStarted = false;
+                root.ProjectsStarted = false;
+            }
+
+            DisposeProjectWatchers(root);
+
+            foreach (var kvp in _activeTeams.Where(k => ReferenceEquals(k.Value.Root, root)).ToList())
+            {
+                if (_activeTeams.TryRemove(kvp.Key, out var state))
+                    CleanupTeam(state.TeamName, state);
+            }
+
+            var orphans = new List<TranscriptTailer>();
+            lock (_trackedSubagentFiles)
+            {
+                foreach (var key in _orphanTailers.Keys.Where(k => IsUnder(root, k)).ToList())
+                {
+                    orphans.Add(_orphanTailers[key]);
+                    _orphanTailers.Remove(key);
+                }
+
+                // Includes the "<dir>:watching" markers, so a root that comes back is watched afresh.
+                _trackedSubagentFiles.RemoveWhere(p => IsUnder(root, p));
+            }
+            foreach (var tailer in orphans)
+            {
+                try { tailer.Dispose(); } catch { }
+            }
+
+            lock (_watchedProjectDirs)
+            {
+                _watchedProjectDirs.RemoveWhere(p => IsUnder(root, p));
+            }
+        }
+
+        private void OnTeamDirectoryCreated(RootState root, FileSystemEventArgs e)
         {
             if (!Directory.Exists(e.FullPath)) return;
             string teamName = Path.GetFileName(e.FullPath);
-            LogInfo($"New team directory detected: {teamName}");
+            LogInfo($"New team directory detected: {teamName} ({root.Plan.Root})");
 
             // Async delay to let config.json be written, without blocking FSW thread
             Task.Run(async () =>
             {
                 await Task.Delay(200);
-                if (_disposed) return;
-                ProcessTeamDirectory(teamName);
+                if (Gone(root)) return;
+                ProcessTeamDirectory(root, teamName);
             });
         }
 
-        private void OnTeamDirectoryDeleted(object sender, FileSystemEventArgs e)
+        private void OnTeamDirectoryDeleted(RootState root, FileSystemEventArgs e)
         {
             string teamName = Path.GetFileName(e.FullPath);
-            LogInfo($"Team directory deleted: {teamName}");
+            LogInfo($"Team directory deleted: {teamName} ({root.Plan.Root})");
 
-            if (_activeTeams.TryGetValue(teamName, out var state))
+            string teamKey = BuildTeamKey(root.Plan.Root, teamName, root.Plan.IsDefault);
+            if (_activeTeams.TryRemove(teamKey, out var state))
             {
                 CleanupTeam(teamName, state);
-                _activeTeams.Remove(teamName);
             }
+        }
+
+        /// <summary>The state for (root, team name), created on first use.</summary>
+        private TeamState GetOrAddTeam(RootState root, string teamName)
+        {
+            string teamKey = BuildTeamKey(root.Plan.Root, teamName, root.Plan.IsDefault);
+            return _activeTeams.GetOrAdd(teamKey, key => new TeamState { TeamName = teamName, TeamKey = key, Root = root });
         }
 
 
         /// <summary>
         /// Process a team directory: read config.json, discover members, create tailers.
         /// </summary>
-        private void ProcessTeamDirectory(string teamName)
+        private void ProcessTeamDirectory(RootState root, string teamName)
         {
             try
             {
-                string configPath = Path.Combine(_teamsDir, teamName, "config.json");
+                if (Gone(root)) return;
+                string configPath = Path.Combine(root.Plan.TeamsDir, teamName, "config.json");
 
                 if (!File.Exists(configPath))
                 {
                     // Watch for config.json creation
-                    WatchForConfigFile(teamName);
+                    WatchForConfigFile(root, teamName);
                     return;
                 }
 
-                ReadAndProcessConfig(teamName, configPath);
+                ReadAndProcessConfig(root, teamName, configPath);
 
                 // Watch config.json for changes (new members added)
-                if (!_activeTeams.ContainsKey(teamName))
-                    _activeTeams[teamName] = new TeamState { TeamName = teamName };
-
-                var state = _activeTeams[teamName];
+                var state = GetOrAddTeam(root, teamName);
                 if (state.ConfigWatcher == null)
                 {
-                    string teamDir = Path.Combine(_teamsDir, teamName);
+                    string teamDir = Path.Combine(root.Plan.TeamsDir, teamName);
                     state.ConfigWatcher = new FileSystemWatcher(teamDir)
                     {
                         Filter = "config.json",
@@ -244,8 +545,8 @@ namespace MultiTerminal.Services
                         Task.Run(async () =>
                         {
                             await Task.Delay(100);
-                            if (_disposed) return;
-                            ReadAndProcessConfig(teamName, configPath);
+                            if (Gone(root)) return;
+                            ReadAndProcessConfig(root, teamName, configPath);
                         });
                     };
                 }
@@ -256,17 +557,15 @@ namespace MultiTerminal.Services
             }
         }
 
-        private void WatchForConfigFile(string teamName)
+        private void WatchForConfigFile(RootState root, string teamName)
         {
-            string teamDir = Path.Combine(_teamsDir, teamName);
+            string teamDir = Path.Combine(root.Plan.TeamsDir, teamName);
             if (!Directory.Exists(teamDir)) return;
 
             // Ensure the TeamState exists so the watcher is owned by state.Watchers
             // and CleanupTeam/StopWatching dispose it deterministically — even if
             // the Created event never fires (no config.json ever appears).
-            if (!_activeTeams.ContainsKey(teamName))
-                _activeTeams[teamName] = new TeamState { TeamName = teamName };
-            var state = _activeTeams[teamName];
+            var state = GetOrAddTeam(root, teamName);
 
             // Construct with events OFF so we can wire the Created handler before
             // any event can fire. This closes the construct-to-subscribe race
@@ -299,13 +598,13 @@ namespace MultiTerminal.Services
                 try { watcher.EnableRaisingEvents = false; } catch { }
                 try { watcher.Dispose(); } catch { }
 
-                if (_disposed) return;
+                if (Gone(root)) return;
 
                 Task.Run(async () =>
                 {
                     await Task.Delay(100);
-                    if (_disposed) return;
-                    ProcessTeamDirectory(teamName);
+                    if (Gone(root)) return;
+                    ProcessTeamDirectory(root, teamName);
                 });
             };
             watcher.Created += handler;
@@ -330,7 +629,7 @@ namespace MultiTerminal.Services
         /// Read config.json and discover new team members.
         /// For each new member, watch for their transcript JSONL file and create a TranscriptTailer.
         /// </summary>
-        private void ReadAndProcessConfig(string teamName, string configPath)
+        private void ReadAndProcessConfig(RootState root, string teamName, string configPath)
         {
             try
             {
@@ -344,26 +643,23 @@ namespace MultiTerminal.Services
                 if (string.IsNullOrWhiteSpace(json)) return;
 
                 using var doc = JsonDocument.Parse(json);
-                var root = doc.RootElement;
+                var config = doc.RootElement;
 
-                string leadSessionId = root.TryGetProperty("leadSessionId", out var lsProp) ? lsProp.GetString() : null;
+                string leadSessionId = config.TryGetProperty("leadSessionId", out var lsProp) ? lsProp.GetString() : null;
                 if (string.IsNullOrEmpty(leadSessionId))
                 {
                     LogError($"No leadSessionId in config for team '{teamName}'");
                     return;
                 }
 
-                if (!_activeTeams.ContainsKey(teamName))
-                    _activeTeams[teamName] = new TeamState { TeamName = teamName };
-
-                var state = _activeTeams[teamName];
+                var state = GetOrAddTeam(root, teamName);
                 state.LeadSessionId = leadSessionId;
 
-                if (!root.TryGetProperty("members", out var membersArr)) return;
+                if (!config.TryGetProperty("members", out var membersArr)) return;
 
                 // Derive the correct project directory from the lead member's cwd
                 // (MultiTerminal's own CWD may differ from the Claude Code project path)
-                string projectDir = _projectDir;
+                string projectDir = root.Plan.AppProjectDir;
                 foreach (var member in membersArr.EnumerateArray())
                 {
                     string agentType = member.TryGetProperty("agentType", out var tp) ? tp.GetString() : null;
@@ -373,14 +669,14 @@ namespace MultiTerminal.Services
                         if (!string.IsNullOrEmpty(leadCwd))
                         {
                             state.LeadCwd = leadCwd;
-                            string leadSlug = GetClaudeProjectSlug(leadCwd);
-                            string userHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-                            projectDir = Path.Combine(userHome, ".claude", "projects", leadSlug);
+                            // The lead's transcripts are under the SAME config root as this team's
+                            // config.json (one Claude Code process wrote both), never another profile's.
+                            projectDir = GetLeadProjectDir(root.Plan.Root, leadCwd);
                             Log($" Derived project dir from lead cwd: {projectDir}");
 
                             // Also start orphan subagent watching on this project dir
                             // (the app's CWD may differ from where terminals are running)
-                            StartProjectSubagentWatchingForDir(projectDir);
+                            StartProjectSubagentWatchingForDir(root, projectDir);
                         }
                         break;
                     }
@@ -390,7 +686,7 @@ namespace MultiTerminal.Services
                 // Used by CreateTailerForMember and message routing.
                 if (string.IsNullOrEmpty(state.SpawnerName))
                 {
-                    state.SpawnerName = LookupTeamSpawner(teamName);
+                    state.SpawnerName = LookupTeamSpawner(state);
                     if (!string.IsNullOrEmpty(state.SpawnerName))
                         LogInfo($"Cached spawner for team '{teamName}': {state.SpawnerName}");
                 }
@@ -427,7 +723,7 @@ namespace MultiTerminal.Services
                         try { tailer.Dispose(); } catch { }
                         state.MemberTailers.Remove(removed);
                     }
-                    MemberRemoved?.Invoke(this, (teamName, removed));
+                    MemberRemoved?.Invoke(this, (teamName, removed, state.TeamKey));
                 }
 
                 // Build subagents directory path (needed for watching even if no new members)
@@ -578,7 +874,7 @@ namespace MultiTerminal.Services
                             Task.Run(async () =>
                             {
                                 await Task.Delay(100);
-                                if (_disposed) return;
+                                if (Gone(state.Root)) return;
                                 LogInfo($"Session dir appeared: {e.FullPath} — chaining to subagents watcher");
                                 WatchForNewTranscripts(teamName, subagentsDir, newMembers, state);
                             });
@@ -605,7 +901,7 @@ namespace MultiTerminal.Services
                         Task.Run(async () =>
                         {
                             await Task.Delay(100);
-                            if (_disposed) return;
+                            if (Gone(state.Root)) return;
                             WatchForNewTranscripts(teamName, subagentsDir, newMembers, state);
                         });
                     };
@@ -653,7 +949,7 @@ namespace MultiTerminal.Services
                 Task.Run(async () =>
                 {
                     await Task.Delay(500);
-                    if (_disposed) return;
+                    if (Gone(state.Root)) return;
 
                 if (state.MatchedTranscripts.Contains(fullPath))
                     return;
@@ -990,7 +1286,7 @@ namespace MultiTerminal.Services
                     if (memberName == "team-lead") continue;
 
                     string inboxFileName = memberName.Replace(" ", "-") + ".json";
-                    string inboxPath = Path.Combine(_teamsDir, teamName, "inboxes", inboxFileName);
+                    string inboxPath = Path.Combine(state.Root.Plan.TeamsDir, teamName, "inboxes", inboxFileName);
 
                     if (!File.Exists(inboxPath)) continue;
 
@@ -1057,7 +1353,7 @@ namespace MultiTerminal.Services
 
                 // Claude Code uses dashes in inbox filenames (e.g. "Agent-Alpha.json" not "Agent Alpha.json")
                 string inboxFileName = memberName.Replace(" ", "-") + ".json";
-                string inboxPath = Path.Combine(_teamsDir, teamName, "inboxes", inboxFileName);
+                string inboxPath = Path.Combine(state.Root.Plan.TeamsDir, teamName, "inboxes", inboxFileName);
 
                 var tailer = new TranscriptTailer(transcriptPath, inboxPath, memberName);
                 tailer.IsTeamAgent = true; // Don't auto-stop on Result — team agents stay alive between turns
@@ -1090,7 +1386,7 @@ namespace MultiTerminal.Services
                     resolvedSpawner = tracking.SpawnerName;
                 if (string.IsNullOrEmpty(resolvedSpawner))
                 {
-                    resolvedSpawner = LookupTeamSpawner(teamName);
+                    resolvedSpawner = LookupTeamSpawner(state);
                     if (!string.IsNullOrEmpty(resolvedSpawner))
                     {
                         state.SpawnerName = resolvedSpawner;
@@ -1106,7 +1402,9 @@ namespace MultiTerminal.Services
                     SpawnerName = resolvedSpawner,
                     TaskDescription = tracking.TaskDescription,
                     SubagentType = tracking.SubagentType,
-                    LeadCwd = state.LeadCwd
+                    LeadCwd = state.LeadCwd,
+                    ConfigRoot = state.Root.Plan.Root,
+                    TeamKey = state.TeamKey
                 });
             }
             catch (Exception ex)
@@ -1116,16 +1414,30 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Watch the project's session directories for non-team subagent JSONL files.
+        /// Watch one root's session directories for non-team subagent JSONL files.
         /// This catches agents spawned via Task tool that don't belong to any team.
         /// Scans all project dirs with recent activity, not just the app's CWD project.
+        /// Caller holds <c>root.Sync</c>. Idempotent; a root with no projects folder yet is retried
+        /// at the next refresh.
         /// </summary>
-        private void StartProjectSubagentWatching()
+        private void EnsureProjectSubagentWatching(RootState root)
         {
-            // Always watch the app's own project dir
-            StartProjectSubagentWatchingForDir(_projectDir);
+            if (root.ProjectsStarted) return;
 
-            string projectsRoot = Path.GetDirectoryName(_projectDir);
+            string projectsRoot = root.Plan.ProjectsDir;
+            if (!Directory.Exists(projectsRoot))
+            {
+                if (!root.ProjectsMissingLogged)
+                {
+                    root.ProjectsMissingLogged = true;
+                    Log($" Projects directory does not exist yet: {projectsRoot}");
+                }
+                return;
+            }
+            root.ProjectsStarted = true;
+
+            // Always watch the app's own project dir
+            StartProjectSubagentWatchingForDir(root, root.Plan.AppProjectDir);
 
             // Scan all project dirs for recent session-level activity.
             // We check session directories INSIDE each project (not just the project dir's
@@ -1133,18 +1445,15 @@ namespace MultiTerminal.Services
             // not when transcript files are written inside existing sessions).
             try
             {
-                if (projectsRoot != null && Directory.Exists(projectsRoot))
+                var cutoff = DateTime.UtcNow.AddHours(-2);
+                foreach (var projDir in Directory.GetDirectories(projectsRoot))
                 {
-                    var cutoff = DateTime.UtcNow.AddHours(-2);
-                    foreach (var projDir in Directory.GetDirectories(projectsRoot))
-                    {
-                        if (string.Equals(projDir, _projectDir, StringComparison.OrdinalIgnoreCase))
-                            continue;
+                    if (string.Equals(projDir, root.Plan.AppProjectDir, StringComparison.OrdinalIgnoreCase))
+                        continue;
 
-                        if (HasRecentSessionActivity(projDir, cutoff))
-                        {
-                            StartProjectSubagentWatchingForDir(projDir);
-                        }
+                    if (HasRecentSessionActivity(projDir, cutoff))
+                    {
+                        StartProjectSubagentWatchingForDir(root, projDir);
                     }
                 }
             }
@@ -1153,48 +1462,46 @@ namespace MultiTerminal.Services
                 Log($" Error scanning project dirs for subagent watching: {ex.Message}");
             }
 
-            // Global catch-all: watch ALL of ~/.claude/projects/ recursively for agent-*.jsonl
+            // Global catch-all: watch ALL of this root's projects/ recursively for agent-*.jsonl
             // files. This handles projects that become active after the app starts, or projects
             // the scan above missed. The _trackedSubagentFiles HashSet prevents duplicates with
             // per-project watchers.
             try
             {
-                if (projectsRoot != null && Directory.Exists(projectsRoot))
+                var globalWatcher = new FileSystemWatcher(projectsRoot)
                 {
-                    var globalWatcher = new FileSystemWatcher(projectsRoot)
-                    {
-                        Filter = "agent-*.jsonl",
-                        NotifyFilter = NotifyFilters.FileName,
-                        IncludeSubdirectories = true,
-                        EnableRaisingEvents = true
-                    };
-                    _projectWatchers.Add(globalWatcher);
+                    Filter = "agent-*.jsonl",
+                    NotifyFilter = NotifyFilters.FileName,
+                    IncludeSubdirectories = true,
+                    EnableRaisingEvents = true
+                };
+                lock (root.ProjectWatchers) { root.ProjectWatchers.Add(globalWatcher); }
+                DisposeProjectWatchersIfStopped(root);
 
-                    globalWatcher.Created += (s, e) =>
+                globalWatcher.Created += (s, e) =>
+                {
+                    // Async delay to let team watcher claim files first, without blocking
+                    // the FileSystemWatcher thread pool thread.
+                    var fullPath = e.FullPath;
+                    Task.Run(async () =>
                     {
-                        // Async delay to let team watcher claim files first, without blocking
-                        // the FileSystemWatcher thread pool thread.
-                        var fullPath = e.FullPath;
-                        Task.Run(async () =>
+                        await Task.Delay(2000);
+                        if (Gone(root)) return;
+
+                        if (IsFileClaimedByTeam(root, fullPath)) return;
+
+                        lock (_trackedSubagentFiles)
                         {
-                            await Task.Delay(2000);
-                            if (_disposed) return;
+                            if (_trackedSubagentFiles.Contains(fullPath)) return;
+                            _trackedSubagentFiles.Add(fullPath);
+                        }
 
-                            if (IsFileClaimedByTeam(fullPath)) return;
+                        LogInfo($"Global watcher caught orphan subagent: {Path.GetFileName(fullPath)}");
+                        CreateOrphanSubagentPanel(root, fullPath);
+                    });
+                };
 
-                            lock (_trackedSubagentFiles)
-                            {
-                                if (_trackedSubagentFiles.Contains(fullPath)) return;
-                                _trackedSubagentFiles.Add(fullPath);
-                            }
-
-                            LogInfo($"Global watcher caught orphan subagent: {Path.GetFileName(fullPath)}");
-                            CreateOrphanSubagentPanel(fullPath);
-                        });
-                    };
-
-                    Log($" Global subagent watcher started on: {projectsRoot}");
-                }
+                Log($" Global subagent watcher started on: {projectsRoot}");
             }
             catch (Exception ex)
             {
@@ -1238,8 +1545,9 @@ namespace MultiTerminal.Services
         /// Can be called multiple times for different projects (e.g., when team config reveals
         /// terminals running in a different project than the app's CWD).
         /// </summary>
-        private void StartProjectSubagentWatchingForDir(string projectDir)
+        private void StartProjectSubagentWatchingForDir(RootState root, string projectDir)
         {
+            if (Gone(root)) return;
             if (!Directory.Exists(projectDir))
             {
                 Log($" Project dir not found for subagent watching: {projectDir}");
@@ -1262,15 +1570,16 @@ namespace MultiTerminal.Services
                 NotifyFilter = NotifyFilters.DirectoryName,
                 EnableRaisingEvents = true
             };
-            _projectWatchers.Add(sessionDirWatcher);
+            lock (root.ProjectWatchers) { root.ProjectWatchers.Add(sessionDirWatcher); }
+            DisposeProjectWatchersIfStopped(root);
             sessionDirWatcher.Created += (s, e) =>
             {
                 var fullPath = e.FullPath;
                 Task.Run(async () =>
                 {
                     await Task.Delay(300);
-                    if (_disposed) return;
-                    WatchSessionSubagentsDir(fullPath);
+                    if (Gone(root)) return;
+                    WatchSessionSubagentsDir(root, fullPath);
                 });
             };
 
@@ -1283,7 +1592,7 @@ namespace MultiTerminal.Services
 
             foreach (var session in recentSessions)
             {
-                WatchSessionSubagentsDir(session.FullName);
+                WatchSessionSubagentsDir(root, session.FullName);
             }
 
             LogInfo($"Project-level subagent watching started: {projectDir}");
@@ -1292,7 +1601,7 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Watch a specific session's subagents/ directory for orphan (non-team) agent JSONL files.
         /// </summary>
-        private void WatchSessionSubagentsDir(string sessionDir)
+        private void WatchSessionSubagentsDir(RootState root, string sessionDir)
         {
             if (!Directory.Exists(sessionDir)) return;
 
@@ -1309,15 +1618,16 @@ namespace MultiTerminal.Services
                         NotifyFilter = NotifyFilters.DirectoryName,
                         EnableRaisingEvents = true
                     };
-                    _projectWatchers.Add(dirWatcher);
+                    lock (root.ProjectWatchers) { root.ProjectWatchers.Add(dirWatcher); }
+                    DisposeProjectWatchersIfStopped(root);
                     dirWatcher.Created += (s, e) =>
                     {
                         var fullPath = e.FullPath;
                         Task.Run(async () =>
                         {
                             await Task.Delay(200);
-                            if (_disposed) return;
-                            WatchSubagentsForOrphans(fullPath);
+                            if (Gone(root)) return;
+                            WatchSubagentsForOrphans(root, fullPath);
                         });
                     };
                 }
@@ -1328,15 +1638,39 @@ namespace MultiTerminal.Services
                 return;
             }
 
-            WatchSubagentsForOrphans(subagentsDir);
+            WatchSubagentsForOrphans(root, subagentsDir);
+        }
+
+        /// <summary>
+        /// Called right after a project-level watcher is added to its root: a watcher added by a
+        /// callback that lost the race with StopRoot is disposed here instead of leaking.
+        /// </summary>
+        private static void DisposeProjectWatchersIfStopped(RootState root)
+        {
+            if (root.Stopped) DisposeProjectWatchers(root);
+        }
+
+        private static void DisposeProjectWatchers(RootState root)
+        {
+            List<FileSystemWatcher> watchers;
+            lock (root.ProjectWatchers)
+            {
+                watchers = root.ProjectWatchers.ToList();
+                root.ProjectWatchers.Clear();
+            }
+            foreach (var watcher in watchers)
+            {
+                try { watcher.Dispose(); } catch { }
+            }
         }
 
         /// <summary>
         /// Watch a subagents directory and create panels for any agent-*.jsonl files
         /// not already claimed by a team.
         /// </summary>
-        private void WatchSubagentsForOrphans(string subagentsDir)
+        private void WatchSubagentsForOrphans(RootState root, string subagentsDir)
         {
+            if (Gone(root)) return;
             if (!Directory.Exists(subagentsDir)) return;
 
             // Check if we already have a project-level watcher on this directory
@@ -1355,7 +1689,8 @@ namespace MultiTerminal.Services
                     NotifyFilter = NotifyFilters.FileName | NotifyFilters.CreationTime,
                     EnableRaisingEvents = true
                 };
-                _projectWatchers.Add(watcher);
+                lock (root.ProjectWatchers) { root.ProjectWatchers.Add(watcher); }
+                DisposeProjectWatchersIfStopped(root);
 
                 watcher.Created += (s, e) =>
                 {
@@ -1365,10 +1700,10 @@ namespace MultiTerminal.Services
                     Task.Run(async () =>
                     {
                         await Task.Delay(2000);
-                        if (_disposed) return;
+                        if (Gone(root)) return;
 
                         // Skip if already tracked by a team or already tracked as orphan
-                        if (IsFileClaimedByTeam(fullPath)) return;
+                        if (IsFileClaimedByTeam(root, fullPath)) return;
 
                         lock (_trackedSubagentFiles)
                         {
@@ -1376,7 +1711,7 @@ namespace MultiTerminal.Services
                             _trackedSubagentFiles.Add(fullPath);
                         }
 
-                        CreateOrphanSubagentPanel(fullPath);
+                        CreateOrphanSubagentPanel(root, fullPath);
                     });
                 };
 
@@ -1394,7 +1729,7 @@ namespace MultiTerminal.Services
                     {
                         var fi = new FileInfo(existingFile);
                         if (fi.CreationTimeUtc < cutoff) continue;
-                        if (IsFileClaimedByTeam(existingFile)) continue;
+                        if (IsFileClaimedByTeam(root, existingFile)) continue;
 
                         lock (_trackedSubagentFiles)
                         {
@@ -1403,7 +1738,7 @@ namespace MultiTerminal.Services
                         }
 
                         Log($" Found recent orphan subagent file (created {(DateTime.UtcNow - fi.CreationTimeUtc).TotalSeconds:F1}s ago): {Path.GetFileName(existingFile)}");
-                        CreateOrphanSubagentPanel(existingFile);
+                        CreateOrphanSubagentPanel(root, existingFile);
                     }
                     catch (Exception scanEx)
                     {
@@ -1418,14 +1753,19 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Check if a transcript file is already claimed by any active team.
+        /// Check if a transcript file is already claimed by any active team. The timing heuristic
+        /// only consults teams under the file's own root: a team of another profile cannot be waiting
+        /// for a transcript that was written here.
         /// </summary>
-        private bool IsFileClaimedByTeam(string filePath)
+        private bool IsFileClaimedByTeam(RootState root, string filePath)
         {
             foreach (var state in _activeTeams.Values)
             {
                 if (state.MatchedTranscripts.Contains(filePath))
                     return true;
+
+                if (!ReferenceEquals(state.Root, root))
+                    continue;
 
                 // Also check if any active team has unmatched members whose joinedAt
                 // timing matches this file. This prevents the orphan watcher from racing
@@ -1529,10 +1869,12 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Create a read-only TranscriptTailer for a non-team subagent and fire SubagentDiscovered.
         /// </summary>
-        private void CreateOrphanSubagentPanel(string transcriptPath)
+        private void CreateOrphanSubagentPanel(RootState root, string transcriptPath)
         {
             try
             {
+                if (Gone(root)) return;
+
                 // Filter out Claude Code system agents (compact/summary, etc.)
                 if (LooksLikeSystemAgent(transcriptPath))
                 {
@@ -1566,7 +1908,7 @@ namespace MultiTerminal.Services
 
                 // Filter out agents from recently-deleted teams (prevents orphan panel
                 // from being created after TeamDelete when agent wakes for shutdown)
-                if (_retiredTeamAgentNames.ContainsKey(displayName))
+                if (_retiredTeamAgentNames.ContainsKey(RetiredKey(root, displayName)))
                 {
                     LogInfo($"Skipping retired team agent: {displayName}");
                     return;
@@ -1614,7 +1956,8 @@ namespace MultiTerminal.Services
                     SpawnerName = tracking.SpawnerName,
                     TaskDescription = tracking.TaskDescription,
                     SubagentType = tracking.SubagentType,
-                    ParentSessionId = parentSessionId
+                    ParentSessionId = parentSessionId,
+                    ConfigRoot = root.Plan.Root
                 });
             }
             catch (Exception ex)
@@ -1738,11 +2081,22 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Look up which terminal (spawner name) created a given team.
         /// Reads the mt-team-spawners.json mapping file written by task-to-agent-hook.js.
+        /// That file is keyed on the team NAME alone (the plugin hook writes it; it knows no profile).
+        /// So while the same name is active under two roots the entry is ambiguous, and it is not
+        /// used for either team: returning null sends the caller to its other fallbacks rather than
+        /// risk attaching one profile's team to the other profile's terminal.
         /// </summary>
-        private string LookupTeamSpawner(string teamName)
+        private string LookupTeamSpawner(TeamState team)
         {
+            string teamName = team.TeamName;
             try
             {
+                if (IsTeamNameSharedAcrossRoots(team))
+                {
+                    Log($" Team name '{teamName}' is active under more than one Claude profile; ignoring the name-keyed spawner mapping");
+                    return null;
+                }
+
                 string mappingPath = Path.Combine(Path.GetTempPath(), "mt-team-spawners.json");
                 if (!File.Exists(mappingPath)) return null;
 
@@ -1767,6 +2121,12 @@ namespace MultiTerminal.Services
 
             return null;
         }
+
+        private bool IsTeamNameSharedAcrossRoots(TeamState team) =>
+            _activeTeams.Values.Any(other =>
+                !ReferenceEquals(other, team)
+                && !ReferenceEquals(other.Root, team.Root)
+                && string.Equals(other.TeamName, team.TeamName, StringComparison.OrdinalIgnoreCase));
 
         /// <summary>
         /// Reclaim a transcript file from the orphan watcher. If an orphan tailer already owns
@@ -1843,29 +2203,37 @@ namespace MultiTerminal.Services
         /// </summary>
         public void StopWatching()
         {
-            foreach (var kvp in _activeTeams.ToList())
+            _started = false;
+            try { _refreshTimer?.Dispose(); } catch { }
+            _refreshTimer = null;
+
+            lock (_rootsLock)
             {
-                CleanupTeam(kvp.Key, kvp.Value);
+                // Each root takes its own watchers, teams and orphan tailers down with it.
+                foreach (var root in _roots.Values.ToList())
+                {
+                    StopRoot(root);
+                }
+                _roots.Clear();
+
+                foreach (var kvp in _activeTeams.ToArray())
+                {
+                    if (_activeTeams.TryRemove(kvp.Key, out var state))
+                        CleanupTeam(state.TeamName, state);
+                }
+
+                List<TranscriptTailer> leftovers;
+                lock (_trackedSubagentFiles)
+                {
+                    leftovers = _orphanTailers.Values.ToList();
+                    _orphanTailers.Clear();
+                    _trackedSubagentFiles.Clear();
+                }
+                foreach (var tailer in leftovers)
+                {
+                    try { tailer.Dispose(); } catch { }
+                }
             }
-            _activeTeams.Clear();
-
-            _teamsRootWatcher?.Dispose();
-            _teamsRootWatcher = null;
-
-
-            // Clean up project-level watchers and orphan tailers
-            foreach (var watcher in _projectWatchers)
-            {
-                try { watcher.Dispose(); } catch { }
-            }
-            _projectWatchers.Clear();
-
-            foreach (var tailer in _orphanTailers.Values)
-            {
-                try { tailer.Dispose(); } catch { }
-            }
-            _orphanTailers.Clear();
-            _trackedSubagentFiles.Clear();
         }
 
         private void CleanupTeam(string teamName, TeamState state)
@@ -1883,7 +2251,7 @@ namespace MultiTerminal.Services
             // Add agent names to retired set so CreateOrphanSubagentPanel skips them
             var now = DateTime.UtcNow;
             foreach (var name in memberNames)
-                _retiredTeamAgentNames[name] = now;
+                _retiredTeamAgentNames[RetiredKey(state.Root, name)] = now;
 
             foreach (var tailer in state.MemberTailers.Values)
             {
@@ -1904,10 +2272,12 @@ namespace MultiTerminal.Services
                         orphansToRemove.Add(kvp.Key);
                     }
                 }
-                // Also match orphans by agent name (catches name-based duplicates)
+                // Also match orphans by agent name (catches name-based duplicates). Only orphans under
+                // this team's own root: a same-named subagent of another profile is not this team's.
                 foreach (var kvp in _orphanTailers)
                 {
                     if (!orphansToRemove.Contains(kvp.Key) &&
+                        IsUnder(state.Root, kvp.Key) &&
                         memberNames.Any(name => string.Equals(kvp.Value.AgentName, name, StringComparison.OrdinalIgnoreCase)))
                     {
                         orphansToRemove.Add(kvp.Key);
@@ -1939,7 +2309,9 @@ namespace MultiTerminal.Services
             {
                 TeamName = teamName,
                 MemberNames = memberNames,
-                TranscriptPaths = state.MatchedTranscripts.ToList()
+                TranscriptPaths = state.MatchedTranscripts.ToList(),
+                ConfigRoot = state.Root.Plan.Root,
+                TeamKey = state.TeamKey
             });
 
             // Prune expired retired names (older than 60 seconds)
@@ -1971,7 +2343,7 @@ namespace MultiTerminal.Services
         /// Convert a project path to Claude's slug format.
         /// E.g., H:\DevLaptop\Foo\Bar → H--DevLaptop-Foo-Bar
         /// </summary>
-        private static string GetClaudeProjectSlug(string projectPath)
+        internal static string GetClaudeProjectSlug(string projectPath)
         {
             if (string.IsNullOrEmpty(projectPath)) return "unknown";
 
@@ -2006,6 +2378,10 @@ namespace MultiTerminal.Services
         private class TeamState
         {
             public string TeamName;
+            /// <summary>BuildTeamKey(root, name): the key in _activeTeams and in raised events.</summary>
+            public string TeamKey;
+            /// <summary>The config root this team's config.json lives under. Never null.</summary>
+            public RootState Root;
             public string LeadSessionId;
             public string SpawnerName;
             public string LeadCwd;
@@ -2017,6 +2393,29 @@ namespace MultiTerminal.Services
             public List<FileSystemWatcher> Watchers = new List<FileSystemWatcher>();
             public DateTime LastConfigChange;
             public bool HasSubagentsDirWatcher;
+        }
+
+        /// <summary>Everything the service holds for one Claude config directory.</summary>
+        private sealed class RootState
+        {
+            public RootState(TeamWatchRoot plan)
+            {
+                Plan = plan;
+            }
+
+            public readonly TeamWatchRoot Plan;
+            public readonly object Sync = new object();
+
+            /// <summary>Set once, when the root stops being watched; delayed callbacks check it.</summary>
+            public volatile bool Stopped;
+
+            /// <summary>The teams watcher, or (before the teams folder exists) the one waiting for it to appear.</summary>
+            public FileSystemWatcher TeamsRootWatcher;
+            public bool TeamsStarted;
+            public bool ProjectsStarted;
+            public bool MissingLogged;
+            public bool ProjectsMissingLogged;
+            public readonly List<FileSystemWatcher> ProjectWatchers = new List<FileSystemWatcher>();
         }
     }
 }
