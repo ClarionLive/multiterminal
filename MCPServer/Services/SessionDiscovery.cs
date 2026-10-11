@@ -22,13 +22,22 @@ namespace MultiTerminal.MCPServer.Services
         public DateTime Created { get; set; }
         public DateTime Modified { get; set; }
         public int MessageCount { get; set; }
+
+        /// <summary>The Claude profile whose config folder the transcript was found in ("Default" for
+        /// the built-in one; ticket c8ee0eec). Null when the discovery was pointed at one fixed folder.</summary>
+        public string ClaudeProfile { get; set; }
     }
 
     /// <summary>
     /// Discovers Claude Code sessions and matches them to MultiTerminal identities.
     ///
+    /// <para>WHICH config folder (ticket c8ee0eec): a call that names a project looks only in the
+    /// folder of the Claude profile that project runs under; the one call that names none
+    /// (<see cref="DiscoverAllSessionsForIdentity"/>) looks in every configured profile's folder and
+    /// keeps one row per session id.</para>
+    ///
     /// <para>Source of truth is the raw session JSONL under
-    /// <c>~/.claude/projects/&lt;proj&gt;/*.jsonl</c>. Each <c>&lt;uuid&gt;.jsonl</c>
+    /// <c>&lt;claude config folder&gt;/projects/&lt;proj&gt;/*.jsonl</c>. Each <c>&lt;uuid&gt;.jsonl</c>
     /// file IS a session; its metadata is derived on demand via
     /// <see cref="SessionSyncService.ParseSessionFile"/>. A
     /// <c>sessions-index.json</c> is used ONLY as a fast-path when it is present
@@ -50,7 +59,17 @@ namespace MultiTerminal.MCPServer.Services
     /// </summary>
     public class SessionDiscovery
     {
-        private readonly string _claudeProjectsPath;
+        // A projects folder plus the profile it belongs to (null for the fixed-folder constructor).
+        private sealed record ScanRoot(string ProjectsDir, string ProfileName);
+
+        // Every projects folder to scan when the caller names no project.
+        private readonly Func<IReadOnlyList<ScanRoot>> _allRoots;
+
+        // Project path → the one projects folder that project's sessions live in, or null (its profile
+        // is not configured here, has no folder, or cannot be decided: nothing is read).
+        private readonly Func<string, ScanRoot> _rootForProject;
+
+        // Used only for ParseSessionFile, which takes a full path and needs no root.
         private readonly SessionSyncService _sync = new SessionSyncService();
 
         // Authoritative identity source: maps a session id to the terminal identity
@@ -97,17 +116,37 @@ namespace MultiTerminal.MCPServer.Services
         private const long MaxJsonlBytes = 64L * 1024 * 1024; // 64 MB per transcript
         private const int MaxCacheEntries = 4000;
 
+        /// <summary>Reads from the configured Claude profile folders, decided at each call.</summary>
         public SessionDiscovery(Func<string, string> identityResolver = null)
+            : this(ClaudeProfileDataRoots.AllExisting, ClaudeProfileDataRoots.ForFolder, identityResolver)
         {
-            // Default Claude projects path
-            var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            _claudeProjectsPath = Path.Combine(userProfile, ".claude", "projects");
+        }
+
+        /// <summary>Points the discovery at ONE projects folder, whatever profiles are configured.</summary>
+        public SessionDiscovery(string claudeProjectsPath, Func<string, string> identityResolver = null)
+        {
+            var only = new ScanRoot(claudeProjectsPath, null);
+            _allRoots = () => new[] { only };
+            _rootForProject = _ => only;
             _identityResolver = identityResolver;
         }
 
-        public SessionDiscovery(string claudeProjectsPath, Func<string, string> identityResolver = null)
+        /// <summary>Test seam for the profile-aware paths: the config folders to scan when no project is
+        /// named, and the config folder for a project path (null = none).</summary>
+        internal SessionDiscovery(
+            Func<IReadOnlyList<ClaudeDataRoot>> allRoots,
+            Func<string, ClaudeDataRoot> rootForProject,
+            Func<string, string> identityResolver = null)
         {
-            _claudeProjectsPath = claudeProjectsPath;
+            if (allRoots == null) throw new ArgumentNullException(nameof(allRoots));
+            if (rootForProject == null) throw new ArgumentNullException(nameof(rootForProject));
+
+            _allRoots = () => allRoots().Select(r => new ScanRoot(r.ProjectsDir, r.ProfileName)).ToList();
+            _rootForProject = projectPath =>
+            {
+                var root = rootForProject(projectPath);
+                return root == null ? null : new ScanRoot(root.ProjectsDir, root.ProfileName);
+            };
             _identityResolver = identityResolver;
         }
 
@@ -191,13 +230,13 @@ namespace MultiTerminal.MCPServer.Services
         {
             var results = new List<DiscoveredSession>();
 
-            foreach (var entry in GetProjectSessionEntries(projectPath))
+            foreach (var entry in GetProjectSessionEntries(projectPath, out string profileName))
             {
                 var extractedIdentity = ResolveIdentity(entry);
                 if (extractedIdentity != null &&
                     extractedIdentity.Equals(identityName, StringComparison.OrdinalIgnoreCase))
                 {
-                    results.Add(ToDiscoveredSession(entry, extractedIdentity, projectPath));
+                    results.Add(ToDiscoveredSession(entry, extractedIdentity, projectPath, profileName));
                 }
             }
 
@@ -222,36 +261,61 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public List<DiscoveredSession> DiscoverAllSessionsInProject(string projectPath)
         {
-            return GetProjectSessionEntries(projectPath)
-                .Select(e => ToDiscoveredSession(e, ResolveIdentity(e), projectPath))
+            return GetProjectSessionEntries(projectPath, out string profileName)
+                .Select(e => ToDiscoveredSession(e, ResolveIdentity(e), projectPath, profileName))
                 .OrderByDescending(s => s.Modified)
                 .ToList();
         }
 
         /// <summary>
-        /// Discover all sessions for an identity across all projects.
+        /// Discover all sessions for an identity across all projects, in every configured Claude
+        /// profile's folder (the caller names no project, so there is no single profile to ask).
+        /// One row per session id: when the same id has a transcript under two profile folders (a
+        /// copied config folder), the more recently modified transcript is kept, and on an exact tie
+        /// the one from the earlier root (Default first). The row's
+        /// <see cref="DiscoveredSession.ClaudeProfile"/> says which folder it came from.
         /// </summary>
         public List<DiscoveredSession> DiscoverAllSessionsForIdentity(string identityName)
         {
-            var results = new List<DiscoveredSession>();
+            var bySessionId = new Dictionary<string, DiscoveredSession>(StringComparer.OrdinalIgnoreCase);
+            var withoutId = new List<DiscoveredSession>();
 
-            if (!Directory.Exists(_claudeProjectsPath))
-                return results;
-
-            foreach (var projectFolder in Directory.GetDirectories(_claudeProjectsPath))
+            foreach (var root in _allRoots())
             {
-                foreach (var entry in GetEntriesForFolder(projectFolder, null))
+                string[] projectFolders;
+                try
                 {
-                    var extractedIdentity = ResolveIdentity(entry);
-                    if (extractedIdentity != null &&
-                        extractedIdentity.Equals(identityName, StringComparison.OrdinalIgnoreCase))
+                    if (string.IsNullOrEmpty(root.ProjectsDir) || !Directory.Exists(root.ProjectsDir))
+                        continue;
+                    projectFolders = Directory.GetDirectories(root.ProjectsDir);
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                {
+                    Debug.WriteLine($"[SessionDiscovery] cannot list {root.ProjectsDir}: {ex.Message}");
+                    continue;
+                }
+
+                foreach (var projectFolder in projectFolders)
+                {
+                    foreach (var entry in GetEntriesForFolder(projectFolder, null))
                     {
-                        results.Add(ToDiscoveredSession(entry, extractedIdentity, null));
+                        var extractedIdentity = ResolveIdentity(entry);
+                        if (extractedIdentity == null ||
+                            !extractedIdentity.Equals(identityName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
+                        var session = ToDiscoveredSession(entry, extractedIdentity, null, root.ProfileName);
+                        if (string.IsNullOrEmpty(session.SessionId))
+                            withoutId.Add(session);
+                        else if (!bySessionId.TryGetValue(session.SessionId, out var kept) || session.Modified > kept.Modified)
+                            bySessionId[session.SessionId] = session;
                     }
                 }
             }
 
-            return results.OrderByDescending(s => s.Modified).ToList();
+            return bySessionId.Values.Concat(withoutId).OrderByDescending(s => s.Modified).ToList();
         }
 
         /// <summary>
@@ -262,13 +326,13 @@ namespace MultiTerminal.MCPServer.Services
         {
             var identities = new Dictionary<string, DiscoveredSession>(StringComparer.OrdinalIgnoreCase);
 
-            var entries = GetProjectSessionEntries(projectPath);
+            var entries = GetProjectSessionEntries(projectPath, out string profileName);
             foreach (var entry in entries.OrderByDescending(e => ParseDateTime(e.Modified)))
             {
                 var extractedIdentity = ResolveIdentity(entry);
                 if (extractedIdentity != null && !identities.ContainsKey(extractedIdentity))
                 {
-                    identities[extractedIdentity] = ToDiscoveredSession(entry, extractedIdentity, projectPath);
+                    identities[extractedIdentity] = ToDiscoveredSession(entry, extractedIdentity, projectPath, profileName);
                 }
             }
 
@@ -290,13 +354,27 @@ namespace MultiTerminal.MCPServer.Services
         /// or JSONL derivation. Internal so the falsifiable file-count == row-count
         /// test can assert against the raw entry set.
         /// </summary>
-        internal List<SessionEntry> GetProjectSessionEntries(string projectPath)
+        internal List<SessionEntry> GetProjectSessionEntries(string projectPath) =>
+            GetProjectSessionEntries(projectPath, out _);
+
+        /// <summary>
+        /// As above, also reporting which Claude profile's folder was read. The project's sessions are
+        /// looked for ONLY in the folder of the profile it runs under; when that profile has no usable
+        /// folder the result is empty rather than another profile's sessions.
+        /// </summary>
+        private List<SessionEntry> GetProjectSessionEntries(string projectPath, out string profileName)
         {
+            profileName = null;
             var folderName = GetProjectFolderName(projectPath);
             if (folderName == null)
                 return new List<SessionEntry>();
 
-            var projectFolder = Path.Combine(_claudeProjectsPath, folderName);
+            var root = _rootForProject(projectPath);
+            if (root == null || string.IsNullOrEmpty(root.ProjectsDir))
+                return new List<SessionEntry>();
+
+            profileName = root.ProfileName;
+            var projectFolder = Path.Combine(root.ProjectsDir, folderName);
             if (!Directory.Exists(projectFolder))
                 return new List<SessionEntry>();
 
@@ -549,7 +627,7 @@ namespace MultiTerminal.MCPServer.Services
             return entry;
         }
 
-        private static DiscoveredSession ToDiscoveredSession(SessionEntry entry, string identity, string fallbackProjectPath)
+        private static DiscoveredSession ToDiscoveredSession(SessionEntry entry, string identity, string fallbackProjectPath, string profileName)
         {
             return new DiscoveredSession
             {
@@ -560,7 +638,8 @@ namespace MultiTerminal.MCPServer.Services
                 Summary = entry.Summary,
                 Created = ParseDateTime(entry.Created),
                 Modified = ParseDateTime(entry.Modified),
-                MessageCount = entry.MessageCount
+                MessageCount = entry.MessageCount,
+                ClaudeProfile = profileName
             };
         }
 

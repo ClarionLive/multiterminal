@@ -531,7 +531,24 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
-        /// Discovers available skill names by scanning ~/.claude/skills/ subdirectories.
+        /// The Claude config folders whose user-level skills and agents apply to what this panel is
+        /// showing (ticket c8ee0eec). With a project selected: only the folder of the profile that
+        /// project runs under, or none when that profile has no usable folder on this machine (another
+        /// profile's are never listed instead). With no project: every configured profile's folder.
+        /// </summary>
+        private List<string> UserLevelClaudeConfigDirs()
+        {
+            var project = _currentProject;
+            if (project == null)
+                return ClaudeProfileDataRoots.AllExisting().Select(r => r.ConfigDir).ToList();
+
+            var root = ClaudeProfileDataRoots.ForProject(project.Id, project.SourcePath ?? project.Path);
+            return root == null ? new List<string>() : new List<string> { root.ConfigDir };
+        }
+
+        /// <summary>
+        /// Discovers available skill names by scanning the skills/ subdirectories of the Claude config
+        /// folder(s) from <see cref="UserLevelClaudeConfigDirs"/>.
         /// Returns the list so the caller can reuse after stats re-render.
         /// </summary>
         private List<string> SendAvailableSkills()
@@ -539,18 +556,21 @@ namespace MultiTerminal.Docking
             if (_renderer == null) return null;
             try
             {
-                var skillsDir = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                    ".claude", "skills");
                 var skillNames = new List<string>();
-                if (Directory.Exists(skillsDir))
+                foreach (var configDir in UserLevelClaudeConfigDirs())
                 {
+                    var skillsDir = Path.Combine(configDir, "skills");
+                    if (!Directory.Exists(skillsDir))
+                        continue;
+
                     foreach (var dir in Directory.GetDirectories(skillsDir))
                     {
-                        skillNames.Add(Path.GetFileName(dir));
+                        string name = Path.GetFileName(dir);
+                        if (!skillNames.Contains(name, StringComparer.OrdinalIgnoreCase))
+                            skillNames.Add(name);
                     }
-                    skillNames.Sort(StringComparer.OrdinalIgnoreCase);
                 }
+                skillNames.Sort(StringComparer.OrdinalIgnoreCase);
                 _renderer.SendAvailableSkills(skillNames);
                 return skillNames;
             }
@@ -572,11 +592,10 @@ namespace MultiTerminal.Docking
             {
                 var agentMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-                // Scan user-level ~/.claude/agents/ first (global agents)
-                var userAgentsDir = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                    ".claude", "agents");
-                ScanAgentsDirectory(userAgentsDir, agentMap);
+                // Scan user-level agents/ first (global agents), in the Claude config folder of the
+                // project's profile (see UserLevelClaudeConfigDirs)
+                foreach (var configDir in UserLevelClaudeConfigDirs())
+                    ScanAgentsDirectory(Path.Combine(configDir, "agents"), agentMap);
 
                 // Scan project-level .claude/agents/ (project agents override user-level)
                 var projectPath = _currentProject?.SourcePath ?? _currentProject?.Path;

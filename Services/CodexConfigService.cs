@@ -72,9 +72,13 @@ namespace MultiTerminal.Services
                 }
             }
 
-            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            string claudeJson = Path.Combine(userProfile, ".claude.json");
-            if (!File.Exists(claudeJson))
+            // The DEFAULT Claude profile's .claude.json only (ticket c8ee0eec): inside MT's inherited
+            // CLAUDE_CONFIG_DIR when it was started with one, else %USERPROFILE%\.claude.json. A named
+            // profile's file is deliberately never read: ~/.codex/config.toml is one file shared by
+            // every Codex terminal, so copying a profile's MCP servers into it would carry them across
+            // the profile boundary.
+            string claudeJson = ClaudeProfileDataRoots.DefaultClaudeJsonPath();
+            if (claudeJson == null || !File.Exists(claudeJson))
                 return null;
 
             try
