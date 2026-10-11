@@ -208,6 +208,19 @@ namespace MultiTerminal.Tests
             Assert.Null(SessionContextWriter.ChooseContextPane(_workProject, null, out inProject));
         }
 
+        [Fact]
+        public void A_pane_outside_the_context_folder_gets_the_file_only_under_its_own_profile()
+        {
+            var work = new ClaudeDataRoot("Work", @"C:\Users\me\.claude-work");
+            var personal = new ClaudeDataRoot("Default", @"C:\Users\me\.claude");
+
+            Assert.True(SessionContextWriter.SameContextRoot(work, new ClaudeDataRoot("Work", @"c:\users\me\.claude-work\")));
+            Assert.False(SessionContextWriter.SameContextRoot(work, personal));
+            Assert.False(SessionContextWriter.SameContextRoot(work, null));
+            Assert.False(SessionContextWriter.SameContextRoot(null, personal));
+            Assert.False(SessionContextWriter.SameContextRoot(null, null));
+        }
+
         // ── The index guard ──────────────────────────────────────────────────
 
         [Fact]

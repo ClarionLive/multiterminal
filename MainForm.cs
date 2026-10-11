@@ -6155,14 +6155,22 @@ namespace MultiTerminal
                     // There is ONE context file, for one project folder (SessionContextWriter.ContextProjectDir),
                     // written once. It is written for a pane that sits in that folder when there is one,
                     // and then under THAT pane's profile; if that profile has no usable folder here,
-                    // nothing is written (never Default, never the folder's profile). Only when no pane
-                    // is in that folder does the first named pane supply the agent name alone, and the
-                    // folder decides the profile, as it would for a launch there.
+                    // nothing is written (never Default, never the folder's profile). When no pane is in
+                    // that folder, the first named pane supplies the agent name and the folder decides
+                    // the profile, but ONLY if that is also the profile the pane itself runs under:
+                    // one pane's task context is never written into another profile's folder.
                     var contextPane = Services.SessionContextWriter.ChooseContextPane(
                         Services.SessionContextWriter.ContextProjectDir, panes, out bool contextPaneInProject);
                     if (contextPane != null && !contextPaneInProject)
                     {
-                        await Services.SessionContextWriter.WriteContextAsync(contextPane.AgentName);
+                        var folderRoot = Services.ClaudeProfileDataRoots.ForFolder(Services.SessionContextWriter.ContextProjectDir);
+                        var paneRoot = contextPane.Profile == null
+                            ? null
+                            : Services.ClaudeProfileDataRoots.ForPaneOrFolder(contextPane.Profile, contextPane.Folder);
+                        if (Services.SessionContextWriter.SameContextRoot(folderRoot, paneRoot))
+                            await Services.SessionContextWriter.WriteContextAsync(contextPane.AgentName, _ => folderRoot);
+                        else
+                            _debugLogService?.Warning("ClaudeProfile", $"Session context not written for '{contextPane.AgentName}': its terminal does not run under the Claude profile of the context project folder, or one of the two has no usable folder on this machine.");
                     }
                     else if (contextPane != null)
                     {

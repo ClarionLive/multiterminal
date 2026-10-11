@@ -30,9 +30,10 @@ namespace MultiTerminal.Services
         // There is ONE context file, for one project folder (ContextProjectDir). The app-close save
         // picks the pane it is written for with ChooseContextPane: a pane sitting in that project
         // folder supplies its own profile's folder (item 33); with no such pane the profile is the one
-        // a launch in that folder would get. When the profile is not configured here, has no folder,
-        // or cannot be decided, nothing is written: the file is never put in the Default profile's
-        // folder instead, and no profile folder is created.
+        // a launch in that folder would get, and the file is written only when the chosen pane runs
+        // under that same profile (SameContextRoot). When the profile is not configured here, has no
+        // folder, or cannot be decided, nothing is written: the file is never put in the Default
+        // profile's folder instead, and no profile folder is created.
 
         /// <summary>The one project folder whose ACTIVE-CONTEXT.md this writer maintains.</summary>
         internal static string ContextProjectDir => ResolveProjectDir();
@@ -69,6 +70,18 @@ namespace MultiTerminal.Services
             }
 
             return list[0];
+        }
+
+        /// <summary>
+        /// Pure: true only when both roots are known and are the same config folder. The app-close
+        /// save uses it for a pane that is NOT in the context project folder, so that pane's task
+        /// context is written only when the folder's profile is also the pane's own.
+        /// </summary>
+        internal static bool SameContextRoot(ClaudeDataRoot folderRoot, ClaudeDataRoot paneRoot)
+        {
+            string folderDir = ClaudeProfileResolver.Canonicalize(folderRoot?.ConfigDir);
+            string paneDir = ClaudeProfileResolver.Canonicalize(paneRoot?.ConfigDir);
+            return folderDir != null && string.Equals(folderDir, paneDir, StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>

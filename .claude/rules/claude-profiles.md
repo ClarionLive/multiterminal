@@ -109,6 +109,12 @@ of the machine (`SettingsService`, key `ClaudeProfiles`); a project stores a pro
    a `.claude` path from `SpecialFolder.UserProfile` in a reader or writer. Pinned by
    `ClaudeProfilePaneScopeTests` (the pure choice; the call sites are wiring no test executes).
 
+   The app-close context file is the one case with two profiles in play: there is ONE file, for
+   one project folder (`SessionContextWriter.ContextProjectDir`). A pane sitting in that folder
+   decides by its own profile. When no pane is in it, the first named pane supplies the agent name
+   and the FOLDER's profile is used, but only if that pane runs under the same profile
+   (`SessionContextWriter.SameContextRoot`); otherwise nothing is written.
+
    Still path-only, because no pane exists to ask: the startup session sync and crash-recovery
    indexing and the periodic sync (MainForm, over registered projects); the Project panel
    (`ProjectPanelDocument`, the selected project); View Session (`MainForm`, a project path from
@@ -116,6 +122,11 @@ of the machine (`SettingsService`, key `ClaudeProfiles`); a project stores a pro
    `SessionLineageService.GetUnsummarizedSessions`; `SessionMemoryDatabase.FindUnindexedSessions`;
    the REST calls that carry a path and no terminal name; and any call naming an agent that is not
    a live MT terminal (a headless agent, a ClarionAssistant tab).
+
+   Path-only although a pane IS in hand (a known gap, not by design): the two
+   `SessionIndexingService.IndexProjectSessionsAsync` calls in MainForm. They hand only a project
+   path to the session-history Node CLI (`--project-path`); how that CLI picks a Claude folder has
+   not been checked.
 
 9. **Team keys are (root, name), and so are subagent panel keys.** Two profiles can each have a
    team, or a subagent, with the same name. `TeamWatcherService.BuildTeamKey` gives the bare name
