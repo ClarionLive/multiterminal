@@ -861,5 +861,239 @@ namespace MultiTerminal.Tests
             Assert.False(byFolder.CanLaunch);
             Assert.Null(byFolder.Profile);
         }
+
+        // ── Phase 3 item 8: a profile picked for the launch (Just Claude, Launch as) ──
+
+        private const string Scratch = @"D:\scratch";
+
+        [Fact]
+        public void A_picked_profile_is_used_when_no_project_owns_the_folder_and_beats_the_inherited_one()
+        {
+            var name = ClaudeProfileLaunchPolicy.FindProfileName(null, Scratch, "Work", Lookup(), requestedProfileName: " personal ");
+            var decision = ClaudeProfileLaunchPolicy.Decide(null, Scratch, "Work", "Claude in 'scratch'", Lookup(), Resolver(), requestedProfileName: "personal");
+
+            Assert.Equal("personal", name.ProfileName);
+            Assert.Equal(ClaudeProfileNameSource.Requested, name.Source);
+            Assert.True(decision.CanLaunch);
+            Assert.Equal("Personal", decision.Profile.Name);
+            Assert.Equal(ClaudeProfileNameSource.Requested, decision.Source);
+        }
+
+        [Fact]
+        public void Picking_Default_selects_Default_over_the_inherited_profile()
+        {
+            var picked = ClaudeProfileLaunchPolicy.Decide(null, Scratch, "Work", "x", Lookup(), Resolver(), requestedProfileName: "Default");
+            var notPicked = ClaudeProfileLaunchPolicy.Decide(null, Scratch, "Work", "x", Lookup(), Resolver(), requestedProfileName: "  ");
+
+            Assert.True(picked.CanLaunch);
+            Assert.True(picked.Profile.IsDefault);
+            Assert.Equal(ClaudeProfileNameSource.Requested, picked.Source);
+
+            // A blank pick is no pick: the inherited name still applies.
+            Assert.Equal("Work", notPicked.Profile.Name);
+            Assert.Equal(ClaudeProfileNameSource.Inherited, notPicked.Source);
+        }
+
+        [Fact]
+        public void A_picked_profile_other_than_the_owning_projects_is_refused()
+        {
+            var lookup = Lookup(rows: new[] { Row("p1", "Work", path: WorkProject, name: "Acme") });
+
+            var atRoot = ClaudeProfileLaunchPolicy.Decide(null, WorkProject, null, "Claude in 'work'", lookup, Resolver(), requestedProfileName: "Personal");
+            var below = ClaudeProfileLaunchPolicy.Decide(null, WorkProject + @"\src", null, "Claude in 'src'", lookup, Resolver(), requestedProfileName: "Personal");
+            var named = ClaudeProfileLaunchPolicy.Decide("p1", Scratch, null, "project 'Acme'", lookup, Resolver(), requestedProfileName: "Default");
+
+            foreach (var decision in new[] { atRoot, below, named })
+            {
+                Assert.False(decision.CanLaunch);
+                Assert.Null(decision.Profile);
+                Assert.Contains("'Acme'", decision.Refusal, StringComparison.Ordinal);
+                Assert.Contains("'Work'", decision.Refusal, StringComparison.Ordinal);
+                Assert.Contains("Edit Project", decision.Refusal, StringComparison.Ordinal);
+            }
+
+            Assert.Contains("'Personal'", atRoot.Refusal, StringComparison.Ordinal);
+            Assert.Contains("'Default'", named.Refusal, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void A_picked_named_profile_is_refused_in_a_project_that_uses_Default()
+        {
+            var lookup = Lookup(rows: new[] { Row("p1", null, path: WorkProject, name: "Acme") });
+
+            var decision = ClaudeProfileLaunchPolicy.Decide(null, WorkProject + @"\src", null, "x", lookup, Resolver(), requestedProfileName: "Work");
+
+            Assert.False(decision.CanLaunch);
+            Assert.Contains("'Acme'", decision.Refusal, StringComparison.Ordinal);
+            Assert.Contains("'Default'", decision.Refusal, StringComparison.Ordinal);
+        }
+
+        [Theory]
+        [InlineData("Work", "work")]
+        [InlineData("Work", " WORK ")]
+        [InlineData(null, "Default")]
+        [InlineData("", "default")]
+        public void Picking_the_owning_projects_own_profile_changes_nothing(string projectProfile, string picked)
+        {
+            var lookup = Lookup(rows: new[] { Row("p1", projectProfile, path: WorkProject) });
+
+            var without = ClaudeProfileLaunchPolicy.FindProfileName(null, WorkProject, null, lookup);
+            var with = ClaudeProfileLaunchPolicy.FindProfileName(null, WorkProject, null, lookup, requestedProfileName: picked);
+
+            Assert.Null(with.Conflict);
+            Assert.Equal(without, with);
+            Assert.Equal(ClaudeProfileNameSource.Database, with.Source);
+        }
+
+        [Fact]
+        public void A_picked_profile_this_machine_lacks_is_refused_and_does_not_point_at_Edit_Project()
+        {
+            var decision = ClaudeProfileLaunchPolicy.Decide(null, Scratch, "Work", "Claude in 'scratch'", Lookup(), Resolver(), requestedProfileName: "Gone");
+
+            Assert.False(decision.CanLaunch);
+            Assert.Null(decision.Profile);
+            Assert.Equal(ClaudeProfileNameSource.Requested, decision.Source);
+            Assert.Contains("'Gone'", decision.Refusal, StringComparison.Ordinal);
+            Assert.Contains("not configured", decision.Refusal, StringComparison.Ordinal);
+            Assert.DoesNotContain("Edit Project", decision.Refusal, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void An_owner_that_is_already_a_conflict_keeps_its_own_refusal_whatever_was_picked()
+        {
+            var lookup = Lookup(rows: new[] { Row("a", "Work", path: WorkProject), Row("b", "Personal", path: WorkProject) });
+
+            var without = ClaudeProfileLaunchPolicy.FindProfileName(null, WorkProject, null, lookup);
+            var with = ClaudeProfileLaunchPolicy.FindProfileName(null, WorkProject, null, lookup, requestedProfileName: "Work");
+
+            Assert.NotNull(without.Conflict);
+            Assert.Equal(without.Conflict, with.Conflict);
+        }
+
+        // ── The picker: what it may offer for a folder ──
+
+        [Fact]
+        public void The_picker_offers_a_choice_only_for_a_folder_no_project_owns()
+        {
+            var lookup = Lookup(rows: new[]
+            {
+                Row("w", "Work", path: WorkProject, name: "Acme"),
+                Row("d", null, path: PersonalProject, name: "Home"),
+            });
+
+            var free = ClaudeProfileLaunchPolicy.DescribeChoice(Scratch, lookup);
+            var owned = ClaudeProfileLaunchPolicy.DescribeChoice(WorkProject + @"\src", lookup);
+            var ownedDefault = ClaudeProfileLaunchPolicy.DescribeChoice(PersonalProject, lookup);
+
+            Assert.Equal(new ClaudeProfileLaunchChoice(true, null, null), free);
+
+            Assert.False(owned.CanChoose);
+            Assert.Equal("Work", owned.FixedProfileName);
+            Assert.Contains("'Acme'", owned.Reason, StringComparison.Ordinal);
+            Assert.Contains("Edit Project", owned.Reason, StringComparison.Ordinal);
+
+            Assert.False(ownedDefault.CanChoose);
+            Assert.Equal("Default", ownedDefault.FixedProfileName);
+        }
+
+        [Fact]
+        public void The_picker_and_the_decision_agree_on_which_folders_have_a_choice()
+        {
+            // For every folder: the picker offers a choice exactly when picking a profile the folder's
+            // owner does not use is honoured rather than refused. (Personal is used by no row at
+            // WorkProject and Work by none at PersonalProject, so one of the two always differs.)
+            var lookup = Lookup(
+                rows: new[] { Row("w", "Work", path: WorkProject), Row("p", "Personal", path: PersonalProject) },
+                files: new Dictionary<string, Project> { [UnregisteredChild] = FileProject("f", "Work") });
+
+            foreach (string folder in new[] { Scratch, WorkProject, WorkProject + @"\a\b", PersonalProject + @"\src", BroadParent, UnregisteredChild })
+            {
+                bool canChoose = ClaudeProfileLaunchPolicy.DescribeChoice(folder, lookup).CanChoose;
+                bool bothHonoured =
+                    ClaudeProfileLaunchPolicy.Decide(null, folder, null, "x", lookup, Resolver(), requestedProfileName: "Work").CanLaunch
+                    && ClaudeProfileLaunchPolicy.Decide(null, folder, null, "x", lookup, Resolver(), requestedProfileName: "Personal").CanLaunch;
+
+                Assert.True(canChoose == bothHonoured, $"'{folder}': picker says canChoose={canChoose}, decision honours both picks={bothHonoured}");
+            }
+        }
+
+        [Fact]
+        public void The_picker_offers_no_choice_when_the_owner_cannot_be_worked_out()
+        {
+            var broken = new ClaudeProfileLookup(
+                RowById: _ => throw new InvalidOperationException("database is locked"),
+                AllRows: () => throw new InvalidOperationException("database is locked"),
+                LoadProjectFile: _ => null,
+                CandidateFolders: folder => new[] { folder });
+            var twoOwners = Lookup(rows: new[] { Row("a", "Work", path: WorkProject), Row("b", "Personal", path: WorkProject) });
+
+            foreach (var choice in new[]
+            {
+                ClaudeProfileLaunchPolicy.DescribeChoice(WorkProject, broken),
+                ClaudeProfileLaunchPolicy.DescribeChoice(WorkProject, twoOwners),
+            })
+            {
+                Assert.False(choice.CanChoose);
+                Assert.Null(choice.FixedProfileName);
+                Assert.False(string.IsNullOrWhiteSpace(choice.Reason));
+            }
+        }
+
+        // ── Phase 3 item 20: a launch nobody is watching, under a profile that has never run Claude ──
+
+        private static Func<ClaudeProfile, string> NeverUsed(params string[] names) =>
+            profile => names.Contains(profile.Name, StringComparer.OrdinalIgnoreCase) ? $"The Claude profile '{profile.Name}' has never been used." : null;
+
+        [Fact]
+        public void An_unattended_launch_under_a_never_used_profile_is_refused_whatever_chose_the_profile()
+        {
+            var lookup = Lookup(rows: new[] { Row("p1", "Work", path: WorkProject, name: "Acme") });
+
+            var byProject = ClaudeProfileLaunchPolicy.Decide(null, WorkProject, null, "helper 'Bob'", lookup, Resolver(), neverUsedReason: NeverUsed("Work"));
+            var inherited = ClaudeProfileLaunchPolicy.Decide(null, Scratch, "Work", "helper 'Bob'", lookup, Resolver(), neverUsedReason: NeverUsed("Work"));
+            var onDefault = ClaudeProfileLaunchPolicy.Decide(null, Scratch, null, "helper 'Bob'", lookup, Resolver(), neverUsedReason: NeverUsed("Default"));
+
+            foreach (var decision in new[] { byProject, inherited, onDefault })
+            {
+                Assert.False(decision.CanLaunch);
+                Assert.Null(decision.Profile);
+                Assert.StartsWith("Not started: helper 'Bob'.", decision.Refusal, StringComparison.Ordinal);
+                Assert.Contains("has never been used", decision.Refusal, StringComparison.Ordinal);
+                Assert.Contains("sign in", decision.Refusal, StringComparison.Ordinal);
+            }
+
+            Assert.Contains("Project 'Acme'", byProject.Refusal, StringComparison.Ordinal);
+            Assert.Contains("under the Claude profile 'Default'", onDefault.Refusal, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void A_used_profile_or_a_watched_launch_is_not_refused_for_being_never_used()
+        {
+            var lookup = Lookup(rows: new[] { Row("p1", "Work", path: WorkProject) });
+
+            // Unattended, but the profile it resolves to (Work) has been used; Personal has not.
+            var used = ClaudeProfileLaunchPolicy.Decide(null, WorkProject, null, "helper 'Bob'", lookup, Resolver(), neverUsedReason: NeverUsed("Personal"));
+
+            // Watched (no check passed): the same never-used profile starts, so a human can sign in.
+            var watched = ClaudeProfileLaunchPolicy.Decide(null, WorkProject, null, "Claude in 'work'", lookup, Resolver());
+
+            Assert.True(used.CanLaunch);
+            Assert.Equal("Work", used.Profile.Name);
+            Assert.True(watched.CanLaunch);
+        }
+
+        [Fact]
+        public void The_never_used_check_is_not_asked_about_a_launch_that_is_already_refused()
+        {
+            var asked = new List<string>();
+            Func<ClaudeProfile, string> record = p => { asked.Add(p?.Name); return "never used"; };
+
+            var missingFolder = ClaudeProfileLaunchPolicy.Decide(
+                "p1", Repo, null, "helper 'Bob'", Lookup(rows: new[] { Row("p1", "Work") }), Resolver(exists: _ => false), neverUsedReason: record);
+
+            Assert.False(missingFolder.CanLaunch);
+            Assert.Contains("does not exist", missingFolder.Refusal, StringComparison.Ordinal);
+            Assert.Empty(asked);
+        }
     }
 }

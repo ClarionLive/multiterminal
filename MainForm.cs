@@ -2034,7 +2034,9 @@ namespace MultiTerminal
                         // sent to a scratch folder stays on the account its spawner works under.
                         string helperLabel = $"helper '{agentName}' in '{workingDir}'";
                         string spawnerProfileName = FindSpawnerClaudeProfileName(spawnerDocId, spawnerName);
-                        var profileDecision = DecideLaunchClaudeProfile(null, workingDir, helperLabel, spawnerProfileName);
+                        // Nobody watches a helper start, so a profile that has never run Claude refuses
+                        // it (item 20) instead of leaving it on a sign-in prompt.
+                        var profileDecision = DecideLaunchClaudeProfile(null, workingDir, helperLabel, spawnerProfileName, unattended: true);
                         if (!profileDecision.CanLaunch)
                         {
                             profileRefusal = profileDecision.Refusal;
@@ -2296,7 +2298,7 @@ namespace MultiTerminal
                 // cannot honour fails the spawn; the writer never runs on another account instead.
                 // No folder is passed: its cwd is the app directory, which belongs to no project.
                 var glossProfile = DecideLaunchClaudeProfile(
-                    _mcpServer?.Broker?.GetTask(taskId)?.ProjectId, null, $"gloss writer for task {taskId}");
+                    _mcpServer?.Broker?.GetTask(taskId)?.ProjectId, null, $"gloss writer for task {taskId}", unattended: true);
                 if (!glossProfile.CanLaunch)
                     return (false, glossProfile.Refusal);
 
@@ -2382,7 +2384,7 @@ namespace MultiTerminal
                 // machine cannot honour fails the spawn before any process exists.
                 var agentProfile = DecideLaunchClaudeProfile(
                     null, workingDir, $"headless agent '{agentName}' in '{workingDir}'",
-                    FindSpawnerClaudeProfileName(null, spawnerName));
+                    FindSpawnerClaudeProfileName(null, spawnerName), unattended: true);
                 if (!agentProfile.CanLaunch)
                     return (false, null, agentProfile.Refusal);
 
@@ -3771,7 +3773,7 @@ namespace MultiTerminal
             Models.ClaudeProfile claudeProfile = decidedClaudeProfile;
             if (hasLaunchParams && claudeProfile == null)
             {
-                var early = DecideLaunchClaudeProfile(projectId, requestedDir, claudeProfileLabel, inheritedClaudeProfileName);
+                var early = DecideLaunchClaudeProfile(projectId, requestedDir, claudeProfileLabel, inheritedClaudeProfileName, unattended: onClaudeProfileRefused != null);
                 if (!early.CanLaunch)
                 {
                     ReportClaudeProfileRefused(early.Refusal, onClaudeProfileRefused);
@@ -3939,7 +3941,7 @@ namespace MultiTerminal
                 string launchFolder = string.IsNullOrEmpty(taskWorktreePath) ? dir : taskWorktreePath;
                 if (decidedClaudeProfile == null && string.IsNullOrEmpty(projectId) && !SameLaunchFolder(launchFolder, requestedDir))
                 {
-                    var moved = DecideLaunchClaudeProfile(null, launchFolder, claudeProfileLabel, inheritedClaudeProfileName);
+                    var moved = DecideLaunchClaudeProfile(null, launchFolder, claudeProfileLabel, inheritedClaudeProfileName, unattended: onClaudeProfileRefused != null);
                     claudeProfile = moved.Profile;
                     claudeProfileRefusal = moved.Refusal;
                 }
@@ -4336,12 +4338,17 @@ namespace MultiTerminal
                 var recentFolders = _settings?.GetRecentDirectories() ?? new List<string>();
 
                 // Show identity + folder picker
+                // The picker also offers the Claude profile (item 8), when more than one exists and
+                // for as long as the folder in its box belongs to no project.
                 var identities = GetAvailableIdentities(defaultFolder);
                 using var picker = new Dialogs.IdentityPickerDialog(
                     null, identities, _currentTheme,
                     isSelectionMode: true,
                     defaultFolder: defaultFolder,
-                    recentFolders: recentFolders);
+                    recentFolders: recentFolders,
+                    claudeProfileNames: GetClaudeProfileNamesForPicker(),
+                    describeProfileChoice: DescribeClaudeProfileChoice,
+                    profileHint: DescribeClaudeProfileHint);
 
                 if (picker.ShowDialog(this) != DialogResult.OK)
                     return; // User cancelled
@@ -4355,9 +4362,14 @@ namespace MultiTerminal
 
                 // "Just Claude" names no project, but a folder that belongs to a registered project
                 // still runs under that project's Claude profile (ticket c8ee0eec). Decided before the
-                // name is registered; a refusal leaves the pane on its start screen.
-                if (!TryGetLaunchClaudeProfile(null, workingDir, $"Claude in '{workingDir}'", out var claudeProfile))
+                // name is registered; a refusal leaves the pane on its start screen. The profile picked
+                // in the dialog counts only for a folder no project owns; the dialog returns none for a
+                // folder that is owned, and the policy refuses one that slips through.
+                if (!TryGetLaunchClaudeProfile(null, workingDir, $"Claude in '{workingDir}'", out var claudeProfile,
+                        requestedProfileName: picker.SelectedClaudeProfileName))
+                {
                     return;
+                }
 
                 if (_mcpServer?.Broker != null)
                 {
@@ -4900,19 +4912,19 @@ namespace MultiTerminal
         /// or two owners of one folder that disagree, refuses the launch. Shows nothing: the caller decides how a refusal is reported. Safe off the
         /// UI thread.
         /// </summary>
-        private ClaudeProfileLaunchDecision DecideLaunchClaudeProfile(string projectId, string folder, string launchLabel, string inheritedProfileName = null)
+        /// <param name="requestedProfileName">The profile a human picked for this launch (Just Claude,
+        /// Launch as), or null. Honoured only when no project owns the folder; refused when a project
+        /// does and uses another profile.</param>
+        /// <param name="unattended">True for a launch nobody is watching (a spawned helper, a headless
+        /// agent, the gloss writer): it is refused under a profile that has never run Claude, because
+        /// the sign-in and first-run prompts would wait forever. False for a pane a human opened.</param>
+        private ClaudeProfileLaunchDecision DecideLaunchClaudeProfile(string projectId, string folder, string launchLabel, string inheritedProfileName = null, string requestedProfileName = null, bool unattended = false)
         {
-            var db = _sharedProjectDatabase;
-            var projects = _projectService;
-            var lookup = new ClaudeProfileLookup(
-                RowById: id => ToClaudeProfileRow(db?.GetRichProject(id)),
-                AllRows: () => (db?.GetAllRichProjects() ?? new List<Models.Project>()).Select(ToClaudeProfileRow).ToList(),
-                LoadProjectFile: f => projects?.DiscoverProject(f),
-                CandidateFolders: ClaudeProfileLaunchPolicy.CandidateFolders);
-
             var decision = ClaudeProfileLaunchPolicy.Decide(
-                projectId, folder, inheritedProfileName, launchLabel, lookup,
-                name => ClaudeProfileResolver.Resolve(name, null));
+                projectId, folder, inheritedProfileName, launchLabel, BuildClaudeProfileLookup(),
+                name => ClaudeProfileResolver.Resolve(name, null),
+                requestedProfileName,
+                unattended ? ClaudeProfileResolver.DescribeNeverUsed : null);
 
             if (decision.CanLaunch)
                 _debugLogService?.Info("ClaudeProfile", $"{launchLabel}: profile '{decision.Profile.Name}' (from {decision.Source}{(decision.ProjectName == null ? "" : $", project '{decision.ProjectName}'")}).");
@@ -4920,6 +4932,48 @@ namespace MultiTerminal
                 _debugLogService?.Warning("ClaudeProfile", $"LAUNCH REFUSED. {decision.Refusal}");
 
             return decision;
+        }
+
+        /// <summary>The live database and project.json readers the profile policy asks.</summary>
+        private ClaudeProfileLookup BuildClaudeProfileLookup()
+        {
+            var db = _sharedProjectDatabase;
+            var projects = _projectService;
+            return new ClaudeProfileLookup(
+                RowById: id => ToClaudeProfileRow(db?.GetRichProject(id)),
+                AllRows: () => (db?.GetAllRichProjects() ?? new List<Models.Project>()).Select(ToClaudeProfileRow).ToList(),
+                LoadProjectFile: f => projects?.DiscoverProject(f),
+                CandidateFolders: ClaudeProfileLaunchPolicy.CandidateFolders);
+        }
+
+        /// <summary>What a "Claude profile" picker may offer for <paramref name="folder"/> (item 8): a
+        /// free choice when no project owns it, else the owner's profile as fixed text.</summary>
+        private ClaudeProfileLaunchChoice DescribeClaudeProfileChoice(string folder) =>
+            ClaudeProfileLaunchPolicy.DescribeChoice(folder, BuildClaudeProfileLookup());
+
+        /// <summary>Every profile name for a picker, Default first.</summary>
+        private static List<string> GetClaudeProfileNamesForPicker() =>
+            ClaudeProfileResolver.GetAllProfiles().Select(p => p.Name).ToList();
+
+        /// <summary>
+        /// The note a profile picker shows under a picked profile, or null: that the profile has never
+        /// run Claude, so this terminal will ask for a sign-in (item 20; an interactive launch is not
+        /// blocked, since that is how a profile gets set up). A name this machine cannot honour gets
+        /// no note here; the launch itself refuses it with the reason.
+        /// </summary>
+        private static string DescribeClaudeProfileHint(string profileName)
+        {
+            try
+            {
+                var resolution = ClaudeProfileResolver.Resolve(profileName, null);
+                return resolution.CanLaunch && ClaudeProfileResolver.DescribeNeverUsed(resolution.Profile) != null
+                    ? $"'{resolution.Profile.Name}' has never been used here: Claude will ask you to sign in."
+                    : null;
+            }
+            catch (Exception ex) when (ex is ArgumentException || ex is IOException || ex is UnauthorizedAccessException)
+            {
+                return null;
+            }
         }
 
         private static ClaudeProfileProjectRow ToClaudeProfileRow(Models.Project p) =>
@@ -4931,9 +4985,9 @@ namespace MultiTerminal
         /// that did not happen must never look like one that did), and false is returned. The caller
         /// starts nothing.
         /// </summary>
-        private bool TryGetLaunchClaudeProfile(string projectId, string folder, string launchLabel, out Models.ClaudeProfile profile, string inheritedProfileName = null, string refusalTail = null)
+        private bool TryGetLaunchClaudeProfile(string projectId, string folder, string launchLabel, out Models.ClaudeProfile profile, string inheritedProfileName = null, string refusalTail = null, string requestedProfileName = null)
         {
-            var decision = DecideLaunchClaudeProfile(projectId, folder, launchLabel, inheritedProfileName);
+            var decision = DecideLaunchClaudeProfile(projectId, folder, launchLabel, inheritedProfileName, requestedProfileName);
             profile = decision.Profile;
             if (decision.CanLaunch)
                 return true;
@@ -5904,7 +5958,28 @@ namespace MultiTerminal
             string predictedDir = ResolveSpawnDir(identityName, workingDirectory, out string predictedWorktree);
             string predictedFolder = string.IsNullOrEmpty(predictedWorktree) ? predictedDir : predictedWorktree;
             string paneProfileName = doc.LaunchClaudeProfileName;
-            if (!TryGetLaunchClaudeProfile(null, predictedFolder, launchAsLabel, out var claudeProfile, inheritedProfileName: paneProfileName))
+
+            // Item 8: when that folder belongs to no project and there is more than one profile, ask
+            // which one, with the pane's current profile preselected. A folder a project owns is never
+            // asked about. Asked before the running session is touched, so Cancel changes nothing.
+            string pickedProfileName = null;
+            var profileNames = GetClaudeProfileNamesForPicker();
+            if (profileNames.Count > 1 && DescribeClaudeProfileChoice(predictedFolder).CanChoose)
+            {
+                using var profilePicker = new Dialogs.IdentityPickerProfileDialog(
+                    identityName, predictedFolder, profileNames,
+                    paneProfileName ?? Models.ClaudeProfile.DefaultName, _currentTheme, DescribeClaudeProfileHint);
+                if (profilePicker.ShowDialog(this) != DialogResult.OK)
+                    return;
+
+                pickedProfileName = profilePicker.SelectedClaudeProfileName;
+
+                // From here the pick replaces the pane's profile as the one a folder with no owner
+                // gets (null = Default), including in the second decision below.
+                paneProfileName = Models.ClaudeProfile.NormalizeName(pickedProfileName);
+            }
+
+            if (!TryGetLaunchClaudeProfile(null, predictedFolder, launchAsLabel, out var claudeProfile, inheritedProfileName: paneProfileName, requestedProfileName: pickedProfileName))
                 return;
 
             // Unregister the old terminal from MCP
@@ -5933,7 +6008,9 @@ namespace MultiTerminal
             // name has its own active task or none, so the folder can differ from the predicted one. The
             // profile follows the real folder. The old session is already unregistered by now, so a
             // refusal here stops it and returns the pane to its start screen rather than leave it
-            // running under a name the broker no longer knows.
+            // running under a name the broker no longer knows. A profile picked above was picked for
+            // the predicted folder, so here it is passed only as the name a folder with no owner gets:
+            // if the real folder belongs to a project, that project's profile is used, not refused.
             string launchFolder = string.IsNullOrEmpty(taskWorktreePath) ? workingDirectory : taskWorktreePath;
             if (!SameLaunchFolder(launchFolder, predictedFolder)
                 && !TryGetLaunchClaudeProfile(null, launchFolder, launchAsLabel, out claudeProfile, inheritedProfileName: paneProfileName))

@@ -4,6 +4,8 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Windows.Forms;
+using MultiTerminal.Models;
+using MultiTerminal.Services;
 using MultiTerminal.Terminal;
 
 namespace MultiTerminal.Dialogs
@@ -24,7 +26,20 @@ namespace MultiTerminal.Dialogs
         private ListBox _recentList;
         private Button _okButton;
         private Button _cancelButton;
+        private ComboBox _profileCombo;
+        private Label _profileNote;
 #pragma warning restore CA2213
+
+        // Claude profile choice (ticket c8ee0eec item 8). Shown only in selection mode and only when
+        // more than one profile exists. _describeProfileChoice says, for the folder in the box, whether
+        // a profile may be picked at all (a folder a project owns always uses that project's profile).
+        private readonly IReadOnlyList<string> _profileNames;
+        private readonly Func<string, ClaudeProfileLaunchChoice> _describeProfileChoice;
+        private readonly Func<string, string> _profileHint;
+        private Timer _profileRefreshTimer;
+        private string _pickedProfileName = ClaudeProfile.DefaultName;
+        private bool _profileChoiceOpen = true;
+        private bool _settingProfileSelection;
         private readonly string _conflictingName;
         private readonly List<string> _identities;
         private readonly bool _isSelectionMode;
@@ -39,6 +54,13 @@ namespace MultiTerminal.Dialogs
         /// Gets the working folder selected by the user (selection mode only).
         /// </summary>
         public string SelectedFolder { get; private set; }
+
+        /// <summary>
+        /// The Claude profile the user picked for this launch ("Default" included), or null when there
+        /// was nothing to pick: only one profile exists, or the selected folder belongs to a project
+        /// (which always uses that project's profile). Selection mode only.
+        /// </summary>
+        public string SelectedClaudeProfileName { get; private set; }
 
         /// <summary>
         /// Conflict mode: team lead identity is already in use, pick an alternative.
@@ -62,7 +84,32 @@ namespace MultiTerminal.Dialogs
             bool isSelectionMode,
             string defaultFolder,
             List<string> recentFolders)
+            : this(conflictingName, availableIdentities, theme, isSelectionMode, defaultFolder, recentFolders, null, null, null)
         {
+        }
+
+        /// <summary>
+        /// Selection mode with a "Claude profile" choice (ticket c8ee0eec item 8).
+        /// </summary>
+        /// <param name="claudeProfileNames">Every profile name, Default first. The choice appears only
+        /// when there is more than one.</param>
+        /// <param name="describeProfileChoice">Folder → whether a profile may be picked for it
+        /// (<see cref="ClaudeProfileLaunchPolicy.DescribeChoice"/>).</param>
+        /// <param name="profileHint">Profile name → a one-line note to show under the choice, or null.</param>
+        internal IdentityPickerDialog(
+            string conflictingName,
+            List<string> availableIdentities,
+            TerminalTheme theme,
+            bool isSelectionMode,
+            string defaultFolder,
+            List<string> recentFolders,
+            IReadOnlyList<string> claudeProfileNames,
+            Func<string, ClaudeProfileLaunchChoice> describeProfileChoice,
+            Func<string, string> profileHint)
+        {
+            _profileNames = claudeProfileNames ?? Array.Empty<string>();
+            _describeProfileChoice = describeProfileChoice;
+            _profileHint = profileHint;
             _conflictingName = conflictingName;
             _identities = availableIdentities ?? new List<string>();
             _isSelectionMode = isSelectionMode;
@@ -205,6 +252,65 @@ namespace MultiTerminal.Dialogs
             Controls.Add(_browseButton);
             y += 34;
 
+            // --- Claude Profile Section (only when there is something to choose between) ---
+            if (_profileNames.Count > 1)
+            {
+                var profileLabel = new Label
+                {
+                    Text = "Claude profile:",
+                    Location = new Point(16, y),
+                    Size = new Size(512, 20),
+                    Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
+                };
+                Controls.Add(profileLabel);
+                y += 24;
+
+                _profileCombo = new ComboBox
+                {
+                    Location = new Point(16, y),
+                    Size = new Size(260, 26),
+                    DropDownStyle = ComboBoxStyle.DropDownList,
+                    Font = new Font("Segoe UI", 9.5f)
+                };
+                foreach (var profileName in _profileNames)
+                    _profileCombo.Items.Add(profileName);
+                _profileCombo.SelectedIndex = 0;
+                _profileCombo.SelectedIndexChanged += (s, e) =>
+                {
+                    if (_settingProfileSelection || !_profileChoiceOpen || _profileCombo.SelectedItem == null)
+                        return;
+                    _pickedProfileName = _profileCombo.SelectedItem.ToString();
+                    ShowProfileNote(_profileHint?.Invoke(_pickedProfileName));
+                };
+                Controls.Add(_profileCombo);
+                y += 30;
+
+                _profileNote = new Label
+                {
+                    Location = new Point(16, y),
+                    Size = new Size(512, 34),
+                    AutoSize = false,
+                    Font = new Font("Segoe UI", 8.5f)
+                };
+                Controls.Add(_profileNote);
+                y += 38;
+
+                // The folder decides whether there is a choice at all. Typing is debounced: the answer
+                // reads the project database and the folder's project.json.
+                _profileRefreshTimer = new Timer { Interval = 300 };
+                _profileRefreshTimer.Tick += (s, e) =>
+                {
+                    _profileRefreshTimer.Stop();
+                    RefreshProfileChoice();
+                };
+                _folderTextBox.TextChanged += (s, e) =>
+                {
+                    _profileRefreshTimer.Stop();
+                    _profileRefreshTimer.Start();
+                };
+                RefreshProfileChoice();
+            }
+
             // --- Recent Folders Section ---
             var recents = recentFolders?.Where(f => Directory.Exists(f)).ToList() ?? new List<string>();
             if (recents.Count > 0)
@@ -299,6 +405,41 @@ namespace MultiTerminal.Dialogs
             }
         }
 
+        /// <summary>
+        /// Brings the profile choice in line with the folder in the box: open when no project owns the
+        /// folder (the user's last pick is restored), else closed on the owning project's profile with
+        /// the reason shown. No-op when the choice is not shown.
+        /// </summary>
+        private void RefreshProfileChoice()
+        {
+            if (_profileCombo == null)
+                return;
+
+            var choice = _describeProfileChoice?.Invoke(_folderTextBox.Text.Trim())
+                ?? new ClaudeProfileLaunchChoice(true, null, null);
+            _profileChoiceOpen = choice.CanChoose;
+
+            string show = choice.CanChoose ? _pickedProfileName : choice.FixedProfileName;
+            _settingProfileSelection = true;
+            try
+            {
+                _profileCombo.SelectedIndex = show == null ? -1 : _profileCombo.FindStringExact(show);
+                _profileCombo.Enabled = choice.CanChoose;
+            }
+            finally
+            {
+                _settingProfileSelection = false;
+            }
+
+            ShowProfileNote(choice.CanChoose ? _profileHint?.Invoke(_pickedProfileName) : choice.Reason);
+        }
+
+        private void ShowProfileNote(string text)
+        {
+            if (_profileNote != null)
+                _profileNote.Text = text ?? "";
+        }
+
         private void SelectFirstAvailable()
         {
             for (int i = 0; i < _identityList.Items.Count; i++)
@@ -347,6 +488,15 @@ namespace MultiTerminal.Dialogs
                     return false;
                 }
                 SelectedFolder = folder;
+
+                // Decided again for the folder being accepted (the debounce may not have run yet), so a
+                // pick is never returned for a folder that a project owns.
+                if (_profileCombo != null)
+                {
+                    _profileRefreshTimer?.Stop();
+                    RefreshProfileChoice();
+                    SelectedClaudeProfileName = _profileChoiceOpen ? _pickedProfileName : null;
+                }
             }
 
             return true;
@@ -375,6 +525,12 @@ namespace MultiTerminal.Dialogs
                     tb.BackColor = theme.Background;
                     tb.ForeColor = theme.Foreground;
                 }
+                else if (ctrl is ComboBox cb)
+                {
+                    cb.BackColor = theme.Background;
+                    cb.ForeColor = theme.Foreground;
+                    cb.FlatStyle = FlatStyle.Flat;
+                }
                 else if (ctrl is Button btn)
                 {
                     btn.BackColor = theme.TabInactiveBackground;
@@ -383,6 +539,17 @@ namespace MultiTerminal.Dialogs
                     btn.FlatAppearance.BorderColor = theme.StatusForeground;
                 }
             }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _profileRefreshTimer?.Dispose();
+                _profileRefreshTimer = null;
+            }
+
+            base.Dispose(disposing);
         }
 
         protected override void OnShown(EventArgs e)
