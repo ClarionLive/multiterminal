@@ -2044,7 +2044,13 @@ namespace MultiTerminal
                         // database; a folder no project owns takes the SPAWNER's profile, so a helper
                         // sent to a scratch folder stays on the account its spawner works under.
                         string helperLabel = $"helper '{agentName}' in '{workingDir}'";
-                        string spawnerProfileName = FindSpawnerClaudeProfileName(spawnerDocId, spawnerName);
+                        string spawnerProfileName = FindSpawnerClaudeProfileName(spawnerDocId, spawnerName, out string spawnerRefusal);
+                        if (spawnerRefusal != null)
+                        {
+                            profileRefusal = spawnerRefusal;
+                            return;
+                        }
+
                         // Nobody watches a helper start, so a profile that has never run Claude refuses
                         // it (item 20) instead of leaving it on a sign-in prompt.
                         var profileDecision = DecideLaunchClaudeProfile(null, workingDir, helperLabel, spawnerProfileName, unattended: true);
@@ -2393,9 +2399,13 @@ namespace MultiTerminal
                 // worktree belongs to the project at its repo). Same rules as a spawned pane: the
                 // project's profile from the database, else the spawner's, else Default; a profile this
                 // machine cannot honour fails the spawn before any process exists.
+                string headlessSpawnerProfile = FindSpawnerClaudeProfileName(null, spawnerName, out string headlessSpawnerRefusal);
+                if (headlessSpawnerRefusal != null)
+                    return (false, null, headlessSpawnerRefusal);
+
                 var agentProfile = DecideLaunchClaudeProfile(
                     null, workingDir, $"headless agent '{agentName}' in '{workingDir}'",
-                    FindSpawnerClaudeProfileName(null, spawnerName), unattended: true);
+                    headlessSpawnerProfile, unattended: true);
                 if (!agentProfile.CanLaunch)
                     return (false, null, agentProfile.Refusal);
 
@@ -5010,18 +5020,40 @@ namespace MultiTerminal
         /// Default, or it cannot be found). The pane is found by <paramref name="spawnerDocId"/> when the
         /// caller's launch nonce proved one, else by <paramref name="spawnerName"/>, which is only what
         /// the caller said its name was. A headless spawner has no pane and yields null.
+        /// <para>By name, the pane is the one <see cref="ClaudeProfilePaneLookup.Match"/> picks (its
+        /// confirmed name only, never a renamed tab's title), not <c>TerminalDocument.FindByIdentity</c>.
+        /// When more than one running pane answers to the name, or the one that does has no recorded
+        /// launch, the spawner's profile cannot be told: <paramref name="refusal"/> is set and the
+        /// spawn must not start, because inheriting nothing would put the helper on Default.</para>
         /// </summary>
-        private string FindSpawnerClaudeProfileName(string spawnerDocId, string spawnerName)
+        private string FindSpawnerClaudeProfileName(string spawnerDocId, string spawnerName, out string refusal)
         {
-            TerminalDocument spawner = null;
+            refusal = null;
             lock (_terminalDocMapLock)
             {
                 if (!string.IsNullOrEmpty(spawnerDocId))
-                    spawner = _terminalDocMap.Values.FirstOrDefault(d => string.Equals(d.DocId, spawnerDocId, StringComparison.Ordinal));
-                spawner ??= TerminalDocument.FindByIdentity(_terminalDocMap.Values, spawnerName);
-            }
+                {
+                    var proven = _terminalDocMap.Values.FirstOrDefault(d => string.Equals(d.DocId, spawnerDocId, StringComparison.Ordinal));
+                    if (proven != null)
+                        return proven.LaunchClaudeProfileName;
+                }
 
-            return spawner?.LaunchClaudeProfileName;
+                var panes = _terminalDocMap.Values
+                    .Distinct()
+                    .Select(d => new ClaudeProfilePaneLookup.PaneCandidate(
+                        d.OriginalAgentName, d.CustomTitle, d.Terminal?.IsRunning == true, d.LaunchClaudeProfile))
+                    .ToList();
+                var byName = ClaudeProfilePaneLookup.Match(spawnerName, panes);
+                if (byName == null)
+                    return null;
+                if (!byName.Known)
+                {
+                    refusal = $"Not started: the Claude profile of the spawner '{spawnerName}' cannot be told (more than one running terminal answers to that name, or its terminal has no recorded launch), and MultiTerminal will not guess which profile the helper should inherit.";
+                    return null;
+                }
+
+                return byName.ProfileName;
+            }
         }
 
         /// <summary>
@@ -5033,14 +5065,23 @@ namespace MultiTerminal
         /// stale by one launch. A terminal that is not running (a pane back on its start screen) is not
         /// a match, so a name no live terminal holds is decided by folder. A running terminal with no
         /// recorded launch answers <see cref="ClaudePaneProfile.Unknown"/> (its data is skipped).
+        /// <para>Which pane the name means is <see cref="ClaudeProfilePaneLookup.Match"/>: a pane's
+        /// confirmed name only, its tab title only while it has no confirmed name, and
+        /// <see cref="ClaudePaneProfile.Unknown"/> when more than one running pane matches. Not
+        /// <c>TerminalDocument.FindByIdentity</c>, which takes a renamed tab's title and the first hit.
+        /// The map holds one entry per registration, so one pane can be in it several times; it is
+        /// counted once.</para>
         /// </summary>
         private ClaudePaneProfile FindPaneClaudeProfileForAgent(string agentName)
         {
             lock (_terminalDocMapLock)
             {
-                var running = _terminalDocMap.Values.Where(d => d.Terminal?.IsRunning == true).ToList();
-                var doc = TerminalDocument.FindByIdentity(running, agentName);
-                return doc == null ? null : doc.LaunchClaudeProfile ?? ClaudePaneProfile.Unknown;
+                var panes = _terminalDocMap.Values
+                    .Distinct()
+                    .Select(d => new ClaudeProfilePaneLookup.PaneCandidate(
+                        d.OriginalAgentName, d.CustomTitle, d.Terminal?.IsRunning == true, d.LaunchClaudeProfile))
+                    .ToList();
+                return ClaudeProfilePaneLookup.Match(agentName, panes);
             }
         }
 
@@ -8967,9 +9008,21 @@ namespace MultiTerminal
         private void OnViewSessionRequested(object sender, string sessionId)
         {
             // Get current project path from current project or last active terminal (prefer SourcePath)
-            string projectPath = (!string.IsNullOrEmpty(_currentProject?.SourcePath) ? _currentProject.SourcePath : _currentProject?.Path)
-                ?? _lastActiveTerminal?.GetWorkingDirectory()
-                ?? _settings?.GetLastDirectory();
+            string projectPath = !string.IsNullOrEmpty(_currentProject?.SourcePath) ? _currentProject.SourcePath : _currentProject?.Path;
+
+            // When the path is the last active terminal's folder, the session is looked for under THAT
+            // pane's Claude profile (ticket c8ee0eec): the folder alone answers Default for a folder
+            // no project owns, whatever profile the pane in it runs under.
+            TerminalDocument pathPane = null;
+            if (projectPath == null)
+            {
+                var pane = _lastActiveTerminal;
+                projectPath = pane?.GetWorkingDirectory();
+                if (projectPath != null)
+                    pathPane = pane;
+                else
+                    projectPath = _settings?.GetLastDirectory();
+            }
 
             if (string.IsNullOrEmpty(projectPath))
             {
@@ -8982,7 +9035,9 @@ namespace MultiTerminal
             }
 
             // Try to find HTML export from Claude's storage
-            var claudePath = SessionLineageService.GetClaudeProjectFolder(projectPath);
+            var claudePath = pathPane != null
+                ? SessionLineageService.GetClaudeProjectFolderForPane(projectPath, pathPane.LaunchClaudeProfile)
+                : SessionLineageService.GetClaudeProjectFolder(projectPath);
 
             if (!string.IsNullOrEmpty(claudePath))
             {

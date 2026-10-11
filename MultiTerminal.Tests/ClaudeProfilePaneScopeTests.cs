@@ -15,8 +15,10 @@ namespace MultiTerminal.Tests
     /// configured "Gone" with no folder) and an injected resolver context and project registry;
     /// nothing reads the machine's settings or a real profile folder.
     /// <para>What these facts do NOT cover: that MainForm's shutdown, the two HUD tabs and the REST
-    /// controllers actually call the functions tested here, and the live terminal lookup behind
-    /// <see cref="ClaudeProfilePaneLookup"/> (MainForm's map). Those are wiring, executed by no test.</para>
+    /// controllers actually call the functions tested here, and that MainForm's
+    /// <c>FindPaneClaudeProfileForAgent</c> hands its real panes to
+    /// <see cref="ClaudeProfilePaneLookup.Match"/> (the matching itself is tested here, over plain
+    /// values). Those are wiring, executed by no test.</para>
     /// </summary>
     public sealed class ClaudeProfilePaneScopeTests : IDisposable
     {
@@ -96,6 +98,112 @@ namespace MultiTerminal.Tests
             Assert.Null(For(Pane("Gone"), _unownedFolder));
             Assert.Null(For(ClaudePaneProfile.Unknown, _unownedFolder));
             Assert.Null(For(Pane("Gone"), _workProject));
+        }
+
+        // ── Which pane an agent name means ───────────────────────────────────
+
+        private static ClaudeProfilePaneLookup.PaneCandidate Running(string confirmedName, string title, ClaudePaneProfile profile) =>
+            new ClaudeProfilePaneLookup.PaneCandidate(confirmedName, title, true, profile);
+
+        [Fact]
+        public void A_pane_matches_by_its_confirmed_name_whatever_its_title_says()
+        {
+            var work = Pane("Work");
+            var panes = new[]
+            {
+                Running("Alice", "my renamed tab", work),
+                Running("Carol", "Carol", Pane("Personal")),
+            };
+
+            Assert.Same(work, ClaudeProfilePaneLookup.Match("Alice", panes));
+            Assert.Same(work, ClaudeProfilePaneLookup.Match("alice", panes)); // the broker's comparison ignores case
+            Assert.Null(ClaudeProfilePaneLookup.Match(" Alice", panes));      // and does not trim
+        }
+
+        /// <summary>
+        /// The defect: Bob (Personal) renames his tab "Alice". With no pane confirmed as Alice (a
+        /// headless agent), the name must mean NO pane, so the folder decides; with a real Alice pane
+        /// present, it must mean that pane and not be made ambiguous by Bob's title.
+        /// </summary>
+        [Fact]
+        public void A_renamed_tab_whose_confirmed_name_differs_does_not_match()
+        {
+            var personal = Pane("Personal");
+            var work = Pane("Work");
+            var bobRenamed = Running("Bob", "Alice", personal);
+
+            Assert.Null(ClaudeProfilePaneLookup.Match("Alice", new[] { bobRenamed }));
+            Assert.Same(work, ClaudeProfilePaneLookup.Match("Alice", new[] { bobRenamed, Running("Alice", "Alice", work) }));
+            Assert.Same(personal, ClaudeProfilePaneLookup.Match("Bob", new[] { bobRenamed }));
+
+            // The same from the other side: a confirmed pane is not found by the title it was given.
+            Assert.Null(ClaudeProfilePaneLookup.Match("my renamed tab", new[] { Running("Alice", "my renamed tab", work) }));
+        }
+
+        [Fact]
+        public void A_pane_with_no_confirmed_name_yet_matches_by_its_title()
+        {
+            var work = Pane("Work");
+
+            Assert.Same(work, ClaudeProfilePaneLookup.Match("Alice", new[] { Running(null, "Alice", work) }));
+            Assert.Same(work, ClaudeProfilePaneLookup.Match("Alice", new[] { Running("", "Alice", work) }));
+            Assert.Null(ClaudeProfilePaneLookup.Match("Alice", new[] { Running(null, "Bob", work) }));
+            Assert.Null(ClaudeProfilePaneLookup.Match("Alice", new[] { Running(null, null, work) }));
+        }
+
+        [Fact]
+        public void Two_matching_panes_give_Unknown_and_never_the_first()
+        {
+            var work = Pane("Work");
+            var personal = Pane("Personal");
+
+            // Two confirmed; one confirmed and one by title; and two of the SAME profile, which is
+            // still not an answer to "which pane".
+            Assert.Same(ClaudePaneProfile.Unknown, ClaudeProfilePaneLookup.Match("Alice", new[] { Running("Alice", "a", work), Running("ALICE", "b", personal) }));
+            Assert.Same(ClaudePaneProfile.Unknown, ClaudeProfilePaneLookup.Match("Alice", new[] { Running(null, "Alice", personal), Running("Alice", "x", work) }));
+            Assert.Same(ClaudePaneProfile.Unknown, ClaudeProfilePaneLookup.Match("Alice", new[] { Running("Alice", "a", work), Running("Alice", "b", work) }));
+
+            // Every consumer treats that as "no folder", not as the folder's profile.
+            Assert.Null(For(ClaudePaneProfile.Unknown, _workProject));
+        }
+
+        [Fact]
+        public void No_matching_pane_gives_null_and_a_matching_pane_with_no_launch_gives_Unknown()
+        {
+            var panes = new[] { Running("Carol", "Carol", Pane("Work")) };
+
+            Assert.Null(ClaudeProfilePaneLookup.Match("Alice", panes));
+            Assert.Null(ClaudeProfilePaneLookup.Match("Alice", Array.Empty<ClaudeProfilePaneLookup.PaneCandidate>()));
+            Assert.Null(ClaudeProfilePaneLookup.Match("Alice", null));
+            Assert.Null(ClaudeProfilePaneLookup.Match("", panes));
+            Assert.Null(ClaudeProfilePaneLookup.Match(null, new[] { Running(null, null, Pane("Work")) }));
+
+            Assert.Same(ClaudePaneProfile.Unknown, ClaudeProfilePaneLookup.Match("Carol", new[] { Running("Carol", "Carol", null) }));
+        }
+
+        [Fact]
+        public void A_helper_suffix_name_matches_only_the_pane_confirmed_under_exactly_that_name()
+        {
+            var work = Pane("Work");
+            var personal = Pane("Personal");
+            var panes = new[] { Running("Alice", "Alice", work), Running("Alice-2", "Alice-2", personal) };
+
+            Assert.Same(personal, ClaudeProfilePaneLookup.Match("Alice-2", panes));
+            Assert.Same(work, ClaudeProfilePaneLookup.Match("Alice", panes));
+            Assert.Null(ClaudeProfilePaneLookup.Match("Alice-3", panes));
+            Assert.Null(ClaudeProfilePaneLookup.Match("Alice-2", new[] { Running("Alice", "Alice", work) }));
+        }
+
+        [Fact]
+        public void A_pane_that_is_not_running_never_matches()
+        {
+            var work = Pane("Work");
+            var stoppedConfirmed = new ClaudeProfilePaneLookup.PaneCandidate("Alice", "Alice", false, Pane("Personal"));
+            var stoppedTitled = new ClaudeProfilePaneLookup.PaneCandidate(null, "Alice", false, Pane("Personal"));
+
+            Assert.Null(ClaudeProfilePaneLookup.Match("Alice", new[] { stoppedConfirmed, stoppedTitled }));
+            // Nor does it make a running match ambiguous.
+            Assert.Same(work, ClaudeProfilePaneLookup.Match("Alice", new[] { stoppedConfirmed, Running("Alice", "Alice", work), stoppedTitled }));
         }
 
         // ── Agent name to pane ───────────────────────────────────────────────

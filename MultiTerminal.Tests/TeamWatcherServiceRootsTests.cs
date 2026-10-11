@@ -294,6 +294,58 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// A teams folder that appears is not necessarily new: a drive that comes back, or a folder
+        /// renamed away and back, brings the teams of earlier sessions with it. The teams folder is
+        /// moved in whole with TWO teams inside, so neither gets a Created event and both are seen only
+        /// by the one-off look. The one whose folder was created a day ago is not adopted; the one
+        /// created now is, which is also the proof that the look ran.
+        /// </summary>
+        [Fact]
+        public async Task An_old_team_inside_a_teams_folder_that_appears_is_not_adopted_and_a_new_one_is()
+        {
+            string rootA = MakeRoot("a");
+            string rootB = Path.Combine(_base, "b") + Path.DirectorySeparatorChar;
+            Directory.CreateDirectory(Path.Combine(rootB, "projects")); // the profile folder exists; teams\ does not
+            using var h = new Harness(new[] { rootA, rootB }, rootA);
+            h.Service.StartWatching();
+
+            string stagedTeams = Path.Combine(_base, "staging", Guid.NewGuid().ToString("N"), "teams");
+            foreach (string kind in new[] { "old", "new" })
+            {
+                string session = Guid.NewGuid().ToString();
+                WriteTranscript(rootB, @"H:\Lead\Dir", session);
+                string teamDir = Path.Combine(stagedTeams, kind + "-" + _id);
+                Directory.CreateDirectory(teamDir);
+                File.WriteAllText(Path.Combine(teamDir, "config.json"), ConfigJson(kind + "-member-" + _id, @"H:\Lead\Dir", session));
+            }
+            string oldDir = Path.Combine(stagedTeams, "old-" + _id);
+            Directory.SetCreationTimeUtc(oldDir, DateTime.UtcNow.AddDays(-1));
+            Directory.Move(stagedTeams, Path.Combine(rootB, "teams"));
+
+            // The instrument: the move kept the old folder's creation time (were it reset to now, the
+            // "not adopted" assert below could only fail, never pass by accident).
+            Assert.True(Directory.GetCreationTimeUtc(Path.Combine(rootB, "teams", "old-" + _id)) < DateTime.UtcNow.AddHours(-23));
+
+            Assert.NotNull(await h.WaitForDiscovery(e => e.MemberName == "new-member-" + _id));
+            await Task.Delay(1000); // both were listed in the same pass; this covers the old one's processing
+            Assert.DoesNotContain(h.Discovered, e => e.MemberName == "old-member-" + _id);
+        }
+
+        [Fact]
+        public void A_team_folder_counts_as_new_only_from_the_time_its_teams_folder_was_seen_missing()
+        {
+            var seenMissing = new DateTime(2026, 10, 10, 12, 0, 0, DateTimeKind.Utc);
+
+            Assert.True(TeamWatcherService.IsTeamFolderFromThisAbsence(seenMissing.AddSeconds(5), seenMissing));
+            Assert.True(TeamWatcherService.IsTeamFolderFromThisAbsence(seenMissing, seenMissing));
+            // A file system's coarser clock: just before, within the tolerance.
+            Assert.True(TeamWatcherService.IsTeamFolderFromThisAbsence(seenMissing.AddMilliseconds(-20), seenMissing));
+
+            Assert.False(TeamWatcherService.IsTeamFolderFromThisAbsence(seenMissing - TeamWatcherService.TeamCreationTolerance - TimeSpan.FromSeconds(1), seenMissing));
+            Assert.False(TeamWatcherService.IsTeamFolderFromThisAbsence(seenMissing.AddDays(-30), seenMissing));
+        }
+
+        /// <summary>
         /// "Nothing from a previous session is restored" still holds: a teams folder that was there
         /// when watching began is not looked into. The control is a team added afterwards to the same
         /// root, which went through the same watcher and arrived.

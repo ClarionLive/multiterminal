@@ -472,7 +472,7 @@ namespace MultiTerminal.Services
 
                     if (!Directory.Exists(root.Plan.Root))
                     {
-                        root.TeamsSeenMissing = true;
+                        root.TeamsSeenMissingUtc ??= DateTime.UtcNow;
                         if (!root.MissingLogged)
                         {
                             root.MissingLogged = true;
@@ -500,7 +500,7 @@ namespace MultiTerminal.Services
 
             if (!Directory.Exists(teamsDir))
             {
-                root.TeamsSeenMissing = true;
+                root.TeamsSeenMissingUtc ??= DateTime.UtcNow;
                 if (root.TeamsRootWatcher != null) return; // already waiting for it
 
                 Log($" Teams directory does not exist yet: {teamsDir}");
@@ -554,14 +554,19 @@ namespace MultiTerminal.Services
             // Only react to NEW team directories created during this session via the FileSystemWatcher.
             //
             // One exception, which is not a restore: a teams folder this service SAW MISSING (or whose
-            // profile folder it saw missing) and that exists now was created during this session, and
-            // so was everything in it. Claude Code makes teams\ and the first team's folder in one go,
-            // so that team is already inside by the time this watcher goes live and no Created event
-            // will ever come for it. Look once.
-            if (root.TeamsSeenMissing)
+            // profile folder it saw missing) and that exists now. Claude Code makes teams\ and the first
+            // team's folder in one go, so that team is already inside by the time this watcher goes live
+            // and no Created event will ever come for it. Look once.
+            //
+            // "Exists now" does not mean "created this session": a folder that was only unavailable
+            // (an unmounted or network drive, a folder renamed away and back) reappears with the teams
+            // of earlier sessions in it. So the look takes only team folders whose creation time is
+            // not earlier than the moment the folder was first seen missing; see
+            // IsTeamFolderFromThisAbsence.
+            if (root.TeamsSeenMissingUtc is DateTime seenMissingUtc)
             {
-                root.TeamsSeenMissing = false;
-                ScanTeamsCreatedBeforeWatching(root, teamsDir);
+                root.TeamsSeenMissingUtc = null;
+                ScanTeamsCreatedBeforeWatching(root, teamsDir, seenMissingUtc);
             }
         }
 
@@ -572,16 +577,46 @@ namespace MultiTerminal.Services
         private static readonly TimeSpan TeamScanDelay = TimeSpan.FromMilliseconds(600);
 
         /// <summary>
-        /// Process the team folders that are in <paramref name="teamsDir"/> at the moment its watcher
-        /// goes live. The listing is taken NOW, on the caller's thread (anything created later gets a
-        /// Created event); the processing happens off it, after <see cref="TeamScanDelay"/>.
+        /// Pure: whether a team folder found in a teams folder that has just appeared was made while
+        /// that folder was missing, going by its creation time. A team folder created before
+        /// <paramref name="seenMissingUtc"/> (when the teams folder was first seen missing) belongs to
+        /// an earlier session and is not adopted.
+        /// <para><see cref="TeamCreationTolerance"/> is allowed for, because the two times do not come
+        /// from one clock reading: a file system stamps a coarser time than <c>DateTime.UtcNow</c>
+        /// returns, so a folder made just after the check can carry a slightly earlier time.</para>
+        /// <para>The limit of this: it trusts the file system's creation time. A copy or an archive
+        /// extraction stamps the time of the copy, so old teams brought back that way look new; a move
+        /// or rename on the same volume, and a drive coming back, keep the original time. A share
+        /// whose server clock is behind this machine's by more than the tolerance makes a new team
+        /// look old, and it is then not shown.</para>
         /// </summary>
-        private void ScanTeamsCreatedBeforeWatching(RootState root, string teamsDir)
+        internal static bool IsTeamFolderFromThisAbsence(DateTime teamDirCreatedUtc, DateTime seenMissingUtc) =>
+            teamDirCreatedUtc >= seenMissingUtc - TeamCreationTolerance;
+
+        /// <summary>See <see cref="IsTeamFolderFromThisAbsence"/>.</summary>
+        internal static readonly TimeSpan TeamCreationTolerance = TimeSpan.FromSeconds(2);
+
+        /// <summary>
+        /// Process the team folders that are in <paramref name="teamsDir"/> at the moment its watcher
+        /// goes live and that were created since <paramref name="seenMissingUtc"/>
+        /// (<see cref="IsTeamFolderFromThisAbsence"/>). The listing is taken NOW, on the caller's thread
+        /// (anything created later gets a Created event); the processing happens off it, after
+        /// <see cref="TeamScanDelay"/>.
+        /// </summary>
+        private void ScanTeamsCreatedBeforeWatching(RootState root, string teamsDir, DateTime seenMissingUtc)
         {
             string[] present;
             try
             {
-                present = Directory.GetDirectories(teamsDir);
+                var fresh = new List<string>();
+                foreach (string dir in Directory.GetDirectories(teamsDir))
+                {
+                    if (IsTeamFolderFromThisAbsence(Directory.GetCreationTimeUtc(dir), seenMissingUtc))
+                        fresh.Add(dir);
+                    else
+                        LogInfo($"Team directory not adopted (created before its teams folder went missing): {Path.GetFileName(dir)} ({root.Plan.Root})");
+                }
+                present = fresh.ToArray();
             }
             catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
             {
@@ -607,7 +642,7 @@ namespace MultiTerminal.Services
                             continue;
                         }
 
-                        LogInfo($"Team directory found in a teams folder created this session: {teamName} ({root.Plan.Root})");
+                        LogInfo($"Team directory found in a teams folder that appeared this session: {teamName} ({root.Plan.Root})");
                         ProcessTeamDirectory(root, teamName);
                     }
                 }
@@ -2725,9 +2760,11 @@ namespace MultiTerminal.Services
             public bool MissingLogged;
             public bool ProjectsMissingLogged;
 
-            /// <summary>True once this root's teams folder (or the root itself) was seen NOT to exist:
-            /// whatever is in it when it does exist was created during this session. Guarded by Sync.</summary>
-            public bool TeamsSeenMissing;
+            /// <summary>When (UTC) this root's teams folder, or the root itself, was first seen NOT to
+            /// exist; null when it has not been, or once the one-off look has been taken. A team folder
+            /// found when it appears is adopted only if it was created at or after this time: the folder
+            /// may only have been unavailable, with earlier sessions' teams still in it. Guarded by Sync.</summary>
+            public DateTime? TeamsSeenMissingUtc;
             public readonly List<FileSystemWatcher> ProjectWatchers = new List<FileSystemWatcher>();
         }
     }

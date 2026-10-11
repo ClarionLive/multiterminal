@@ -101,7 +101,15 @@ of the machine (`SettingsService`, key `ClaudeProfiles`); a project stores a pro
      `ForAgentOrFolder(agentName, folder)` / `SessionLineageService.GetClaudeProjectFolderForAgent`.
      The name reaches a pane through `ClaudeProfilePaneLookup`, `Configure`d once in MainForm's
      constructor with `FindPaneClaudeProfileForAgent` (the registered-terminal map under its own
-     lock; running terminals only).
+     lock; running terminals only). Which pane a name means is `ClaudeProfilePaneLookup.Match`: a
+     pane matches only by its confirmed name (`TerminalDocument.OriginalAgentName`), by its tab
+     title only while it has no confirmed name, compared as the broker compares terminal names
+     (ordinal-ignore-case, untrimmed); more than one matching pane is ambiguous and gives no folder
+     (`ClaudePaneProfile.Unknown`), never the first match. The same `Match` finds a helper's
+     SPAWNER when the spawn carries no proven pane (`MainForm.FindSpawnerClaudeProfileName`); an
+     ambiguous spawner name refuses the spawn, because inheriting nothing would mean Default.
+     `TerminalDocument.FindByIdentity` (title fallback, first hit) must not be used to pick a
+     profile; its remaining callers pick a target terminal by name, not a profile.
 
    A pane whose profile cannot be honoured gets NO folder (skipped and logged), never the
    folder's profile and never Default; so does a pane lookup that throws
@@ -117,8 +125,9 @@ of the machine (`SettingsService`, key `ClaudeProfiles`); a project stores a pro
 
    Still path-only, because no pane exists to ask: the startup session sync and crash-recovery
    indexing and the periodic sync (MainForm, over registered projects); the Project panel
-   (`ProjectPanelDocument`, the selected project); View Session (`MainForm`, a project path from
-   the session list); `SessionSyncService` and `SessionDiscovery` (a project path, or every root);
+   (`ProjectPanelDocument`, the selected project); View Session (`MainForm`) when its path is the
+   current project's or the last-used directory (when it is the last active terminal's folder it
+   asks by that pane: `GetClaudeProjectFolderForPane`); `SessionSyncService` and `SessionDiscovery` (a project path, or every root);
    `SessionLineageService.GetUnsummarizedSessions`; `SessionMemoryDatabase.FindUnindexedSessions`;
    the REST calls that carry a path and no terminal name; and any call naming an agent that is not
    a live MT terminal (a headless agent, a ClarionAssistant tab).
