@@ -67,21 +67,22 @@ namespace MultiTerminal.Services
 
     /// <summary>
     /// Service for syncing Claude Code sessions from the local filesystem.
-    /// Reads sessions from %USERPROFILE%\.claude\projects\ folder structure.
+    /// Reads sessions from a Claude config folder's <c>projects\</c> structure.
     /// </summary>
     public class SessionSyncService
     {
-        private readonly string _claudeProjectsRoot;
+        // Project path → the projects folder to look in, or null when there is none to read.
+        private readonly Func<string, string> _projectsRootFor;
 
         /// <summary>
-        /// Creates a new SessionSyncService with the default Claude projects folder.
+        /// Creates a new SessionSyncService that looks, for each project path it is asked about, in the
+        /// config folder of the Claude profile that project's folder runs under (ticket c8ee0eec; see
+        /// <see cref="ClaudeProfileDataRoots.ForFolder(string)"/>). Decided at each call, so a profile
+        /// changed in Settings is picked up.
         /// </summary>
         public SessionSyncService()
+            : this(projectPath => ClaudeProfileDataRoots.ForFolder(projectPath)?.ProjectsDir)
         {
-            _claudeProjectsRoot = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".claude",
-                "projects");
         }
 
         /// <summary>
@@ -89,8 +90,14 @@ namespace MultiTerminal.Services
         /// </summary>
         /// <param name="claudeProjectsRoot">Path to the Claude projects folder.</param>
         public SessionSyncService(string claudeProjectsRoot)
+            : this(_ => claudeProjectsRoot)
         {
-            _claudeProjectsRoot = claudeProjectsRoot;
+        }
+
+        /// <summary>Test seam: the projects folder to use for a given project path (null = none).</summary>
+        internal SessionSyncService(Func<string, string> projectsRootFor)
+        {
+            _projectsRootFor = projectsRootFor ?? throw new ArgumentNullException(nameof(projectsRootFor));
         }
 
         #region Path Conversion
@@ -148,10 +155,18 @@ namespace MultiTerminal.Services
             if (string.IsNullOrEmpty(folderName))
                 return null;
 
+            // The projects folder of the profile this project runs under. None (the profile is not
+            // configured here, its folder is missing, or it cannot be decided) means nothing to read:
+            // another profile's folder is never searched instead.
+            string claudeProjectsRoot = _projectsRootFor(projectPath);
+            if (string.IsNullOrEmpty(claudeProjectsRoot))
+                return null;
+
             // Try exact match first
-            string claudePath = Path.Combine(_claudeProjectsRoot, folderName);
-            // CA3003: claudePath is Path.Combine(_claudeProjectsRoot, folderName) where _claudeProjectsRoot
-            // is Environment.GetFolderPath(UserProfile)+".claude/projects" and folderName is produced by
+            string claudePath = Path.Combine(claudeProjectsRoot, folderName);
+            // CA3003: claudePath is Path.Combine(claudeProjectsRoot, folderName) where claudeProjectsRoot
+            // is a configured Claude profile folder's "projects" directory (from MT settings via
+            // ClaudeProfileDataRoots, or the constructor) and folderName is produced by
             // GetClaudeProjectFolderName, which replaces every ':' with "--" and every '\' with '-' —
             // making path-traversal segments impossible in the appended component. Existence check only.
 #pragma warning disable CA3003
@@ -159,12 +174,12 @@ namespace MultiTerminal.Services
                 return claudePath;
 
             // Case-insensitive search (Windows paths are case-insensitive)
-            if (Directory.Exists(_claudeProjectsRoot))
+            if (Directory.Exists(claudeProjectsRoot))
 #pragma warning restore CA3003
             {
                 try
                 {
-                    foreach (var dir in Directory.GetDirectories(_claudeProjectsRoot))
+                    foreach (var dir in Directory.GetDirectories(claudeProjectsRoot))
                     {
                         if (Path.GetFileName(dir).Equals(folderName, StringComparison.OrdinalIgnoreCase))
                             return dir;

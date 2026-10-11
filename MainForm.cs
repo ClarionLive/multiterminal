@@ -504,6 +504,11 @@ namespace MultiTerminal
             // Shared project database for the start screen (one connection, shared across all terminals)
             _sharedProjectDatabase = new Services.ProjectDatabase();
 
+            // Ticket c8ee0eec items 10/11: session readers and writers ask which Claude profile owns a
+            // folder through the same project lookup the launch decision uses.
+            Services.ClaudeProfileDataRoots.Configure(
+                _sharedProjectDatabase, _projectService, m => _debugLogService?.Warning("ClaudeProfile", m));
+
             // Initialize project panel (combines project info and prompts)
             _projectPanel = new ProjectPanelDocument();
             _projectPanel.SetServices(_projectService, _promptService);

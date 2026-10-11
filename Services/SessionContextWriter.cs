@@ -20,17 +20,42 @@ namespace MultiTerminal.Services
             Timeout = TimeSpan.FromSeconds(3)
         };
 
-        // Claude stores per-project memory under ~/.claude/projects/<encoded-project-path>/memory,
-        // where the folder name is the project path with ':' '\' '/' replaced by '-'. Derive it
-        // from CLAUDE_PROJECT_DIR (falling back to the historical dev-box path) instead of
+        // Claude stores per-project memory under <config folder>/projects/<encoded-project-path>/memory,
+        // where the folder name is the project path with ':' '\' '/' replaced by '-'. The project is
+        // derived from CLAUDE_PROJECT_DIR (falling back to the historical dev-box path) instead of
         // hardcoding, so this works for any checkout/machine. Mirrors the canonical encoder in
         // SessionSyncService.GetClaudeProjectFolderName (issue #5 follow-up).
-        private static readonly string MemoryDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".claude", "projects",
-            ClaudeProjectFolderName(ResolveProjectDir()),
-            "memory"
-        );
+        //
+        // WHICH config folder (ticket c8ee0eec): the one of the Claude profile that project folder runs
+        // under, decided at each write. This writer knows a project folder and an agent NAME, not a
+        // pane, so the project's profile is the only one it can stand behind. When that profile is not
+        // configured here, has no folder, or cannot be decided, nothing is written: the file is never
+        // put in the Default profile's folder instead, and no profile folder is created.
+
+        /// <summary>
+        /// The ACTIVE-CONTEXT.md path for <paramref name="projectDir"/>, or null (with
+        /// <paramref name="refusal"/> set) when the write must not happen.
+        /// </summary>
+        /// <param name="rootForFolder">Project folder → its profile's config folder, or null when there
+        /// is none to write to (production: <see cref="ClaudeProfileDataRoots.ForFolder(string)"/>).</param>
+        internal static string ResolveContextFile(string projectDir, Func<string, ClaudeDataRoot> rootForFolder, out string refusal)
+        {
+            refusal = null;
+            if (string.IsNullOrWhiteSpace(projectDir))
+            {
+                refusal = "no project folder is known";
+                return null;
+            }
+
+            var root = rootForFolder(projectDir);
+            if (root == null)
+            {
+                refusal = $"the Claude profile for '{projectDir}' is not configured on this machine, has no folder, or could not be decided";
+                return null;
+            }
+
+            return Path.Combine(root.ProjectsDir, ClaudeProjectFolderName(projectDir), "memory", "ACTIVE-CONTEXT.md");
+        }
 
         /// <summary>Project root used to derive the Claude memory folder. CLAUDE_PROJECT_DIR
         /// when set/non-blank, else the historical dev-box default.</summary>
@@ -71,16 +96,22 @@ namespace MultiTerminal.Services
             return sb.ToString();
         }
 
-        private static readonly string ContextFile = Path.Combine(MemoryDir, "ACTIVE-CONTEXT.md");
-
         /// <summary>
         /// Writes ACTIVE-CONTEXT.md by querying the REST API for active task state.
-        /// Fast, mechanical, no Claude involvement. Returns true on success.
+        /// Fast, mechanical, no Claude involvement. Returns true on success; false also when the
+        /// project's Claude profile has no usable folder on this machine (nothing is written then).
         /// </summary>
         public static async Task<bool> WriteContextAsync(string agentName = null)
         {
             try
             {
+                string contextFile = ResolveContextFile(ResolveProjectDir(), ClaudeProfileDataRoots.ForFolder, out string refusal);
+                if (contextFile == null)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[SessionContextWriter] Not written: {refusal}.");
+                    return false;
+                }
+
                 // Fetch in-progress tasks
                 var tasksJson = await _http.GetStringAsync("/api/tasks?status=in_progress");
                 using var tasksDoc = JsonDocument.Parse(tasksJson);
@@ -154,9 +185,10 @@ namespace MultiTerminal.Services
                 // Build context markdown
                 string content = BuildContext(detail, agentName);
 
-                // Write file
-                Directory.CreateDirectory(MemoryDir);
-                await File.WriteAllTextAsync(ContextFile, content);
+                // Write file. The profile's config folder exists (ResolveContextFile refused otherwise);
+                // only this project's memory folder inside it is created.
+                Directory.CreateDirectory(Path.GetDirectoryName(contextFile));
+                await File.WriteAllTextAsync(contextFile, content);
 
                 return true;
             }

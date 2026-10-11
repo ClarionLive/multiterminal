@@ -3594,10 +3594,12 @@ namespace MultiTerminal.Docking
                             tokenMeter.ProcessTranscriptFile(tokenSessionId, transcriptPath, false);
 
                             // Subagent rollup: tail {claudeProjectFolder}/{sessionId}/subagents/agent-*.jsonl.
+                            // Looked for only under the profile THIS pane was launched under (ticket
+                            // c8ee0eec): the pane knows its profile, so no other profile's folder is read.
                             try
                             {
-                                string claudeFolder = MultiTerminal.Services.SessionLineageService.GetClaudeProjectFolder(
-                                    folder ?? _startingWorkingDirectory);
+                                string claudeFolder = MultiTerminal.Services.SessionLineageService.GetClaudeProjectFolderForProfile(
+                                    folder ?? _startingWorkingDirectory, LaunchClaudeProfileName);
                                 if (!string.IsNullOrEmpty(claudeFolder))
                                 {
                                     string subDir = Path.Combine(claudeFolder, tokenSessionId, "subagents");

@@ -77,11 +77,10 @@ namespace MultiTerminal.API.Controllers
             if (string.IsNullOrEmpty(request?.SessionFilePath))
                 return Problem(detail: "sessionFilePath is required", statusCode: 400);
 
-            // Path traversal protection: only allow indexing files under known Claude project directories
-            string fullPath = System.IO.Path.GetFullPath(request.SessionFilePath);
-            string claudeDir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude")
-                + System.IO.Path.DirectorySeparatorChar;
-            if (!fullPath.StartsWith(claudeDir, StringComparison.OrdinalIgnoreCase))
+            // Path traversal protection: only allow indexing files under a configured Claude profile's
+            // folder (ticket c8ee0eec: any profile, since the request names no pane to take one from).
+            // The roots come from MT's settings, never from the request.
+            if (!ClaudeProfileDataRoots.IsUnderAnyRoot(request.SessionFilePath, null, out string fullPath))
                 return Problem(detail: "sessionFilePath must be within the Claude projects directory", statusCode: 400);
 
             int chunks = db.IndexSessionFile(fullPath, request.TerminalName, request.ProjectPath);

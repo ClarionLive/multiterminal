@@ -164,15 +164,43 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Converts a project filesystem path to the corresponding .claude/projects/ folder path.
-        /// Returns null if the folder doesn't exist.
+        /// Converts a project filesystem path to that project's folder under <c>projects\</c> in the
+        /// config folder of the Claude profile the project runs under (ticket c8ee0eec). The profile is
+        /// the one a launch in <paramref name="projectPath"/> would get
+        /// (<see cref="ClaudeProfileDataRoots.ForFolder(string)"/>); no other profile's folder is looked
+        /// in. Returns null if the folder doesn't exist, or the profile is not configured on this
+        /// machine, has no folder, or cannot be decided.
         /// </summary>
-        public static string GetClaudeProjectFolder(string projectPath)
-        {
-            string claudeProjectsRoot = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".claude", "projects");
+        public static string GetClaudeProjectFolder(string projectPath) =>
+            GetClaudeProjectFolder(projectPath, ClaudeProfileDataRoots.CurrentLookup(), ClaudeProfileResolver.CurrentContext());
 
+        /// <summary>
+        /// As <see cref="GetClaudeProjectFolder(string)"/>, for a caller that has the PANE: the folder
+        /// is looked for only under the profile that pane was launched under
+        /// (<paramref name="paneProfileName"/>; null or blank = Default), whatever project owns
+        /// <paramref name="projectPath"/>.
+        /// </summary>
+        public static string GetClaudeProjectFolderForProfile(string projectPath, string paneProfileName) =>
+            GetClaudeProjectFolderForProfile(projectPath, paneProfileName, ClaudeProfileResolver.CurrentContext());
+
+        internal static string GetClaudeProjectFolder(string projectPath, ClaudeProfileLookup lookup, ClaudeProfileContext ctx) =>
+            GetClaudeProjectFolderUnder(ClaudeProfileDataRoots.ForProject(null, projectPath, lookup, ctx), projectPath);
+
+        internal static string GetClaudeProjectFolderForProfile(string projectPath, string paneProfileName, ClaudeProfileContext ctx) =>
+            GetClaudeProjectFolderUnder(ClaudeProfileDataRoots.ForProfileName(paneProfileName, ctx), projectPath);
+
+        private static string GetClaudeProjectFolderUnder(ClaudeDataRoot root, string projectPath)
+        {
+            if (root == null || string.IsNullOrEmpty(projectPath))
+                return null;
+
+            // CA3003 (both checks below): root is a configured Claude profile folder taken from MT's
+            // settings by ClaudeProfileDataRoots. projectPath only SELECTS which configured profile is
+            // used; no part of it becomes part of the root. claudeProjectPath is that root + a literal
+            // "projects" + a folderName whose construction below replaces ':' and '/' away, so no
+            // path-traversal segments survive. Existence checks only; no file read.
+#pragma warning disable CA3003
+            string claudeProjectsRoot = root.ProjectsDir;
             if (!Directory.Exists(claudeProjectsRoot))
                 return null;
 
@@ -181,10 +209,6 @@ namespace MultiTerminal.Services
             string folderName = normalized.Replace(":", "-").Replace("/", "-");
 
             string claudeProjectPath = Path.Combine(claudeProjectsRoot, folderName);
-            // CA3003: claudeProjectPath is built from Environment.GetFolderPath(UserProfile) + a literal
-            // ".claude/projects" + a folderName whose construction above replaces ':' and '/' away, so no
-            // path-traversal segments survive. Existence check only; no file read.
-#pragma warning disable CA3003
             return Directory.Exists(claudeProjectPath) ? claudeProjectPath : null;
 #pragma warning restore CA3003
         }
