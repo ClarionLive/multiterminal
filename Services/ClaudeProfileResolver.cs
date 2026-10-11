@@ -130,7 +130,62 @@ namespace MultiTerminal.Services
         public static IReadOnlyList<ClaudeProfileValidationError> Validate(IReadOnlyList<ClaudeProfile> profiles) =>
             Validate(profiles, CurrentContext());
 
+        /// <summary>
+        /// Null when <paramref name="profile"/> has run Claude Code on this machine, else one sentence
+        /// saying that it has not and which file is missing. Asked before a launch nobody is watching
+        /// (<see cref="ClaudeProfileLaunchPolicy.Decide"/>). Reads the disk; creates nothing.
+        /// </summary>
+        public static string DescribeNeverUsed(ClaudeProfile profile) =>
+            DescribeNeverUsed(profile, CurrentContext(), File.Exists);
+
         // ── Pure core ─────────────────────────────────────────────────────────
+
+        /// <summary>The file name Claude Code keeps its login, onboarding, folder-trust and
+        /// skip-permissions state in.</summary>
+        internal const string StateFileName = ".claude.json";
+
+        /// <summary>
+        /// Where Claude Code keeps <see cref="StateFileName"/> for a launch under
+        /// <paramref name="profile"/>. This follows the variable the launch will actually get
+        /// (<see cref="ConfigDirValue"/>): INSIDE the config directory when CLAUDE_CONFIG_DIR is set,
+        /// and in %USERPROFILE% itself (next to <c>.claude</c>, not inside it) when the variable is
+        /// removed, which is the Default profile on a machine where MT inherited none. Null when
+        /// %USERPROFILE% is needed and unknown.
+        /// </summary>
+        internal static string GetStateFilePath(ClaudeProfile profile, ClaudeProfileContext ctx)
+        {
+            string dir = ConfigDirValue(profile, ctx) ?? Canonicalize(ctx.UserProfile);
+            return dir == null ? null : Path.Combine(dir, StateFileName);
+        }
+
+        /// <summary>
+        /// True when <paramref name="profile"/> has run Claude Code before: its
+        /// <see cref="StateFileName"/> exists. A <c>.config.json</c> inside the config directory counts
+        /// too (believed to be the name older Claude Code versions used; accepting it can only avoid a
+        /// wrong "never used"). Also true when the file's place cannot be worked out, because this
+        /// answer is used to refuse a launch and "cannot tell" is not "never used".
+        /// </summary>
+        internal static bool HasBeenUsed(ClaudeProfile profile, ClaudeProfileContext ctx, Func<string, bool> fileExists)
+        {
+            string path = GetStateFilePath(profile, ctx);
+            if (path == null || fileExists == null)
+                return true;
+
+            if (fileExists(path))
+                return true;
+
+            string configDir = GetConfigDir(profile, ctx);
+            return configDir != null && fileExists(Path.Combine(configDir, ".config.json"));
+        }
+
+        internal static string DescribeNeverUsed(ClaudeProfile profile, ClaudeProfileContext ctx, Func<string, bool> fileExists)
+        {
+            if (HasBeenUsed(profile, ctx, fileExists))
+                return null;
+
+            string name = profile == null || profile.IsDefault ? ClaudeProfile.DefaultName : profile.Name;
+            return $"The Claude profile '{name}' has never been used on this machine (there is no '{GetStateFilePath(profile, ctx)}').";
+        }
 
         internal static ClaudeProfileContext CurrentContext() =>
             new ClaudeProfileContext(

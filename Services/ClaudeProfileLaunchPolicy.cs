@@ -24,6 +24,10 @@ namespace MultiTerminal.Services
         /// <summary>No project owns the folder; the name was handed down (a helper's spawner, or the
         /// profile a pane was already running under).</summary>
         Inherited,
+
+        /// <summary>No project owns the folder; the human starting the launch picked the profile
+        /// (Just Claude, Launch as).</summary>
+        Requested,
     }
 
     /// <summary>The columns of a project's database row that the profile lookup needs.</summary>
@@ -57,9 +61,24 @@ namespace MultiTerminal.Services
         /// text says what was found and how to fix it. There is then no profile name to use, and
         /// <see cref="ClaudeProfileLaunchPolicy.Decide"/> refuses the launch with this text after
         /// "Not started: (what)."
+        /// <para>Also set when a profile was asked for by name for a launch whose folder a project owns,
+        /// and it is not that project's profile.</para>
         /// </summary>
         public string Conflict { get; init; }
     }
+
+    /// <summary>
+    /// What a "Claude profile" picker may offer for a launch folder
+    /// (<see cref="ClaudeProfileLaunchPolicy.DescribeChoice"/>), so that it never offers what
+    /// <see cref="ClaudeProfileLaunchPolicy.Decide"/> would refuse.
+    /// </summary>
+    /// <param name="CanChoose">True when no project owns the folder, so the launch takes whichever
+    /// profile is picked.</param>
+    /// <param name="FixedProfileName">When a project owns the folder: its profile's display name
+    /// ("Default" when it has none set). Null when <paramref name="CanChoose"/>, or when the owner
+    /// could not be worked out.</param>
+    /// <param name="Reason">One line saying why there is no choice; null when <paramref name="CanChoose"/>.</param>
+    internal sealed record ClaudeProfileLaunchChoice(bool CanChoose, string FixedProfileName, string Reason);
 
     /// <summary>
     /// Thrown when a launch is refused because its Claude profile cannot be applied (ticket c8ee0eec).
@@ -121,9 +140,15 @@ namespace MultiTerminal.Services
     ///   there and nothing is inherited.</item>
     ///   <item>Two projects registered at the same owning folder with different profiles REFUSE the
     ///   launch.</item>
-    ///   <item>Only a folder with no owning project at any level takes the inherited name (a helper's
-    ///   spawner, the pane's current profile), else Default.</item>
+    ///   <item>Only a folder with no owning project at any level takes a profile from elsewhere: the
+    ///   one the human picked for this launch (Just Claude, Launch as), else the inherited name (a
+    ///   helper's spawner, the pane's current profile), else Default.</item>
+    ///   <item>A picked profile never overrides an owner. Picking the owner's own profile changes
+    ///   nothing; picking any other REFUSES the launch.</item>
     ///   <item>A name this machine cannot honour REFUSES the launch. Nothing falls back to Default.</item>
+    ///   <item>A launch nobody is watching (a spawned helper, a headless agent, the gloss writer) is
+    ///   REFUSED under a profile that has never run Claude: its sign-in and first-run prompts would
+    ///   wait for an answer nobody can give.</item>
     /// </list>
     /// </summary>
     internal static class ClaudeProfileLaunchPolicy
@@ -136,9 +161,83 @@ namespace MultiTerminal.Services
         /// </summary>
         /// <param name="projectId">The project the launch names, or null/blank when it names none.</param>
         /// <param name="folder">The folder the launch starts in.</param>
-        /// <param name="inheritedProfileName">The name to use when no project owns the folder.</param>
+        /// <param name="inheritedProfileName">The name to use when no project owns the folder and
+        /// nothing was requested.</param>
+        /// <param name="requestedProfileName">The profile a human picked for this launch, or null/blank
+        /// when none was picked ("Default" is a pick: it selects Default over the inherited name). Used
+        /// only when no project owns the folder. When a project does, the same profile as the owner's
+        /// is ignored and any other is a <see cref="ClaudeProfileNameDecision.Conflict"/>.</param>
         internal static ClaudeProfileNameDecision FindProfileName(
-            string projectId, string folder, string inheritedProfileName, ClaudeProfileLookup lookup)
+            string projectId, string folder, string inheritedProfileName, ClaudeProfileLookup lookup,
+            string requestedProfileName = null)
+        {
+            bool requested = !string.IsNullOrWhiteSpace(requestedProfileName);
+            string requestedName = ClaudeProfile.NormalizeName(requestedProfileName);
+
+            var owner = FindOwner(projectId, folder, lookup);
+            if (owner != null)
+            {
+                // An owner that is itself a conflict refuses for its own reason, whatever was picked.
+                if (!requested || owner.Conflict != null
+                    || string.Equals(requestedName, owner.ProfileName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return owner;
+                }
+
+                return new ClaudeProfileNameDecision(null, owner.Source, owner.ProjectId, owner.ProjectName)
+                {
+                    Conflict =
+                        $"The Claude profile '{requestedName ?? ClaudeProfile.DefaultName}' was chosen for it, but its folder belongs to project '{owner.ProjectName}', "
+                        + $"which uses the Claude profile '{owner.ProfileName ?? ClaudeProfile.DefaultName}'. "
+                        + "A terminal in a project's folder always runs under that project's profile. "
+                        + "To change it, choose another profile for the project in Edit Project.",
+                };
+            }
+
+            if (requested)
+                return new ClaudeProfileNameDecision(requestedName, ClaudeProfileNameSource.Requested, null, null);
+
+            string inherited = ClaudeProfile.NormalizeName(inheritedProfileName);
+            return inherited != null
+                ? new ClaudeProfileNameDecision(inherited, ClaudeProfileNameSource.Inherited, null, null)
+                : new ClaudeProfileNameDecision(null, ClaudeProfileNameSource.None, null, null);
+        }
+
+        /// <summary>
+        /// What a profile picker may offer for <paramref name="folder"/>: a free choice when no project
+        /// owns it, else the owner's profile as fixed text with the reason. Uses the same ownership
+        /// search as <see cref="FindProfileName"/>. Never throws: a lookup that fails offers no choice,
+        /// and the launch itself then reports why.
+        /// </summary>
+        internal static ClaudeProfileLaunchChoice DescribeChoice(string folder, ClaudeProfileLookup lookup)
+        {
+            ClaudeProfileNameDecision owner;
+            try
+            {
+                owner = FindOwner(null, folder, lookup);
+            }
+            catch (Exception)
+            {
+                return new ClaudeProfileLaunchChoice(false, null, "MultiTerminal could not work out which project this folder belongs to.");
+            }
+
+            if (owner == null)
+                return new ClaudeProfileLaunchChoice(true, null, null);
+
+            if (owner.Conflict != null)
+                return new ClaudeProfileLaunchChoice(false, null, "This folder's project gives no clear Claude profile; Launch will say why.");
+
+            string fixedName = owner.ProfileName ?? ClaudeProfile.DefaultName;
+            return new ClaudeProfileLaunchChoice(
+                false, fixedName,
+                $"This folder belongs to project '{owner.ProjectName}', which uses '{fixedName}'. Change it in Edit Project.");
+        }
+
+        /// <summary>
+        /// The project that owns the launch and its profile name (or its conflict), or null when no
+        /// project owns it. The ownership rules are items 1 to 6 of the class summary.
+        /// </summary>
+        private static ClaudeProfileNameDecision FindOwner(string projectId, string folder, ClaudeProfileLookup lookup)
         {
             if (!string.IsNullOrWhiteSpace(projectId))
             {
@@ -215,13 +314,7 @@ namespace MultiTerminal.Services
                 return worktreeFile ?? fromFile;
             }
 
-            if (worktreeFile != null)
-                return worktreeFile;
-
-            string inherited = ClaudeProfile.NormalizeName(inheritedProfileName);
-            return inherited != null
-                ? new ClaudeProfileNameDecision(inherited, ClaudeProfileNameSource.Inherited, null, null)
-                : new ClaudeProfileNameDecision(null, ClaudeProfileNameSource.None, null, null);
+            return worktreeFile;
         }
 
         /// <summary>
@@ -231,21 +324,35 @@ namespace MultiTerminal.Services
         /// because "could not find out" must not become "Default".
         /// </summary>
         /// <param name="launchLabel">What is being started, for the message ("project 'X'", "helper 'Bob'").</param>
+        /// <param name="requestedProfileName">The profile a human picked for this launch, or null
+        /// (see <see cref="FindProfileName"/>).</param>
+        /// <param name="neverUsedReason">Passed only for a launch nobody is watching. Given the resolved
+        /// profile it returns null when that profile has run Claude before, else the sentence saying it
+        /// has not (normally <see cref="ClaudeProfileResolver.DescribeNeverUsed(ClaudeProfile)"/>), and
+        /// the launch is refused with it. Null for a launch with a human at the pane, who sees the
+        /// sign-in and first-run prompts; that is how a profile gets set up.</param>
         internal static ClaudeProfileLaunchDecision Decide(
             string projectId,
             string folder,
             string inheritedProfileName,
             string launchLabel,
             ClaudeProfileLookup lookup,
-            Func<string, ClaudeProfileResolution> resolve)
+            Func<string, ClaudeProfileResolution> resolve,
+            string requestedProfileName = null,
+            Func<ClaudeProfile, string> neverUsedReason = null)
         {
             ClaudeProfileNameDecision name;
             ClaudeProfileResolution resolution = null;
+            string neverUsed = null;
             try
             {
-                name = FindProfileName(projectId, folder, inheritedProfileName, lookup);
+                name = FindProfileName(projectId, folder, inheritedProfileName, lookup, requestedProfileName);
                 if (name.Conflict == null)
+                {
                     resolution = resolve(name.ProfileName);
+                    if (resolution.CanLaunch && neverUsedReason != null)
+                        neverUsed = neverUsedReason(resolution.Profile);
+                }
             }
             catch (Exception ex)
             {
@@ -261,6 +368,14 @@ namespace MultiTerminal.Services
                     $"Not started: {launchLabel}. {name.Conflict}");
             }
 
+            if (neverUsed != null)
+            {
+                return new ClaudeProfileLaunchDecision(
+                    null, name.ProfileName, name.Source, name.ProjectName,
+                    $"Not started: {launchLabel}. {DescribeOrigin(name)}{neverUsed} Nobody is watching this launch to sign in or answer Claude's first-run prompts, so it would wait on them forever. "
+                    + $"Open a terminal under the Claude profile '{resolution.Profile.Name}' once and sign in, then try again.");
+            }
+
             if (resolution.CanLaunch)
                 return new ClaudeProfileLaunchDecision(resolution.Profile, name.ProfileName, name.Source, name.ProjectName, null);
 
@@ -272,21 +387,30 @@ namespace MultiTerminal.Services
         /// <summary>The refusal text: what was not started, which project and profile, why, and where to fix it.</summary>
         internal static string DescribeRefusal(string launchLabel, ClaudeProfileNameDecision name, string blockedReason)
         {
-            string origin = name.Source switch
+            string fix = name.Source switch
             {
-                ClaudeProfileNameSource.Database or ClaudeProfileNameSource.ProjectFile =>
-                    $"Project '{name.ProjectName}' is set to the Claude profile '{name.ProfileName}'. ",
-                ClaudeProfileNameSource.Inherited =>
-                    $"Its folder belongs to no project, so it takes the Claude profile '{name.ProfileName}' from the terminal it came from. ",
-                _ => "",
+                ClaudeProfileNameSource.Inherited => "Fix the profile in Settings > Claude Profiles.",
+                ClaudeProfileNameSource.Requested => "Fix the profile in Settings > Claude Profiles, or choose another one.",
+                _ => "Fix the profile in Settings > Claude Profiles, or choose another profile for the project in Edit Project.",
             };
 
-            string fix = name.Source == ClaudeProfileNameSource.Inherited
-                ? "Fix the profile in Settings > Claude Profiles."
-                : "Fix the profile in Settings > Claude Profiles, or choose another profile for the project in Edit Project.";
-
-            return $"Not started: {launchLabel}. {origin}{blockedReason} {fix} MultiTerminal does not fall back to another profile.";
+            return $"Not started: {launchLabel}. {DescribeOrigin(name)}{blockedReason} {fix} MultiTerminal does not fall back to another profile.";
         }
+
+        /// <summary>One sentence (with a trailing space) saying where the launch's profile name came
+        /// from, or "" when nothing chose one (no owner, nothing picked, nothing inherited).</summary>
+        private static string DescribeOrigin(ClaudeProfileNameDecision name) => name.Source switch
+        {
+            ClaudeProfileNameSource.Database or ClaudeProfileNameSource.ProjectFile when name.ProfileName != null =>
+                $"Project '{name.ProjectName}' is set to the Claude profile '{name.ProfileName}'. ",
+            ClaudeProfileNameSource.Database or ClaudeProfileNameSource.ProjectFile =>
+                $"Project '{name.ProjectName}' uses the Default Claude profile. ",
+            ClaudeProfileNameSource.Inherited =>
+                $"Its folder belongs to no project, so it takes the Claude profile '{name.ProfileName}' from the terminal it came from. ",
+            ClaudeProfileNameSource.Requested =>
+                $"The Claude profile '{name.ProfileName ?? ClaudeProfile.DefaultName}' was chosen for it. ",
+            _ => "",
+        };
 
         /// <summary>
         /// The levels an owning project is looked for at, nearest first: the folder, then each ancestor

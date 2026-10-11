@@ -357,5 +357,83 @@ namespace MultiTerminal.Tests
             Assert.Equal(new[] { "B" }, parsed.Select(p => p.Name));
             Assert.Empty(SettingsService.ParseClaudeProfiles("not json"));
         }
+
+        // ── Phase 3 item 20: has this profile ever run Claude ────────────────
+
+        private static Func<string, bool> Files(params string[] present) =>
+            path => present.Contains(path, StringComparer.OrdinalIgnoreCase);
+
+        [Fact]
+        public void State_file_is_inside_the_config_dir_when_the_variable_is_set_and_in_the_user_folder_when_it_is_not()
+        {
+            var plain = Ctx(configured: Work);
+            var inherited = Ctx(@"D:\cfg", configured: Work);
+
+            // Default with nothing inherited: the variable is removed, so NOT inside .claude.
+            Assert.Equal(Home + @"\.claude.json", ClaudeProfileResolver.GetStateFilePath(null, plain));
+            Assert.Equal(Home + @"\.claude.json", ClaudeProfileResolver.GetStateFilePath(ClaudeProfileResolver.GetDefaultProfile(plain), plain));
+
+            // Default when MT inherited a config dir, and any named profile: inside that directory.
+            Assert.Equal(@"D:\cfg\.claude.json", ClaudeProfileResolver.GetStateFilePath(null, inherited));
+            Assert.Equal(WorkDir + @"\.claude.json", ClaudeProfileResolver.GetStateFilePath(Work, plain));
+            Assert.Equal(WorkDir + @"\.claude.json", ClaudeProfileResolver.GetStateFilePath(Work, inherited));
+        }
+
+        [Fact]
+        public void A_profile_is_used_exactly_when_its_own_state_file_exists()
+        {
+            var ctx = Ctx(configured: Work);
+            var homeOnly = Files(Home + @"\.claude.json");
+            var workOnly = Files(WorkDir + @"\.claude.json");
+
+            // Each profile is judged by its own file, never by the other's.
+            Assert.True(ClaudeProfileResolver.HasBeenUsed(null, ctx, homeOnly));
+            Assert.False(ClaudeProfileResolver.HasBeenUsed(Work, ctx, homeOnly));
+            Assert.False(ClaudeProfileResolver.HasBeenUsed(null, ctx, workOnly));
+            Assert.True(ClaudeProfileResolver.HasBeenUsed(Work, ctx, workOnly));
+
+            // The trap: a .claude.json INSIDE %USERPROFILE%\.claude is not Default's state file.
+            Assert.False(ClaudeProfileResolver.HasBeenUsed(null, ctx, Files(HomeClaude + @"\.claude.json")));
+
+            // The older name inside the config directory counts.
+            Assert.True(ClaudeProfileResolver.HasBeenUsed(Work, ctx, Files(WorkDir + @"\.config.json")));
+            Assert.True(ClaudeProfileResolver.HasBeenUsed(null, ctx, Files(HomeClaude + @"\.config.json")));
+        }
+
+        [Fact]
+        public void Never_used_is_described_with_the_profile_and_the_missing_file_and_is_null_when_used()
+        {
+            var ctx = Ctx(configured: Work);
+
+            string work = ClaudeProfileResolver.DescribeNeverUsed(Work, ctx, Files());
+            string def = ClaudeProfileResolver.DescribeNeverUsed(null, ctx, Files());
+
+            Assert.Contains("'Work'", work, StringComparison.Ordinal);
+            Assert.Contains(WorkDir + @"\.claude.json", work, StringComparison.Ordinal);
+            Assert.Contains("'Default'", def, StringComparison.Ordinal);
+            Assert.Contains(Home + @"\.claude.json", def, StringComparison.Ordinal);
+            Assert.Null(ClaudeProfileResolver.DescribeNeverUsed(Work, ctx, Files(WorkDir + @"\.claude.json")));
+        }
+
+        [Fact]
+        public void A_profile_whose_state_file_cannot_be_located_is_not_called_never_used()
+        {
+            // No %USERPROFILE% and nothing inherited: there is no place to look for Default's file.
+            var noHome = new ClaudeProfileContext(Array.Empty<ClaudeProfile>(), null, null, _ => true);
+
+            Assert.Null(ClaudeProfileResolver.GetStateFilePath(null, noHome));
+            Assert.True(ClaudeProfileResolver.HasBeenUsed(null, noHome, Files()));
+        }
+
+        [Fact]
+        public void The_used_check_only_asks_whether_files_exist()
+        {
+            // The probe is the only thing handed in, and it cannot create anything: this pins that the
+            // check asks about the state file (and the older name) and nothing else.
+            var asked = new List<string>();
+            ClaudeProfileResolver.HasBeenUsed(Work, Ctx(configured: Work), path => { asked.Add(path); return false; });
+
+            Assert.Equal(new[] { WorkDir + @"\.claude.json", WorkDir + @"\.config.json" }, asked);
+        }
     }
 }
