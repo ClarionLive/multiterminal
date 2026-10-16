@@ -134,6 +134,60 @@ namespace MultiTerminal.Dialogs
         }
 
         /// <summary>
+        /// The folder a new profile gets when the user types only a name (Owner decision 2026-10-16):
+        /// <c>%USERPROFILE%\.claude-&lt;name&gt;</c>, the name lower-cased with every run of characters
+        /// other than letters and digits turned into one hyphen. Empty when the name has no letter or
+        /// digit, or %USERPROFILE% is unknown, so the folder box stays blank rather than guessing.
+        /// </summary>
+        public static string SuggestFolder(string name, string userProfile)
+        {
+            if (string.IsNullOrWhiteSpace(userProfile))
+                return "";
+
+            var slug = new System.Text.StringBuilder();
+            bool pendingHyphen = false;
+            foreach (char c in (name ?? "").Trim())
+            {
+                if (char.IsLetterOrDigit(c))
+                {
+                    if (pendingHyphen && slug.Length > 0)
+                        slug.Append('-');
+                    pendingHyphen = false;
+                    slug.Append(char.ToLowerInvariant(c));
+                }
+                else
+                {
+                    pendingHyphen = true;
+                }
+            }
+
+            return slug.Length == 0
+                ? ""
+                : System.IO.Path.Combine(userProfile.Trim(), ".claude-" + slug);
+        }
+
+        /// <summary>
+        /// The folders a save must create first: each profile's folder, canonical, that
+        /// <paramref name="directoryExists"/> says is missing, once each. Only meaningful for a list the
+        /// validator accepted.
+        /// </summary>
+        public static IReadOnlyList<string> FoldersToCreate(IReadOnlyList<ClaudeProfile> toSave, Func<string, bool> directoryExists)
+        {
+            ArgumentNullException.ThrowIfNull(directoryExists);
+
+            var result = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var p in toSave ?? Array.Empty<ClaudeProfile>())
+            {
+                string dir = ClaudeProfileResolver.Canonicalize(p?.ConfigDir);
+                if (dir != null && seen.Add(dir) && !directoryExists(dir))
+                    result.Add(dir);
+            }
+
+            return result;
+        }
+
+        /// <summary>
         /// The read-only Default line: the folder, plus where it came from when MultiTerminal itself was
         /// started with CLAUDE_CONFIG_DIR set.
         /// </summary>

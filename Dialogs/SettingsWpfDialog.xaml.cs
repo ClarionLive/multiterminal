@@ -3,12 +3,14 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Threading;
 using Microsoft.Win32;
 
 using MultiTerminal.API.Gateway;
@@ -63,6 +65,7 @@ namespace MultiTerminal.Dialogs
         private List<ClaudeProfile> _claudeProfilesStored = new List<ClaudeProfile>();
         // Set by ValidateClaudeProfiles when the grid differs from what is stored; null = leave the setting alone.
         private IReadOnlyList<ClaudeProfile> _claudeProfilesToSave;
+        private DispatcherTimer _claudeProfileStatusTimer;
 
         /// <summary>
         /// True if the user edited their owner profile during this settings session.
@@ -677,7 +680,24 @@ namespace MultiTerminal.Dialogs
             _claudeProfileRows.CollectionChanged += (s, e) => UpdateClaudeProfilesEmptyText();
             ClaudeProfilesList.ItemsSource = _claudeProfileRows;
             UpdateClaudeProfilesEmptyText();
+            RefreshClaudeProfileStatuses();
+
+            // The Sign in window runs on its own, so the dialog looks again every couple of seconds and
+            // a row turns to "Signed in" without the user doing anything. A File.Exists per row is cheap.
+            _claudeProfileStatusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _claudeProfileStatusTimer.Tick += (s, e) => RefreshClaudeProfileStatuses();
+            _claudeProfileStatusTimer.Start();
+            Closed += (s, e) => _claudeProfileStatusTimer.Stop();
         }
+
+        private void RefreshClaudeProfileStatuses()
+        {
+            foreach (var row in _claudeProfileRows)
+                row.RefreshStatus(ClaudeProfileResolver.IsSignedIn);
+        }
+
+        private static string SuggestClaudeProfileFolder(string name) =>
+            ClaudeProfileEditorRules.SuggestFolder(name, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
 
         private void UpdateClaudeProfilesEmptyText()
         {
@@ -686,7 +706,46 @@ namespace MultiTerminal.Dialogs
 
         private void ClaudeProfileAddButton_Click(object sender, RoutedEventArgs e)
         {
-            _claudeProfileRows.Add(new ClaudeProfileRow());
+            var row = new ClaudeProfileRow(SuggestClaudeProfileFolder);
+            row.PropertyChanged += (s, args) =>
+            {
+                if (args.PropertyName == nameof(ClaudeProfileRow.ConfigDir))
+                    row.RefreshStatus(ClaudeProfileResolver.IsSignedIn);
+            };
+            _claudeProfileRows.Add(row);
+        }
+
+        /// <summary>
+        /// Opens a console window signed in to nothing yet, running claude under this row's folder
+        /// (<see cref="ClaudeProfileSignIn"/>). Nothing is saved: the row is checked like OK would check
+        /// it, its folder is created, and the window opens. The row turns to "Signed in" by itself.
+        /// </summary>
+        private void ClaudeProfileSignInButton_Click(object sender, RoutedEventArgs e)
+        {
+            if ((sender as FrameworkElement)?.DataContext is not ClaudeProfileRow row) return;
+
+            int index = _claudeProfileRows.IndexOf(row);
+            var rows = _claudeProfileRows.Select(r => (r.Name, r.ConfigDir)).ToList();
+            var result = ClaudeProfileEditorRules.Evaluate(rows, ClaudeProfileResolver.ValidateAllowingMissingFolders);
+            if (result.RowErrors.TryGetValue(index, out string error))
+            {
+                row.Error = error;
+                return;
+            }
+
+            row.Error = null;
+            try
+            {
+                ClaudeProfileSignIn.Start(row.Name, row.ConfigDir);
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException
+                || ex is ArgumentException || ex is InvalidOperationException || ex is System.ComponentModel.Win32Exception)
+            {
+                row.Error = "Could not open the sign-in window: " + ex.Message;
+                return;
+            }
+
+            row.RefreshStatus(ClaudeProfileResolver.IsSignedIn);
         }
 
         private void ClaudeProfileRemoveButton_Click(object sender, RoutedEventArgs e)
@@ -724,7 +783,8 @@ namespace MultiTerminal.Dialogs
             _claudeProfilesToSave = null;
 
             var rows = _claudeProfileRows.Select(r => (r.Name, r.ConfigDir)).ToList();
-            var result = ClaudeProfileEditorRules.Evaluate(rows, ClaudeProfileResolver.Validate);
+            // A missing folder is not an error: it is created below, after every other check has passed.
+            var result = ClaudeProfileEditorRules.Evaluate(rows, ClaudeProfileResolver.ValidateAllowingMissingFolders);
 
             // Untouched grid: nothing to check or write, so a stored profile whose folder is missing
             // right now does not block OK for an unrelated setting.
@@ -756,6 +816,22 @@ namespace MultiTerminal.Dialogs
                     "Claude Profiles", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
                 if (answer != MessageBoxResult.Yes)
                     return false;
+            }
+
+            foreach (string dir in ClaudeProfileEditorRules.FoldersToCreate(result.ToSave, Directory.Exists))
+            {
+                try
+                {
+                    Directory.CreateDirectory(dir);
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException || ex is NotSupportedException)
+                {
+                    SettingsTabs.SelectedItem = ClaudeProfilesTab;
+                    MessageBox.Show(this,
+                        $"Could not create the folder {dir}:\n\n{ex.Message}",
+                        "Claude Profiles", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return false;
+                }
             }
 
             _claudeProfilesToSave = result.ToSave;
@@ -1129,16 +1205,46 @@ namespace MultiTerminal.Dialogs
     /// </summary>
     public sealed class ClaudeProfileRow : INotifyPropertyChanged
     {
+        private readonly Func<string, string> _suggestFolder;
         private string _name = "";
         private string _configDir = "";
         private string _error;
+        private string _status = "";
+        private bool _isSignedIn;
+        private bool _canSignIn;
+
+        // The folder this row last filled in from its name. While the folder box still holds exactly
+        // that (or is empty), typing in the name keeps it in step; once the user edits or browses to
+        // another folder, the name stops touching it.
+        private string _lastSuggestedFolder;
 
         public event PropertyChangedEventHandler PropertyChanged;
+
+        public ClaudeProfileRow()
+        {
+        }
+
+        /// <param name="suggestFolder">Name → suggested folder (<see cref="ClaudeProfileEditorRules.SuggestFolder"/>),
+        /// or null for a row whose folder never follows its name.</param>
+        internal ClaudeProfileRow(Func<string, string> suggestFolder)
+        {
+            _suggestFolder = suggestFolder;
+        }
 
         public string Name
         {
             get => _name;
-            set => Set(ref _name, value ?? "", nameof(Name));
+            set
+            {
+                if (!Set(ref _name, value ?? "", nameof(Name)) || _suggestFolder == null)
+                    return;
+
+                if (_configDir.Length == 0 || string.Equals(_configDir, _lastSuggestedFolder, StringComparison.Ordinal))
+                {
+                    _lastSuggestedFolder = _suggestFolder(_name) ?? "";
+                    ConfigDir = _lastSuggestedFolder;
+                }
+            }
         }
 
         public string ConfigDir
@@ -1154,9 +1260,58 @@ namespace MultiTerminal.Dialogs
             set => Set(ref _error, value, nameof(Error));
         }
 
-        private void Set(ref string field, string value, string propertyName)
+        /// <summary>"Signed in", "Needs sign-in", or empty while the folder is not a usable path.</summary>
+        public string Status
         {
-            if (string.Equals(field, value, StringComparison.Ordinal)) return;
+            get => _status;
+            private set => Set(ref _status, value ?? "", nameof(Status));
+        }
+
+        public bool IsSignedIn
+        {
+            get => _isSignedIn;
+            private set => SetBool(ref _isSignedIn, value, nameof(IsSignedIn));
+        }
+
+        /// <summary>True when the Sign in button is shown: the folder is a full path and Claude has not run there.</summary>
+        public bool CanSignIn
+        {
+            get => _canSignIn;
+            private set => SetBool(ref _canSignIn, value, nameof(CanSignIn));
+        }
+
+        /// <summary>
+        /// Recomputes <see cref="Status"/>, <see cref="IsSignedIn"/> and <see cref="CanSignIn"/> from the
+        /// folder as it is now. <paramref name="isSignedIn"/> is
+        /// <see cref="ClaudeProfileResolver.IsSignedIn(string)"/> outside tests.
+        /// </summary>
+        internal void RefreshStatus(Func<string, bool> isSignedIn)
+        {
+            if (ClaudeProfileResolver.Canonicalize(_configDir) == null)
+            {
+                Status = "";
+                IsSignedIn = false;
+                CanSignIn = false;
+                return;
+            }
+
+            bool signedIn = isSignedIn?.Invoke(_configDir) == true;
+            Status = signedIn ? "✓ Signed in" : "Needs sign-in";
+            IsSignedIn = signedIn;
+            CanSignIn = !signedIn;
+        }
+
+        private bool Set(ref string field, string value, string propertyName)
+        {
+            if (string.Equals(field, value, StringComparison.Ordinal)) return false;
+            field = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+            return true;
+        }
+
+        private void SetBool(ref bool field, bool value, string propertyName)
+        {
+            if (field == value) return;
             field = value;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
         }

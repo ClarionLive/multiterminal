@@ -138,11 +138,51 @@ namespace MultiTerminal.Services
         public static string DescribeNeverUsed(ClaudeProfile profile) =>
             DescribeNeverUsed(profile, CurrentContext(), File.Exists);
 
+        /// <summary>
+        /// <see cref="Validate(IReadOnlyList{ClaudeProfile})"/> without the "folder must exist" rule. The
+        /// Settings dialog uses it because it creates a missing folder on save (Owner decision
+        /// 2026-10-16: typing a name must be enough). Every other rule still applies.
+        /// </summary>
+        public static IReadOnlyList<ClaudeProfileValidationError> ValidateAllowingMissingFolders(IReadOnlyList<ClaudeProfile> profiles) =>
+            ValidateAllowingMissingFolders(profiles, CurrentContext());
+
+        internal static IReadOnlyList<ClaudeProfileValidationError> ValidateAllowingMissingFolders(
+            IReadOnlyList<ClaudeProfile> profiles, ClaudeProfileContext ctx) =>
+            Validate(profiles, ctx with { DirectoryExists = _ => true });
+
+        /// <summary>
+        /// True when Claude Code has run with <c>CLAUDE_CONFIG_DIR</c> set to <paramref name="configDir"/>:
+        /// its <see cref="StateFileName"/> (or the older <see cref="LegacyStateFileName"/>) is inside it.
+        /// For the Settings dialog's per-row status, where the profile may not be stored yet. False for a
+        /// blank, relative or missing folder.
+        /// </summary>
+        public static bool IsSignedIn(string configDir) => IsSignedIn(configDir, File.Exists);
+
         // ── Pure core ─────────────────────────────────────────────────────────
 
         /// <summary>The file name Claude Code keeps its login, onboarding, folder-trust and
         /// skip-permissions state in.</summary>
         internal const string StateFileName = ".claude.json";
+
+        /// <summary>Believed to be the name older Claude Code versions used for <see cref="StateFileName"/>.</summary>
+        internal const string LegacyStateFileName = ".config.json";
+
+        internal static bool IsSignedIn(string configDir, Func<string, bool> fileExists)
+        {
+            string dir = Canonicalize(configDir);
+            if (dir == null || fileExists == null)
+                return false;
+
+            try
+            {
+                return fileExists(Path.Combine(dir, StateFileName))
+                    || fileExists(Path.Combine(dir, LegacyStateFileName));
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException)
+            {
+                return false;
+            }
+        }
 
         /// <summary>
         /// Where Claude Code keeps <see cref="StateFileName"/> for a launch under
@@ -175,7 +215,7 @@ namespace MultiTerminal.Services
                 return true;
 
             string configDir = GetConfigDir(profile, ctx);
-            return configDir != null && fileExists(Path.Combine(configDir, ".config.json"));
+            return configDir != null && fileExists(Path.Combine(configDir, LegacyStateFileName));
         }
 
         internal static string DescribeNeverUsed(ClaudeProfile profile, ClaudeProfileContext ctx, Func<string, bool> fileExists)

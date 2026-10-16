@@ -77,8 +77,8 @@
         <div class="card">
           <h3>Typical flow</h3>
           <ol>
-            <li>Create a folder for the second profile, for example <code>C:\Users\you\.claude-work</code>, and sign in to Claude Code there once.</li>
-            <li>Add it in <strong>Settings &rarr; Claude Profiles</strong> with a name such as <code>Work</code>.</li>
+            <li>In <strong>Settings &rarr; Claude Profiles</strong>, click <strong>Add profile</strong> and type a name such as <code>Work</code>.</li>
+            <li>Click <strong>Sign in&hellip;</strong> on that row and log in to Claude in the window that opens.</li>
             <li>Open <strong>Edit Project</strong> for each work project and choose <code>Work</code> under <strong>Claude profile</strong>.</li>
             <li>Launch as usual. Every terminal in that project's folder now runs under <code>Work</code>; everything else keeps using <code>Default</code>.</li>
           </ol>
@@ -107,40 +107,29 @@
         <p>MultiTerminal sets the variable for you, per terminal, from the project the terminal belongs to. You do not set <code>CLAUDE_CONFIG_DIR</code> by hand for terminals MultiTerminal starts.</p>
 
         <h2 id="setup">Setting up a second profile</h2>
-        <p>A profile has to be signed in once before it is useful. There are two ways to do that.</p>
-        <div class="card">
-          <h3>Option A: outside MultiTerminal</h3>
-          <ol>
-            <li>Create the folder, for example <code>C:\Users\you\.claude-work</code>.</li>
-            <li>Open any terminal, point Claude Code at it, and start Claude:
-              <pre><code>$env:CLAUDE_CONFIG_DIR = 'C:\Users\you\.claude-work'
-claude</code></pre>
-            </li>
-            <li>Sign in and answer the first-run questions. Then add the profile in Settings (next section).</li>
-          </ol>
-        </div>
-        <div class="card">
-          <h3>Option B: inside MultiTerminal</h3>
-          <ol>
-            <li>Create the folder (it must exist before it can be added).</li>
-            <li>Add it in <strong>Settings &rarr; Claude Profiles</strong>.</li>
-            <li>On a start screen choose <strong>Just Claude</strong>, pick a folder that <em>no project owns</em>, and choose the new profile under <strong>Claude profile</strong>. MultiTerminal notes that the profile has never been used and that Claude will ask you to sign in.</li>
-            <li>Sign in and answer the first-run questions in that terminal.</li>
-          </ol>
-        </div>
+        <p>Everything happens on one screen, <strong>Settings &rarr; Claude Profiles</strong>:</p>
+        <ol>
+          <li>Click <strong>Add profile</strong> and type a name, for example <code>Work</code>. The folder fills itself in as <code>%USERPROFILE%\.claude-work</code>. You do not have to create it; MultiTerminal does.</li>
+          <li>The row shows <strong>Needs sign-in</strong>. Click <strong>Sign in&hellip;</strong>. A separate window opens with Claude Code running under the new profile.</li>
+          <li>In that window, log in and answer Claude's first-run questions. When you are done the row changes to <strong>&#10003; Signed in</strong> by itself, and you can close the window.</li>
+          <li>Click <strong>OK</strong> to save.</li>
+        </ol>
+        <p>The sign-in window starts in an empty folder MultiTerminal keeps for this (<code>%LOCALAPPDATA%\MultiTerminal\profile-sign-in</code>), so Claude's "do you trust this folder" question is about a folder that holds nothing. It is a plain console, not a MultiTerminal terminal: it does not appear in the terminal list and has no MultiTerminal tools.</p>
         <p>A new profile starts from nothing. Expect Claude Code's onboarding, the "do you trust this folder" question for each folder, and permission prompts again, exactly as on a fresh machine. Nothing is copied from your Default profile.</p>
+        <p><strong>Already have a folder?</strong> If you set one up before by running Claude with <code>CLAUDE_CONFIG_DIR</code> yourself, use <strong>Browse&hellip;</strong> to pick it instead of the suggested one. The row shows <strong>Signed in</strong> straight away.</p>
 
         <h2 id="settings">Adding it in Settings</h2>
         <p>Open <strong>Settings</strong> and go to the <strong>Claude Profiles</strong> tab.</p>
         <ul>
           <li><strong>Default profile</strong> is shown at the top with its folder. It is built in and cannot be edited.</li>
-          <li>Under <strong>Additional profiles</strong>, click <strong>Add profile</strong>, type a <strong>Name</strong> and choose the <strong>Config folder</strong> (<strong>Browse&hellip;</strong> helps).</li>
+          <li>Under <strong>Additional profiles</strong>, click <strong>Add profile</strong> and type a <strong>Name</strong>. The <strong>Config folder</strong> follows the name until you change it yourself or pick another with <strong>Browse&hellip;</strong>.</li>
+          <li>Under each row, <strong>&#10003; Signed in</strong> or <strong>Needs sign-in</strong> says whether Claude has been signed in under that folder, with a <strong>Sign in&hellip;</strong> button when it has not. The status updates by itself while Settings is open.</li>
           <li><strong>Remove</strong> takes a profile off the list. The folder itself is never deleted.</li>
         </ul>
         <p>Saving checks every row and tells you which one is wrong. A profile needs:</p>
         <ul>
           <li>a name that is not blank, not <code>Default</code>, and not used by another profile;</li>
-          <li>a folder given as a full path that already exists;</li>
+          <li>a folder given as a full path (a missing folder is created when you save);</li>
           <li>a folder that is not a drive root, not your user folder or anything above it, not the Default profile's folder, and not already used by another profile.</li>
         </ul>
         <p>Profiles are a setting of <em>this machine</em>. If you remove or rename one that projects still use, MultiTerminal warns you first: those projects will refuse to start until you pick another profile for them.</p>
