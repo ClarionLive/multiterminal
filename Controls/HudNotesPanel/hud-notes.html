@@ -97,15 +97,20 @@ body.light {
 }
 .tab-scroll::-webkit-scrollbar { display: none; }
 
-.tab-scroll.fade-right::after {
-    content: '';
-    position: absolute;
-    right: 28px;
-    top: 0; bottom: 0;
-    width: 24px;
-    background: linear-gradient(to right, transparent, var(--bg-header));
-    pointer-events: none;
-    z-index: 1;
+/* Edge fades: a mask on the strip itself (not an overlay pseudo-element),
+   so it tracks the strip's real edges whichever nav buttons are showing.
+   updateScrollFade() sets the class for whichever sides hide content. */
+.tab-scroll.fade-left {
+    -webkit-mask-image: linear-gradient(to right, transparent 0, #000 20px);
+            mask-image: linear-gradient(to right, transparent 0, #000 20px);
+}
+.tab-scroll.fade-right {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent 100%);
+            mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent 100%);
+}
+.tab-scroll.fade-left.fade-right {
+    -webkit-mask-image: linear-gradient(to right, transparent 0, #000 20px, #000 calc(100% - 20px), transparent 100%);
+            mask-image: linear-gradient(to right, transparent 0, #000 20px, #000 calc(100% - 20px), transparent 100%);
 }
 
 .tab {
@@ -161,6 +166,23 @@ body.light {
     width: 80px;
 }
 
+/* Agent-written tab (task 5d94ac91): a small accent glyph before the name;
+   the agent's name is in the tooltip. Unread: an agent added or changed the
+   tab since the Owner last looked at it. */
+.tab-agent {
+    font-size: 9px;
+    color: var(--accent);
+    pointer-events: none;
+}
+.tab-unread {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    pointer-events: none;
+}
+.tab-nav-all.has-unread { color: var(--accent); }
+
 .tab-close {
     display: flex;
     align-items: center;
@@ -190,6 +212,60 @@ body.light {
     transition: background 0.15s, color 0.15s;
 }
 .tab-add:hover { background: var(--bg-tab-hover); color: var(--accent); }
+
+/* ── Overflow navigation (‹ › ▾) ── shown only while the strip overflows */
+.tab-nav {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    flex-shrink: 0;
+    font-size: 14px;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s, color 0.15s, opacity 0.15s;
+}
+.tab-nav-left { border-right: 1px solid var(--border); }
+.tab-nav-right, .tab-nav-all { border-left: 1px solid var(--border); }
+.tab-nav-all { font-size: 10px; }
+.tab-bar.overflowing .tab-nav { display: flex; }
+.tab-nav:hover { background: var(--bg-tab-hover); color: var(--accent); }
+.tab-nav.disabled { opacity: 0.35; cursor: not-allowed; }
+.tab-nav.disabled:hover { background: transparent; color: var(--text-muted); }
+.tab-nav-all.open { background: var(--bg-tab-hover); color: var(--accent); }
+
+/* ── All-notes menu ── body-appended + position:fixed for the same reason
+   as .delete-confirm below (task d8a1d0c4): the strip clips anything
+   positioned inside it. JS sets left/top from the ▾ button's rect. */
+.tab-menu {
+    position: fixed;
+    min-width: 140px;
+    max-width: 280px;
+    max-height: 60vh;
+    overflow-y: auto;
+    background: var(--bg-tab-active);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px 0;
+    z-index: 10;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+.tab-menu::-webkit-scrollbar { width: 4px; }
+.tab-menu::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.tab-menu-item {
+    padding: 4px 10px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    user-select: none;
+}
+.tab-menu-item:hover { background: var(--bg-tab-hover); color: var(--text-primary); }
+.tab-menu-item.active { color: var(--accent); font-weight: 600; }
+.tab-menu-item.unread::after { content: ' CF'; color: var(--accent); }
 
 /* ── Delete confirmation ── */
 /* position:fixed + body-appended: the tab bar is a clipped scroll row
@@ -278,8 +354,11 @@ body.no-project-state .no-project { display: flex; }
     <span class="save-status" id="save-status"></span>
 </div>
 
-<div class="tab-bar">
+<div class="tab-bar" id="tab-bar">
+    <div class="tab-nav tab-nav-left" id="tab-nav-left" title="Scroll left">&#8249;</div>
     <div class="tab-scroll" id="tab-scroll"></div>
+    <div class="tab-nav tab-nav-right" id="tab-nav-right" title="Scroll right">&#8250;</div>
+    <div class="tab-nav tab-nav-all" id="tab-nav-all" title="All notes">&#9662;</div>
     <div class="tab-add" id="tab-add" title="New tab (Ctrl+T)">+</div>
 </div>
 
@@ -292,14 +371,20 @@ const editor = document.getElementById('editor');
 const saveStatus = document.getElementById('save-status');
 const tabScroll = document.getElementById('tab-scroll');
 const tabAddBtn = document.getElementById('tab-add');
+const tabBar = document.getElementById('tab-bar');
+const navLeftBtn = document.getElementById('tab-nav-left');
+const navRightBtn = document.getElementById('tab-nav-right');
+const navAllBtn = document.getElementById('tab-nav-all');
 
-let tabs = [];           // [{name, content, isDefault}]
+let tabs = [];           // [{name, content, isDefault, createdBy, updatedBy}]
+let unreadTabs = new Set(); // agent-written tabs the Owner hasn't opened since they changed
 let activeTab = null;     // current tab name
 let tabContents = {};     // in-memory content cache per tab
 let lastSavedContent = {};
 let saveTimeout = null;
 let dragSrcName = null;
 let deleteConfirmEl = null;
+let tabMenuEl = null;
 
 // ── Tab rendering ──
 
@@ -308,6 +393,7 @@ function renderTabs() {
     // no longer removes it implicitly — dismiss it here or it would linger
     // detached over rebuilt tabs.
     hideDeleteConfirm();
+    hideTabMenu();
     tabScroll.innerHTML = '';
     tabs.forEach((tab, i) => {
         const el = document.createElement('div');
@@ -318,7 +404,19 @@ function renderTabs() {
         const label = document.createElement('span');
         label.className = 'tab-label';
         label.textContent = tab.name;
+        if (tab.createdBy) {
+            const marker = document.createElement('span');
+            marker.className = 'tab-agent';
+            marker.textContent = '✦';
+            el.appendChild(marker);
+            el.title = tabAuthorText(tab);
+        }
         el.appendChild(label);
+        if (unreadTabs.has(tab.name)) {
+            const dot = document.createElement('span');
+            dot.className = 'tab-unread';
+            el.appendChild(dot);
+        }
 
         if (!tab.isDefault) {
             const close = document.createElement('span');
@@ -341,7 +439,30 @@ function renderTabs() {
 
         tabScroll.appendChild(el);
     });
+    updateUnreadIndicator();
+    scrollActiveTabIntoView();
     updateScrollFade();
+}
+
+// Horizontal-only "scroll into view" for the active tab. Manual scrollLeft
+// math rather than el.scrollIntoView(), which may also scroll ancestors
+// (body) vertically. Keeps a 20px margin so the tab isn't under an edge fade.
+function scrollActiveTabIntoView() {
+    if (!activeTab) return;
+    const el = Array.from(tabScroll.children).find(c => c.dataset.name === activeTab);
+    if (!el) return;
+    const margin = 20;
+    const stripRect = tabScroll.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    const left = elRect.left - stripRect.left + tabScroll.scrollLeft;
+    const right = left + elRect.width;
+    const viewLeft = tabScroll.scrollLeft;
+    const viewRight = viewLeft + tabScroll.clientWidth;
+    if (left - margin < viewLeft) {
+        tabScroll.scrollLeft = Math.max(0, left - margin);
+    } else if (right + margin > viewRight) {
+        tabScroll.scrollLeft = right + margin - tabScroll.clientWidth;
+    }
 }
 
 function switchTab(name) {
@@ -353,6 +474,7 @@ function switchTab(name) {
         if (saveTimeout) { clearTimeout(saveTimeout); saveTimeout = null; saveCurrentTab(); }
     }
     activeTab = name;
+    unreadTabs.delete(name);
     editor.value = tabContents[name] || '';
     lastSavedContent[name] = tabContents[name] || '';
     saveStatus.textContent = '';
@@ -576,15 +698,146 @@ function clearDropIndicators() {
     });
 }
 
-// ── Scroll fade ──
+// ── Scroll fade + overflow navigation ──
 
-function updateScrollFade() {
-    const hasOverflow = tabScroll.scrollWidth > tabScroll.clientWidth;
-    const scrolledToEnd = tabScroll.scrollLeft + tabScroll.clientWidth >= tabScroll.scrollWidth - 2;
-    tabScroll.classList.toggle('fade-right', hasOverflow && !scrolledToEnd);
+function stripOverflows() {
+    return tabScroll.scrollWidth > tabScroll.clientWidth + 1;
 }
-tabScroll.addEventListener('scroll', updateScrollFade);
+
+// Single source of truth for overflow-dependent UI: the edge fades, the
+// .overflowing class that reveals ‹ › ▾, and the arrows' disabled states.
+// Stable under its own layout change: showing the buttons only narrows the
+// strip (still overflowing), and they are hidden only when the narrower
+// strip already fits.
+function updateScrollFade() {
+    const hasOverflow = stripOverflows();
+    const atStart = tabScroll.scrollLeft <= 1;
+    const atEnd = tabScroll.scrollLeft + tabScroll.clientWidth >= tabScroll.scrollWidth - 2;
+    tabBar.classList.toggle('overflowing', hasOverflow);
+    tabScroll.classList.toggle('fade-left', hasOverflow && !atStart);
+    tabScroll.classList.toggle('fade-right', hasOverflow && !atEnd);
+    navLeftBtn.classList.toggle('disabled', !hasOverflow || atStart);
+    navRightBtn.classList.toggle('disabled', !hasOverflow || atEnd);
+    if (!hasOverflow) hideTabMenu();
+}
+tabScroll.addEventListener('scroll', () => { updateScrollFade(); hideTabMenu(); });
 new ResizeObserver(updateScrollFade).observe(tabScroll);
+
+// Vertical mouse wheel scrolls the strip horizontally (its scrollbar is
+// hidden, so without this the overflowed tabs were unreachable).
+tabScroll.addEventListener('wheel', (e) => {
+    if (!stripOverflows()) return;
+    if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+    let delta = e.deltaY;
+    if (e.deltaMode === 1) delta *= 16;                         // lines
+    else if (e.deltaMode === 2) delta *= tabScroll.clientWidth; // pages
+    tabScroll.scrollLeft += delta;
+    e.preventDefault();
+}, { passive: false });
+
+function scrollStripBy(direction) {
+    tabScroll.scrollBy({ left: direction * Math.max(40, tabScroll.clientWidth * 0.7), behavior: 'smooth' });
+}
+
+navLeftBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!navLeftBtn.classList.contains('disabled')) scrollStripBy(-1);
+});
+navRightBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!navRightBtn.classList.contains('disabled')) scrollStripBy(1);
+});
+
+// ── Drag auto-scroll ──
+// dragover fires repeatedly while hovering, so a small step per event gives
+// a steady scroll. The drop itself still lands on a tab via onDrop.
+const DRAG_EDGE_PX = 32;
+const DRAG_STEP_PX = 8;
+
+tabScroll.addEventListener('dragover', (e) => {
+    if (!dragSrcName) return;
+    const rect = tabScroll.getBoundingClientRect();
+    if (e.clientX < rect.left + DRAG_EDGE_PX) tabScroll.scrollLeft -= DRAG_STEP_PX;
+    else if (e.clientX > rect.right - DRAG_EDGE_PX) tabScroll.scrollLeft += DRAG_STEP_PX;
+});
+
+[[navLeftBtn, -1], [navRightBtn, 1]].forEach(([btn, dir]) => {
+    const onDragHover = () => { if (dragSrcName) tabScroll.scrollLeft += dir * DRAG_STEP_PX * 1.5; };
+    btn.addEventListener('dragenter', onDragHover);
+    btn.addEventListener('dragover', onDragHover);
+});
+
+// ── All-notes menu ──
+
+function showTabMenu() {
+    hideTabMenu();
+    hideDeleteConfirm();
+    tabMenuEl = document.createElement('div');
+    tabMenuEl.className = 'tab-menu';
+    tabs.forEach(tab => {
+        const item = document.createElement('div');
+        item.className = 'tab-menu-item' + (tab.name === activeTab ? ' active' : '');
+        item.textContent = tab.name;   // user text: never innerHTML
+        if (unreadTabs.has(tab.name)) item.classList.add('unread');
+        item.title = tab.createdBy ? `${tab.name} — ${tabAuthorText(tab)}` : tab.name;
+        item.title = tab.name;
+        item.addEventListener('click', (e) => {
+            e.stopPropagation();
+            hideTabMenu();
+            switchTab(tab.name);
+        });
+        tabMenuEl.appendChild(item);
+    });
+
+    // Body-appended + fixed, positioned under the ▾ button and clamped to
+    // the viewport (same approach as showDeleteConfirm, task d8a1d0c4).
+    document.body.appendChild(tabMenuEl);
+    navAllBtn.classList.add('open');
+    const rect = navAllBtn.getBoundingClientRect();
+    const menuW = tabMenuEl.offsetWidth;
+    const menuH = tabMenuEl.offsetHeight;
+    tabMenuEl.style.left = Math.max(4, Math.min(rect.right - menuW, window.innerWidth - menuW - 4)) + 'px';
+    tabMenuEl.style.top = Math.max(4, Math.min(rect.bottom + 2, window.innerHeight - menuH - 4)) + 'px';
+
+    // Long list: bring the active entry into the menu's own view.
+    const activeItem = tabMenuEl.querySelector('.tab-menu-item.active');
+    if (activeItem && activeItem.offsetTop + activeItem.offsetHeight > tabMenuEl.clientHeight) {
+        tabMenuEl.scrollTop = activeItem.offsetTop - tabMenuEl.clientHeight / 2;
+    }
+
+    // Deferred so the click that opened the menu doesn't immediately close it.
+    setTimeout(() => {
+        if (tabMenuEl) {
+            document.addEventListener('click', onTabMenuOutsideClick);
+            document.addEventListener('keydown', onTabMenuKeydown);
+        }
+    }, 0);
+}
+
+function hideTabMenu() {
+    if (tabMenuEl) {
+        tabMenuEl.remove();
+        tabMenuEl = null;
+    }
+    navAllBtn.classList.remove('open');
+    document.removeEventListener('click', onTabMenuOutsideClick);
+    document.removeEventListener('keydown', onTabMenuKeydown);
+}
+
+function onTabMenuOutsideClick(e) {
+    if (tabMenuEl && (tabMenuEl.contains(e.target) || navAllBtn.contains(e.target))) return;
+    hideTabMenu();
+}
+
+function onTabMenuKeydown(e) {
+    if (e.key === 'Escape') { e.preventDefault(); hideTabMenu(); }
+}
+
+navAllBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (tabMenuEl) hideTabMenu(); else showTabMenu();
+});
+window.addEventListener('resize', hideTabMenu);
 
 // ── Auto-save ──
 
@@ -631,9 +884,62 @@ document.addEventListener('keydown', (e) => {
 
 // ── WebView2 message protocol ──
 
+function toTabModel(t) {
+    return { name: t.name, content: t.content || '', isDefault: t.isDefault,
+             createdBy: t.createdBy || null, updatedBy: t.updatedBy || null };
+}
+
+// Tooltip for an agent-written tab. A null updatedBy means the Owner saved it last.
+function tabAuthorText(tab) {
+    let text = `Written by ${tab.createdBy}`;
+    if (tab.updatedBy !== tab.createdBy) text += `, last edited by ${tab.updatedBy || 'you'}`;
+    return text;
+}
+
+function updateUnreadIndicator() {
+    unreadTabs.forEach(n => { if (!tabs.some(t => t.name === n)) unreadTabs.delete(n); });
+    navAllBtn.classList.toggle('has-unread', unreadTabs.size > 0);
+}
+
+// Live update after an agent wrote a note (task 5d94ac91). A MERGE, not a reload:
+// the Owner keeps the tab they are on, and unsaved typing in it is never replaced
+// (it wins and is saved over the agent's change, which an agent can only make to
+// its own tab). Every other tab, and a clean active tab, takes the stored text.
+function mergeTabs(data) {
+    if (document.body.classList.contains('no-project-state')) return;
+    const known = new Set(tabs.map(t => t.name));
+    const activeDirty = !!activeTab && editor.value !== (lastSavedContent[activeTab] ?? '');
+    tabs = (data.tabs || []).map(toTabModel);
+
+    const nextContents = {};
+    const nextSaved = {};
+    tabs.forEach(t => {
+        nextSaved[t.name] = t.content;
+        nextContents[t.name] = (t.name === activeTab && activeDirty) ? editor.value : t.content;
+        if (!known.has(t.name) && t.name !== activeTab) unreadTabs.add(t.name);
+    });
+    if (data.changedTab && data.changedTab !== activeTab && tabs.some(t => t.name === data.changedTab)) {
+        unreadTabs.add(data.changedTab);
+    }
+    tabContents = nextContents;
+    lastSavedContent = nextSaved;
+
+    if (!activeTab || !tabs.some(t => t.name === activeTab)) {
+        activeTab = tabs.length > 0 ? tabs[0].name : null;
+        editor.value = activeTab ? (tabContents[activeTab] || '') : '';
+    } else if (!activeDirty && editor.value !== tabContents[activeTab]) {
+        // Clean active tab changed underneath: take the new text, keeping caret and scroll.
+        const { selectionStart, selectionEnd, scrollTop } = editor;
+        editor.value = tabContents[activeTab];
+        editor.setSelectionRange(Math.min(selectionStart, editor.value.length), Math.min(selectionEnd, editor.value.length));
+        editor.scrollTop = scrollTop;
+    }
+    renderTabs();
+}
+
 function loadAllTabs(data) {
     document.body.classList.remove('no-project-state');
-    tabs = (data.tabs || []).map(t => ({ name: t.name, content: t.content || '', isDefault: t.isDefault }));
+    tabs = (data.tabs || []).map(toTabModel);
 
     // Populate content cache
     tabContents = {};
@@ -664,6 +970,9 @@ if (window.chrome && window.chrome.webview) {
         if (!data || typeof data !== 'object') return;
 
         switch (data.type) {
+            case 'notes_changed':
+                mergeTabs(data);
+                break;
             case 'load_all_tabs':
                 loadAllTabs(data);
                 break;
@@ -675,6 +984,8 @@ if (window.chrome && window.chrome.webview) {
                 document.body.classList.toggle('light', !data.isDark);
                 break;
             case 'no_project':
+                hideTabMenu();
+                hideDeleteConfirm();
                 document.body.classList.add('no-project-state');
                 break;
         }

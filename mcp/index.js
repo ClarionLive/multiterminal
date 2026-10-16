@@ -323,6 +323,23 @@ async function resolveScopedProjectId(args) {
   return { projectId: scope.id, degradedText: null };
 }
 
+// Which project a project-note call targets (task 5d94ac91). An explicit projectId or projectPath
+// wins; otherwise the terminal's resolved project. Unlike the task-surfacing tools there is no
+// global view to fall back to, so an unresolvable scope is an error, never a guess.
+// Returns { fields: {projectId} | {projectPath} | null, errorText }.
+async function resolveNotesProject(args) {
+  if (args.projectId) return { fields: { projectId: String(args.projectId) }, errorText: null };
+  if (args.projectPath) return { fields: { projectPath: String(args.projectPath) }, errorText: null };
+  const scope = await resolveProjectScope();
+  if (scope.id) return { fields: { projectId: scope.id }, errorText: null };
+  return {
+    fields: null,
+    errorText: scope.degraded
+      ? `⚠ Could not work out this terminal's project (${scope.reason}). Pass projectId (list_projects shows them) or projectPath.`
+      : "⚠ This terminal has no project context. Pass projectId (list_projects shows them) or projectPath.",
+  };
+}
+
 // Format terminal list for display
 function formatTerminals(terminals) {
   if (!terminals || terminals.length === 0) {
@@ -1921,6 +1938,39 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       // Knowledge Base Tools
+      {
+        name: "add_project_note",
+        description:
+          "Save a note for the Owner as a tab in the project's Notes pane (HUD 📝 Notes). Use it for anything the Owner must do or check LATER — steps after a restart or redeploy, manual test steps, deploy steps — so they don't have to copy it out of chat. The tab shows up live, marked with your name. " +
+          "You can never change a tab the Owner wrote. mode 'new' (default) adds a tab; if the name is taken by the Owner or another agent you get 'Name (2)', but if YOU already have a tab of that name it is refused so you update it instead of piling up copies. " +
+          "mode 'append' adds to the end of your own tab (and still works after the Owner edited it). mode 'replace' rewrites your own tab, but only while nobody else has edited it since your last write. " +
+          "Use list_project_notes to find your earlier note first.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            tabName: { type: "string", description: "Tab title, one line, at most 80 characters (e.g. \"After redeploy: c8ee0eec\")" },
+            content: { type: "string", description: "The note text (plain text; shown in a monospace editor)" },
+            mode: { type: "string", enum: ["new", "append", "replace"], description: "new (default), append or replace; see the tool description" },
+            projectId: { type: "string", description: "Project ID. Defaults to this terminal's project." },
+            projectPath: { type: "string", description: "Absolute project root folder, instead of projectId (not a worktree path)." },
+            agentName: { type: "string", description: "Your MultiTerminal name, recorded as the author. Defaults to MULTITERMINAL_NAME." },
+          },
+          required: ["tabName", "content"],
+        },
+      },
+      {
+        name: "list_project_notes",
+        description:
+          "List the project's note tabs (HUD 📝 Notes) with who wrote each one, or read one tab's full text by passing tabName. A tab with no author was written by the Owner.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            tabName: { type: "string", description: "Read this tab's full content instead of listing" },
+            projectId: { type: "string", description: "Project ID. Defaults to this terminal's project." },
+            projectPath: { type: "string", description: "Absolute project root folder, instead of projectId." },
+          },
+        },
+      },
       {
         name: "query_knowledge",
         description: "Search the institutional knowledge base for decisions, patterns, gotchas, and anti-patterns. Uses FTS5 full-text search.",
@@ -4901,6 +4951,69 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       // Knowledge Base Handlers
+      case "add_project_note": {
+        const { fields, errorText } = await resolveNotesProject(args);
+        if (errorText) return { content: [{ type: "text", text: errorText }], isError: true };
+        const author = (args.agentName || process.env.MULTITERMINAL_NAME || "").trim();
+        if (!author) {
+          return {
+            content: [{ type: "text", text: "⚠ No author: pass agentName (MULTITERMINAL_NAME is not set in this session)." }],
+            isError: true,
+          };
+        }
+        let result;
+        try {
+          result = await apiCall("/api/project-notes", "POST", {
+            ...fields,
+            tabName: args.tabName,
+            content: args.content,
+            mode: args.mode || "new",
+            author,
+          });
+        } catch (err) {
+          if (err.status === 409) {
+            // The ownership rules refused it; the reason says which mode to use instead.
+            return { content: [{ type: "text", text: `⚠ Note not saved: ${err.detail || err.message}` }], isError: true };
+          }
+          throw err;
+        }
+        const renamed = result.tabName !== String(args.tabName).trim()
+          ? ` (the name was taken, so it was saved as "${result.tabName}")`
+          : "";
+        return {
+          content: [{
+            type: "text",
+            text: `✅ Note ${result.outcome}: "${result.tabName}"${renamed} in the Notes pane of ${result.projectKey}, marked as written by ${author}.`,
+          }],
+        };
+      }
+
+      case "list_project_notes": {
+        const { fields, errorText } = await resolveNotesProject(args);
+        if (errorText) return { content: [{ type: "text", text: errorText }], isError: true };
+        const params = new URLSearchParams(fields);
+        const by = (name) => (name ? name : "the Owner");
+        if (args.tabName) {
+          params.set("tabName", args.tabName);
+          const tab = await apiCall(`/api/project-notes/tab?${params.toString()}`);
+          const edited = tab.updatedBy !== tab.createdBy ? `, last edited by ${by(tab.updatedBy)}` : "";
+          return {
+            content: [{
+              type: "text",
+              text: `📝 "${tab.name}" — written by ${by(tab.createdBy)}${edited}\n\n${tab.content || "(empty)"}`,
+            }],
+          };
+        }
+        const list = await apiCall(`/api/project-notes?${params.toString()}`);
+        const tabs = list.tabs || [];
+        let text = `📝 ${tabs.length} note tab(s) in ${list.projectKey}:\n`;
+        tabs.forEach((t) => {
+          const edited = t.updatedBy !== t.createdBy ? `, last edited by ${by(t.updatedBy)}` : "";
+          text += `- "${t.name}" — ${by(t.createdBy)}${edited}, ${t.length} chars\n`;
+        });
+        return { content: [{ type: "text", text: text.trim() }] };
+      }
+
       case "query_knowledge": {
         const params = new URLSearchParams();
         params.set("query", args.query);

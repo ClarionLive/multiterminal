@@ -8,6 +8,7 @@ using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
+using MultiTerminal.MCPServer.Models;
 using MultiTerminal.Terminal;
 
 namespace MultiTerminal.Controls
@@ -189,7 +190,30 @@ namespace MultiTerminal.Controls
 
         public void Initialize(MessageBroker broker)
         {
+            if (_broker != null) _broker.ProjectNotesChanged -= OnProjectNotesChanged;
             _broker = broker;
+            if (_broker != null) _broker.ProjectNotesChanged += OnProjectNotesChanged;
+        }
+
+        /// <summary>
+        /// An agent wrote a note (task 5d94ac91). Raised on the REST thread, so marshal to the UI
+        /// thread, and only for the project this pane shows: the key is compared in its canonical
+        /// form, ordinally, because that is how the note rows themselves are keyed.
+        /// </summary>
+        private void OnProjectNotesChanged(object sender, ProjectNotesChangedEventArgs e)
+        {
+            if (e == null || IsDisposed) return;
+            if (InvokeRequired)
+            {
+                if (!IsHandleCreated) return;
+                try { BeginInvoke(new Action(() => OnProjectNotesChanged(sender, e))); }
+                catch (InvalidOperationException) { /* handle torn down between the check and the post */ }
+                return;
+            }
+
+            if (string.IsNullOrEmpty(_projectPath) || !_isInitialized) return;
+            if (!string.Equals(TaskDatabase.CanonicalNoteTabKey(_projectPath), e.ProjectKey, StringComparison.Ordinal)) return;
+            LoadAllTabs(changedTab: e.TabName, changedBy: e.AgentName);
         }
 
         public void SetProject(string projectPath)
@@ -219,7 +243,12 @@ namespace MultiTerminal.Controls
         // Tab operations
         // -------------------------------------------------------------------------
 
-        private void LoadAllTabs(string selectTab = null)
+        /// <summary>
+        /// Sends every tab to the page. With <paramref name="changedTab"/> it is a live update
+        /// (<c>notes_changed</c>) that the page MERGES, keeping the Owner's unsaved typing and current
+        /// tab; otherwise a full <c>load_all_tabs</c>.
+        /// </summary>
+        private void LoadAllTabs(string selectTab = null, string changedTab = null, string changedBy = null)
         {
             if (string.IsNullOrEmpty(_projectPath))
             {
@@ -232,14 +261,23 @@ namespace MultiTerminal.Controls
                 var taskDb = _broker?.TaskDb;
                 if (taskDb == null) return;
 
-                var tabs = taskDb.GetProjectNoteTabs(_projectPath);
+                var tabs = taskDb.GetProjectNoteTabDetails(_projectPath);
                 var tabData = new List<object>();
-                foreach (var (name, content, isDefault) in tabs)
+                foreach (var tab in tabs)
                 {
-                    tabData.Add(new { name, content, isDefault });
+                    tabData.Add(new
+                    {
+                        name = tab.Name,
+                        content = tab.Content,
+                        isDefault = tab.IsDefault,
+                        createdBy = tab.CreatedBy,
+                        updatedBy = tab.UpdatedBy,
+                    });
                 }
 
-                if (selectTab != null)
+                if (changedTab != null)
+                    PostJsonMessage(new { type = "notes_changed", tabs = tabData, changedTab, changedBy });
+                else if (selectTab != null)
                     PostJsonMessage(new { type = "load_all_tabs", tabs = tabData, activeTab = selectTab });
                 else
                     PostJsonMessage(new { type = "load_all_tabs", tabs = tabData });
@@ -323,6 +361,7 @@ namespace MultiTerminal.Controls
         {
             if (disposing)
             {
+                if (_broker != null) _broker.ProjectNotesChanged -= OnProjectNotesChanged;
                 if (_webView != null)
                 {
                     if (_webView.CoreWebView2 != null)

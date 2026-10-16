@@ -339,6 +339,30 @@ namespace MultiTerminal.MCPServer.Services
             => RaiseSafe(MessagingCredentialsStored, terminalName);
 
         /// <summary>
+        /// An agent wrote a project note (task 5d94ac91). Raised only after a successful
+        /// <see cref="WriteAgentProjectNote"/>, so an open Notes pane can show the note live. Not raised
+        /// for the Owner's own saves in the pane, which already shows them.
+        /// </summary>
+        public event EventHandler<ProjectNotesChangedEventArgs> ProjectNotesChanged;
+
+        /// <summary>
+        /// The one write path for agent-authored project notes: applies the ownership rules in
+        /// <see cref="TaskDatabase.WriteAgentNoteTab"/> and announces a successful write on
+        /// <see cref="ProjectNotesChanged"/>. <paramref name="projectKey"/> is a note-tab key as resolved by
+        /// <see cref="ProjectNoteKeys.TryResolve"/>.
+        /// </summary>
+        public AgentNoteWriteResult WriteAgentProjectNote(string projectKey, string tabName, string content, string agentName, AgentNoteWriteMode mode)
+        {
+            var result = _taskDb.WriteAgentNoteTab(projectKey, tabName, content, agentName, mode);
+            if (result.Succeeded)
+            {
+                RaiseSafe(ProjectNotesChanged, new ProjectNotesChangedEventArgs(
+                    TaskDatabase.CanonicalNoteTabKey(projectKey), result.TabName, agentName?.Trim(), result.Outcome));
+            }
+            return result;
+        }
+
+        /// <summary>
         /// Activity service for auto-updating terminal activity on task operations.
         /// Set via DI after broker is created.
         /// </summary>

@@ -45,6 +45,7 @@ paths:
 | `session_agent_map` | session_id, agent_name, is_active | Hook-written: which agent owns each session |
 | `knowledge_entries` | id, topic, content, source, created_at | Institutional knowledge base |
 | `code_digests` | id, file_path, digest, created_at | Code digest summaries |
+| `project_note_tabs` | project_path (canonical key), tab_name, content, tab_order, is_default, created_by, updated_by | HUD Notes tabs. `created_by` NULL = the Owner wrote it (all pre-5d94ac91 rows); an agent name = written via `api/project-notes`. `updated_by` NULL = the Owner saved it last (the pane clears it). Agents never modify an Owner tab, and may `replace` their own only while `updated_by` is still theirs (task 5d94ac91). |
 | `complexity_decisions` | id, task_id, complexity, reasoning | Task complexity assessments |
 
 ## ProjectDatabase.cs Tables (same multiterminal.db file)
