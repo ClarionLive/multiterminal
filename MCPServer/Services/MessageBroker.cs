@@ -6904,6 +6904,13 @@ namespace MultiTerminal.MCPServer.Services
             RaiseSafe(ProjectsUpdated, projects);
         }
 
+        /// <summary>
+        /// Raises <see cref="ProjectsUpdated"/> for a project change written outside the broker: the project
+        /// settings form saves through <c>ProjectSettingsService</c> (ticket e20e2ce0), which writes the
+        /// project tables directly and then calls this so listeners refresh.
+        /// </summary>
+        public void NotifyProjectsChanged() => BroadcastProjectUpdate();
+
         // Project write path (P5 / 1df2a534) — same ordering rule as the task write path: clone → mutate
         // the clone → persist → swap into the cache ONLY on persist success, so a DB failure never leaves
         // the _projects cache ahead of the DB. Neither helper broadcasts (the caller decides). See the
