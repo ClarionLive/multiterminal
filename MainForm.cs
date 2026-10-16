@@ -4035,10 +4035,11 @@ namespace MultiTerminal
         }
 
         /// <summary>
-        /// Handles a project delete from a Home/start-screen card. Confirms (native MessageBox),
-        /// routes through the canonical broker delete (unregisters the project — firing
+        /// Handles a project delete from a start-screen Home card or Browse All row. Confirms (native
+        /// TaskDialog), routes through the canonical broker delete (unregisters the project — firing
         /// ProjectRemoved so the code-graph watcher drops it — evicts its cg rows, records activity),
-        /// then refreshes the start-screen card grid. Unregister only: .claude/project.json is kept.
+        /// then refreshes the start screen. The dialog's checkbox (unchecked by default) also deletes
+        /// the on-disk .claude/project.json; otherwise it is kept. Tasks are never deleted.
         /// </summary>
         private void OnStartScreenProjectDeleteRequested(object sender, string projectId)
         {
@@ -4049,15 +4050,25 @@ namespace MultiTerminal
 
             string name = broker.GetProjectsList()?.FirstOrDefault(p => p.Id == projectId)?.Name ?? projectId;
 
-            var confirm = MessageBox.Show(
-                this,
-                $"Delete project '{name}' from MultiTerminal?\n\nThe project is unregistered and its code-graph data removed. The .claude/project.json file on disk is kept, and tasks are not deleted.",
-                "Delete Project",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning);
-            if (confirm != DialogResult.Yes) return;
+            // TaskDialog, not MessageBox: its verification checkbox replaces the retired Project
+            // Manager dialog's separate "Remove" / "Delete Config" buttons.
+            var deleteButton = new TaskDialogButton("Delete");
+            var cancelButton = TaskDialogButton.Cancel;
+            var page = new TaskDialogPage
+            {
+                Caption = "Delete Project",
+                Heading = $"Delete project '{name}' from MultiTerminal?",
+                Text = "The project is unregistered and its code-graph data removed. Tasks are not deleted.",
+                Icon = TaskDialogIcon.Warning,
+                DefaultButton = cancelButton,
+                Verification = new TaskDialogVerificationCheckBox("Also delete the project's .claude/project.json config"),
+            };
+            page.Buttons.Add(deleteButton);
+            page.Buttons.Add(cancelButton);
+            if (TaskDialog.ShowDialog(this, page) != deleteButton) return;
+            bool deleteLocalConfig = page.Verification.Checked;
 
-            var result = broker.DeleteProject(projectId, "ui", deleteLocalConfig: false);
+            var result = broker.DeleteProject(projectId, "ui", deleteLocalConfig: deleteLocalConfig);
             if (!result.Success)
             {
                 MessageBox.Show(
