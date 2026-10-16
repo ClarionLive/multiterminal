@@ -75,6 +75,7 @@ body.light {
 }
 .save-status.saved { color: var(--save-indicator); }
 .save-status.saving { color: var(--accent); }
+.save-status.conflict { color: var(--danger); }
 
 /* ── Tab bar ── */
 .tab-bar {
@@ -265,7 +266,7 @@ body.light {
 }
 .tab-menu-item:hover { background: var(--bg-tab-hover); color: var(--text-primary); }
 .tab-menu-item.active { color: var(--accent); font-weight: 600; }
-.tab-menu-item.unread::after { content: ' CF'; color: var(--accent); }
+.tab-menu-item.unread::after { content: ' ●'; color: var(--accent); }
 
 /* ── Delete confirmation ── */
 /* position:fixed + body-appended: the tab bar is a clipped scroll row
@@ -385,10 +386,12 @@ let saveTimeout = null;
 let dragSrcName = null;
 let deleteConfirmEl = null;
 let tabMenuEl = null;
+let renderPending = false;  // a live update arrived mid-rename/prompt/menu; redraw when it closes
 
 // ── Tab rendering ──
 
 function renderTabs() {
+    renderPending = false;
     // The confirm popup is body-appended (not inside a tab), so a re-render
     // no longer removes it implicitly — dismiss it here or it would linger
     // detached over rebuilt tabs.
@@ -576,6 +579,7 @@ function hideDeleteConfirm() {
         deleteConfirmEl.remove();
         deleteConfirmEl = null;
     }
+    flushPendingRender();
 }
 
 // ── Rename tab ──
@@ -601,6 +605,7 @@ function startRename(tabEl, name) {
         tabEl.draggable = true;
         input.remove();
         label.style.display = '';
+        flushPendingRender();
 
         if (newName && newName !== name && !tabs.some(t => t.name.toLowerCase() === newName.toLowerCase())) {
             if (window.chrome && window.chrome.webview) {
@@ -613,6 +618,7 @@ function startRename(tabEl, name) {
         tabEl.draggable = true;
         input.remove();
         label.style.display = '';
+        flushPendingRender();
     }
 
     input.addEventListener('blur', commit);
@@ -780,7 +786,6 @@ function showTabMenu() {
         item.textContent = tab.name;   // user text: never innerHTML
         if (unreadTabs.has(tab.name)) item.classList.add('unread');
         item.title = tab.createdBy ? `${tab.name} — ${tabAuthorText(tab)}` : tab.name;
-        item.title = tab.name;
         item.addEventListener('click', (e) => {
             e.stopPropagation();
             hideTabMenu();
@@ -822,6 +827,7 @@ function hideTabMenu() {
     navAllBtn.classList.remove('open');
     document.removeEventListener('click', onTabMenuOutsideClick);
     document.removeEventListener('keydown', onTabMenuKeydown);
+    flushPendingRender();
 }
 
 function onTabMenuOutsideClick(e) {
@@ -901,21 +907,51 @@ function updateUnreadIndicator() {
     navAllBtn.classList.toggle('has-unread', unreadTabs.size > 0);
 }
 
+// What an agent's append added to `base`, or null when `stored` is not an append
+// of it. Mirrors TaskDatabase.WriteAgentNoteTab: base.TrimEnd() + "\n\n" + text,
+// or just text when base was empty.
+function appendedSuffix(base, stored) {
+    const trimmed = base.trimEnd();
+    if (trimmed.length === 0) return stored.length > 0 ? stored : null;
+    const head = trimmed + '\n\n';
+    return stored.length > head.length && stored.startsWith(head) ? stored.slice(trimmed.length) : null;
+}
+
 // Live update after an agent wrote a note (task 5d94ac91). A MERGE, not a reload:
-// the Owner keeps the tab they are on, and unsaved typing in it is never replaced
-// (it wins and is saved over the agent's change, which an agent can only make to
-// its own tab). Every other tab, and a clean active tab, takes the stored text.
+// the Owner keeps the tab they are on, and unsaved typing in it is never replaced.
+// Every other tab, and a clean active tab, takes the stored text.
+//
+// When the active tab has unsaved typing AND an agent changed that same tab, the
+// pending save would write the Owner's buffer over the agent's change, which the
+// agent was already told had succeeded. So an append is carried INTO the buffer
+// (the Owner's text, then the agent's addition) and saved with it. Anything that is
+// not an append (a replace) cannot be merged; the Owner's text still wins, but the
+// status line says so instead of losing the agent's version silently.
 function mergeTabs(data) {
     if (document.body.classList.contains('no-project-state')) return;
     const known = new Set(tabs.map(t => t.name));
-    const activeDirty = !!activeTab && editor.value !== (lastSavedContent[activeTab] ?? '');
+    const base = activeTab ? (lastSavedContent[activeTab] ?? '') : '';
+    const activeDirty = !!activeTab && editor.value !== base;
     tabs = (data.tabs || []).map(toTabModel);
 
     const nextContents = {};
     const nextSaved = {};
+    let conflictBy = null;
     tabs.forEach(t => {
         nextSaved[t.name] = t.content;
-        nextContents[t.name] = (t.name === activeTab && activeDirty) ? editor.value : t.content;
+        nextContents[t.name] = t.content;
+        if (t.name === activeTab && activeDirty) {
+            nextContents[t.name] = editor.value;
+            if (t.content !== base) {
+                const suffix = appendedSuffix(base, t.content);
+                if (suffix !== null) {
+                    const own = editor.value.trimEnd();
+                    nextContents[t.name] = own + (base.trimEnd().length === 0 && own.length > 0 ? '\n\n' : '') + suffix;
+                } else {
+                    conflictBy = data.changedBy || t.updatedBy || 'an agent';
+                }
+            }
+        }
         if (!known.has(t.name) && t.name !== activeTab) unreadTabs.add(t.name);
     });
     if (data.changedTab && data.changedTab !== activeTab && tabs.some(t => t.name === data.changedTab)) {
@@ -927,14 +963,36 @@ function mergeTabs(data) {
     if (!activeTab || !tabs.some(t => t.name === activeTab)) {
         activeTab = tabs.length > 0 ? tabs[0].name : null;
         editor.value = activeTab ? (tabContents[activeTab] || '') : '';
-    } else if (!activeDirty && editor.value !== tabContents[activeTab]) {
-        // Clean active tab changed underneath: take the new text, keeping caret and scroll.
+    } else if (editor.value !== tabContents[activeTab]) {
+        // The active tab's text changed underneath (a clean tab taking the stored
+        // text, or a dirty one gaining an agent's append at the end): keep caret and scroll.
         const { selectionStart, selectionEnd, scrollTop } = editor;
         editor.value = tabContents[activeTab];
         editor.setSelectionRange(Math.min(selectionStart, editor.value.length), Math.min(selectionEnd, editor.value.length));
         editor.scrollTop = scrollTop;
     }
+    if (conflictBy) {
+        saveStatus.textContent = `${conflictBy} rewrote this note while you were editing; your version will be saved`;
+        saveStatus.className = 'save-status conflict';
+    }
+    renderTabsWhenIdle();
+}
+
+// A live update must not tear down what the Owner is in the middle of: an inline
+// rename, the delete prompt or the all-notes menu. renderTabs rebuilds the strip and
+// closes both popups, so it waits until they are gone. The data above is already
+// merged; only the redraw is deferred.
+function renderTabsWhenIdle() {
+    if (tabScroll.querySelector('.tab-label-edit') || deleteConfirmEl || tabMenuEl) {
+        renderPending = true;
+        return;
+    }
     renderTabs();
+}
+function flushPendingRender() {
+    if (!renderPending) return;
+    // Deferred so it runs after the closing click/commit has finished its own work.
+    setTimeout(() => { if (renderPending) renderTabsWhenIdle(); }, 0);
 }
 
 function loadAllTabs(data) {

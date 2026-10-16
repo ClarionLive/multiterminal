@@ -148,6 +148,33 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void Append_cannot_grow_a_note_past_the_stored_size_limit()
+        {
+            using var db = new TaskDatabase();
+            string chunk = new string('x', TaskDatabase.AgentNoteMaxChars / 2);
+            db.WriteAgentNoteTab(_project, "Big", chunk, "Alice", AgentNoteWriteMode.New);
+
+            // Each fragment is under the limit on its own; the stored total would not be.
+            var second = db.WriteAgentNoteTab(_project, "Big", chunk, "Alice", AgentNoteWriteMode.Append);
+
+            Assert.Equal(AgentNoteWriteOutcome.Refused, second.Outcome);
+            Assert.Contains("limit", second.Reason, StringComparison.Ordinal);
+            Assert.Equal(chunk.Length, Tab(db, _project, "Big").Content.Length);
+        }
+
+        [Fact]
+        public void A_single_oversized_note_is_refused_whatever_the_mode()
+        {
+            using var db = new TaskDatabase();
+            string tooBig = new string('x', TaskDatabase.AgentNoteMaxChars + 1);
+
+            var result = db.WriteAgentNoteTab(_project, "Huge", tooBig, "Alice", AgentNoteWriteMode.New);
+
+            Assert.Equal(AgentNoteWriteOutcome.Refused, result.Outcome);
+            Assert.Null(Tab(db, _project, "Huge"));
+        }
+
+        [Fact]
         public void Migration_adds_authorship_to_an_existing_table_and_reads_old_rows_as_the_owners()
         {
             using (var raw = new SQLiteConnection($"Data Source={_testDbPath};Version=3;"))

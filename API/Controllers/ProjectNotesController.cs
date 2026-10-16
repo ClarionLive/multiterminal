@@ -19,7 +19,7 @@ namespace MultiTerminal.API.Controllers
     public class ProjectNotesController : ControllerBase
     {
         internal const int MaxTabNameLength = 80;
-        internal const int MaxContentLength = 100_000;
+        internal const int MaxContentLength = TaskDatabase.AgentNoteMaxChars;
 
         private readonly MessageBroker _broker;
 

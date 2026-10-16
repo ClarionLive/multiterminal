@@ -6538,6 +6538,13 @@ namespace MultiTerminal.Services
         /// Notes pane's <see cref="SaveNoteTab"/>, so an Owner save cannot land between the check and
         /// the write.
         /// </summary>
+        /// <summary>
+        /// Largest note an agent may leave in one tab, measured on the STORED text. Checked here rather
+        /// than only on the incoming request, because repeated appends would otherwise grow a tab
+        /// without bound (and every write re-sends every tab to each open Notes pane).
+        /// </summary>
+        public const int AgentNoteMaxChars = 100_000;
+
         public AgentNoteWriteResult WriteAgentNoteTab(string projectPath, string tabName, string content, string agentName, AgentNoteWriteMode mode)
         {
             using var gate = LockConn();
@@ -6547,6 +6554,8 @@ namespace MultiTerminal.Services
             if (string.IsNullOrEmpty(tabName)) return AgentNoteWriteResult.Refused(tabName, "A tab name is required.");
             if (string.IsNullOrEmpty(agentName)) return AgentNoteWriteResult.Refused(tabName, "The writing agent's name is required.");
             content ??= "";
+            if (content.Length > AgentNoteMaxChars)
+                return AgentNoteWriteResult.Refused(tabName, $"A note is limited to {AgentNoteMaxChars} characters.");
 
             GetProjectNoteTabs(projectPath); // heal/migrate first so ownership is read off canonical rows
             projectPath = NormalizeNoteTabPath(projectPath);
@@ -6581,6 +6590,11 @@ namespace MultiTerminal.Services
                     }
                     string current = existing.Content ?? "";
                     string appended = current.Length == 0 ? content : current.TrimEnd() + "\n\n" + content;
+                    if (appended.Length > AgentNoteMaxChars)
+                    {
+                        return AgentNoteWriteResult.Refused(existing.Name,
+                            $"Appending would make '{existing.Name}' {appended.Length} characters, over the {AgentNoteMaxChars}-character limit. Use mode 'replace' with a shorter note, or 'new'.");
+                    }
                     UpdateAgentNoteTab(projectPath, existing.Name, appended, agentName);
                     return new AgentNoteWriteResult { Outcome = AgentNoteWriteOutcome.Appended, TabName = existing.Name };
 
