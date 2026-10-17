@@ -27,8 +27,8 @@ paths:
 | `TaskLifecycleBoard/` | Task lifecycle view | TaskLifecycleBoardForm (WebView2) |
 | `Controls/` | Reusable controls | TerminalControl, TerminalStatusBarRenderer, EmbeddedAgentPanel, HudTabContainer (instantiated TWICE — once per terminal, once by the Tasks pane; ctor takes the tasks-tab id so the two don't share zoom keys), HudGraphPanel (🔗 Plan tab — checklist as a dependency graph, task 60665c6c; Terminal/Board mode since f5744489), TaskHudPanel (Terminal/Board mode; board mode is read-only and refuses activation), IZoomableTab (contract every HUD tab implements so per-tab zoom cannot be silently forgotten, task 0d72698a) + HudTabZoomTracker/HudTabZoomChangedEventArgs (per-tab zoom keys + echo suppression) |
 | `Terminal/` | Terminal hosting | ConPtyTerminal, WebViewTerminalRenderer |
-| `Docking/` | Window layout | GridLayoutManager, TerminalDocument, ProjectPanelDocument, LauncherPanelDocument |
-| `Dialogs/` | Modal dialogs (11) | ProjectManager, Settings, ChatHistory, NewProjectWpf, OwnerProfile, SavePrompt, RenameTab, SessionViewer, EditProject, IdentityPicker, About |
+| `Docking/` | Window layout | GridLayoutManager, TerminalDocument (its nested `ClaudeSessionTracker` fences which Claude session a pane holds: `CurrentClaudeSessionId`, plus `PendingResumeSessionId` reserved at a `--resume` launch, task ec2ed636), ProjectPanelDocument, LauncherPanelDocument |
+| `Dialogs/` | Modal dialogs (12) | ProjectManager, Settings, ChatHistory, NewProjectWpf, OwnerProfile, SavePrompt, RenameTab, SessionViewer, EditProject, IdentityPicker, About, LaunchSession (New / Continue last / resume a past session at project launch, task ec2ed636; its decisions live in the pure `Services/LaunchSessionChoice.cs` LaunchSessionChoiceModel, see rules/launch-session-choice.md) |
 | `docs/` | Architecture docs | Design specs, workflow guides, integration docs |
 | `installer/` | Distribution | MultiTerminal.iss (Inno Setup), build-installer.ps1, post-install.js, post-uninstall.js |
 | `tools/` | Bundled tools | rg.exe (ripgrep for code search) |
