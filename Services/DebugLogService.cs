@@ -211,13 +211,53 @@ namespace MultiTerminal.Services
                 {
                     handler(this, entry);
                 }
-#pragma warning disable CA1031 // Any subscriber fault is caught on purpose: see the summary above.
                 catch (Exception ex)
-#pragma warning restore CA1031
                 {
-                    System.Diagnostics.Debug.WriteLine($"[DebugLogService] LogMessageAdded subscriber threw: {ex}");
+                    ReportSubscriberFault(nameof(LogMessageAdded), ex);
                 }
             }
+        }
+
+        /// <summary>Same isolation for LogCleared, which DebugController raises on a REST thread.</summary>
+        private void RaiseLogCleared()
+        {
+            var handlers = LogCleared;
+            if (handlers == null) return;
+            foreach (EventHandler handler in handlers.GetInvocationList())
+            {
+                try
+                {
+                    handler(this, EventArgs.Empty);
+                }
+                catch (Exception ex)
+                {
+                    ReportSubscriberFault(nameof(LogCleared), ex);
+                }
+            }
+        }
+
+        private const long SubscriberFaultReportIntervalMs = 5000;
+        private long _lastSubscriberFaultReportMs = long.MinValue;
+        private long _subscriberFaultsReported;
+
+        /// <summary>Test seam (InternalsVisibleTo): how many subscriber faults have been written out.</summary>
+        internal long SubscriberFaultsReported => Interlocked.Read(ref _subscriberFaultsReported);
+
+        /// <summary>
+        /// At most one report per <see cref="SubscriberFaultReportIntervalMs"/>. Unlimited reporting
+        /// would loop: with system-wide capture on, Debug.WriteLine from this process comes back as an
+        /// OutputDebugString message, which raises LogMessageAdded again into the subscriber that just
+        /// threw (OutputDebugStringListener does not filter out our own pid).
+        /// </summary>
+        private void ReportSubscriberFault(string eventName, Exception ex)
+        {
+            long now = Environment.TickCount64;
+            long last = Interlocked.Read(ref _lastSubscriberFaultReportMs);
+            if (last != long.MinValue && now - last < SubscriberFaultReportIntervalMs) return;
+            if (Interlocked.CompareExchange(ref _lastSubscriberFaultReportMs, now, last) != last) return;
+
+            Interlocked.Increment(ref _subscriberFaultsReported);
+            System.Diagnostics.Debug.WriteLine($"[DebugLogService] {eventName} subscriber threw: {ex}");
         }
 
         /// <summary>
@@ -266,7 +306,7 @@ namespace MultiTerminal.Services
         public void Clear()
         {
             while (_logQueue.TryDequeue(out _)) { }
-            LogCleared?.Invoke(this, EventArgs.Empty);
+            RaiseLogCleared();
         }
 
         /// <summary>

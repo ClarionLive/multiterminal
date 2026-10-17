@@ -37,6 +37,10 @@ namespace MultiTerminal.Panels
         // UI thread in OnHandleCreated. Volatile so a set on a pool thread is seen there.
         private volatile bool _resyncPending;
 
+        // The thread that owns the ListView. Every creation site (MainForm) runs on the UI thread, and
+        // the handle is created on the thread that creates the control.
+        private readonly int _uiThreadId = Environment.CurrentManagedThreadId;
+
         public DebugPanel()
         {
             InitializeComponent();
@@ -211,27 +215,11 @@ namespace MultiTerminal.Panels
             // Task d41637ab: InvokeRequired answers false when the panel has no handle (never shown,
             // or hidden before its handle was made), even on a thread-pool thread. The old code then
             // edited the ListView from that thread, and on 2026-10-16 a FileSystemWatcher error
-            // logged that way corrupted it and crashed MultiTerminal. With no handle there is no
-            // thread to marshal to, so leave the list alone and rebuild it from the service's buffer
-            // once a handle exists (OnHandleCreated).
-            if (!IsHandleCreated)
+            // logged that way corrupted it and crashed MultiTerminal. So the test is thread identity,
+            // which cannot answer wrongly, and an off-thread call never touches the list.
+            if (Environment.CurrentManagedThreadId != _uiThreadId)
             {
-                _resyncPending = true;
-                return;
-            }
-
-            // Marshal to UI thread
-            if (InvokeRequired)
-            {
-                try
-                {
-                    BeginInvoke(new Action(() => OnLogMessageAdded(sender, entry)));
-                }
-                catch (InvalidOperationException)
-                {
-                    // The handle was destroyed between the check above and this call.
-                    _resyncPending = true;
-                }
+                MarshalOrDefer(() => OnLogMessageAdded(sender, entry));
                 return;
             }
 
@@ -300,9 +288,50 @@ namespace MultiTerminal.Panels
             }
         }
 
+        /// <summary>
+        /// Called off the UI thread. Posts <paramref name="action"/> to the UI thread when there is a
+        /// handle to post through; otherwise marks the list for a rebuild from the service's buffer.
+        /// </summary>
+        private void MarshalOrDefer(Action action)
+        {
+            if (IsHandleCreated)
+            {
+                try
+                {
+                    BeginInvoke(action);
+                    return;
+                }
+                catch (InvalidOperationException)
+                {
+                    // The handle was destroyed after the check; fall through to the rebuild.
+                }
+            }
+
+            _resyncPending = true;
+
+            // OnHandleCreated may have read the flag between our handle check and the line above. If
+            // a handle exists now, ask the UI thread to pick the flag up rather than leave it set.
+            if (IsHandleCreated)
+            {
+                try
+                {
+                    BeginInvoke(new Action(ResyncIfPending));
+                }
+                catch (InvalidOperationException)
+                {
+                    // Destroyed again; the next OnHandleCreated reads the flag.
+                }
+            }
+        }
+
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
+            ResyncIfPending();
+        }
+
+        private void ResyncIfPending()
+        {
             if (_resyncPending) ResyncFromService();
         }
 
@@ -338,23 +367,11 @@ namespace MultiTerminal.Panels
         {
             if (_isDisposed) return;
 
-            // Same no-handle hazard as OnLogMessageAdded; the resync rebuilds from the emptied buffer.
-            if (!IsHandleCreated)
+            // Same hazard as OnLogMessageAdded (DebugController.Clear raises this on a REST thread);
+            // a deferred clear is a rebuild from the emptied buffer.
+            if (Environment.CurrentManagedThreadId != _uiThreadId)
             {
-                _resyncPending = true;
-                return;
-            }
-
-            if (InvokeRequired)
-            {
-                try
-                {
-                    BeginInvoke(new Action(() => OnLogCleared(sender, e)));
-                }
-                catch (InvalidOperationException)
-                {
-                    _resyncPending = true;
-                }
+                MarshalOrDefer(() => OnLogCleared(sender, e));
                 return;
             }
 

@@ -15,11 +15,16 @@ namespace MultiTerminal.Tests
     /// on that thread; DebugPanel's InvokeRequired answered false (no handle), so it edited the
     /// ListView off the UI thread, which threw, and nothing between there and the pool caught it.
     ///
-    /// <para>Two defects, one fact each. Falsified by reverting each fix against the same file
-    /// state: removing the IsHandleCreated guard turns the panel fact red at the first count
-    /// assertion (3 rows instead of 2, the pool thread having added one); restoring the direct
-    /// <c>LogMessageAdded?.Invoke</c> turns the service fact red with the subscriber's exception
-    /// escaping Log. Neither can pass by luck: both are single-threaded at the point asserted.</para>
+    /// <para>Falsified by reverting each fix against the same file state: treating every thread as
+    /// the UI thread turns the panel fact red at the first count assertion (3 rows instead of 2, the
+    /// pool thread having added one); restoring a direct <c>?.Invoke</c> turns the matching
+    /// isolation fact red with the subscriber's exception escaping; removing the rate limit turns
+    /// the report-count fact red. None can pass by luck: each is single-threaded at the point
+    /// asserted.</para>
+    ///
+    /// <para>NOT covered: the interleavings MarshalOrDefer's re-check exists for (a log racing
+    /// OnHandleCreated, a handle destroyed after BeginInvoke). Those are argued in its comments, not
+    /// exercised here.</para>
     /// </summary>
     public class DebugLogCrashSafetyTests
     {
@@ -63,6 +68,35 @@ namespace MultiTerminal.Tests
 
                 Assert.Null(ex);
                 Assert.Equal(1, laterCalls);
+            });
+        }
+
+        [Fact]
+        public void A_throwing_LogCleared_subscriber_does_not_escape_Clear()
+        {
+            WithTempLog(log =>
+            {
+                log.LogCleared += (s, e) => throw new InvalidOperationException("boom");
+
+                Assert.Null(Record.Exception(() => log.Clear()));
+            });
+        }
+
+        /// <summary>
+        /// Codex security, Run 1: with system-wide capture on, each fault report comes back through
+        /// OutputDebugString into the subscriber that threw, so unlimited reporting loops. A burst of
+        /// faults inside one interval must produce one report.
+        /// </summary>
+        [Fact]
+        public void Subscriber_faults_are_reported_at_most_once_per_interval()
+        {
+            WithTempLog(log =>
+            {
+                log.LogMessageAdded += (s, e) => throw new ArgumentOutOfRangeException("index");
+
+                for (int i = 0; i < 100; i++) log.Error("Test", "boom " + i);
+
+                Assert.Equal(1, log.SubscriberFaultsReported);
             });
         }
 
