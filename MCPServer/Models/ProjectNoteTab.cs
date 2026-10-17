@@ -26,6 +26,22 @@ namespace MultiTerminal.MCPServer.Models
 
         public DateTime? UpdatedAt { get; set; }
 
+        /// <summary>
+        /// Bumped by every agent write to the tab (task c133b27d); 0 for a tab no agent has written.
+        /// A counter rather than <see cref="UpdatedAt"/>, which has one-second resolution.
+        /// </summary>
+        public long AgentRev { get; set; }
+
+        /// <summary>The highest <see cref="AgentRev"/> the Owner has seen.</summary>
+        public long OwnerReadRev { get; set; }
+
+        /// <summary>
+        /// An agent wrote this tab after the Owner last saw it. Same rule as
+        /// <c>TaskDatabase.NoteTabUnreadSql</c>: an Owner save clears <see cref="UpdatedBy"/>, which also
+        /// marks the tab read.
+        /// </summary>
+        public bool IsUnread => !string.IsNullOrEmpty(UpdatedBy) && AgentRev > OwnerReadRev;
+
         public bool IsAgentWritten => !string.IsNullOrEmpty(CreatedBy);
     }
 
@@ -89,5 +105,33 @@ namespace MultiTerminal.MCPServer.Models
 
         public static AgentNoteWriteResult Refused(string tabName, string reason)
             => new AgentNoteWriteResult { Outcome = AgentNoteWriteOutcome.Refused, TabName = tabName, Reason = reason };
+    }
+
+    /// <summary>
+    /// Args of <c>MessageBroker.ProjectNoteReadStateChanged</c> (task c133b27d): which project's unread
+    /// count may have changed. Every listener recounts. When the Owner renamed or deleted a tab,
+    /// <see cref="TabsChanged"/> is set so open panes also take the new tab list, not only the flags.
+    /// </summary>
+    public sealed class ProjectNoteReadStateChangedEventArgs : EventArgs
+    {
+        public ProjectNoteReadStateChangedEventArgs(string projectKey, bool tabsChanged = false, string renamedFrom = null, string renamedTo = null)
+        {
+            ProjectKey = projectKey;
+            TabsChanged = tabsChanged;
+            RenamedFrom = renamedFrom;
+            RenamedTo = renamedTo;
+        }
+
+        /// <summary>The canonical note-tab key (<c>TaskDatabase.CanonicalNoteTabKey</c>).</summary>
+        public string ProjectKey { get; }
+
+        /// <summary>A tab was renamed or deleted, so other panes' tab lists are stale.</summary>
+        public bool TabsChanged { get; }
+
+        /// <summary>For a rename: the old name, so a pane can carry the Owner's unsaved typing across.</summary>
+        public string RenamedFrom { get; }
+
+        /// <summary>For a rename: the new name.</summary>
+        public string RenamedTo { get; }
     }
 }

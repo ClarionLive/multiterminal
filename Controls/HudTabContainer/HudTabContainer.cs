@@ -31,6 +31,8 @@ namespace MultiTerminal.Controls
         private const int DirtyStripHeight = 22;
         private const int TabPadding = 12;
         private const int CloseButtonWidth = 18;
+        private const int BadgeHeight = 15;
+        private const int BadgeGap = 4;
 
         /// <summary>
         /// Raised when any tab needs the container to be shown or hidden.
@@ -155,7 +157,7 @@ namespace MultiTerminal.Controls
                 IsPermanent = true
             };
             _tabs.Add(hudEntry);
-            HookTabZoom(hudEntry);
+            HookTab(hudEntry);
             _contentArea.Controls.Add(_taskHud);
             _activeTabIndex = 0;
             _taskHud.Visible = true; // Active tab starts visible
@@ -224,7 +226,7 @@ namespace MultiTerminal.Controls
             // Insert after existing permanent tabs
             int insertIndex = _tabs.Count(t => t.IsPermanent);
             _tabs.Insert(insertIndex, entry);
-            HookTabZoom(entry);
+            HookTab(entry);
             _contentArea.Controls.Add(control);
 
             UpdateTabStripVisibility();
@@ -319,7 +321,7 @@ namespace MultiTerminal.Controls
                 IsPermanent = false
             };
             _tabs.Add(entry);
-            HookTabZoom(entry);
+            HookTab(entry);
             _contentArea.Controls.Add(page);
 
             // Navigate after adding to content area
@@ -574,6 +576,38 @@ namespace MultiTerminal.Controls
         /// purpose: a per-site subscription is the same hand-maintained-list shape that caused this
         /// ticket, one layer up.
         /// </remarks>
+        private void HookTab(TabEntry entry)
+        {
+            HookTabZoom(entry);
+            HookTabBadge(entry);
+        }
+
+        /// <summary>
+        /// Repaints the strip when a tab's badge count changes (task c133b27d). Optional: only tabs that
+        /// implement <see cref="ITabBadgeSource"/> have one, and the container names no tab type.
+        /// </summary>
+        private void HookTabBadge(TabEntry entry)
+        {
+            if (!(entry?.Control is ITabBadgeSource badge)) return;
+            badge.BadgeCountChanged += (s, e) =>
+            {
+                if (!IsDisposed) _tabStrip.Invalidate();
+            };
+        }
+
+        /// <summary>
+        /// The count shown on a tab's header, or 0 for none. Internal so tests can read what the strip
+        /// will paint without rendering it.
+        /// </summary>
+        internal int GetTabBadgeCount(string tabId)
+        {
+            var entry = _tabs.FirstOrDefault(t => t.Id == tabId);
+            return entry?.Control is ITabBadgeSource badge ? Math.Max(0, badge.BadgeCount) : 0;
+        }
+
+        /// <summary>Badge text: the count, capped so the pill keeps its width.</summary>
+        internal static string FormatBadge(int count) => count > 99 ? "99+" : count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
         private void HookTabZoom(TabEntry entry)
         {
             if (!(entry?.Control is IZoomableTab zoomable)) return;
@@ -647,12 +681,18 @@ namespace MultiTerminal.Controls
             var textColor = _isDarkTheme ? Color.FromArgb(200, 200, 210) : Color.FromArgb(40, 40, 40);
             var activeTextColor = _isDarkTheme ? Color.White : Color.Black;
             var closeColor = _isDarkTheme ? Color.FromArgb(150, 150, 160) : Color.FromArgb(100, 100, 100);
+            // The Notes page's --accent, so the header badge matches the indicator inside the tab.
+            var badgeBg = _isDarkTheme ? Color.FromArgb(0x89, 0xb4, 0xfa) : Color.FromArgb(0x1e, 0x66, 0xf5);
+            var badgeFg = _isDarkTheme ? Color.FromArgb(0x1e, 0x1e, 0x2e) : Color.White;
 
             int x = 2;
             using (var font = new Font("Segoe UI", 8.5f))
+            using (var badgeFont = new Font("Segoe UI", 7.5f, FontStyle.Bold))
             using (var textBrush = new SolidBrush(textColor))
             using (var activeTextBrush = new SolidBrush(activeTextColor))
             using (var closeBrush = new SolidBrush(closeColor))
+            using (var badgeBgBrush = new SolidBrush(badgeBg))
+            using (var badgeFgBrush = new SolidBrush(badgeFg))
             {
                 for (int i = 0; i < _tabs.Count; i++)
                 {
@@ -661,6 +701,15 @@ namespace MultiTerminal.Controls
                     int tabWidth = (int)titleSize.Width + TabPadding * 2;
                     if (!tab.IsPermanent)
                         tabWidth += CloseButtonWidth;
+
+                    int badgeCount = tab.Control is ITabBadgeSource badgeSource ? badgeSource.BadgeCount : 0;
+                    string badgeText = badgeCount > 0 ? FormatBadge(badgeCount) : null;
+                    int badgeWidth = 0;
+                    if (badgeText != null)
+                    {
+                        badgeWidth = Math.Max(BadgeHeight, (int)g.MeasureString(badgeText, badgeFont).Width + 4);
+                        tabWidth += badgeWidth + BadgeGap;
+                    }
 
                     var tabRect = new Rectangle(x, 2, tabWidth, TabStripHeight - 4);
                     tab.Bounds = tabRect;
@@ -674,6 +723,20 @@ namespace MultiTerminal.Controls
                     // Tab title
                     var titleRect = new RectangleF(x + TabPadding, 5, titleSize.Width, TabStripHeight - 8);
                     g.DrawString(tab.Title, font, isActive ? activeTextBrush : textBrush, titleRect);
+
+                    if (badgeText != null)
+                    {
+                        var badgeRect = new Rectangle(
+                            x + TabPadding + (int)titleSize.Width + BadgeGap,
+                            (TabStripHeight - BadgeHeight) / 2,
+                            badgeWidth,
+                            BadgeHeight);
+                        g.FillRoundedRectangle(badgeBgBrush, badgeRect, BadgeHeight / 2);
+                        using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                        {
+                            g.DrawString(badgeText, badgeFont, badgeFgBrush, badgeRect, sf);
+                        }
+                    }
 
                     // Close button for non-permanent tabs
                     if (!tab.IsPermanent)

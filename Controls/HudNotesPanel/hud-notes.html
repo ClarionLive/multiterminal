@@ -183,6 +183,19 @@ body.light {
     pointer-events: none;
 }
 .tab-nav-all.has-unread { color: var(--accent); }
+/* Unread count on ▾ (task c133b27d); the ▾ widens to fit it. */
+.tab-nav-all.has-unread { width: auto; padding: 0 5px; gap: 3px; }
+.tab-unread-count {
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 13px;
+    min-width: 13px;
+    padding: 0 3px;
+    border-radius: 7px;
+    text-align: center;
+    background: var(--accent);
+    color: var(--bg-primary, #1e1e2e);
+}
 
 .tab-close {
     display: flex;
@@ -377,8 +390,12 @@ const navLeftBtn = document.getElementById('tab-nav-left');
 const navRightBtn = document.getElementById('tab-nav-right');
 const navAllBtn = document.getElementById('tab-nav-all');
 
-let tabs = [];           // [{name, content, isDefault, createdBy, updatedBy}]
-let unreadTabs = new Set(); // agent-written tabs the Owner hasn't opened since they changed
+let tabs = [];           // [{name, content, isDefault, createdBy, updatedBy, unread, agentRev}]
+// Tabs an agent wrote after the Owner last saw them. Comes from the HOST (stored read
+// state, task c133b27d), so it survives a restart and agrees across panes; the page
+// only clears an entry when it tells the host the tab was read.
+let unreadTabs = new Set();
+let hostSeen = false;     // host says the Owner can see this pane (Notes tab shown, window not minimised)
 let activeTab = null;     // current tab name
 let tabContents = {};     // in-memory content cache per tab
 let lastSavedContent = {};
@@ -478,7 +495,7 @@ function switchTab(name) {
         if (saveTimeout) { clearTimeout(saveTimeout); saveTimeout = null; saveCurrentTab(); }
     }
     activeTab = name;
-    unreadTabs.delete(name);
+    markActiveRead();
     editor.value = tabContents[name] || '';
     lastSavedContent[name] = tabContents[name] || '';
     saveStatus.textContent = '';
@@ -906,7 +923,27 @@ document.addEventListener('keydown', (e) => {
 // "dirty" against the editor with no typing at all.
 function toTabModel(t) {
     return { name: t.name, content: (t.content || '').replace(/\r\n?/g, '\n'), isDefault: t.isDefault,
-             createdBy: t.createdBy || null, updatedBy: t.updatedBy || null };
+             createdBy: t.createdBy || null, updatedBy: t.updatedBy || null,
+             unread: !!t.unread, agentRev: Number(t.agentRev) || 0 };
+}
+
+function syncUnreadFromTabs() {
+    unreadTabs = new Set(tabs.filter(t => t.unread).map(t => t.name));
+}
+
+// The active tab counts as read only while the host says the Owner can see it.
+// Sends the revision this page is SHOWING, so an agent write that has not reached
+// the page yet stays unread. The host re-checks visibility before storing it.
+function markActiveRead() {
+    if (!hostSeen || !activeTab || !unreadTabs.has(activeTab)) return false;
+    const tab = tabs.find(t => t.name === activeTab);
+    if (!tab) return false;
+    unreadTabs.delete(activeTab);
+    tab.unread = false;
+    if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.postMessage({ type: 'mark_read', tabName: activeTab, rev: tab.agentRev });
+    }
+    return true;
 }
 
 // Tooltip for an agent-written tab. A null updatedBy means the Owner saved it last.
@@ -918,7 +955,16 @@ function tabAuthorText(tab) {
 
 function updateUnreadIndicator() {
     unreadTabs.forEach(n => { if (!tabs.some(t => t.name === n)) unreadTabs.delete(n); });
-    navAllBtn.classList.toggle('has-unread', unreadTabs.size > 0);
+    const n = unreadTabs.size;
+    navAllBtn.classList.toggle('has-unread', n > 0);
+    navAllBtn.textContent = '\u25BE';
+    if (n > 0) {
+        const count = document.createElement('span');
+        count.className = 'tab-unread-count';
+        count.textContent = n > 99 ? '99+' : String(n);
+        navAllBtn.appendChild(count);
+    }
+    navAllBtn.title = n > 0 ? `All notes (${n} unread)` : 'All notes';
 }
 
 // What an agent's append added to `base`, or null when `stored` is not an append
@@ -942,9 +988,25 @@ function appendedSuffix(base, stored) {
 // (the Owner's text, then the agent's addition) and saved with it. Anything that is
 // not an append (a replace) cannot be merged; the Owner's text still wins, but the
 // status line says so instead of losing the agent's version silently.
+// The Owner renamed a tab in ANOTHER pane (task c133b27d). Move this page's state for
+// it to the new name before merging, so the current tab and any unsaved typing in it
+// survive instead of the merge treating the tab as deleted. A pane that already has
+// the new name (the one that did the rename) has nothing under the old one: no-op.
+function renameLocalTab(from, to) {
+    if (!from || !to || from === to || !(from in tabContents) || (to in tabContents)) return;
+    tabContents[to] = tabContents[from];
+    delete tabContents[from];
+    if (from in lastSavedContent) {
+        lastSavedContent[to] = lastSavedContent[from];
+        delete lastSavedContent[from];
+    }
+    if (activeTab === from) activeTab = to;
+    if (pendingConflict && pendingConflict.tab === from) pendingConflict.tab = to;
+}
+
 function mergeTabs(data) {
     if (document.body.classList.contains('no-project-state')) return;
-    const known = new Set(tabs.map(t => t.name));
+    if (data.renamed) renameLocalTab(data.renamed.from, data.renamed.to);
     const base = activeTab ? (lastSavedContent[activeTab] ?? '') : '';
     const activeDirty = !!activeTab && editor.value !== base;
     tabs = (data.tabs || []).map(toTabModel);
@@ -969,11 +1031,7 @@ function mergeTabs(data) {
                 }
             }
         }
-        if (!known.has(t.name) && t.name !== activeTab) unreadTabs.add(t.name);
     });
-    if (data.changedTab && data.changedTab !== activeTab && tabs.some(t => t.name === data.changedTab)) {
-        unreadTabs.add(data.changedTab);
-    }
     tabContents = nextContents;
     lastSavedContent = nextSaved;
 
@@ -994,6 +1052,24 @@ function mergeTabs(data) {
         saveStatus.textContent = `${conflictBy} rewrote this note while you were editing; your version will be saved`;
         saveStatus.className = 'save-status conflict';
     }
+    syncUnreadFromTabs();
+    markActiveRead();
+    renderTabsWhenIdle();
+}
+
+// Read state changed elsewhere (another pane read or deleted a note): refresh the
+// flags only. Content and the Owner's typing are untouched.
+function applyUnreadState(data) {
+    const byName = new Map((data.tabs || []).map(t => [t.name, t]));
+    tabs.forEach(t => {
+        const s = byName.get(t.name);
+        // A tab the host no longer has cannot be unread; keeping its old flag would
+        // leave a dot and a dropdown count that disagree with the header badge.
+        if (s) { t.unread = !!s.unread; t.agentRev = Number(s.agentRev) || 0; }
+        else t.unread = false;
+    });
+    syncUnreadFromTabs();
+    markActiveRead();
     renderTabsWhenIdle();
 }
 
@@ -1036,6 +1112,8 @@ function loadAllTabs(data) {
     editor.value = activeTab ? (tabContents[activeTab] || '') : '';
     saveStatus.textContent = '';
     saveStatus.className = 'save-status';
+    syncUnreadFromTabs();
+    markActiveRead();
     renderTabs();
 }
 
@@ -1052,6 +1130,13 @@ if (window.chrome && window.chrome.webview) {
                 break;
             case 'load_all_tabs':
                 loadAllTabs(data);
+                break;
+            case 'unread_state':
+                applyUnreadState(data);
+                break;
+            case 'seen':
+                hostSeen = !!data.seen;
+                if (markActiveRead()) renderTabsWhenIdle();
                 break;
             case 'load_notes':
                 // Legacy fallback: treat as single "General" tab
