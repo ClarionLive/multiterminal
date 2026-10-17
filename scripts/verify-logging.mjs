@@ -100,6 +100,7 @@ const ALLOWLIST_SITES = new Map([
   ['MCPServer/Services/ActivityFeedService.cs', 'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],
   ['MCPServer/Services/ActivityService.cs',     'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],
   ['MCPServer/Services/PoolCoordinator.cs',     'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],
+  ['MCPServer/Services/SessionCatalog.cs',      'dependency-free leaf (ec2ed636) — no sink/broker, lookups injected for unit tests; not plumbed (ruling #1)'],
   ['Services/ChangelogAttributionService.cs',   'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],
   ['Services/ChangelogService.cs',              'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],
   ['Services/CompanionProcessManager.cs',       'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],

@@ -44,6 +44,13 @@ namespace MultiTerminal.Services
         public string SessionId { get; private set; }
 
         /// <summary>
+        /// When the process was started (UTC), or null before <see cref="SpawnAsync"/>. The launch
+        /// prompt (task ec2ed636) needs it while <see cref="SessionId"/> is still null: only a session
+        /// written since this time can be the one this helper holds.
+        /// </summary>
+        public DateTime? StartedUtc { get; private set; }
+
+        /// <summary>
         /// Whether the underlying process is still running.
         /// </summary>
         public bool IsRunning => _process != null && !_process.HasExited;
@@ -134,6 +141,9 @@ namespace MultiTerminal.Services
             {
                 args.Add("--resume");
                 args.Add(sessionId);
+                // Count the resumed session as held from spawn, not from the first stream
+                // message, so the launch prompt never offers it in between (task ec2ed636).
+                SessionId ??= sessionId;
             }
 
             if (!string.IsNullOrEmpty(permissionMode))
@@ -178,6 +188,7 @@ namespace MultiTerminal.Services
 
             _process = new Process { StartInfo = psi, EnableRaisingEvents = true };
             _process.Exited += OnProcessExited;
+            StartedUtc = DateTime.UtcNow;
             _process.Start();
 
             _stdinWriter = _process.StandardInput;

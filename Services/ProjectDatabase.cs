@@ -202,7 +202,10 @@ namespace MultiTerminal.Services
                 ("quiet_start",        "INTEGER"),
                 // Claude Code config profile NAME (ticket c8ee0eec, GitHub #21). NULL = the implicit
                 // Default profile, so every existing project keeps launching as it does today.
-                ("claude_profile",     "TEXT")
+                ("claude_profile",     "TEXT"),
+                // No DEFAULT: NULL reads as 'ask' (task ec2ed636), so every existing project keeps
+                // prompting. Project.ParseLaunchMode maps NULL/unknown to Ask.
+                ("launch_mode",        "TEXT")
             };
 
             foreach (var (colName, colDef) in newColumns)
@@ -645,7 +648,7 @@ namespace MultiTerminal.Services
                            launch_command, project_type, current_version, change_log, is_pinned,
                            icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
                            team_lead, default_terminal, source_control_account_id, status, quiet_start,
-                           claude_profile
+                           claude_profile, launch_mode
                     FROM projects
                     WHERE id = @id
                 ";
@@ -678,7 +681,7 @@ namespace MultiTerminal.Services
                            launch_command, project_type, current_version, change_log, is_pinned,
                            icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
                            team_lead, default_terminal, source_control_account_id, status, quiet_start,
-                           claude_profile
+                           claude_profile, launch_mode
                     FROM projects
                     ORDER BY is_pinned DESC, created_at DESC
                 ";
@@ -963,6 +966,33 @@ namespace MultiTerminal.Services
         internal static string NormalizeClaudeProfileName(string profileName) =>
             MultiTerminal.Models.ClaudeProfile.NormalizeName(profileName);
 
+        /// <summary>
+        /// Sets a project's launch mode (task ec2ed636): ask / new / continue. The only writer of
+        /// <c>launch_mode</c>; the SaveRichProject UPSERT does not name the column, so a
+        /// project.json re-save can never reset it.
+        /// <para>Ask is written as the string "ask", not NULL. Both read as Ask today, but an
+        /// explicit "ask" records that the user CHOSE it, so a future change of the default for
+        /// unset (NULL) projects cannot silently override that choice.</para>
+        /// </summary>
+        /// <returns>True if a row was updated, false if the project was not found.</returns>
+        public bool SetLaunchMode(string projectId, MultiTerminal.Models.ProjectLaunchMode mode)
+        {
+            if (string.IsNullOrWhiteSpace(projectId))
+                return false;
+
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand(
+                    "UPDATE projects SET launch_mode = @launchMode, updated_at = @updatedAt WHERE id = @id",
+                    _connection);
+                command.Parameters.AddWithValue("@launchMode", MultiTerminal.Models.Project.LaunchModeToStorage(mode));
+                command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
+                command.Parameters.AddWithValue("@id", projectId);
+
+                return command.ExecuteNonQuery() > 0;
+            }
+        }
+
         private MultiTerminal.Models.Project ReadRichProject(SQLiteDataReader reader)
         {
             return new MultiTerminal.Models.Project
@@ -997,7 +1027,9 @@ namespace MultiTerminal.Services
                 Status = MultiTerminal.Models.Project.NormalizeStatus(
                     reader.IsDBNull(26) ? null : reader.GetString(26)),
                 QuietStart = reader.IsDBNull(27) ? (bool?)null : reader.GetInt32(27) == 1,
-                ClaudeProfile = reader.IsDBNull(28) ? null : reader.GetString(28)
+                ClaudeProfile = reader.IsDBNull(28) ? null : reader.GetString(28),
+                LaunchMode = MultiTerminal.Models.Project.ParseLaunchMode(
+                    reader.IsDBNull(29) ? null : reader.GetString(29))
             };
         }
 
