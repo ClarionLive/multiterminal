@@ -387,6 +387,7 @@ let dragSrcName = null;
 let deleteConfirmEl = null;
 let tabMenuEl = null;
 let renderPending = false;  // a live update arrived mid-rename/prompt/menu; redraw when it closes
+let pendingConflict = null; // {tab, by}: the next save of this tab overwrites an agent's unmergeable change
 
 // ── Tab rendering ──
 
@@ -505,6 +506,16 @@ function saveCurrentTab() {
     }
 
     lastSavedContent[activeTab] = content;
+
+    // A save that overwrites an agent's unmergeable change (see mergeTabs) must not
+    // replace the conflict warning with a cheerful "Saved" a moment later: say what
+    // was saved over, and leave it up until the Owner moves on.
+    if (pendingConflict && pendingConflict.tab === activeTab) {
+        saveStatus.textContent = `Saved your version over ${pendingConflict.by}'s change`;
+        saveStatus.className = 'save-status conflict';
+        pendingConflict = null;
+        return;
+    }
 
     setTimeout(() => {
         saveStatus.textContent = 'Saved';
@@ -890,8 +901,11 @@ document.addEventListener('keydown', (e) => {
 
 // ── WebView2 message protocol ──
 
+// Content is normalized to LF because a textarea's value is always LF: a stored
+// CRLF note (an agent writing through REST on Windows) would otherwise compare as
+// "dirty" against the editor with no typing at all.
 function toTabModel(t) {
-    return { name: t.name, content: t.content || '', isDefault: t.isDefault,
+    return { name: t.name, content: (t.content || '').replace(/\r\n?/g, '\n'), isDefault: t.isDefault,
              createdBy: t.createdBy || null, updatedBy: t.updatedBy || null };
 }
 
@@ -909,10 +923,11 @@ function updateUnreadIndicator() {
 
 // What an agent's append added to `base`, or null when `stored` is not an append
 // of it. Mirrors TaskDatabase.WriteAgentNoteTab: base.TrimEnd() + "\n\n" + text,
-// or just text when base was empty.
+// or just text when base was EMPTY. The branch is on the untrimmed length, as in C#:
+// a whitespace-only base still gets the separator there.
 function appendedSuffix(base, stored) {
+    if (base.length === 0) return stored.length > 0 ? stored : null;
     const trimmed = base.trimEnd();
-    if (trimmed.length === 0) return stored.length > 0 ? stored : null;
     const head = trimmed + '\n\n';
     return stored.length > head.length && stored.startsWith(head) ? stored.slice(trimmed.length) : null;
 }
@@ -937,6 +952,7 @@ function mergeTabs(data) {
     const nextContents = {};
     const nextSaved = {};
     let conflictBy = null;
+    let caretCap = null;  // after a merge, the caret must not land inside the agent's suffix
     tabs.forEach(t => {
         nextSaved[t.name] = t.content;
         nextContents[t.name] = t.content;
@@ -946,7 +962,8 @@ function mergeTabs(data) {
                 const suffix = appendedSuffix(base, t.content);
                 if (suffix !== null) {
                     const own = editor.value.trimEnd();
-                    nextContents[t.name] = own + (base.trimEnd().length === 0 && own.length > 0 ? '\n\n' : '') + suffix;
+                    nextContents[t.name] = own + (base.length === 0 && own.length > 0 ? '\n\n' : '') + suffix;
+                    caretCap = own.length;
                 } else {
                     conflictBy = data.changedBy || t.updatedBy || 'an agent';
                 }
@@ -968,10 +985,12 @@ function mergeTabs(data) {
         // text, or a dirty one gaining an agent's append at the end): keep caret and scroll.
         const { selectionStart, selectionEnd, scrollTop } = editor;
         editor.value = tabContents[activeTab];
-        editor.setSelectionRange(Math.min(selectionStart, editor.value.length), Math.min(selectionEnd, editor.value.length));
+        const cap = caretCap ?? editor.value.length;
+        editor.setSelectionRange(Math.min(selectionStart, cap), Math.min(selectionEnd, cap));
         editor.scrollTop = scrollTop;
     }
     if (conflictBy) {
+        pendingConflict = { tab: activeTab, by: conflictBy };
         saveStatus.textContent = `${conflictBy} rewrote this note while you were editing; your version will be saved`;
         saveStatus.className = 'save-status conflict';
     }

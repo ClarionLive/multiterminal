@@ -6521,6 +6521,14 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Largest note an agent may leave in one tab, measured on the STORED text. Checked in
+        /// <see cref="WriteAgentNoteTab"/> rather than only on the incoming request, because repeated
+        /// appends would otherwise grow a tab without bound (and every write re-sends every tab to each
+        /// open Notes pane).
+        /// </summary>
+        public const int AgentNoteMaxChars = 100_000;
+
+        /// <summary>
         /// An agent's note write (task 5d94ac91). The one rule that matters: <b>an agent never modifies a
         /// tab the Owner created</b>. It may only add tabs, and change its OWN tabs:
         /// <list type="bullet">
@@ -6536,15 +6544,8 @@ namespace MultiTerminal.Services
         /// Ownership compares agent names ordinal-ignore-case, the comparison MT routes names with.
         /// Read, decide and write all happen under one <c>LockConn</c>, which also serializes the
         /// Notes pane's <see cref="SaveNoteTab"/>, so an Owner save cannot land between the check and
-        /// the write.
+        /// the write. Every mode is refused when the STORED text would exceed <see cref="AgentNoteMaxChars"/>.
         /// </summary>
-        /// <summary>
-        /// Largest note an agent may leave in one tab, measured on the STORED text. Checked here rather
-        /// than only on the incoming request, because repeated appends would otherwise grow a tab
-        /// without bound (and every write re-sends every tab to each open Notes pane).
-        /// </summary>
-        public const int AgentNoteMaxChars = 100_000;
-
         public AgentNoteWriteResult WriteAgentNoteTab(string projectPath, string tabName, string content, string agentName, AgentNoteWriteMode mode)
         {
             using var gate = LockConn();
