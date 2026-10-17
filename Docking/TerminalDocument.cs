@@ -1509,7 +1509,18 @@ namespace MultiTerminal.Docking
             WriteFallbackStatusline(terminalName, workingDirectory);
 
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"Calling _terminal.Start...");
-            _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, _launch.LaunchNonce);
+            try
+            {
+                _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, _launch.LaunchNonce);
+            }
+            catch
+            {
+                // Nothing started, so release the resume reservation and the started flag
+                // (task ec2ed636); otherwise a failed launch holds the session id forever.
+                _isTerminalStarted = false;
+                _claudeSession.EndLaunch();
+                throw;
+            }
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"_terminal.Start returned");
 
             // Update status bar after terminal starts

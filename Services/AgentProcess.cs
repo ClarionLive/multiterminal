@@ -139,6 +139,9 @@ namespace MultiTerminal.Services
             {
                 args.Add("--resume");
                 args.Add(sessionId);
+                // Count the resumed session as held from spawn, not from the first stream
+                // message, so the launch prompt never offers it in between (task ec2ed636).
+                SessionId ??= sessionId;
             }
 
             if (!string.IsNullOrEmpty(permissionMode))
