@@ -42,8 +42,6 @@ const CONVERTED = new Set([
   'TasksPanel/TasksPanelControl.cs',
   'FilePreviewPanel/FilePreviewPanelDocument.cs',
   'AgentPanel/AgentPanelControl.cs',
-  'Docking/ProjectPanelDocument.cs',
-  'ProjectPanel/ProjectPanelRenderer.cs',
   // Dialogs
   'Dialogs/CodeReviewPopupForm.cs',
   'Dialogs/CodeReviewPopupManager.cs',
@@ -123,8 +121,6 @@ const ALLOWLIST_SITES = new Map([
   // ── 4c86f18d UI+API sweep — sites that legitimately KEEP a Debug/Trace.WriteLine (no clean sink seam) ─
   ['API/MultiTerminalRestServer.cs',
     'converted except 1 self-fallback: the PresenceAdapter log callback writes Debug.WriteLine ONLY when _broker.DebugLogService is null — cannot route a "sink is null" fallback through the null sink (same pattern as PresenceAdapter)'],
-  ['Docking/PromptTreeDocument.cs',
-    'dead/orphaned class — never constructed in the live app (MainForm GetContentFromPersistString maps its old persist-string to ProjectPanelDocument); no reachable seam to wire a sink into'],
   ['Program.cs',
     'app entry/composition shim — the 4 Trace lines are splash/loading lifecycle events that fire before/around DebugLogService construction (created inside MainForm); no sink in scope'],
   ['Terminal/WebView2EnvironmentCache.cs',

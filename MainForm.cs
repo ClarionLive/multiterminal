@@ -50,10 +50,8 @@ namespace MultiTerminal
         private ToolStripDropDownButton _gridDropdown;
         private ToolStripButton _settingsButton;
         private ToolStripButton _aboutButton;
-        private ProjectPanelDocument _projectPanel;
         private PromptService _promptService;
         private ProjectService _projectService;
-        private ToolStripButton _projectPanelButton;
         private ToolStripDropDownButton _recentFoldersDropdown;
         private TerminalDocument _lastActiveTerminal;
         private Models.Project _currentProject;
@@ -515,34 +513,6 @@ namespace MultiTerminal
             // reach the profile of the terminal that agent runs in, instead of deciding by folder.
             Services.ClaudeProfilePaneLookup.Configure(FindPaneClaudeProfileForAgent);
 
-            // Initialize project panel (combines project info and prompts)
-            _projectPanel = new ProjectPanelDocument();
-            _projectPanel.SetServices(_projectService, _promptService);
-            // SessionLineageService is injected later in InitializeMcpServerAndChatPanel once TaskDatabase is available
-            _projectPanel.SetProjectDatabase(_sharedProjectDatabase); // Share single connection used by the rest of the app
-            _projectPanel.SetTheme(_currentTheme);
-
-            // Project events
-            _projectPanel.ProjectSelected += OnProjectSelected;
-            _projectPanel.ProjectLaunchRequested += OnProjectLaunchRequested;
-
-            // Prompt events
-            _projectPanel.PromptPasteRequested += OnPromptPasteRequested;
-            _projectPanel.PromptEditRequested += OnPromptEditRequested;
-            _projectPanel.PromptDeleteRequested += OnPromptDeleteRequested;
-            _projectPanel.NewPromptRequested += OnNewPromptRequested;
-            _projectPanel.NewPromptInCategoryRequested += OnNewPromptInCategoryRequested;
-
-            // Session events
-            _projectPanel.ViewSessionRequested += OnViewSessionRequested;
-
-            // MCP config events
-            _projectPanel.McpJsonWriteRequested += OnMcpJsonWriteRequested;
-
-            // File preview — route file explorer clicks to the separate preview panel
-            _projectPanel.FilePreviewRequested += OnFilePreviewRequested;
-            _projectPanel.ProjectDeleteRequested += OnProjectPanelDeleteRequested;
-
             // Create debug log service (available immediately)
             _debugLogService = new DebugLogService();
 
@@ -558,12 +528,12 @@ namespace MultiTerminal
             // The launch-time .mcp.json heal (a796e5f9) logs what it did, so a repair at launch is traceable.
             Services.LaunchCommandBuilder.SetLogger(_debugLogService);
 
-            // Initialize McpConfigService — used by OnMcpJsonWriteRequested
+            // Initialize McpConfigService — used by the project settings form's Sync MCP config and at launch
             // Pass debug log callback so CLI errors are visible in the debug panel
             _mcpConfigService = new Services.McpConfigService(_sharedProjectDatabase,
                 (source, msg) => _debugLogService?.Info(source, msg));
 
-            // Initialize GatewayIntegrationService and wire it to McpConfigService and ProjectPanel
+            // Initialize GatewayIntegrationService and wire it to McpConfigService
             _gatewayService = new Services.GatewayIntegrationService(
                 (source, msg) => _debugLogService?.Info(source, msg));
             _mcpConfigService.GatewayService = _gatewayService;
@@ -573,8 +543,6 @@ namespace MultiTerminal
             // writes this file — its opt-in global step writes ~/.claude.json instead — so without this,
             // terminals on installed machines got no core MCP servers (GitHub #8).
             _gatewayService.EnsureGatewayRegistered();
-            _projectPanel.SetGatewayService(_gatewayService);
-            _projectPanel.SetDebugLogService(_debugLogService); // route ProjectPanel + its renderer's diagnostics to the unified sink (4c86f18d)
 
             // Create panel instances early so they can be restored from layout
             // They will be initialized with MCP broker later in InitializeMcpServerAndChatPanel
@@ -694,9 +662,6 @@ namespace MultiTerminal
 
                 // Wire up SessionLineageService — uses the broker's shared TaskDatabase
                 _mcpServer.Broker.SessionLineageService = new Services.SessionLineageService(_mcpServer.Broker.TaskDb);
-
-                // Inject SessionLineageService into ProjectPanel (replaces old SessionDatabase dependency)
-                _projectPanel.SetSessionLineageService(_mcpServer.Broker.SessionLineageService);
 
                 // Set DefaultInboxRecipient from owner profile (so inbox notifications go to the actual user, not a hardcoded name)
                 var ownerProfile = _ownerProfileService?.GetProfile();
@@ -3050,11 +3015,10 @@ namespace MultiTerminal
                     case "attention": ToggleAttentionPanel(); break;
                     case "debug": ToggleDebugPanel(); break;
                     case "preview": ToggleFilePreviewPanel(); break;
-                    case "projects": ToggleProjectPanel(); break;
                 }
 
-                // One call covers all ten icons (task f2e32f6c). Deliberately not per-case: a
-                // per-case call is ten places to forget, and forgetting is what this fixes.
+                // One call covers every icon (task f2e32f6c). Deliberately not per-case: a
+                // per-case call is one place per icon to forget, and forgetting is what this fixes.
                 SyncPanelIndicators();
             };
 
@@ -3178,15 +3142,6 @@ namespace MultiTerminal
                 ForeColor = Color.White
             };
             newTerminalBtn.Click += (s, e) => AddNewTerminal();
-
-            // Project panel toggle button
-            _projectPanelButton = new ToolStripButton
-            {
-                Text = "Project",
-                DisplayStyle = ToolStripItemDisplayStyle.Text,
-                ForeColor = Color.White
-            };
-            _projectPanelButton.Click += (s, e) => ToggleProjectPanel();
 
             // Chat panel toggle button
             _chatPanelButton = new ToolStripButton
@@ -3372,7 +3327,6 @@ namespace MultiTerminal
 
             // Add items to toolbar
             _toolStrip.Items.Add(newTerminalBtn);
-            _toolStrip.Items.Add(_projectPanelButton);
             _toolStrip.Items.Add(_chatPanelButton);
             _toolStrip.Items.Add(_chatHistoryButton);
             _toolStrip.Items.Add(_helpButton);
@@ -3500,9 +3454,6 @@ namespace MultiTerminal
             }
             _oracleService?.SetFontSize(dialog.TerminalFontSize);
 
-            // Apply project panel font
-            _projectPanel?.SetFontSize(dialog.ProjectPanelFontSize);
-
             // Apply chat panel font
             _chatPanel?.SetFontSize(dialog.ChatPanelFontSize);
 
@@ -3565,9 +3516,6 @@ namespace MultiTerminal
                 _toolStrip.Font = new Font(_toolStrip.Font.FontFamily, toolbarFontSize);
 
             // Restore panel font sizes
-            float projectFontSize = _settings.GetPromptsFontSize();
-            _projectPanel?.SetFontSize(projectFontSize);
-
             float chatFontSize = _settings.GetChatFontSize();
             _chatPanel?.SetFontSize(chatFontSize);
 
@@ -3582,13 +3530,6 @@ namespace MultiTerminal
             _tasksPanel?.SetZoomFactor(_settings.GetTasksPanelZoom());
             _chatPanel?.SetZoomFactor(_settings.GetChatPanelZoom());
             _officePanel?.SetZoomFactor(_settings.GetOfficePanelZoom());
-
-            // Migrate legacy ShowPromptsPanel setting to new Panel_ProjectPanel_Visible format
-            if (_settings.Get("ShowPromptsPanel") == "true" && _settings.Get("Panel_ProjectPanel_Visible") == null)
-            {
-                _settings.Set("Panel_ProjectPanel_Visible", "true");
-                _settings.Set("Panel_ProjectPanel_DockState", "DockLeft");
-            }
 
             // The Attention Rail is constructed in InitializeDockPanel, which runs BEFORE this
             // method — so its preferences cannot be loaded at wiring time and are pushed here,
@@ -3649,9 +3590,6 @@ namespace MultiTerminal
             {
                 doc.SetTheme(_currentTheme);
             }
-
-            // Update project panel theme
-            _projectPanel?.SetTheme(_currentTheme);
 
             // Update activity panel theme
             _activityPanel?.ApplyTheme(_currentTheme.IsDark);
@@ -4319,8 +4257,8 @@ namespace MultiTerminal
                 }
 
                 // Sync MCP configs: gateway-aware path if available, else standard path.
-                // Skip when launchDir is the user-profile fallback (same guard as
-                // OnProjectLaunchRequested) so a broken project path can't mutate ~/.mcp.json.
+                // Skip when launchDir is the user-profile fallback so a broken project path can't
+                // mutate ~/.mcp.json.
                 string gatewayProfile = null;
                 if (Services.LaunchCommandBuilder.IsDistinctProjectRoot(project, launchDir))
                 {
@@ -5600,18 +5538,16 @@ namespace MultiTerminal
                     }
                     else
                     {
-                        // Update current project and refresh panel
-                        _debugLogService?.Trace("OnTerminalDirectoryChanged", "Refreshing project panel...");
+                        // Update current project
                         _currentProject = project;
-                        _projectPanel?.RefreshForProject(project);
                         RefreshDashboardProjectInfo();
                     }
                 }
                 else
                 {
-                    // Not a project directory - clear project and show path-based prompts
+                    // Not a project directory - clear the current project
                     _currentProject = null;
-                    RefreshProjectPanel();
+                    RefreshCurrentProject();
                     RefreshDashboardProjectInfo();
                 }
 
@@ -5629,15 +5565,14 @@ namespace MultiTerminal
                 // Auto-register the discovered project (skipped when its id belongs to another folder)
                 _projectService.AutoRegisterDiscoveredProject(directory, discoveredProject);
                 _currentProject = discoveredProject;
-                _projectPanel?.RefreshForProject(discoveredProject);
             }
         }
 
         private void OnProjectFileChanged(object sender, EventArgs e)
         {
-            // project.json was created or modified - refresh the project panel
+            // project.json was created or modified - re-read the current project
             _debugLogService?.Trace("MainForm", $"OnProjectFileChanged received from {sender}");
-            RefreshProjectPanel();
+            RefreshCurrentProject();
         }
 
         private void OnRegistryChangedExternally(object sender, EventArgs e)
@@ -5650,8 +5585,8 @@ namespace MultiTerminal
                 return;
             }
 
-            _debugLogService?.Trace("MainForm", "Registry changed externally - refreshing project panel and tasks panel");
-            RefreshProjectPanel();
+            _debugLogService?.Trace("MainForm", "Registry changed externally - refreshing the current project and tasks panel");
+            RefreshCurrentProject();
             _tasksPanel?.RefreshProjects();
         }
 
@@ -5676,15 +5611,12 @@ namespace MultiTerminal
                 var project = _projectService?.DiscoverProject(workingDir);
                 if (project != null)
                 {
-                    // Already registered - just refresh
+                    // Already registered
                     _currentProject = project;
-                    _projectPanel?.RefreshForProject(project);
                 }
                 else
                 {
-                    // Not registered - show Claude-specific prompt
                     _currentProject = null;
-                    _projectPanel?.ShowClaudeDetectedState(workingDir);
                 }
 
                 // Index sessions for this project when Claude starts (fire-and-forget)
@@ -6382,7 +6314,6 @@ namespace MultiTerminal
             }
 
             // Save all panel visibility and dock positions
-            SavePanelState("ProjectPanel", _projectPanel);
             SavePanelState("ChatPanel", _chatPanel);
             SavePanelState("TasksPanel", _tasksPanel);
             SavePanelState("ActivityPanel", _activityPanel);
@@ -6488,7 +6419,6 @@ namespace MultiTerminal
             // Explicitly dispose all WebView2 panels to prevent zombie processes.
             // WebView2 can hang during implicit dispose if it has pending navigation or JS,
             // which blocks the entire process from exiting and requires a reboot.
-            DisposePanel(_projectPanel);
             DisposePanel(_chatPanel);
             DisposePanel(_tasksPanel);
             DisposePanel(_activityPanel);
@@ -6629,7 +6559,6 @@ namespace MultiTerminal
         /// </remarks>
         private static readonly (string Key, Func<MainForm, DockContent> Get)[] PanelIndicators =
         {
-            ("projects",  f => f._projectPanel),
             ("tasks",     f => f._tasksPanel),
             ("chat",      f => f._chatPanel),
             ("activity",  f => f._activityPanel),
@@ -6708,11 +6637,6 @@ namespace MultiTerminal
         {
             bool isDark = _currentTheme.IsDark;
 
-            if (RestoreSinglePanel("ProjectPanel", _projectPanel, DockState.DockLeft))
-            {
-                _projectPanel.SetTheme(_currentTheme);
-                RefreshProjectPanel();
-            }
             if (RestoreSinglePanel("ChatPanel", _chatPanel, DockState.DockRight))
                 _chatPanel.ApplyTheme(isDark);
             if (RestoreSinglePanel("TasksPanel", _tasksPanel, DockState.DockBottom))
@@ -6740,11 +6664,6 @@ namespace MultiTerminal
         {
             bool isDark = _currentTheme.IsDark;
             ProjectSettings.ProjectSettingsForm.ApplyThemeToAll(isDark);
-            if (_projectPanel != null && !_projectPanel.IsDisposed && _projectPanel.Visible)
-            {
-                _projectPanel.SetTheme(_currentTheme);
-                RefreshProjectPanel();
-            }
             if (_chatPanel != null && !_chatPanel.IsDisposed && _chatPanel.Visible)
                 _chatPanel.ApplyTheme(isDark);
             if (_tasksPanel != null && !_tasksPanel.IsDisposed && _tasksPanel.Visible)
@@ -6881,10 +6800,10 @@ namespace MultiTerminal
                 RestorePanelStates();
             }
 
-            // Refresh project panel now that terminals have their directories
-            _debugLogService?.Trace("RestoreSession", "Calling RefreshProjectPanel...");
-            RefreshProjectPanel();
-            _debugLogService?.Trace("RestoreSession", "RefreshProjectPanel returned");
+            // Resolve the current project now that terminals have their directories
+            _debugLogService?.Trace("RestoreSession", "Calling RefreshCurrentProject...");
+            RefreshCurrentProject();
+            _debugLogService?.Trace("RestoreSession", "RefreshCurrentProject returned");
 
             // Ensure Oracle is visible on launch. If the saved layout already restored her
             // dock/float position (via the "Oracle" factory case above), this is a no-op;
@@ -7034,14 +6953,8 @@ namespace MultiTerminal
 
         private IDockContent GetContentFromPersistString(string persistString)
         {
-            // Handle both old PromptTreeDocument and new ProjectPanelDocument for backward compatibility.
-            // PromptTreeDocument (the old panel) was removed as dead code (task df1f521f); its persist
-            // string is matched here as a literal so pre-existing saved layouts still re-bind to the panel.
-            if (persistString == typeof(ProjectPanelDocument).FullName ||
-                persistString == "MultiTerminal.Docking.PromptTreeDocument")
-            {
-                return _projectPanel;
-            }
+            // The Project pane (and its predecessor PromptTreeDocument) was retired in ticket e20e2ce0.
+            // A saved layout that still names it falls through to null, and DockPanelSuite skips it.
 
             // Oracle: re-bind a saved dock/float position to the live always-on singleton
             // (created in InitializeOracle before this restore runs). Returns null if Oracle
@@ -7262,22 +7175,7 @@ namespace MultiTerminal
             return doc;
         }
 
-        #region Project Panel
-
-        private void ToggleProjectPanel()
-        {
-            if (_projectPanel == null) return;
-
-            if (_projectPanel.Visible)
-            {
-                _projectPanel.Hide();
-            }
-            else
-            {
-                _projectPanel.Show(_dockPanel, GetSavedDockState("ProjectPanel", DockState.DockLeft));
-                RefreshProjectPanel();
-            }
-        }
+        #region Panels and projects
 
         private void ToggleFilePreviewPanel()
         {
@@ -7299,26 +7197,6 @@ namespace MultiTerminal
                 _filePreviewPanel.Show(_dockPanel, GetSavedDockState("FilePreviewPanel", DockState.DockBottom));
                 _filePreviewPanel.ApplyTheme(_currentTheme.IsDark);
             }
-        }
-
-        private void OnFilePreviewRequested(object sender, string filePath)
-        {
-            // Ensure the preview panel is visible
-            if (_filePreviewPanel == null || _filePreviewPanel.IsDisposed)
-            {
-                _filePreviewPanel = new FilePreviewPanel.FilePreviewPanelDocument();
-                _filePreviewPanel.DebugLogService = _debugLogService;
-                _filePreviewPanel.ApplyTheme(_currentTheme.IsDark);
-                _filePreviewPanel.Show(_dockPanel, GetSavedDockState("FilePreviewPanel", DockState.DockBottom));
-            }
-            else if (!_filePreviewPanel.Visible)
-            {
-                _filePreviewPanel.Show(_dockPanel, GetSavedDockState("FilePreviewPanel", DockState.DockBottom));
-                _filePreviewPanel.ApplyTheme(_currentTheme.IsDark);
-            }
-
-            _debugLogService?.Info("FilePreview", $"OnFilePreviewRequested: {filePath}");
-            _filePreviewPanel.PreviewFile(filePath);
         }
 
         private void ToggleChatPanel()
@@ -8759,9 +8637,13 @@ namespace MultiTerminal
 
 
         /// <summary>
-        private void RefreshProjectPanel([System.Runtime.CompilerServices.CallerMemberName] string caller = "")
+        /// Resolves <c>_currentProject</c> from the last active terminal's folder (else the last
+        /// directory), auto-registering a discovered project. It was RefreshProjectPanel until the
+        /// Project pane was retired (ticket e20e2ce0); the pane was only one of its effects.
+        /// </summary>
+        private void RefreshCurrentProject([System.Runtime.CompilerServices.CallerMemberName] string caller = "")
         {
-            _debugLogService?.Trace("RefreshProjectPanel", $"Called by: {caller}");
+            _debugLogService?.Trace("RefreshCurrentProject", $"Called by: {caller}");
             string workingDir = _lastActiveTerminal?.GetWorkingDirectory() ?? _settings?.GetLastDirectory();
 
             if (!string.IsNullOrEmpty(workingDir))
@@ -8776,159 +8658,11 @@ namespace MultiTerminal
                         _projectService.AutoRegisterDiscoveredProject(workingDir, project);
                     }
                     _currentProject = project;
-                    _projectPanel?.RefreshForProject(project);
                     return;
                 }
             }
 
-            // No project found - clear and show path-based prompts
             _currentProject = null;
-            _projectPanel?.RefreshPrompts(workingDir);
-        }
-
-        private void OnProjectSelected(object sender, ProjectSelectedEventArgs e)
-        {
-            if (e.Project == null) return;
-
-            // Just view the project — no terminal launch
-            _currentProject = e.Project;
-            _projectService?.MarkProjectOpened(e.Project.Id);
-            _projectPanel?.RefreshForProject(e.Project);
-            // The header shows _currentProject's name, which went stale on a pane switch (task 4cac608c).
-            RefreshDashboardProjectInfo();
-        }
-
-        private void OnMcpJsonWriteRequested(object sender, (string ProjectId, string SourcePath) args)
-        {
-            if (_mcpConfigService == null || string.IsNullOrEmpty(args.ProjectId))
-            {
-                _projectPanel?.NotifyMcpJsonWriteResult(false, "MCP config service not available");
-                return;
-            }
-            try
-            {
-                // Syncs the project's gateway profile and REMOVES any stale {sourcePath}/.mcp.json
-                // (backed up to .mcp.json.bak). It writes no MCP config: core servers reach every
-                // terminal through %APPDATA%\multiterminal\.mcp.json via --mcp-config (CentralMcpConfig).
-                _mcpConfigService.EnsureMcpConfigsForProject(args.ProjectId, args.SourcePath);
-                _projectPanel?.NotifyMcpJsonWriteResult(true);
-            }
-            catch (Exception ex)
-            {
-                _debugLogService?.Error("MainForm", $"OnMcpJsonWriteRequested error: {ex.Message}");
-                _projectPanel?.NotifyMcpJsonWriteResult(false, ex.Message);
-            }
-        }
-
-        private void OnProjectLaunchRequested(object sender, ProjectSelectedEventArgs e)
-        {
-            if (e.Project == null) return;
-
-            // Claude profile (ticket c8ee0eec). e.Project is the panel's cached snapshot, which can be
-            // older than an edit made elsewhere, so the profile is read from the database row by id;
-            // nothing below uses e.Project.ClaudeProfile. The folder is only for a project that has no
-            // row (its project.json then speaks). Checked first, so a refused launch builds, syncs and
-            // registers nothing.
-            if (!TryGetLaunchClaudeProfile(e.Project.Id, e.Project.Path, $"project '{e.Project.Name}'", out var panelClaudeProfile))
-                return;
-
-            // Resolve terminal kind. Explicit override from the split-button dropdown
-            // wins; otherwise fall back to the project's stored default (normalized).
-            var kind = !string.IsNullOrEmpty(e.TerminalKindOverride)
-                ? Models.TerminalKindHelper.ParseOrDefault(e.TerminalKindOverride)
-                : Models.TerminalKindHelper.ParseOrDefault(e.Project.DefaultTerminal);
-
-            // Validate working directory (project source > legacy path > user profile),
-            // rejecting UNC paths and non-existent dirs like the prior dialog-based flow.
-            string rawPath = !string.IsNullOrEmpty(e.Project.SourcePath) ? e.Project.SourcePath : e.Project.Path;
-            string workingDir = (!string.IsNullOrEmpty(rawPath) && Path.IsPathRooted(rawPath)
-                                 && !rawPath.StartsWith("\\\\") && Directory.Exists(rawPath))
-                ? rawPath
-                : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-
-            // Build the CLI launch command for the chosen kind. BuildCommand also
-            // refreshes ~/.codex/config.toml and writes the Codex launcher scaffolding
-            // when kind == Codex (side-effect inside BuildCodexCommand).
-            var launchCmd = Services.LaunchCommandBuilder.BuildCommand(kind, e.Project);
-
-            if (HandleBootstrapErrorIfAny(launchCmd))
-                return;
-
-            // Identity: team-lead if set; else the Codex default agent; else the project name,
-            // made unique by the broker (task 6a8d029f — see TryResolveProjectLaunchIdentity). It used
-            // to be null for non-team-lead Claude, which AddNewTerminal turned into "Unassigned".
-            bool isTeamLead = !string.IsNullOrEmpty(e.Project.TeamLead);
-            if (!TryResolveProjectLaunchIdentity(kind, e.Project, out var launchIdentity, out string censusError))
-            {
-                // Refused before any pane exists, so there is no start screen to return to.
-                ShowReservedCensusFailed(censusError);
-                return;
-            }
-
-            string identityName = launchIdentity.Name;
-
-            // Resolve gateway profile for per-project MCP server filtering.
-            string gatewayProfile = null;
-            if (_gatewayService != null && _gatewayService.IsGatewayInstalled())
-                gatewayProfile = Services.GatewayIntegrationService.GetGatewayProfileName(e.Project.Name);
-
-            // Ensure the global .mcp.json is up to date (source of truth for both
-            // Claude's --mcp-config and Codex's config.toml translation).
-            //
-            // Guard: only run project-scoped MCP sync when workingDir is the real
-            // project root. If we fell back to %USERPROFILE% because the project
-            // path was missing/invalid, McpConfigService.WriteMcpJsonToProject
-            // would treat ~/ as the project root and could mutate/delete the
-            // user's personal ~/.mcp.json. Mirrors the AGENTS.md guard in
-            // LaunchCommandBuilder.BuildCodexCommand.
-            if (Services.LaunchCommandBuilder.IsDistinctProjectRoot(e.Project, workingDir))
-            {
-                try
-                {
-                    _mcpConfigService?.EnsureMcpConfigsForProjectWithGateway(e.Project.Id, workingDir, e.Project.Name);
-                }
-                catch (Exception ex)
-                {
-                    _debugLogService?.Error("ProjectPanel", $"MCP config sync failed: {ex.Message}");
-                }
-            }
-            else
-            {
-                _debugLogService?.Warning("ProjectPanel", $"MCP config sync skipped — workingDir is the user-profile fallback, not a distinct project root.");
-            }
-
-            // Atomic uniqueness for every non-team-lead launch so two concurrent launches of the
-            // same project (or the same per-user Codex default-agent name) can't alias to one
-            // broker identity.
-            bool atomicIdentityUniqueness = launchIdentity.RegisterUnique;
-
-            // No broker: a project-derived launch is refused before any pane is created (Run 3).
-            string brokerRefusal = Services.ProjectLaunchIdentity.StartRefusal(launchIdentity.IsProjectDerived, brokerAvailable: _mcpServer?.Broker != null);
-            if (brokerRefusal != null)
-            {
-                ShowProjectIdentityRefused(identityName, brokerRefusal);
-                return;
-            }
-
-            var launched = AddNewTerminal(
-                workingDirectory: workingDir,
-                identityName: identityName,
-                autoRunCommand: launchCmd.AutoRunCommand,
-                projectId: e.Project.Id,
-                isTeamLead: isTeamLead,
-                gatewayProfile: gatewayProfile,
-                atomicIdentityUniqueness: atomicIdentityUniqueness,
-                failClosedIdentity: launchIdentity.IsProjectDerived,
-                decidedClaudeProfile: panelClaudeProfile);
-
-            // A refused project identity left the new pane on its start screen: nothing was opened. A
-            // project-derived launch only has a name once registered, so null is refusal, broker or not.
-            if (launchIdentity.IsProjectDerived && launched.Name == null)
-                return;
-
-            _currentProject = e.Project;
-            _projectService?.MarkProjectOpened(e.Project.Id);
-            _projectPanel?.RefreshForProject(e.Project);
         }
 
         private TerminalDocument FindEmptyTerminal()
@@ -8982,165 +8716,6 @@ namespace MultiTerminal
             }
 
             return doc;
-        }
-
-        /// <summary>
-        /// Handles the projects-pane delete button. Confirms, then routes through the canonical
-        /// broker delete (which unregisters the project — firing ProjectRemoved so the code-graph
-        /// watcher drops it — evicts its code-graph rows, and records activity), then refreshes the
-        /// pane. The on-disk .claude/project.json is kept; tasks are not deleted.
-        /// </summary>
-        private void OnProjectPanelDeleteRequested(object sender, string projectId)
-        {
-            if (string.IsNullOrEmpty(projectId)) return;
-
-            var broker = _mcpServer?.Broker;
-            if (broker == null) return;
-
-            string name = broker.GetProjectsList()?.FirstOrDefault(p => p.Id == projectId)?.Name ?? projectId;
-
-            var confirm = MessageBox.Show(
-                this,
-                $"Delete project '{name}' from MultiTerminal?\n\nThe project is unregistered and its code-graph data removed. The .claude/project.json file on disk is kept, and tasks are not deleted.",
-                "Delete Project",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning);
-            if (confirm != DialogResult.Yes) return;
-
-            var result = broker.DeleteProject(projectId, "ui", deleteLocalConfig: false);
-            if (!result.Success)
-            {
-                MessageBox.Show(
-                    this,
-                    result.Error ?? "Failed to delete project.",
-                    "Delete Project",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
-                return;
-            }
-
-            _projectPanel?.RefreshAfterProjectDeleted(projectId);
-        }
-
-        private void OnPromptPasteRequested(object sender, PromptEventArgs e)
-        {
-            // Use _lastActiveTerminal instead of _dockPanel.ActiveDocument
-            // because DockPanelSuite's ActiveDocument is unreliable with WebView2
-            var doc = _lastActiveTerminal ?? _dockPanel.ActiveDocument as TerminalDocument;
-            if (doc != null && e.Prompt != null)
-            {
-                doc.Terminal.Write(e.Prompt.Text);
-                doc.FocusTerminal();
-            }
-        }
-
-        private void OnPromptEditRequested(object sender, PromptEventArgs e)
-        {
-            if (e.Prompt != null)
-            {
-                ShowSavePromptDialog(existingPrompt: e.Prompt);
-            }
-        }
-
-        private void OnPromptDeleteRequested(object sender, PromptEventArgs e)
-        {
-            if (e.Prompt != null)
-            {
-                var result = MessageBox.Show(
-                    $"Delete prompt \"{e.Prompt.Description}\"?",
-                    "Confirm Delete",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Question);
-
-                if (result == DialogResult.Yes)
-                {
-                    string workingDir = _settings?.GetLastDirectory();
-                    _promptService.DeletePrompt(e.Prompt.Id, workingDir);
-                    RefreshProjectPanel();
-                }
-            }
-        }
-
-        private void OnNewPromptRequested(object sender, EventArgs e)
-        {
-            ShowSavePromptDialog();
-        }
-
-        private void OnNewPromptInCategoryRequested(object sender, NewPromptInCategoryEventArgs e)
-        {
-            ShowSavePromptDialog(defaultCategory: e.Category);
-        }
-
-        private void OnViewSessionRequested(object sender, string sessionId)
-        {
-            // Get current project path from current project or last active terminal (prefer SourcePath)
-            string projectPath = !string.IsNullOrEmpty(_currentProject?.SourcePath) ? _currentProject.SourcePath : _currentProject?.Path;
-
-            // When the path is the last active terminal's folder, the session is looked for under THAT
-            // pane's Claude profile (ticket c8ee0eec): the folder alone answers Default for a folder
-            // no project owns, whatever profile the pane in it runs under.
-            TerminalDocument pathPane = null;
-            if (projectPath == null)
-            {
-                var pane = _lastActiveTerminal;
-                projectPath = pane?.GetWorkingDirectory();
-                if (projectPath != null)
-                    pathPane = pane;
-                else
-                    projectPath = _settings?.GetLastDirectory();
-            }
-
-            if (string.IsNullOrEmpty(projectPath))
-            {
-                MessageBox.Show(
-                    "Unable to determine project path for session viewing.",
-                    "View Session",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
-                return;
-            }
-
-            // Try to find HTML export from Claude's storage
-            var claudePath = pathPane != null
-                ? SessionLineageService.GetClaudeProjectFolderForPane(projectPath, pathPane.LaunchClaudeProfile)
-                : SessionLineageService.GetClaudeProjectFolder(projectPath);
-
-            if (!string.IsNullOrEmpty(claudePath))
-            {
-                // Look for session-{sessionId}.html
-                string htmlPath = Path.Combine(claudePath, $"session-{sessionId}.html");
-                if (File.Exists(htmlPath))
-                {
-                    // Open in default browser
-                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = htmlPath,
-                        UseShellExecute = true
-                    });
-                    return;
-                }
-
-                // Fallback: Look for matching .jsonl file and open in default application
-                string jsonlPath = Path.Combine(claudePath, $"{sessionId}.jsonl");
-                if (File.Exists(jsonlPath))
-                {
-                    // Open JSONL file in default application (e.g., text editor)
-                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = jsonlPath,
-                        UseShellExecute = true
-                    });
-                    return;
-                }
-            }
-
-            // Session file not found
-            MessageBox.Show(
-                $"Could not find session file for session '{sessionId}'.\n\n" +
-                $"Looked in: {claudePath ?? "(Claude path not found)"}",
-                "View Session",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
         }
 
         private void OnSaveAsPromptRequested(object sender, SavePromptRequestEventArgs e)
@@ -9200,7 +8775,6 @@ namespace MultiTerminal
                     prompt.IsGlobal = dialog.IsGlobal;
 
                     _promptService.SavePrompt(prompt, workingDir);
-                    RefreshProjectPanel();
                 }
             }
         }

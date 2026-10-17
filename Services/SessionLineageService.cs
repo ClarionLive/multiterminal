@@ -621,7 +621,6 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Returns sessions whose file path is within the given Claude project folder.
-        /// Used by ProjectPanel to show sessions for a specific project.
         /// </summary>
         public List<SessionLineageRecord> GetSessionsByFolder(string claudeProjectFolder, int limit = 20)
             => _db.GetSessionsByFolder(claudeProjectFolder, limit);

@@ -83,7 +83,6 @@ namespace MultiTerminal.Dialogs
         // Public properties for MainForm to read after dialog closes
         public float ToolbarFontSize => GetSelectedFontSize(ToolbarFontCombo);
         public float TerminalFontSize => GetSelectedFontSize(TerminalFontCombo);
-        public float ProjectPanelFontSize => GetSelectedFontSize(ProjectPanelFontCombo);
         public float ChatPanelFontSize => GetSelectedFontSize(ChatPanelFontCombo);
         public float TasksPanelFontSize => GetSelectedFontSize(TasksPanelFontCombo);
         public float ActivityPanelFontSize => GetSelectedFontSize(ActivityPanelFontCombo);
@@ -125,7 +124,6 @@ namespace MultiTerminal.Dialogs
             {
                 string item = $"{size}pt";
                 ToolbarFontCombo.Items.Add(item);
-                ProjectPanelFontCombo.Items.Add(item);
                 ChatPanelFontCombo.Items.Add(item);
                 TasksPanelFontCombo.Items.Add(item);
                 ActivityPanelFontCombo.Items.Add(item);
@@ -162,7 +160,6 @@ namespace MultiTerminal.Dialogs
             // Font sizes
             SelectFontSize(ToolbarFontCombo, _settings.GetToolbarFontSize());
             SelectFontSize(TerminalFontCombo, _settings.GetTerminalFontSize());
-            SelectFontSize(ProjectPanelFontCombo, _settings.GetPromptsFontSize());
             SelectFontSize(ChatPanelFontCombo, _settings.GetChatFontSize());
             SelectFontSize(TasksPanelFontCombo, _settings.GetTasksFontSize());
             SelectFontSize(ActivityPanelFontCombo, _settings.GetActivityFontSize());
@@ -231,7 +228,6 @@ namespace MultiTerminal.Dialogs
             {
                 _settings.SetToolbarFontSize(GetSelectedFontSize(ToolbarFontCombo));
                 _settings.SetTerminalFontSize(GetSelectedFontSize(TerminalFontCombo));
-                _settings.SetPromptsFontSize(GetSelectedFontSize(ProjectPanelFontCombo));
                 _settings.SetChatFontSize(GetSelectedFontSize(ChatPanelFontCombo));
                 _settings.SetTasksFontSize(GetSelectedFontSize(TasksPanelFontCombo));
                 _settings.SetActivityFontSize(GetSelectedFontSize(ActivityPanelFontCombo));

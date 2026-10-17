@@ -514,7 +514,6 @@
                             <RowDefinition Height="32"/>
                             <RowDefinition Height="32"/>
                             <RowDefinition Height="32"/>
-                            <RowDefinition Height="32"/>
                         </Grid.RowDefinitions>
 
                         <TextBlock Grid.Row="0" Grid.Column="0" Text="Toolbar"
@@ -529,28 +528,22 @@
                         <ComboBox x:Name="TerminalFontCombo" Grid.Row="1" Grid.Column="1"
                                   Style="{StaticResource DarkComboBox}" Height="26"/>
 
-                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Project Panel"
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Chat Panel"
                                    Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
                                    VerticalAlignment="Center"/>
-                        <ComboBox x:Name="ProjectPanelFontCombo" Grid.Row="2" Grid.Column="1"
+                        <ComboBox x:Name="ChatPanelFontCombo" Grid.Row="2" Grid.Column="1"
                                   Style="{StaticResource DarkComboBox}" Height="26"/>
 
-                        <TextBlock Grid.Row="3" Grid.Column="0" Text="Chat Panel"
+                        <TextBlock Grid.Row="3" Grid.Column="0" Text="Tasks Panel"
                                    Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
                                    VerticalAlignment="Center"/>
-                        <ComboBox x:Name="ChatPanelFontCombo" Grid.Row="3" Grid.Column="1"
+                        <ComboBox x:Name="TasksPanelFontCombo" Grid.Row="3" Grid.Column="1"
                                   Style="{StaticResource DarkComboBox}" Height="26"/>
 
-                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Tasks Panel"
+                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Activity Panel"
                                    Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
                                    VerticalAlignment="Center"/>
-                        <ComboBox x:Name="TasksPanelFontCombo" Grid.Row="4" Grid.Column="1"
-                                  Style="{StaticResource DarkComboBox}" Height="26"/>
-
-                        <TextBlock Grid.Row="5" Grid.Column="0" Text="Activity Panel"
-                                   Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
-                                   VerticalAlignment="Center"/>
-                        <ComboBox x:Name="ActivityPanelFontCombo" Grid.Row="5" Grid.Column="1"
+                        <ComboBox x:Name="ActivityPanelFontCombo" Grid.Row="4" Grid.Column="1"
                                   Style="{StaticResource DarkComboBox}" Height="26"/>
                     </Grid>
                 </GroupBox>

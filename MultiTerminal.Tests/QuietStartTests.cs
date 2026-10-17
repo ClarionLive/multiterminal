@@ -100,9 +100,10 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
-        public void The_project_panel_toggle_writes_it()
+        public void The_project_settings_toggle_writes_it()
         {
-            // panel.html sends the camelCase data-field and the strings 'true' / 'false'.
+            // The project settings form (ticket e20e2ce0) saves the camelCase field name with the
+            // strings 'true' / 'false' through UpdateProjectField, as the retired Project pane did.
             var project = SeedProject();
 
             Assert.True(_projectDb.UpdateProjectField(project.Id, "quietStart", "true"));

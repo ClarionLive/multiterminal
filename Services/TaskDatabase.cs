@@ -7204,7 +7204,6 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Returns sessions whose file path starts with the given Claude project folder prefix.
-        /// Used by ProjectPanel to show sessions for a specific project.
         /// </summary>
         public List<SessionLineageRecord> GetSessionsByFolder(string claudeProjectFolder, int limit = 20)
         {
