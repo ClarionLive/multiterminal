@@ -25,6 +25,45 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void A_resume_launch_reserves_its_session_until_the_launch_ends()
+        {
+            // Pipeline Run 1: the reservation exists from BeginLaunch, before any statusline tick.
+            var t = new ClaudeSessionTracker();
+            t.BeginLaunch(LaunchMs, "old-session");
+            Assert.Equal("old-session", t.PendingResumeSessionId);
+            Assert.Null(t.SessionId);
+
+            // Adopting the same id (any case) keeps it.
+            Assert.True(t.TryAdopt(t.Generation, "OLD-SESSION", LaunchMs + 10, ownPaneFile: true));
+            Assert.Equal("old-session", t.PendingResumeSessionId);
+
+            t.EndLaunch();
+            Assert.Null(t.PendingResumeSessionId);
+        }
+
+        [Fact]
+        public void Adopting_a_different_session_or_a_plain_relaunch_drops_the_reservation()
+        {
+            var t = new ClaudeSessionTracker();
+            t.BeginLaunch(LaunchMs, "old-session");
+            Assert.True(t.TryAdopt(t.Generation, "forked", LaunchMs + 10, ownPaneFile: true));
+            Assert.Null(t.PendingResumeSessionId);
+
+            t.BeginLaunch(LaunchMs + 100, "old-session");
+            t.BeginLaunch(LaunchMs + 200);
+            Assert.Null(t.PendingResumeSessionId);
+        }
+
+        [Fact]
+        public void A_refused_adoption_keeps_the_reservation()
+        {
+            var t = new ClaudeSessionTracker();
+            t.BeginLaunch(LaunchMs, "old-session");
+            Assert.False(t.TryAdopt(t.Generation, "stale", LaunchMs - 1, ownPaneFile: true)); // previous process's file
+            Assert.Equal("old-session", t.PendingResumeSessionId);
+        }
+
+        [Fact]
         public void Launch_start_time_is_reported_only_while_a_launch_runs()
         {
             // Read by the launch prompt's null-session pane rule (task ec2ed636, item 4).

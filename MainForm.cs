@@ -4011,15 +4011,32 @@ namespace MultiTerminal
                     doc.ShowStartScreen();
                     return;
                 }
-                if (resumeSession != null && !Directory.Exists(resumeSession.Entry.Cwd))
+                // The cwd came out of a transcript, so it is untrusted: re-validate it against the project
+                // root here, on the string alone, before any filesystem call or launch (pipeline Run 1).
+                // The catalog validated it too; this is the check that actually stands in front of the launch.
+                string resumeCwd = null;
+                if (resumeSession != null)
                 {
-                    // Listed sessions had an existing cwd when the catalog was read; a worktree can be
-                    // removed while the prompt is open. Claude could not find the session from anywhere else.
-                    doc.ShowStartScreen();
-                    MessageBox.Show(
-                        $"The folder this session ran in no longer exists:\n{resumeSession.Entry.Cwd}\n\nClaude can only resume a session from the folder it ran in. Nothing was launched.",
-                        "Resume Session", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
+                    resumeCwd = SessionCatalog.ValidateResumeCwd(GetLaunchableProjectRoot(project), resumeSession.Entry.Cwd);
+                    if (resumeCwd == null)
+                    {
+                        _debugLogService?.Warning("LaunchSession", $"Project '{project.Name}': resume of {resumeSession.Entry.SessionId} refused, cwd is not the project root or one of its worktrees");
+                        doc.ShowStartScreen();
+                        MessageBox.Show(
+                            $"This session ran in a folder that is not this project's folder or one of its worktrees:\n{resumeSession.Entry.Cwd}\n\nOnly local folders inside the project can be resumed from. Nothing was launched.",
+                            "Resume Session", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    if (!Directory.Exists(resumeCwd))
+                    {
+                        // Listed sessions had an existing cwd when the catalog was read; a worktree can be
+                        // removed while the prompt is open. Claude could not find the session from anywhere else.
+                        doc.ShowStartScreen();
+                        MessageBox.Show(
+                            $"The folder this session ran in no longer exists:\n{resumeCwd}\n\nClaude can only resume a session from the folder it ran in. Nothing was launched.",
+                            "Resume Session", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
                 }
 
                 // Build launch command for the chosen kind. BuildCommand dispatches to
@@ -4029,7 +4046,7 @@ namespace MultiTerminal
                 // --resume <id>; the command builder validates the id as a GUID.
                 var launchCmd = resumeSession == null
                     ? Services.LaunchCommandBuilder.BuildCommand(kind, project)
-                    : Services.LaunchCommandBuilder.BuildCommand(kind, project, resumeSession.Entry.Cwd, resumeSession.Entry.SessionId);
+                    : Services.LaunchCommandBuilder.BuildCommand(kind, project, resumeCwd, resumeSession.Entry.SessionId);
 
                 // Bootstrap gate — see HandleBootstrapErrorIfAny for rationale.
                 if (HandleBootstrapErrorIfAny(launchCmd, onBeforeDialog: () => doc.ShowStartScreen()))
@@ -4039,14 +4056,65 @@ namespace MultiTerminal
                 string autoRunCommand = launchCmd.AutoRunCommand;
                 _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] LaunchCommandBuilder: workingDir='{launchDir}' autoRun='{autoRunCommand}' for project name='{project.Name}' id='{project.Id}' kind='{kind}'");
 
+                // Last check before a resume is registered and started (pipeline Run 1): the live set is
+                // rebuilt and the transcript re-stated NOW, because the dialog's (and the bootstrap gate's)
+                // modal loops let other panes launch, report a session, or write in the meantime.
+                if (resumeSession != null)
+                {
+                    DateTime? transcriptWriteUtc = null;
+                    try
+                    {
+                        if (File.Exists(resumeSession.Entry.TranscriptPath))
+                            transcriptWriteUtc = File.GetLastWriteTimeUtc(resumeSession.Entry.TranscriptPath);
+                    }
+                    catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                    {
+                        _debugLogService?.Warning("LaunchSession", $"Cannot re-stat transcript of {resumeSession.Entry.SessionId}: {ex.Message}");
+                    }
+
+                    string recheck = LaunchSessionChoiceModel.RecheckResume(resumeSession, CollectLiveSessionStates(doc), transcriptWriteUtc);
+                    if (recheck != null)
+                    {
+                        _debugLogService?.Warning("LaunchSession", $"Project '{project.Name}': resume of {resumeSession.Entry.SessionId} aborted at the pre-launch recheck: {recheck}");
+                        doc.ShowStartScreen();
+                        MessageBox.Show(
+                            $"{recheck}\n\nResuming a session that is still open makes two Claude processes write one transcript, which corrupts it. Nothing was launched; launch the project again to choose.",
+                            "Resume Session", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                }
+
                 // Register terminal before starting (start screen tabs are unregistered).
                 // Restored panes come back on the start screen, so they launch through here too.
+                // Every arm uses doc.LaunchNonce as it stands: nothing rotates it between here and
+                // StartTerminal.
                 string terminalName = launchIdentity.Name;
                 if (chosenName != null)
                 {
-                    // A resume, or a new session the user renamed in the prompt (task ec2ed636): register
-                    // the chosen name with this pane's launch nonce. A held name comes back suffixed.
-                    terminalName = RegisterChosenLaunchName(doc, project, chosenName, out isTeamLead);
+                    // A resume, or a new session the user renamed in the prompt (task ec2ed636). When the
+                    // chosen name is the project-derived identity it keeps 6a8d029f's fail-closed path
+                    // (pipeline Run 1); with no broker any chosen name is refused, never started unregistered.
+                    switch (LaunchSessionChoiceModel.RouteChosenName(launchIdentity.IsProjectDerived, launchIdentity.Name, chosenName, _mcpServer?.Broker != null))
+                    {
+                        case ChosenNameRegistration.ProjectIdentityFailClosed:
+                            isTeamLead = false; // a project-derived identity never has a team lead
+                            if (!TryRegisterProjectIdentity(doc.DocId, chosenName, doc.LaunchNonce, out terminalName, out string chosenRefusal))
+                            {
+                                doc.ShowStartScreen();
+                                ShowProjectIdentityRefused(chosenName, chosenRefusal);
+                                return;
+                            }
+                            break;
+                        case ChosenNameRegistration.RefuseNoBroker:
+                            _debugLogService?.Warning("LaunchSession", $"Chosen name '{chosenName}' not registered; launch refused: no broker");
+                            doc.ShowStartScreen();
+                            ShowProjectIdentityRefused(chosenName, Services.ProjectLaunchIdentity.BrokerUnavailableMessage);
+                            return;
+                        default:
+                            // A held name comes back suffixed.
+                            terminalName = RegisterChosenLaunchName(doc, project, chosenName, out isTeamLead);
+                            break;
+                    }
                 }
                 // A project-derived launch enters even with no broker so it is refused, not started
                 // under an unregistered name (Run 3). It never has a team lead, so the picker below,
@@ -4157,7 +4225,8 @@ namespace MultiTerminal
 
                 _debugLogService?.Trace("StartScreen", $"Launching project '{project.Name}' in {launchDir}{(resumeSession == null ? string.Empty : $" resuming session {resumeSession.Entry.SessionId}")}");
                 _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] Calling doc.StartTerminal: doc.DocId='{doc.DocId}' launchDir='{launchDir}' terminalName='{terminalName}' projectId='{project.Id}' projectName='{project.Name}' isTeamLead={isTeamLead} taskWorktreePath='{taskWorktreePath ?? "null"}'");
-                doc.StartTerminal(launchDir, terminalName, autoRunCommand, projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile, taskWorktreePath: taskWorktreePath);
+                doc.StartTerminal(launchDir, terminalName, autoRunCommand, projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile, taskWorktreePath: taskWorktreePath,
+                    resumeSessionId: resumeSession?.Entry.SessionId);
                 _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] After StartTerminal: doc.CustomTitle='{doc.CustomTitle}' doc.TabText='{doc.TabText}' doc.Text='{doc.Text}'");
 
                 // Apply current font size
@@ -4202,6 +4271,17 @@ namespace MultiTerminal
             if (decision.Action == LaunchSessionAction.New)
                 return true;
 
+            if (decision.Action == LaunchSessionAction.LoadFailed)
+            {
+                // Not the same as "nothing to resume" (pipeline Run 1): say so, and let the user choose
+                // between a new session and launching nothing, in Ask and Continue mode alike.
+                var answer = MessageBox.Show(this,
+                    $"Could not read this project's session history:\n{decision.Model.LoadError}\n\nOK starts a new session. Cancel launches nothing.",
+                    "Launch project", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
+                _debugLogService?.Info("LaunchSession", $"Project '{project.Name}': history unreadable; user chose {(answer == DialogResult.OK ? "new session" : "cancel")}");
+                return answer == DialogResult.OK;
+            }
+
             if (decision.Action == LaunchSessionAction.Resume)
             {
                 resume = decision.Candidate;
@@ -4209,7 +4289,7 @@ namespace MultiTerminal
                 return true;
             }
 
-            using var dialog = new Dialogs.LaunchSessionDialog(project.Name, decision.Model, newSessionName, _currentTheme, DateTime.UtcNow);
+            using var dialog = new Dialogs.LaunchSessionDialog(project.Name, decision.Model, newSessionName, _currentTheme, DateTime.UtcNow, decision.DefaultChoice);
             if (dialog.ShowDialog(this) != DialogResult.OK)
             {
                 _debugLogService?.Info("LaunchSession", $"Project '{project.Name}': launch prompt cancelled; nothing launched");
@@ -4244,23 +4324,22 @@ namespace MultiTerminal
         }
 
         /// <summary>
-        /// Reads the project's resumable sessions and every open pane's live session (task ec2ed636).
-        /// Sessions held by a pane are excluded by the catalog itself; the model applies the
-        /// null-session pane rule (see <see cref="LaunchSessionChoiceModel"/>). Agent names come from
-        /// session_agent_map (one snapshot query) and summaries from session_lineage, falling back to
-        /// the transcript inside the catalog. Never throws: a failure reads as "nothing to resume".
+        /// Reads the project's resumable sessions and the live set (task ec2ed636). Sessions held by a
+        /// pane or helper are excluded by the catalog itself; the model applies the null-session pane
+        /// rule (see <see cref="LaunchSessionChoiceModel"/>). Agent names come from session_agent_map
+        /// (one snapshot query) and summaries from session_lineage, falling back to the transcript
+        /// inside the catalog. Never throws: a failure is a model with
+        /// <see cref="LaunchSessionChoiceModel.LoadFailed"/> set, which the caller reports instead of
+        /// treating it as "nothing to resume". Runs on the UI thread, hence the wait cursor.
         /// </summary>
         private LaunchSessionChoiceModel LoadLaunchSessionChoices(Models.Project project, TerminalDocument launchingDoc)
         {
             var panes = new List<PaneSessionState>();
+            var previousCursor = Cursor.Current;
+            Cursor.Current = Cursors.WaitCursor;
             try
             {
-                foreach (var pane in _dockPanel.Contents.OfType<TerminalDocument>())
-                {
-                    if (ReferenceEquals(pane, launchingDoc) || pane.IsDisposed)
-                        continue;
-                    panes.Add(new PaneSessionState(pane.IsTerminalStarted, pane.CurrentClaudeSessionId, pane.ClaudeLaunchStartedUtc));
-                }
+                panes = CollectLiveSessionStates(launchingDoc);
 
                 string projectRoot = GetLaunchableProjectRoot(project);
                 if (projectRoot == null)
@@ -4277,9 +4356,50 @@ namespace MultiTerminal
             }
             catch (Exception ex)
             {
-                _debugLogService?.Error("LaunchSession", $"Reading resumable sessions for project '{project?.Id}' failed; launching new: {ex.Message}");
-                return new LaunchSessionChoiceModel(null, panes);
+                _debugLogService?.Error("LaunchSession", $"Reading resumable sessions for project '{project?.Id}' failed: {ex.Message}");
+                return LaunchSessionChoiceModel.ForLoadFailure(panes, ex.Message);
             }
+            finally
+            {
+                Cursor.Current = previousCursor;
+            }
+        }
+
+        /// <summary>
+        /// The live set the launch prompt excludes or flags (task ec2ed636, pipeline Run 1): every open
+        /// pane other than <paramref name="launchingDoc"/> (its reported session, the session it was
+        /// launched to resume, and its launch time), plus every running headless helper in
+        /// <see cref="_agentProcessMap"/> (its <c>AgentProcess.SessionId</c>, or, before it has reported
+        /// one, an unknown pane stamped with its start time).
+        ///
+        /// <para>This sees only processes THIS MultiTerminal started. A ClarionAssistant tab, a plain
+        /// terminal or another MT instance holding a session is invisible here; for those the
+        /// protection is ADVISORY only: the catalog's recent-write flag and the transcript re-stat in
+        /// the pre-launch recheck, both of which a session idle for minutes passes. Accepted.</para>
+        /// </summary>
+        private List<PaneSessionState> CollectLiveSessionStates(TerminalDocument launchingDoc)
+        {
+            var states = new List<PaneSessionState>();
+            foreach (var pane in _dockPanel.Contents.OfType<TerminalDocument>())
+            {
+                if (ReferenceEquals(pane, launchingDoc) || pane.IsDisposed)
+                    continue;
+                states.Add(new PaneSessionState(pane.IsTerminalStarted, pane.CurrentClaudeSessionId, pane.ClaudeLaunchStartedUtc, pane.PendingResumeSessionId));
+            }
+
+            lock (_agentProcessMap)
+            {
+                foreach (var agent in _agentProcessMap.Values)
+                {
+                    bool running;
+                    try { running = agent != null && agent.IsRunning; }
+                    catch (InvalidOperationException) { running = false; } // process object already disposed
+                    var state = PaneSessionState.ForHelper(running, agent?.SessionId, agent?.StartedUtc);
+                    if (state != null)
+                        states.Add(state);
+                }
+            }
+            return states;
         }
 
         // The root a project launch starts in (LaunchCommandBuilder's own order: SourcePath, then Path),

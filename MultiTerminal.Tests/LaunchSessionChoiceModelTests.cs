@@ -228,6 +228,143 @@ namespace MultiTerminal.Tests
                 Assert.Equal("Gear", LaunchSessionChoiceModel.ResolveName(choice, m.ContinueCandidate, "MultiTerminal", " Gear "));
         }
 
+        // ── Pipeline Run 1 ────────────────────────────────────────────────────
+
+        private static SessionCatalogEntry Helper(string id, int minutesAgo, string agent) =>
+            new SessionCatalogEntry
+            {
+                SessionId = id,
+                Cwd = @"C:\proj",
+                LastActivityUtc = Now.AddMinutes(-minutesAgo),
+                AgentName = agent,
+                IsHelper = true,
+                SpawnedBy = "Alice",
+            };
+
+        [Fact]
+        public void Continue_prefers_the_newest_non_helper_over_a_newer_helper()
+        {
+            // The helper finished after its PM's last turn, so it is the newest transcript.
+            var m = Model(new[] { Helper(B, 5, "Notes"), Entry(A, 30, agent: "Alice"), Helper(C, 1, "Gear") });
+
+            Assert.Equal(C, m.Candidates[0].Entry.SessionId); // the list itself stays newest first
+            Assert.Equal(A, m.ContinueCandidate.Entry.SessionId);
+
+            var d = LaunchSessionChoiceModel.Decide(true, false, ProjectLaunchMode.Continue, () => m);
+            Assert.Equal(A, d.Candidate.Entry.SessionId);
+        }
+
+        [Fact]
+        public void Continue_falls_back_to_the_newest_helper_when_every_candidate_is_a_helper()
+        {
+            var m = Model(new[] { Helper(A, 30, "Notes"), Helper(B, 5, "Gear") });
+            Assert.Equal(B, m.ContinueCandidate.Entry.SessionId);
+        }
+
+        [Theory]
+        [InlineData(ProjectLaunchMode.Ask)]
+        [InlineData(ProjectLaunchMode.Continue)]
+        public void A_catalog_that_could_not_be_read_is_reported_not_treated_as_empty(ProjectLaunchMode mode)
+        {
+            var failed = LaunchSessionChoiceModel.ForLoadFailure(null, "access denied");
+            var d = LaunchSessionChoiceModel.Decide(true, false, mode, () => failed);
+
+            Assert.Equal(LaunchSessionAction.LoadFailed, d.Action);
+            Assert.Null(d.Candidate);
+            Assert.True(d.Model.LoadFailed);
+            Assert.Equal("access denied", d.Model.LoadError);
+
+            // The contrast that makes the distinction: a genuinely empty catalog still starts new quietly.
+            var empty = LaunchSessionChoiceModel.Decide(true, false, mode, () => Model(Array.Empty<SessionCatalogEntry>()));
+            Assert.Equal(LaunchSessionAction.New, empty.Action);
+            Assert.False(empty.Model.LoadFailed);
+        }
+
+        [Fact]
+        public void A_load_failure_with_a_blank_error_still_reads_as_failed()
+        {
+            Assert.True(LaunchSessionChoiceModel.ForLoadFailure(null, "  ").LoadFailed);
+        }
+
+        [Fact]
+        public void Continue_prompt_defaults_to_continue_and_prefills_the_continue_candidates_name()
+        {
+            var d = LaunchSessionChoiceModel.Decide(true, false, ProjectLaunchMode.Continue,
+                () => Model(new[] { Entry(A, 1, agent: "Notes", status: SessionCatalogStatus.PossiblyOpenElsewhere) }));
+
+            Assert.Equal(LaunchSessionAction.Prompt, d.Action);
+            Assert.Equal(LaunchSessionChoice.ContinueLast, d.DefaultChoice);
+            Assert.Equal("Notes", d.Model.InitialNameFor(d.DefaultChoice, "MultiTerminal"));
+        }
+
+        [Fact]
+        public void Ask_prompt_defaults_to_new_and_prefills_the_new_session_name()
+        {
+            var d = LaunchSessionChoiceModel.Decide(true, false, ProjectLaunchMode.Ask, () => Model(new[] { Entry(A, 30, agent: "Notes") }));
+
+            Assert.Equal(LaunchSessionChoice.NewSession, d.DefaultChoice);
+            Assert.Equal("MultiTerminal", d.Model.InitialNameFor(d.DefaultChoice, "MultiTerminal"));
+        }
+
+        [Fact]
+        public void A_reserved_resume_is_live_but_does_not_make_its_pane_known()
+        {
+            // Pane 1 was just launched with --resume A and has not reported a session id yet.
+            var reserving = new PaneSessionState(true, null, Now.AddSeconds(-2), reservedSessionId: A);
+            var m = Model(new[] { Entry(A, 600), Entry(B, 700) }, reserving);
+
+            Assert.DoesNotContain(m.Candidates, c => c.Entry.SessionId == A);
+            Assert.Contains(A, LaunchSessionChoiceModel.LiveSessionIdsOf(new[] { reserving }));
+            Assert.True(reserving.IsUnknown);
+            Assert.True(m.HasUnknownPane);
+        }
+
+        [Fact]
+        public void A_running_helper_holds_its_session_and_one_with_no_id_yet_is_an_unknown_pane()
+        {
+            var known = PaneSessionState.ForHelper(isRunning: true, A, Now.AddHours(-1));
+            var fresh = PaneSessionState.ForHelper(isRunning: true, null, Now.AddMinutes(-20));
+            Assert.Null(PaneSessionState.ForHelper(isRunning: false, B, Now.AddHours(-1)));
+
+            var m = Model(new[] { Entry(A, 5), Entry(B, 10), Entry(C, 60) }, known, fresh);
+
+            Assert.DoesNotContain(m.Candidates, c => c.Entry.SessionId == A);
+            var byId = m.Candidates.ToDictionary(c => c.Entry.SessionId);
+            Assert.True(byId[B].MayBeOpenElsewhere);   // written since the id-less helper started
+            Assert.False(byId[C].MayBeOpenElsewhere);  // written before it started
+        }
+
+        [Fact]
+        public void Recheck_refuses_a_session_that_became_live_or_was_written_since_and_allows_an_unchanged_one()
+        {
+            var m = Model(new[] { Entry(A, 30) });
+            var candidate = m.ContinueCandidate;
+            var lastWrite = candidate.Entry.LastActivityUtc;
+
+            Assert.Null(LaunchSessionChoiceModel.RecheckResume(candidate, Array.Empty<PaneSessionState>(), lastWrite));
+            Assert.NotNull(LaunchSessionChoiceModel.RecheckResume(candidate, new[] { new PaneSessionState(true, A.ToUpperInvariant(), Now) }, lastWrite));
+            Assert.NotNull(LaunchSessionChoiceModel.RecheckResume(candidate, new[] { new PaneSessionState(true, null, Now, reservedSessionId: A) }, lastWrite));
+            Assert.NotNull(LaunchSessionChoiceModel.RecheckResume(candidate, new[] { PaneSessionState.ForHelper(true, A, Now) }, lastWrite));
+            Assert.NotNull(LaunchSessionChoiceModel.RecheckResume(candidate, Array.Empty<PaneSessionState>(), lastWrite.AddSeconds(1)));
+            Assert.NotNull(LaunchSessionChoiceModel.RecheckResume(candidate, Array.Empty<PaneSessionState>(), null));
+        }
+
+        [Theory]
+        // project-derived identity chosen unchanged (any case): the fail-closed path, broker or not
+        [InlineData(true, "MultiTerminal", "MultiTerminal", true, ChosenNameRegistration.ProjectIdentityFailClosed)]
+        [InlineData(true, "MultiTerminal", "multiterminal", true, ChosenNameRegistration.ProjectIdentityFailClosed)]
+        [InlineData(true, "MultiTerminal", "MultiTerminal", false, ChosenNameRegistration.ProjectIdentityFailClosed)]
+        // a different name (the resumed session's own, or typed)
+        [InlineData(true, "MultiTerminal", "Notes", true, ChosenNameRegistration.ChosenName)]
+        [InlineData(true, "MultiTerminal", "Notes", false, ChosenNameRegistration.RefuseNoBroker)]
+        // not project-derived (team lead / Codex default): never the project-identity path
+        [InlineData(false, "Alice", "Alice", true, ChosenNameRegistration.ChosenName)]
+        [InlineData(false, "Alice", "Alice", false, ChosenNameRegistration.RefuseNoBroker)]
+        public void Chosen_name_registration_route(bool projectDerived, string identity, string chosen, bool broker, ChosenNameRegistration expected)
+        {
+            Assert.Equal(expected, LaunchSessionChoiceModel.RouteChosenName(projectDerived, identity, chosen, broker));
+        }
+
         [Theory]
         [InlineData(0, "just now")]
         [InlineData(12, "12 min ago")]

@@ -128,6 +128,14 @@ namespace MultiTerminal.Docking
         public string CurrentClaudeSessionId => _claudeSession.SessionId;
 
         /// <summary>
+        /// The session this pane's current launch was started to resume (<c>--resume</c>), until the
+        /// launch ends or the pane reports a different session (pipeline Run 1). The launch prompt
+        /// treats it as live, so a second resume of the same old session cannot be offered in the
+        /// seconds before <see cref="CurrentClaudeSessionId"/> is learned.
+        /// </summary>
+        public string PendingResumeSessionId => _claudeSession.PendingResumeSessionId;
+
+        /// <summary>
         /// When this pane's current launch started (UTC), or <c>null</c> when no launch is running
         /// (task ec2ed636). The launch prompt uses it for a started pane whose
         /// <see cref="CurrentClaudeSessionId"/> is still null: only a session written since this time
@@ -1391,7 +1399,7 @@ namespace MultiTerminal.Docking
         /// <param name="gatewayProfile">MCP Gateway profile name (sets MCP_GATEWAY_PROFILE env var)</param>
         /// <param name="taskWorktreePath">Per-task worktree path resolved from the active task (sets MULTITERMINAL_TASK_WORKTREE env var). Empty when no task worktree is in play.</param>
         /// <param name="quietStartProjectId">The project whose Quiet start setting applies when <paramref name="projectId"/> is null (GitHub #34). Used by "Launch as...", which is not a project launch and must not get a project's role or env, but still opens in a quiet project. Ignored when projectId is set.</param>
-        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string quietStartProjectId = null)
+        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string quietStartProjectId = null, string resumeSessionId = null)
         {
             _debugLogService?.Info("TerminalDocument.StartTerminal", $"===== START =====");
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"workingDirectory: '{workingDirectory ?? "null"}'");
@@ -1432,7 +1440,9 @@ namespace MultiTerminal.Docking
             // stamp the launch time so a statusline file the previous process wrote is not adopted
             // as this launch's (task ec2ed636). Before WriteFallbackStatusline below, which carries
             // no session id and so cannot be adopted anyway.
-            _claudeSession.BeginLaunch(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            // A resume reserves its session id in the same step (pipeline Run 1), so the pane counts as
+            // holding it from the first instant (see PendingResumeSessionId).
+            _claudeSession.BeginLaunch(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), resumeSessionId);
 
             // Derive project name for tab title: use project lookup, or fall back to folder name
             if (!string.IsNullOrEmpty(projectId) && _messageBroker != null)
@@ -4296,9 +4306,19 @@ namespace MultiTerminal.Docking
         private bool _launchActive;
         private long _launchStartedMs;
         private volatile string _sessionId;
+        private volatile string _pendingResumeId;
 
         /// <summary>The adopted session id of the running launch, or <c>null</c>.</summary>
         public string SessionId => _sessionId;
+
+        /// <summary>
+        /// The session the running launch was started to resume (<c>--resume &lt;id&gt;</c>), recorded at
+        /// <see cref="BeginLaunch"/> so the launch prompt treats it as live BEFORE the statusline has
+        /// reported anything (pipeline Run 1: two quick resumes of one old session). Cleared when the
+        /// launch ends, and when a DIFFERENT session id is adopted (the resume forked or the user
+        /// switched session); kept when the same id is adopted.
+        /// </summary>
+        public string PendingResumeSessionId => _pendingResumeId;
 
         /// <summary>The running launch's start time (Unix ms), or <c>null</c> when no launch is active.</summary>
         public long? ActiveLaunchStartedMs
@@ -4312,8 +4332,11 @@ namespace MultiTerminal.Docking
             get { lock (_gate) { return _generation; } }
         }
 
-        /// <summary>A launch has started at <paramref name="nowMs"/> (Unix ms); no session is known yet.</summary>
-        public void BeginLaunch(long nowMs)
+        /// <summary>
+        /// A launch has started at <paramref name="nowMs"/> (Unix ms); no session is known yet. A launch
+        /// that resumes a session passes its id as <paramref name="resumeSessionId"/>.
+        /// </summary>
+        public void BeginLaunch(long nowMs, string resumeSessionId = null)
         {
             lock (_gate)
             {
@@ -4321,6 +4344,7 @@ namespace MultiTerminal.Docking
                 _launchActive = true;
                 _launchStartedMs = nowMs;
                 _sessionId = null;
+                _pendingResumeId = string.IsNullOrWhiteSpace(resumeSessionId) ? null : resumeSessionId.Trim();
             }
         }
 
@@ -4332,6 +4356,7 @@ namespace MultiTerminal.Docking
                 _generation++;
                 _launchActive = false;
                 _sessionId = null;
+                _pendingResumeId = null;
             }
         }
 
@@ -4348,6 +4373,8 @@ namespace MultiTerminal.Docking
                 if (observedGeneration != _generation || !_launchActive || fileTimestampMs.Value < _launchStartedMs)
                     return false;
                 _sessionId = sessionId;
+                if (_pendingResumeId != null && !string.Equals(_pendingResumeId, sessionId, StringComparison.OrdinalIgnoreCase))
+                    _pendingResumeId = null;
                 return true;
             }
         }

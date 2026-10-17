@@ -38,14 +38,20 @@ namespace MultiTerminal.Dialogs
         private readonly LaunchSessionChoiceModel _model;
         private readonly string _newSessionName;
         private readonly DateTime _nowUtc;
+        private readonly LaunchSessionChoice _defaultChoice;
         private bool _settingNameProgrammatically;
         private bool _nameEdited;
 
-        public LaunchSessionDialog(string projectName, LaunchSessionChoiceModel model, string newSessionName, TerminalTheme theme, DateTime nowUtc)
+        public LaunchSessionDialog(string projectName, LaunchSessionChoiceModel model, string newSessionName, TerminalTheme theme, DateTime nowUtc,
+            LaunchSessionChoice defaultChoice = LaunchSessionChoice.NewSession)
         {
             _model = model ?? throw new ArgumentNullException(nameof(model));
             _newSessionName = newSessionName;
             _nowUtc = nowUtc;
+            // Continue last can be the default only when there is something to continue.
+            _defaultChoice = defaultChoice == LaunchSessionChoice.ContinueLast && model.ContinueCandidate != null
+                ? LaunchSessionChoice.ContinueLast
+                : LaunchSessionChoice.NewSession;
 
             Text = string.IsNullOrWhiteSpace(projectName) ? "Launch project" : $"Launch {projectName}";
             FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -212,11 +218,22 @@ namespace MultiTerminal.Dialogs
             };
             Controls.Add(_cancelButton);
 
-            AcceptButton = _newButton;
+            AcceptButton = _defaultChoice == LaunchSessionChoice.ContinueLast ? _continueButton : _newButton;
             CancelButton = _cancelButton;
             ClientSize = new Size(width + (2 * left), y + 46);
 
-            SetNameProgrammatically(_newSessionName);
+            // The name box shows the name the default (Enter) action launches under: the continue
+            // candidate's agent when Continue last is the default (pipeline Run 1), else the new name.
+            // Focusing either button re-prefills for that button, unless the user has typed a name.
+            SetNameProgrammatically(_model.InitialNameFor(_defaultChoice, _newSessionName));
+            _newButton.Enter += (s, e) => PrefillFor(LaunchSessionChoice.NewSession);
+            _continueButton.Enter += (s, e) => PrefillFor(LaunchSessionChoice.ContinueLast);
+        }
+
+        private void PrefillFor(LaunchSessionChoice choice)
+        {
+            if (!_nameEdited)
+                SetNameProgrammatically(_model.InitialNameFor(choice, _newSessionName));
         }
 
         private void SetNameProgrammatically(string name)
@@ -352,7 +369,7 @@ namespace MultiTerminal.Dialogs
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
-            _newButton.Focus();
+            (_defaultChoice == LaunchSessionChoice.ContinueLast ? _continueButton : _newButton).Focus();
         }
 
         private sealed class SessionItem

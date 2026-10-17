@@ -134,6 +134,20 @@ namespace MultiTerminal.MCPServer.Services
             _summaryLookup = summaryLookup;
         }
 
+        /// <summary>How many transcripts one <see cref="List"/> call may read, as a multiple of its <c>max</c>.</summary>
+        internal const int ReadBudgetFactor = 3;
+
+        /// <summary>
+        /// Test seam (InternalsVisibleTo): the directory-existence check. Every path it is handed has
+        /// already passed <see cref="ValidateResumeCwd"/> or is derived from the (validated) project
+        /// root, which is what lets a test assert that no transcript-supplied path reaches the
+        /// filesystem unvalidated.
+        /// </summary>
+        internal Func<string, bool> DirectoryExists { get; set; } = Directory.Exists;
+
+        /// <summary>Test seam: how many transcripts the last <see cref="List"/> call opened.</summary>
+        internal int TranscriptsReadLastList { get; private set; }
+
         /// <summary>
         /// Gets how recently a transcript may have been written before it is reported as
         /// <see cref="SessionCatalogStatus.PossiblyOpenElsewhere"/>.
@@ -175,14 +189,13 @@ namespace MultiTerminal.MCPServer.Services
                 return results;
             }
 
-            string root;
-            try
+            TranscriptsReadLastList = 0;
+
+            // Only a local drive root can produce a resumable cwd (ValidateResumeCwd), so a UNC or
+            // device-path project lists nothing, without reading a single transcript.
+            if (!TryCanonicalLocalPath(projectRoot, out var root))
             {
-                root = NormalizeDir(projectRoot);
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[SessionCatalog] bad project root '{projectRoot}': {ex.Message}");
+                Debug.WriteLine($"[SessionCatalog] project root '{projectRoot}' is not a local drive path; nothing to list");
                 return results;
             }
 
@@ -221,18 +234,23 @@ namespace MultiTerminal.MCPServer.Services
                 }
             }
 
-            // Newest first, and parse lazily: only as many transcripts as it takes to fill `max`.
+            // Newest first, and parse lazily: only as many transcripts as it takes to fill `max`, and
+            // never more than max * ReadBudgetFactor of them. This runs on the UI thread while the user
+            // waits; a project whose newest transcripts are all unresumable (aborted, empty, deleted
+            // worktree) must not make it read every transcript the project ever wrote.
             // The first occurrence of an id wins (the newest copy, if a session is in two folders).
+            var readBudget = (long)max * ReadBudgetFactor;
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var candidate in candidates.OrderByDescending(c => c.LastWriteUtc))
             {
-                if (results.Count >= max)
+                if (results.Count >= max || TranscriptsReadLastList >= readBudget)
                     break;
 
                 var id = Path.GetFileNameWithoutExtension(candidate.Path);
                 if (!seen.Add(id))
                     continue;
 
+                TranscriptsReadLastList++;
                 try
                 {
                     var entry = BuildEntry(root, candidate.Path, candidate.FolderName, candidate.LastWriteUtc, utcNow);
@@ -272,8 +290,10 @@ namespace MultiTerminal.MCPServer.Services
                     .Where(d =>
                     {
                         var name = Path.GetFileName(d);
-                        return exactNames.Contains(name) ||
-                               prefixes.Any(p => name.Length > p.Length && name.StartsWith(p, StringComparison.OrdinalIgnoreCase));
+                        if (exactNames.Contains(name))
+                            return true;
+                        var prefix = prefixes.FirstOrDefault(p => name.Length > p.Length && name.StartsWith(p, StringComparison.OrdinalIgnoreCase));
+                        return prefix != null && WorktreeMayExist(root, name.Substring(prefix.Length));
                     })
                     .ToList();
             }
@@ -284,14 +304,39 @@ namespace MultiTerminal.MCPServer.Services
             }
         }
 
+        /// <summary>
+        /// False only when <paramref name="encodedRest"/> (the part of a transcript folder name after
+        /// the encoded <c>&lt;root&gt;\.claude\worktrees\</c> prefix) decodes UNAMBIGUOUSLY to a worktree
+        /// id and <c>&lt;root&gt;\.claude\worktrees\&lt;id&gt;</c> does not exist: every session in that
+        /// folder ran in a deleted worktree, so none of its transcripts is worth reading. Both encodings
+        /// turn '\' into '-', so a rest of letters and digits only is exactly one segment, spelled as on
+        /// disk; anything else ('-', '.', a subfolder) could be several paths and is kept.
+        /// </summary>
+        private bool WorktreeMayExist(string root, string encodedRest)
+        {
+            if (encodedRest.Length == 0 || !encodedRest.All(c => (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')))
+                return true;
+            try
+            {
+                return DirectoryExists(Path.Combine(root, ".claude", "worktrees", encodedRest));
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[SessionCatalog] cannot check worktree '{encodedRest}': {ex.Message}");
+                return true;
+            }
+        }
+
         private SessionCatalogEntry BuildEntry(string root, string path, string folderName, DateTime lastWriteUtc, DateTime utcNow)
         {
             var scan = TranscriptScan.Read(path);
             if (scan == null || !scan.HasTurns)
                 return null; // empty or aborted session: nothing to resume
 
-            var cwd = ResolveCwd(folderName, scan);
-            if (string.IsNullOrEmpty(cwd) || !Directory.Exists(cwd))
+            // ResolveCwd returns only a path that passed ValidateResumeCwd, so the existence check below
+            // is the first filesystem call any transcript-supplied path reaches (pipeline Run 1).
+            var cwd = ResolveCwd(root, folderName, scan);
+            if (string.IsNullOrEmpty(cwd) || !DirectoryExists(cwd))
                 return null; // e.g. a deleted worktree: `claude --resume` could not start there
 
             var sessionId = Path.GetFileNameWithoutExtension(path);
@@ -321,20 +366,110 @@ namespace MultiTerminal.MCPServer.Services
         /// transcript moved with the session), but NOT for a session that merely cd'd: a real PM
         /// transcript (99fede3b, 2026-10-16) sits in the project-root folder while its last cwd is
         /// <c>.claude\worktrees\c8ee0eec\Docking</c>, and resuming from there would not find it.
-        /// Order: matching tail cwd, matching head cwd, then the raw last cwd (tail, then head).
-        /// Deliberately no "decode the folder name" fallback: the encoding is lossy, and a derived
-        /// path would also mask a reader that never looked at the tail.
+        ///
+        /// <para>Every recorded cwd is untrusted transcript text: only one that passes
+        /// <see cref="ValidateResumeCwd"/> is considered at all. Order: matching tail cwd, then matching
+        /// head cwd. A cwd that does not encode to the folder is NEVER returned (pipeline Run 1): Claude
+        /// would answer "No conversation found" from it. The one fallback is the project root for a
+        /// transcript stored in the root's own folder, because the root's encoding IS that folder's
+        /// name. Otherwise the session is dropped. Deliberately no "decode the folder name" fallback:
+        /// the encoding is lossy, and a derived path would also mask a reader that never looked at the
+        /// tail.</para>
         /// </summary>
-        private static string ResolveCwd(string folderName, TranscriptScan scan)
+        private static string ResolveCwd(string root, string folderName, TranscriptScan scan)
         {
-            bool Matches(string c) =>
-                string.Equals(EncodeProjectPath(TrimDir(c)), folderName, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(SessionDiscovery.GetProjectFolderName(TrimDir(c)), folderName, StringComparison.OrdinalIgnoreCase);
+            bool EncodesToFolder(string dir) =>
+                string.Equals(EncodeProjectPath(dir), folderName, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(SessionDiscovery.GetProjectFolderName(dir), folderName, StringComparison.OrdinalIgnoreCase);
 
-            return scan.TailCwds.LastOrDefault(Matches) ??
-                   scan.HeadCwds.LastOrDefault(Matches) ??
-                   scan.TailCwds.LastOrDefault() ??
-                   scan.HeadCwds.LastOrDefault();
+            string LastMatching(List<string> cwds)
+            {
+                for (var i = cwds.Count - 1; i >= 0; i--)
+                {
+                    var valid = ValidateResumeCwd(root, cwds[i]);
+                    if (valid != null && EncodesToFolder(valid))
+                        return valid;
+                }
+                return null;
+            }
+
+            return LastMatching(scan.TailCwds) ??
+                   LastMatching(scan.HeadCwds) ??
+                   (EncodesToFolder(root) ? root : null);
+        }
+
+        /// <summary>
+        /// The canonical form of a transcript-recorded <paramref name="cwd"/> if a resume may be
+        /// launched from it, else null (pipeline Run 1, security). Decided on the STRING alone, before
+        /// any filesystem call: a UNC cwd handed to <c>Directory.Exists</c> would already have sent this
+        /// user's credentials to that host just by opening the launch prompt.
+        ///
+        /// <para>Accepted: a fully-qualified local drive path (<c>X:\...</c>), canonicalised with
+        /// <see cref="Path.GetFullPath(string)"/>, that is exactly the project root or lies at or below
+        /// <c>&lt;root&gt;\.claude\worktrees\&lt;one segment&gt;</c> (a session may have started in a
+        /// subfolder of its worktree). Rejected: UNC (<c>\\host\share</c>), device paths (<c>\\?\</c>,
+        /// <c>\\.\</c>), relative and drive-relative (<c>C:foo</c>) paths, any ':' past the drive
+        /// (alternate data streams), <c>&lt;root&gt;\.claude\worktrees</c> itself, and everything else
+        /// under or outside the root. Comparison is ordinal-ignore-case on the canonical forms, with a
+        /// separator guard so <c>C:\proj2</c> is not "under" <c>C:\proj</c>.</para>
+        ///
+        /// <para>Reparse points (junctions, symlinks) are NOT resolved: a junction inside a worktree can
+        /// point anywhere. That is the local-trust model: whoever can create a junction in the project
+        /// can already run code as this user. Chasing one would mean filesystem calls on an unvalidated
+        /// target, which is what this method exists to prevent.</para>
+        /// </summary>
+        public static string ValidateResumeCwd(string projectRoot, string cwd)
+        {
+            if (!TryCanonicalLocalPath(projectRoot, out var root) || !TryCanonicalLocalPath(cwd, out var dir))
+                return null;
+            if (string.Equals(dir, root, StringComparison.OrdinalIgnoreCase))
+                return dir;
+
+            var worktrees = root.TrimEnd('\\') + @"\.claude\worktrees\";
+            if (!dir.StartsWith(worktrees, StringComparison.OrdinalIgnoreCase))
+                return null;
+            var segment = dir.Substring(worktrees.Length).Split('\\')[0];
+            return segment.Length == 0 ? null : dir;
+        }
+
+        /// <summary>
+        /// A fully-qualified local drive path, canonicalised and without a trailing separator (a drive
+        /// root keeps its own), or false. String checks only: <see cref="Path.GetFullPath(string)"/> is
+        /// path arithmetic for a fully-qualified input and touches no file.
+        /// </summary>
+        internal static bool TryCanonicalLocalPath(string path, out string canonical)
+        {
+            canonical = null;
+            if (!IsDriveRooted(path))
+                return false;
+
+            string full;
+            try
+            {
+                full = Path.GetFullPath(path);
+            }
+            catch (Exception ex) when (ex is ArgumentException || ex is NotSupportedException || ex is PathTooLongException)
+            {
+                return false;
+            }
+
+            // Re-check the canonical form: canonicalisation must not have produced anything else.
+            if (!IsDriveRooted(full))
+                return false;
+            canonical = TrimDir(full);
+            return true;
+        }
+
+        // X:\ or X:/ with no further ':' and no NUL. Rejects UNC and device paths (they start with a
+        // separator), relative and drive-relative paths, and alternate-data-stream colons.
+        private static bool IsDriveRooted(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path) || path.Length < 3)
+                return false;
+            var d = path[0];
+            var isLetter = (d >= 'A' && d <= 'Z') || (d >= 'a' && d <= 'z');
+            return isLetter && path[1] == ':' && (path[2] == '\\' || path[2] == '/')
+                && path.IndexOf(':', 2) < 0 && path.IndexOf('\0', StringComparison.Ordinal) < 0;
         }
 
         private static string GetWorktreeId(string root, string cwd)

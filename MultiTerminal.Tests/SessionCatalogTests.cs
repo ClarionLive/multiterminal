@@ -107,8 +107,13 @@ namespace MultiTerminal.Tests
             return id;
         }
 
+        // Records the cwd that matches the folder, as a real session does: since pipeline Run 1 a
+        // transcript whose cwd does not encode to its folder is dropped, not resumed from that cwd.
         private string WriteSimple(string folder, DateTime lastWriteUtc, string prompt = "hello")
-            => Write(folder, lastWriteUtc, User(prompt, _projectRoot), Assistant("hi", _projectRoot));
+        {
+            var cwd = folder == _worktreeFolder ? _worktreeDir : _projectRoot;
+            return Write(folder, lastWriteUtc, User(prompt, cwd), Assistant("hi", cwd));
+        }
 
         private SessionCatalog Catalog(Func<string, string> names = null, Func<string, string> summaries = null)
             => new SessionCatalog(_projectsRoot, names, summaries);
@@ -340,6 +345,134 @@ namespace MultiTerminal.Tests
             var entry = Assert.Single(List());
             Assert.Equal(ok, entry.SessionId);
             Assert.Equal("survives the bad line", entry.Summary);
+        }
+
+        // ---- pipeline Run 1 ----
+
+        [Theory]
+        // accepted: the root itself (any case, either separator, trailing separator) and worktrees
+        [InlineData(@"C:\proj", @"C:\proj")]
+        [InlineData(@"c:\PROJ\", @"c:\PROJ")]
+        [InlineData(@"C:/proj", @"C:\proj")]
+        [InlineData(@"C:\proj\.claude\worktrees\abcd1234", @"C:\proj\.claude\worktrees\abcd1234")]
+        [InlineData(@"C:\proj\.claude\worktrees\abcd1234\Docking", @"C:\proj\.claude\worktrees\abcd1234\Docking")]
+        // rejected: UNC, device paths, relative, drive-relative, ADS
+        [InlineData(@"\\evilhost\share", null)]
+        [InlineData(@"\\evilhost\share\proj", null)]
+        [InlineData(@"//evilhost/share", null)]
+        [InlineData(@"\\?\C:\proj", null)]
+        [InlineData(@"\\.\C:\proj", null)]
+        [InlineData(@"proj", null)]
+        [InlineData(@"..\proj", null)]
+        [InlineData(@"C:proj", null)]
+        [InlineData(@"C:\proj:stream", null)]
+        [InlineData(@"C:\proj\.claude\worktrees\abcd1234:ads", null)]
+        [InlineData("", null)]
+        [InlineData(null, null)]
+        // rejected: sibling prefix, outside the root, inside the root but not a worktree, worktree depth 0
+        [InlineData(@"C:\proj2", null)]
+        [InlineData(@"C:\proj2\.claude\worktrees\abcd1234", null)]
+        [InlineData(@"C:\other", null)]
+        [InlineData(@"D:\proj", null)]
+        [InlineData(@"C:\", null)]
+        [InlineData(@"C:\proj\src", null)]
+        [InlineData(@"C:\proj\.claude", null)]
+        [InlineData(@"C:\proj\.claude\worktrees", null)]
+        [InlineData(@"C:\proj\.claude\worktrees\", null)]
+        [InlineData(@"C:\proj\.claude\worktreesX\abcd1234", null)]
+        // rejected: '..' climbing out after canonicalisation
+        [InlineData(@"C:\proj\.claude\worktrees\abcd1234\..\..\..\..\other", null)]
+        [InlineData(@"C:\proj\.claude\worktrees\..", null)]
+        public void ValidateResumeCwd_accepts_only_the_root_or_a_worktree_as_a_local_drive_path(string cwd, string expected)
+        {
+            Assert.Equal(expected, SessionCatalog.ValidateResumeCwd(@"C:\proj", cwd));
+        }
+
+        [Fact]
+        public void ValidateResumeCwd_accepts_nothing_for_a_UNC_project_root()
+        {
+            Assert.Null(SessionCatalog.ValidateResumeCwd(@"\\server\share\proj", @"\\server\share\proj"));
+        }
+
+        [Fact]
+        public void A_UNC_cwd_in_a_transcript_never_reaches_the_filesystem()
+        {
+            // Opening the launch prompt must not make Windows authenticate to an attacker's SMB host.
+            // The transcript sits in the root's folder but records only a UNC cwd.
+            var id = Write(_rootFolder, Now.AddHours(-1),
+                User("hi", @"\\evilhost\share"),
+                Assistant("ok", @"\\evilhost\share"));
+
+            var probed = new List<string>();
+            var catalog = Catalog();
+            catalog.DirectoryExists = p => { probed.Add(p); return Directory.Exists(p); };
+
+            var entry = Assert.Single(List(catalog));
+
+            Assert.DoesNotContain(probed, p => p.StartsWith(@"\\", StringComparison.Ordinal) || p.StartsWith("//", StringComparison.Ordinal));
+            Assert.Contains(probed, p => string.Equals(p, _projectRoot, StringComparison.OrdinalIgnoreCase));
+            // The root-folder fallback: resuming from the root finds a transcript stored in its folder.
+            Assert.Equal(id, entry.SessionId);
+            Assert.Equal(_projectRoot, entry.Cwd);
+        }
+
+        [Fact]
+        public void A_worktree_transcript_whose_recorded_cwds_do_not_encode_to_its_folder_is_dropped()
+        {
+            // Every cwd is the project root, but the transcript lives in the WORKTREE's folder: resuming
+            // from the root would answer "No conversation found". Never offered with a mismatched cwd.
+            Write(_worktreeFolder, Now.AddHours(-1), User("x", _projectRoot), Assistant("y", _projectRoot));
+
+            Assert.Empty(List());
+        }
+
+        [Fact]
+        public void A_root_transcript_with_only_worktree_subfolder_cwds_resumes_from_the_root()
+        {
+            var docking = Directory.CreateDirectory(Path.Combine(_worktreeDir, "Docking")).FullName;
+            Write(_rootFolder, Now.AddHours(-1), User("x", docking), Assistant("y", docking));
+
+            var entry = Assert.Single(List());
+            Assert.Equal(_projectRoot, entry.Cwd);
+        }
+
+        [Fact]
+        public void A_deleted_worktrees_folder_is_not_read_but_an_ambiguous_one_is()
+        {
+            var kept = WriteSimple(_rootFolder, Now.AddHours(-5));
+
+            // Unambiguous id, directory gone: skipped before any transcript in it is opened.
+            var gone = Directory.CreateDirectory(Path.Combine(_projectsRoot,
+                SessionCatalog.EncodeProjectPath(Path.Combine(_projectRoot, ".claude", "worktrees", "deadbeef")))).FullName;
+            Write(gone, Now.AddHours(-1), User("x", _projectRoot), Assistant("y", _projectRoot));
+
+            // "dead-beef" encodes with a '-', which could equally be a subfolder: kept and read.
+            var ambiguous = Directory.CreateDirectory(Path.Combine(_projectsRoot,
+                SessionCatalog.EncodeProjectPath(Path.Combine(_projectRoot, ".claude", "worktrees", "dead-beef")))).FullName;
+            Write(ambiguous, Now.AddHours(-2), User("x", _projectRoot), Assistant("y", _projectRoot));
+
+            var catalog = Catalog();
+            var entry = Assert.Single(List(catalog));
+
+            Assert.Equal(kept, entry.SessionId);
+            Assert.Equal(2, catalog.TranscriptsReadLastList); // kept + ambiguous; never the deleted worktree's
+        }
+
+        [Fact]
+        public void Transcripts_read_are_capped_at_three_times_max_newest_first()
+        {
+            // Seven newest transcripts that resume nothing, then one good one: with max 2 the budget is
+            // 6 reads, so the good one is never reached.
+            for (var i = 1; i <= 7; i++)
+                Write(_rootFolder, Now.AddMinutes(-i * 10), Hook("MULTITERMINAL_NAME=X", _projectRoot));
+            WriteSimple(_rootFolder, Now.AddHours(-5));
+
+            var catalog = Catalog();
+            var listed = List(catalog, max: 2);
+
+            Assert.Equal(3, SessionCatalog.ReadBudgetFactor);
+            Assert.Equal(6, catalog.TranscriptsReadLastList);
+            Assert.Empty(listed);
         }
 
         [Fact]
