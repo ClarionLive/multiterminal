@@ -295,6 +295,8 @@ namespace MultiTerminal.Docking
                 DefaultTerminal = project.DefaultTerminal,
                 // Omitting it would show every quiet-start project as off after a re-render.
                 QuietStart = project.QuietStart,
+                // Not shown by the panel; copied so the clone is complete (task ec2ed636).
+                LaunchMode = project.LaunchMode,
                 // Not currently serialized by ProjectPanelRenderer (so the panel's status badge,
                 // guarded by `project.status !== undefined`, never renders). Copied anyway so the
                 // clone is complete; surfacing the badge is a separate change.

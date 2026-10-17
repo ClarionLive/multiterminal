@@ -199,7 +199,10 @@ namespace MultiTerminal.Services
                 ("status",             "TEXT DEFAULT 'active'"),
                 // No DEFAULT: NULL reads as off, so every existing project keeps today's startup
                 // (Owner decision, GitHub #34 / task e0fa9d90). Project.QuietStart explains why null.
-                ("quiet_start",        "INTEGER")
+                ("quiet_start",        "INTEGER"),
+                // No DEFAULT: NULL reads as 'ask' (task ec2ed636), so every existing project keeps
+                // prompting. Project.ParseLaunchMode maps NULL/unknown to Ask.
+                ("launch_mode",        "TEXT")
             };
 
             foreach (var (colName, colDef) in newColumns)
@@ -614,7 +617,7 @@ namespace MultiTerminal.Services
                            source_path, deploy_path, build_output_path, build_command, deploy_command,
                            launch_command, project_type, current_version, change_log, is_pinned,
                            icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
-                           team_lead, default_terminal, source_control_account_id, status, quiet_start
+                           team_lead, default_terminal, source_control_account_id, status, quiet_start, launch_mode
                     FROM projects
                     WHERE id = @id
                 ";
@@ -646,7 +649,7 @@ namespace MultiTerminal.Services
                            source_path, deploy_path, build_output_path, build_command, deploy_command,
                            launch_command, project_type, current_version, change_log, is_pinned,
                            icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
-                           team_lead, default_terminal, source_control_account_id, status, quiet_start
+                           team_lead, default_terminal, source_control_account_id, status, quiet_start, launch_mode
                     FROM projects
                     ORDER BY is_pinned DESC, created_at DESC
                 ";
@@ -888,6 +891,33 @@ namespace MultiTerminal.Services
             }
         }
 
+        /// <summary>
+        /// Sets a project's launch mode (task ec2ed636): ask / new / continue. The only writer of
+        /// <c>launch_mode</c>; the SaveRichProject UPSERT does not name the column, so a
+        /// project.json re-save can never reset it.
+        /// <para>Ask is written as the string "ask", not NULL. Both read as Ask today, but an
+        /// explicit "ask" records that the user CHOSE it, so a future change of the default for
+        /// unset (NULL) projects cannot silently override that choice.</para>
+        /// </summary>
+        /// <returns>True if a row was updated, false if the project was not found.</returns>
+        public bool SetLaunchMode(string projectId, MultiTerminal.Models.ProjectLaunchMode mode)
+        {
+            if (string.IsNullOrWhiteSpace(projectId))
+                return false;
+
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand(
+                    "UPDATE projects SET launch_mode = @launchMode, updated_at = @updatedAt WHERE id = @id",
+                    _connection);
+                command.Parameters.AddWithValue("@launchMode", MultiTerminal.Models.Project.LaunchModeToStorage(mode));
+                command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
+                command.Parameters.AddWithValue("@id", projectId);
+
+                return command.ExecuteNonQuery() > 0;
+            }
+        }
+
         private MultiTerminal.Models.Project ReadRichProject(SQLiteDataReader reader)
         {
             return new MultiTerminal.Models.Project
@@ -921,7 +951,9 @@ namespace MultiTerminal.Services
                 SourceControlAccountId = reader.IsDBNull(25) ? null : reader.GetString(25),
                 Status = MultiTerminal.Models.Project.NormalizeStatus(
                     reader.IsDBNull(26) ? null : reader.GetString(26)),
-                QuietStart = reader.IsDBNull(27) ? (bool?)null : reader.GetInt32(27) == 1
+                QuietStart = reader.IsDBNull(27) ? (bool?)null : reader.GetInt32(27) == 1,
+                LaunchMode = MultiTerminal.Models.Project.ParseLaunchMode(
+                    reader.IsDBNull(28) ? null : reader.GetString(28))
             };
         }
 
