@@ -96,6 +96,7 @@ const ALLOWLIST_SITES = new Map([
   ['Services/PlanSeeder.cs',                     'static utility leaf — no instance seam for a sink; dependency-free, not plumbed (ruling #1)'],
   ['Services/SessionContextWriter.cs',           'static utility leaf — no instance seam for a sink; dependency-free, not plumbed (ruling #1)'],
   ['Services/WorktreeLayoutMigrationService.cs', 'static utility leaf — no instance seam for a sink; dependency-free, not plumbed (ruling #1)'],
+  ['Services/ClaudeProfileDataRoots.cs',         'static utility leaf (c8ee0eec) — its messages go to the sink MainForm passes to Configure; the one Debug.WriteLine is only the fallback before Configure runs (and in unit tests), where no sink exists yet (ruling #1)'],
 
   // ── 4c86f18d leaf sweep — dependency-free instance leaves (no sink, no broker; not plumbed) ─────────
   ['MCPServer/Services/ActivityFeedService.cs', 'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],
