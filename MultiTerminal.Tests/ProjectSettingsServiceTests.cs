@@ -92,6 +92,26 @@ namespace MultiTerminal.Tests
         /// field must leave Auto-commit as saved. Falsified: routing SyncProjectJson through
         /// ProjectService.SaveProject(LoadProject(path)) turns the first assertion red.
         /// </summary>
+        /// <summary>
+        /// The form's "applies at next launch" message (item 2) follows what the save actually changed: a
+        /// launch-time field says so, a field running terminals pick up at once does not.
+        /// </summary>
+        [Fact]
+        public void Only_a_launch_time_change_is_reported_as_applying_at_next_launch()
+        {
+            var p = Seed();
+            var buildOnly = _service.Save(UpdateFor(p, ("buildCommand", "dotnet build")));
+            var quiet = _service.Save(UpdateFor(p, ("quietStart", "true")));
+
+            Assert.True(buildOnly.Success, buildOnly.Error);
+            Assert.True(quiet.Success, quiet.Error);
+            Assert.False(buildOnly.AppliesAtNextLaunch);
+            Assert.True(quiet.AppliesAtNextLaunch);
+            Assert.Subset(
+                new HashSet<string>(ProjectSettingsService.EditableFields, StringComparer.Ordinal),
+                new HashSet<string>(ProjectSettingsSaveResult.LaunchTimeFields, StringComparer.Ordinal));
+        }
+
         [Fact]
         public void Auto_commit_survives_a_save_that_also_rewrites_project_json()
         {

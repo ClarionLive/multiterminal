@@ -58,6 +58,18 @@ namespace MultiTerminal.Services
 
         public bool McpServersChanged { get; set; }
 
+        /// <summary>
+        /// The scalar fields a terminal reads only when it starts. Changing one does nothing to a terminal
+        /// that is already running, so the form says so after the save.
+        /// </summary>
+        public static readonly IReadOnlyCollection<string> LaunchTimeFields = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "claudeProfile", "defaultTerminal", "quietStart", "launchCommand",
+        };
+
+        /// <summary>True when this save changed something running terminals will not pick up until they restart.</summary>
+        public bool AppliesAtNextLaunch => McpServersChanged || ChangedFields.Exists(LaunchTimeFields.Contains);
+
         internal static ProjectSettingsSaveResult Fail(string error) => new ProjectSettingsSaveResult { Success = false, Error = error };
     }
 

@@ -412,7 +412,7 @@ namespace MultiTerminal.ProjectSettings
                 catch (Exception ex) { _context.Log?.Error("ProjectSettings", $"Refresh after save failed: {ex.Message}"); }
             }
 
-            Post(new { type = "saveResult", success = result.Success, error = result.Error, warnings = result.Warnings });
+            Post(new { type = "saveResult", success = result.Success, error = result.Error, warnings = result.Warnings, nextLaunch = result.AppliesAtNextLaunch });
 
             // Reload so the page shows what is stored now (normalized values, new row ids).
             if (result.Success)

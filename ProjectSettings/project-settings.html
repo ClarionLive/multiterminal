@@ -200,7 +200,7 @@
         <section id="launch">
             <h2>Launch</h2>
             <p class="lead">How new terminals for this project start.</p>
-            <div class="note">These settings apply the next time a terminal for this project starts. Terminals already running keep the profile, terminal and MCP setup they started with.</div>
+            <div class="note">Claude profile, default terminal, quiet start and launch command apply the next time a terminal for this project starts. Terminals already running keep what they started with.</div>
             <div class="field"><label for="f-claudeProfile">Claude profile</label><select id="f-claudeProfile" data-field="claudeProfile" data-options="claudeProfiles"></select>
                 <div class="hint" id="profile-hint">Which Claude configuration folder (account, settings, sessions) the project's terminals use.</div></div>
             <div class="field"><label for="f-defaultTerminal">Default terminal</label><select id="f-defaultTerminal" data-field="defaultTerminal" data-options="terminals"></select></div>
@@ -256,6 +256,7 @@
         <section id="mcp">
             <h2>MCP &amp; Skills</h2>
             <p class="lead">Tools and skills the project's terminals get.</p>
+            <div class="note">MCP server changes apply the next time a terminal for this project starts. Terminals already running keep the servers they started with.</div>
             <h3>MCP servers</h3>
             <div data-list="mcpServers"></div>
             <div class="row" style="margin-bottom:6px">
@@ -593,7 +594,10 @@
                     state.saving = false;
                     if (msg.success) {
                         var w = (msg.warnings || []).join(' ');
-                        setStatus(w ? 'Saved. ' + w : 'Saved.', w ? 'error' : 'ok');
+                        var saved = msg.nextLaunch
+                            ? 'Saved. Launch settings apply to terminals started from now on; running ones are unchanged.'
+                            : 'Saved.';
+                        setStatus(w ? saved + ' ' + w : saved, w ? 'error' : 'ok');
                     } else {
                         setStatus(msg.error || 'Save failed.', 'error');
                         onChanged();
