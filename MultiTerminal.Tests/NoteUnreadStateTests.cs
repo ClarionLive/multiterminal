@@ -260,6 +260,25 @@ namespace MultiTerminal.Tests
             Assert.Equal(1, notes.BadgeCount);
         }
 
+        /// <summary>
+        /// Minimise is judged on the TOP-LEVEL window (pipeline Run 1, debugger HIGH). A docked
+        /// TerminalDocument is a DockContent, itself a non-top-level Form, and the main window's minimise
+        /// never reaches it. The first assertion proves this arrangement reproduces that: FindForm, the
+        /// previous resolution, picks the inner form.
+        /// </summary>
+        [Fact]
+        public void Minimise_is_judged_on_the_top_level_window_not_the_docked_content_form()
+        {
+            using var mainWindow = new System.Windows.Forms.Form();
+            using var dockedDocument = new WeifenLuo.WinFormsUI.Docking.DockContent { TopLevel = false };
+            using var pane = new System.Windows.Forms.Panel();
+            dockedDocument.Controls.Add(pane);
+            mainWindow.Controls.Add(dockedDocument);
+
+            Assert.Same(dockedDocument, pane.FindForm());
+            Assert.Same(mainWindow, HudNotesRenderer.SeenWindowFor(pane));
+        }
+
         // ── HUD tab badge ──
 
         private sealed class StubBadgeTab : System.Windows.Forms.Control, IZoomableTab, ITabBadgeSource

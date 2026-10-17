@@ -88,14 +88,23 @@ namespace MultiTerminal.Controls
         internal bool IsSeenByOwner()
         {
             if (!Visible) return false;
-            var form = FindForm();
+            var form = SeenWindowFor(this);
             return form != null && form.Visible && form.WindowState != FormWindowState.Minimized;
         }
 
-        // The window can change under us (a docked pane floated out), so follow FindForm each time.
+        /// <summary>
+        /// The window whose minimise decides whether <paramref name="control"/> can be seen: the TOP-LEVEL
+        /// form (MainForm when docked, the float window when floated). Not <see cref="Control.FindForm"/>:
+        /// that stops at the nearest Form, and a docked <c>TerminalDocument</c> is a DockContent, which is
+        /// itself a non-top-level Form whose WindowState never becomes Minimized and which gets no
+        /// Resize when the main window is minimised (pipeline Run 1, debugger HIGH).
+        /// </summary>
+        internal static Form SeenWindowFor(Control control) => control?.TopLevelControl as Form;
+
+        // The window can change under us (a docked pane floated out), so re-resolve it on every SendSeen.
         private void HookSeenForm()
         {
-            var form = FindForm();
+            var form = SeenWindowFor(this);
             if (ReferenceEquals(form, _seenForm)) return;
             if (_seenForm != null)
             {
@@ -115,6 +124,7 @@ namespace MultiTerminal.Controls
         private void SendSeen()
         {
             if (!_isInitialized) return;
+            HookSeenForm(); // docking or floating the pane changes the top-level window
             bool seen = IsSeenByOwner();
             if (_lastSentSeen == seen) return;
             _lastSentSeen = seen;
