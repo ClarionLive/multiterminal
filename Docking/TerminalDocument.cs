@@ -276,7 +276,7 @@ namespace MultiTerminal.Docking
 
         /// <summary>
         /// Forwarded from StartScreenControl: user clicked "New Project".
-        /// MainForm opens the EditProjectDialog.
+        /// MainForm opens the New Project dialog (NewProjectWpfDialog).
         /// </summary>
         public event EventHandler StartScreenNewProjectRequested;
 

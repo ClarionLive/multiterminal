@@ -123,8 +123,6 @@ const ALLOWLIST_SITES = new Map([
   // ── 4c86f18d UI+API sweep — sites that legitimately KEEP a Debug/Trace.WriteLine (no clean sink seam) ─
   ['API/MultiTerminalRestServer.cs',
     'converted except 1 self-fallback: the PresenceAdapter log callback writes Debug.WriteLine ONLY when _broker.DebugLogService is null — cannot route a "sink is null" fallback through the null sink (same pattern as PresenceAdapter)'],
-  ['Dialogs/EditProjectDialog.cs',
-    'single benign catch (source-control combo-box population); dialog has no broker/sink field and its caller chain (ProjectManagerDialog→MainForm) has none within 1 hop — no clean seam without cross-file plumbing'],
   ['Docking/PromptTreeDocument.cs',
     'dead/orphaned class — never constructed in the live app (MainForm GetContentFromPersistString maps its old persist-string to ProjectPanelDocument); no reachable seam to wire a sink into'],
   ['Program.cs',

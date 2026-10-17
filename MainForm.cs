@@ -525,10 +525,6 @@ namespace MultiTerminal
             // Project events
             _projectPanel.ProjectSelected += OnProjectSelected;
             _projectPanel.ProjectLaunchRequested += OnProjectLaunchRequested;
-            // Welcome-card "Manage Projects" → same dialog as the main toolbar button.
-            // The panel has no header toolbar, so without this the welcome state is a
-            // dead end for a user with no project open (task d2dd75a3).
-            _projectPanel.ManageProjectsRequested += (s, e) => ShowProjectManagerDialog();
 
             // Prompt events
             _projectPanel.PromptPasteRequested += OnPromptPasteRequested;
@@ -8986,36 +8982,6 @@ namespace MultiTerminal
             }
 
             return doc;
-        }
-
-        private void OnOpenProjectManager(object sender, EventArgs e)
-        {
-            ShowProjectManagerDialog();
-        }
-
-        private void ShowProjectManagerDialog()
-        {
-            using var projectDb = new MultiTerminal.Services.ProjectDatabase();
-            using (var dialog = new ProjectManagerDialog(_projectService, projectDb, _currentTheme, _mcpServer?.Broker))
-            {
-                dialog.ProjectOpened += (s, args) =>
-                {
-                    // This will be handled after dialog closes
-                };
-
-                if (dialog.ShowDialog(this) == DialogResult.OK && dialog.SelectedProject != null)
-                {
-                    // Open the selected project
-                    OnProjectSelected(this, new ProjectSelectedEventArgs(dialog.SelectedProject));
-                }
-                else if (_currentProject != null)
-                {
-                    // The dialog may have edited the project the panel is showing (its Claude profile,
-                    // for one). RefreshForProject re-reads the database row, so the panel does not keep
-                    // displaying the values from before the edit.
-                    _projectPanel?.RefreshForProject(_currentProject);
-                }
-            }
         }
 
         /// <summary>

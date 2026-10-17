@@ -6454,7 +6454,7 @@ namespace MultiTerminal.MCPServer.Services
             }
 
             // The database, not the _projects cache, is read first: rows written behind the broker's back
-            // (EditProjectDialog's and the start screen's SaveRichProject, migrations) reach the cache only
+            // (the start screen's SaveRichProject, the project settings form, migrations) reach the cache only
             // on restart.
             List<(string Id, string Name, string Path)> rows;
             try

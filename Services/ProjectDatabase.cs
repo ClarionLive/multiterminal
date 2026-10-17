@@ -732,10 +732,10 @@ namespace MultiTerminal.Services
             // fields like team_lead, icon, project_type, etc.) from wiping those values.
             // source_control_account_id is ALSO COALESCE-ed: several callers re-save via the
             // SaveProject -> SaveRichProject wrapper from a project.json that doesn't carry the
-            // binding (ProjectManagerDialog edit, ChangelogService task-done, VersioningService
-            // bump), so a null here must NOT erase the SQLite binding. The deliberate
-            // "(None)"/clear is applied out-of-band by ProjectDatabase.SetSourceControlAccount
-            // (EditProjectDialog) and UpdateProjectField (ProjectPanel), never via this UPSERT.
+            // binding (ChangelogService task-done, VersioningService bump), so a null here must
+            // NOT erase the SQLite binding. The deliberate "(None)"/clear is applied out-of-band by
+            // UpdateProjectField (ProjectSettingsService, ticket e20e2ce0; SetSourceControlAccount
+            // does the same but lost its last caller with EditProjectDialog), never via this UPSERT.
             // claude_profile is stricter still: it is written on INSERT only and the ON CONFLICT
             // branch leaves it alone. project.json DOES carry the profile name, so a COALESCE would
             // let a stale file value replace a profile changed since (the re-savers above), and a
