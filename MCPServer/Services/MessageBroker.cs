@@ -363,6 +363,21 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// A project's unread-note count may have changed because the Owner read, edited, renamed or
+        /// deleted a note in one pane (task c133b27d). Every Notes pane showing that project recounts, so
+        /// all terminals on it show the same badge. Agent writes are announced on
+        /// <see cref="ProjectNotesChanged"/> instead, which listeners also recount on.
+        /// </summary>
+        public event EventHandler<ProjectNoteReadStateChangedEventArgs> ProjectNoteReadStateChanged;
+
+        /// <summary>Raises <see cref="ProjectNoteReadStateChanged"/> for <paramref name="projectPath"/>, in its canonical key.</summary>
+        public void NotifyProjectNoteReadStateChanged(string projectPath)
+        {
+            if (string.IsNullOrEmpty(projectPath)) return;
+            RaiseSafe(ProjectNoteReadStateChanged, new ProjectNoteReadStateChangedEventArgs(TaskDatabase.CanonicalNoteTabKey(projectPath)));
+        }
+
+        /// <summary>
         /// Activity service for auto-updating terminal activity on task operations.
         /// Set via DI after broker is created.
         /// </summary>

@@ -249,6 +249,7 @@ namespace MultiTerminal.Services
             RunMigration(nameof(MigrateAddAgentToTaskWorktrees), MigrateAddAgentToTaskWorktrees);
             RunMigration(nameof(MigrateNormalizeNoteTabPaths), MigrateNormalizeNoteTabPaths);
             RunMigration(nameof(MigrateAddNoteTabAuthorship), MigrateAddNoteTabAuthorship);
+            RunMigration(nameof(MigrateAddNoteTabReadState), MigrateAddNoteTabReadState);
 
             // Seed default agent profiles on first run
             SeedDefaultProfiles();
@@ -594,6 +595,8 @@ namespace MultiTerminal.Services
                     updated_at DATETIME DEFAULT (datetime('now')),
                     created_by TEXT,
                     updated_by TEXT,
+                    agent_rev INTEGER NOT NULL DEFAULT 0,
+                    owner_read_rev INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(project_path, tab_name)
                 );
             ";
@@ -6462,12 +6465,16 @@ namespace MultiTerminal.Services
         /// clears <c>updated_by</c>, recording that the Owner saved the tab last, which is what stops an
         /// agent's later <see cref="AgentNoteWriteMode.Replace"/> from discarding the Owner's edit.
         /// <c>created_by</c> is never touched, so an agent's tab stays marked as the agent's.
+        /// Clearing <c>updated_by</c> also marks the tab read (task c133b27d), and <c>owner_read_rev</c> is
+        /// caught up so the row says so explicitly.
         /// </summary>
-        public void SaveNoteTab(string projectPath, string tabName, string content, int? tabOrder = null, bool? isDefault = null)
+        /// <returns>True when the tab was unread before this save, so the caller can announce the change.</returns>
+        public bool SaveNoteTab(string projectPath, string tabName, string content, int? tabOrder = null, bool? isDefault = null)
         {
             using var gate = LockConn();
-            if (string.IsNullOrEmpty(projectPath) || string.IsNullOrEmpty(tabName)) return;
+            if (string.IsNullOrEmpty(projectPath) || string.IsNullOrEmpty(tabName)) return false;
             projectPath = NormalizeNoteTabPath(projectPath); // canonical key — stable across path-spelling
+            bool wasUnread = FindNoteTabExact(projectPath, tabName)?.IsUnread == true;
 
             // Get current max tab_order if not specified
             if (!tabOrder.HasValue)
@@ -6484,6 +6491,7 @@ namespace MultiTerminal.Services
                 ON CONFLICT(project_path, tab_name) DO UPDATE SET
                     content = @content,
                     updated_by = NULL,
+                    owner_read_rev = agent_rev,
                     updated_at = datetime('now')";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@id", Guid.NewGuid().ToString("N").Substring(0, 8));
@@ -6493,6 +6501,7 @@ namespace MultiTerminal.Services
             cmd.Parameters.AddWithValue("@order", tabOrder.Value);
             cmd.Parameters.AddWithValue("@isDefault", (isDefault ?? false) ? 1 : 0);
             cmd.ExecuteNonQuery();
+            return wasUnread;
         }
 
         /// <summary>
@@ -6508,7 +6517,7 @@ namespace MultiTerminal.Services
             GetProjectNoteTabs(projectPath); // reentrant under the same lock
             projectPath = NormalizeNoteTabPath(projectPath);
 
-            const string sql = @"SELECT tab_name, content, is_default, tab_order, created_by, updated_by, updated_at
+            const string sql = @"SELECT tab_name, content, is_default, tab_order, created_by, updated_by, updated_at, agent_rev, owner_read_rev
                                  FROM project_note_tabs WHERE project_path = @path ORDER BY tab_order";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@path", projectPath);
@@ -6518,6 +6527,62 @@ namespace MultiTerminal.Services
                 result.Add(ReadNoteTab(reader));
             }
             return result;
+        }
+
+        /// <summary>
+        /// The unread rule (task c133b27d), the SQL twin of <see cref="ProjectNoteTab.IsUnread"/>: an agent
+        /// wrote the tab after the Owner last saw it. Rows that predate the read-state columns have
+        /// <c>agent_rev = owner_read_rev = 0</c> and so never count.
+        /// </summary>
+        internal const string NoteTabUnreadSql = "updated_by IS NOT NULL AND agent_rev > owner_read_rev";
+
+        /// <summary>How many of a project's note tabs are unread (task c133b27d). Drives the HUD badge.</summary>
+        public int CountUnreadNoteTabs(string projectPath)
+        {
+            using var gate = LockConn();
+            if (string.IsNullOrEmpty(projectPath)) return 0;
+            projectPath = NormalizeNoteTabPath(projectPath);
+            const string sql = "SELECT COUNT(*) FROM project_note_tabs WHERE project_path = @path AND " + NoteTabUnreadSql;
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@path", projectPath);
+            return Convert.ToInt32(cmd.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>
+        /// The Owner saw <paramref name="tabName"/> as of agent revision <paramref name="seenRev"/>
+        /// (task c133b27d). Takes the revision the pane actually DISPLAYED, never the stored one, so an
+        /// agent write that lands between the pane rendering the tab and this call stays unread.
+        /// <c>MAX</c> keeps a late, stale call from un-reading a newer one.
+        /// </summary>
+        /// <returns>True when the tab went from unread to read.</returns>
+        public bool MarkNoteTabRead(string projectPath, string tabName, long seenRev)
+        {
+            using var gate = LockConn();
+            if (string.IsNullOrEmpty(projectPath) || string.IsNullOrEmpty(tabName) || seenRev <= 0) return false;
+            projectPath = NormalizeNoteTabPath(projectPath);
+            const string sql = @"UPDATE project_note_tabs SET owner_read_rev = MIN(agent_rev, MAX(owner_read_rev, @rev))
+                                 WHERE project_path = @path AND tab_name = @name AND " + NoteTabUnreadSql + @"
+                                   AND MIN(agent_rev, @rev) > owner_read_rev";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@path", projectPath);
+            cmd.Parameters.AddWithValue("@name", tabName);
+            cmd.Parameters.AddWithValue("@rev", seenRev);
+            if (cmd.ExecuteNonQuery() == 0) return false;
+            var after = FindNoteTabExact(projectPath, tabName);
+            return after != null && !after.IsUnread;
+        }
+
+        // Exact-name lookup for the Owner's paths (the pane addresses tabs by their stored name).
+        private ProjectNoteTab FindNoteTabExact(string canonicalPath, string tabName)
+        {
+            using var gate = LockConn();
+            const string sql = @"SELECT tab_name, content, is_default, tab_order, created_by, updated_by, updated_at, agent_rev, owner_read_rev
+                                 FROM project_note_tabs WHERE project_path = @path AND tab_name = @name";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@path", canonicalPath);
+            cmd.Parameters.AddWithValue("@name", tabName);
+            using var reader = cmd.ExecuteReader();
+            return reader.Read() ? ReadNoteTab(reader) : null;
         }
 
         /// <summary>
@@ -6627,7 +6692,7 @@ namespace MultiTerminal.Services
             // tab_name's UNIQUE constraint is case-sensitive (SQLite BINARY), but the Notes pane refuses
             // a rename that differs only by case; matching NOCASE here keeps an agent from creating
             // "todo" next to the Owner's "Todo", which the Owner would read as the same tab.
-            const string sql = @"SELECT tab_name, content, is_default, tab_order, created_by, updated_by, updated_at
+            const string sql = @"SELECT tab_name, content, is_default, tab_order, created_by, updated_by, updated_at, agent_rev, owner_read_rev
                                  FROM project_note_tabs WHERE project_path = @path AND tab_name = @name COLLATE NOCASE
                                  ORDER BY (tab_name = @name) DESC LIMIT 1";
             using var cmd = new SQLiteCommand(sql, _connection);
@@ -6652,10 +6717,10 @@ namespace MultiTerminal.Services
         {
             using var gate = LockConn();
             const string sql = @"
-                INSERT INTO project_note_tabs (id, project_path, tab_name, content, tab_order, is_default, created_at, updated_at, created_by, updated_by)
+                INSERT INTO project_note_tabs (id, project_path, tab_name, content, tab_order, is_default, created_at, updated_at, created_by, updated_by, agent_rev)
                 VALUES (@id, @path, @name, @content,
                         (SELECT COALESCE(MAX(tab_order), -1) + 1 FROM project_note_tabs WHERE project_path = @path),
-                        0, datetime('now'), datetime('now'), @agent, @agent)";
+                        0, datetime('now'), datetime('now'), @agent, @agent, 1)";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@id", Guid.NewGuid().ToString("N").Substring(0, 8));
             cmd.Parameters.AddWithValue("@path", canonicalPath);
@@ -6668,7 +6733,8 @@ namespace MultiTerminal.Services
         private void UpdateAgentNoteTab(string canonicalPath, string tabName, string content, string agentName)
         {
             using var gate = LockConn();
-            const string sql = @"UPDATE project_note_tabs SET content = @content, updated_by = @agent, updated_at = datetime('now')
+            const string sql = @"UPDATE project_note_tabs SET content = @content, updated_by = @agent, updated_at = datetime('now'),
+                                     agent_rev = agent_rev + 1
                                  WHERE project_path = @path AND tab_name = @name";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@path", canonicalPath);
@@ -6699,6 +6765,8 @@ namespace MultiTerminal.Services
                 CreatedBy = reader.IsDBNull(4) ? null : reader.GetString(4),
                 UpdatedBy = reader.IsDBNull(5) ? null : reader.GetString(5),
                 UpdatedAt = updatedAt,
+                AgentRev = reader.GetInt64(7),
+                OwnerReadRev = reader.GetInt64(8),
             };
         }
 
@@ -6903,6 +6971,32 @@ namespace MultiTerminal.Services
             if (!columns.Contains("updated_by"))
             {
                 using var alter = new SQLiteCommand("ALTER TABLE project_note_tabs ADD COLUMN updated_by TEXT", _connection);
+                alter.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// Adds note-tab read state (task c133b27d): <c>agent_rev</c> / <c>owner_read_rev</c>. Both default
+        /// to 0 on every existing row, so nothing already in the database counts as unread after the
+        /// upgrade: the rule needs <c>agent_rev &gt; owner_read_rev</c>. Guarded per column.
+        /// </summary>
+        private void MigrateAddNoteTabReadState()
+        {
+            var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using (var info = new SQLiteCommand("PRAGMA table_info(project_note_tabs)", _connection))
+            using (var reader = info.ExecuteReader())
+            {
+                while (reader.Read()) columns.Add(reader.GetString(1));
+            }
+
+            if (!columns.Contains("agent_rev"))
+            {
+                using var alter = new SQLiteCommand("ALTER TABLE project_note_tabs ADD COLUMN agent_rev INTEGER NOT NULL DEFAULT 0", _connection);
+                alter.ExecuteNonQuery();
+            }
+            if (!columns.Contains("owner_read_rev"))
+            {
+                using var alter = new SQLiteCommand("ALTER TABLE project_note_tabs ADD COLUMN owner_read_rev INTEGER NOT NULL DEFAULT 0", _connection);
                 alter.ExecuteNonQuery();
             }
         }
