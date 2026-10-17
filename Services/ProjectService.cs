@@ -480,6 +480,33 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Applies <paramref name="mutate"/> to a folder's .claude/project.json and writes it back, touching
+        /// nothing else (ticket e20e2ce0: the project settings form's file sync). File only, like
+        /// <see cref="UpdateProjectJsonClaudeProfile"/>, and for the same reason: going through
+        /// <see cref="SaveProject"/> would push the file's values, including its unserialized gitAutoCommit,
+        /// back over the database row the form just wrote.
+        /// </summary>
+        /// <returns>False, writing nothing, when the folder has no project.json or the file answers to a
+        /// different id.</returns>
+        public bool UpdateProjectJson(string projectPath, string projectId, Action<Project> mutate)
+        {
+            if (mutate == null || string.IsNullOrWhiteSpace(projectPath) || !IsProjectDirectory(projectPath))
+                return false;
+
+            var fileProject = LoadProject(projectPath);
+            if (fileProject == null || !string.Equals(fileProject.Id, projectId, StringComparison.Ordinal))
+                return false;
+
+            mutate(fileProject);
+
+            // CA3003: projectPath is an app-managed project root from the database, not web input.
+#pragma warning disable CA3003
+            File.WriteAllText(GetProjectConfigPath(projectPath), SerializeProjectJson(fileProject));
+#pragma warning restore CA3003
+            return true;
+        }
+
+        /// <summary>
         /// Brings a folder's project.json copy of the Claude profile name into line with the database
         /// value (ticket c8ee0eec), and says so when it cannot. The database is the authority and is NOT
         /// touched here; this only stops the portable copy going stale, which matters when the folder is

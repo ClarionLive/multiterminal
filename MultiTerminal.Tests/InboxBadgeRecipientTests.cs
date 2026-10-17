@@ -23,8 +23,8 @@ namespace MultiTerminal.Tests
     /// WHY THESE ARE SOURCE-LEVEL ASSERTIONS: DashboardHeaderControl is a WinForms UserControl
     /// hosting WebView2. It is not unit-instantiable without a message loop and a browser
     /// environment, so there is no honest way to exercise the handler in-process. The repo
-    /// already uses this technique for exactly that reason — see
-    /// <see cref="ProjectPanelCopyCompletenessTests"/>, whose failure mode was likewise "silence
+    /// already used this technique for exactly that reason — the Project pane's copy-completeness
+    /// tests (removed with the pane, ticket e20e2ce0), whose failure mode was likewise "silence
     /// in the UI layer". These tests pin the two properties that make the badge correct, so the
     /// regression cannot return unnoticed even though the control itself cannot be driven here.
     ///
@@ -36,8 +36,7 @@ namespace MultiTerminal.Tests
     {
         /// <summary>
         /// Repo root from THIS FILE's compile-time path — unaffected by the runner's working
-        /// directory and correct inside a git worktree. (Same approach as
-        /// ProjectPanelCopyCompletenessTests.)
+        /// directory and correct inside a git worktree.
         /// </summary>
         private static string RepoRoot([CallerFilePath] string thisFile = "")
             => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile) ?? ".", ".."));

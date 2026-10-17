@@ -550,6 +550,27 @@ namespace MultiTerminal.Services
             }
         }
 
+        /// <summary>
+        /// Runs <paramref name="body"/> as one transaction on this class's connection: every write the body
+        /// makes through this class's public methods commits together or not at all (ticket e20e2ce0, so a
+        /// project settings save cannot leave half its lists written). _dbLock is held throughout and is
+        /// re-entrant, so those methods run inside it unchanged; other threads wait for the commit.
+        /// The body must not touch another connection owner: that owner's write would wait on this
+        /// transaction's file lock while this thread waits on it.
+        /// </summary>
+        public void RunInTransaction(string operation, string projectId, Action body)
+        {
+            if (body == null) throw new ArgumentNullException(nameof(body));
+            // GATE BEFORE _dbLock, the SqliteWriteGate lock-ordering rule.
+            using var writeGate = SqliteWriteGate.EnterWrite(operation, projectId);
+            lock (_dbLock)
+            {
+                using var tx = _connection.BeginTransaction();
+                body();
+                tx.Commit();
+            }
+        }
+
         /// <summary>Every table whose rows belong to a project (project_id REFERENCES projects(id)).</summary>
         internal static readonly string[] ProjectChildTables =
         {
@@ -732,10 +753,10 @@ namespace MultiTerminal.Services
             // fields like team_lead, icon, project_type, etc.) from wiping those values.
             // source_control_account_id is ALSO COALESCE-ed: several callers re-save via the
             // SaveProject -> SaveRichProject wrapper from a project.json that doesn't carry the
-            // binding (ProjectManagerDialog edit, ChangelogService task-done, VersioningService
-            // bump), so a null here must NOT erase the SQLite binding. The deliberate
-            // "(None)"/clear is applied out-of-band by ProjectDatabase.SetSourceControlAccount
-            // (EditProjectDialog) and UpdateProjectField (ProjectPanel), never via this UPSERT.
+            // binding (ChangelogService task-done, VersioningService bump), so a null here must
+            // NOT erase the SQLite binding. The deliberate "(None)"/clear is applied out-of-band by
+            // UpdateProjectField (ProjectSettingsService, ticket e20e2ce0; SetSourceControlAccount
+            // does the same but lost its last caller with EditProjectDialog), never via this UPSERT.
             // claude_profile is stricter still: it is written on INSERT only and the ON CONFLICT
             // branch leaves it alone. project.json DOES carry the profile name, so a COALESCE would
             // let a stale file value replace a profile changed since (the re-savers above), and a
@@ -983,7 +1004,7 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Get all team member profiles that have is_team_lead = 1.
         /// Returns a list of lightweight profile summaries (id, displayName, avatarUrl)
-        /// for populating the team lead dropdown in the Project Panel.
+        /// for populating a team lead dropdown.
         /// ProjectDatabase shares the same multiterminal.db file as TaskDatabase, so it can
         /// query team_member_profiles directly.
         /// </summary>

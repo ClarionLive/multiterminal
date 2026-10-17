@@ -14,7 +14,7 @@ namespace MultiTerminal.Dialogs
     /// is a real choice: more than one profile exists and no project owns the folder (the caller
     /// checks both; a folder a project owns always uses that project's profile and is never asked
     /// about). The pane's current profile is preselected, so Enter keeps it.
-    /// <para>The list is built by <see cref="ClaudeProfileChoices.Build"/>, as Edit Project's is. A
+    /// <para>The list is built by <see cref="ClaudeProfileChoices.Build"/>, as the project settings form's is. A
     /// pane whose current profile is no longer configured on this machine therefore shows that name
     /// as its own selected "(not configured on this machine)" entry, which cannot be launched: the
     /// Launch button stays disabled until a configured profile is picked. Default is never

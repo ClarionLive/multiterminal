@@ -14,9 +14,9 @@ namespace MultiTerminal.Tests
     ///
     /// <para>Storage facts run against a real temp SQLite DB and a real temp project folder.</para>
     ///
-    /// <para>Not covered: EditProjectDialog and ProjectManagerDialog themselves (that the combo is
-    /// filled, read on save, and that the dialogs call the setters). Those are WinForms wiring no fact
-    /// here executes; they need a live check. Nothing here launches a terminal either.</para>
+    /// <para>Not covered: the project settings form's page (that the dropdown is filled and read on save).
+    /// ProjectSettingsServiceTests covers the save path it calls; the page itself needs a live check.
+    /// Nothing here launches a terminal either.</para>
     /// </summary>
     public sealed class ClaudeProfileProjectStorageTests : IDisposable
     {

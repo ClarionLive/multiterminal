@@ -9,7 +9,7 @@ paths:
 - ~156 C# production files, ~66K lines of code
 - 3 SQLite databases (multiterminal.db for tasks/sessions/knowledge/profiles/code-graph, projects in same db, message queue separate)
 - 19 data models, 23 REST controllers, 110 MCP tools (counted 2026-10-16 as the `        name: "` lines in mcp/index.js; it once read 92 while the real count was 107)
-- 12 UI panels (WebView2-based), 11 dialog windows
+- Dockable UI panels (mostly WebView2-based) plus dialog windows and the project settings form (not counted here: the old "12 panels, 11 dialogs" figures went stale when ticket e20e2ce0 removed the Project pane and two dialogs)
 - REST API on port 5050, MCP server via Node.js, MCP Gateway (McpGateway.exe)
 
 # Keeping This Summary Current

@@ -79,7 +79,7 @@
           <ol>
             <li>In <strong>Settings &rarr; Claude Profiles</strong>, click <strong>Add profile</strong> and type a name such as <code>Work</code>.</li>
             <li>Click <strong>Sign in&hellip;</strong> on that row and log in to Claude in the window that opens.</li>
-            <li>Open <strong>Edit Project</strong> for each work project and choose <code>Work</code> under <strong>Claude profile</strong>.</li>
+            <li>Open each work project's settings (the gear on its Home card or Browse All row) and choose <code>Work</code> under <strong>Launch &rarr; Claude profile</strong>, then <strong>Save</strong>.</li>
             <li>Launch as usual. Every terminal in that project's folder now runs under <code>Work</code>; everything else keeps using <code>Default</code>.</li>
           </ol>
         </div>
@@ -135,7 +135,7 @@
         <p>Profiles are a setting of <em>this machine</em>. If you remove or rename one that projects still use, MultiTerminal warns you first: those projects will refuse to start until you pick another profile for them.</p>
 
         <h2 id="project">Choosing a profile for a project</h2>
-        <p>Open <strong>Edit Project</strong> and choose from the <strong>Claude profile</strong> list. <code>Default</code> means the project has no profile of its own.</p>
+        <p>Open the project's settings (the gear on its Home card, its Browse All row, or a terminal's status bar) and choose from the <strong>Claude profile</strong> list under <strong>Launch</strong>. <code>Default</code> means the project has no profile of its own.</p>
         <p>A project remembers its profile by <em>name</em>. The name also travels with the project in its <code>.claude\project.json</code>, so the same project on another machine asks for the same profile name. If that machine has no profile with that name, the list shows it as <code>(not configured on this machine)</code> and the project will not launch there until you either add a profile with that name in Settings or choose another one for the project.</p>
 
         <h2 id="picks">How a launch picks its profile</h2>
@@ -152,7 +152,7 @@
             <tr><td>A terminal in a folder no project owns</td><td><code>Default</code>, unless you pick another one (below).</td></tr>
           </tbody>
         </table>
-        <p>The <strong>Claude profile</strong> choice in <strong>Just Claude</strong> and <strong>Launch as</strong> appears only when it is a real choice: you have more than one profile, and the folder belongs to no project. For a folder a project owns, <strong>Just Claude</strong> shows that project's profile as fixed, and <strong>Launch as</strong> does not ask at all. To change it, change the project in <strong>Edit Project</strong>.</p>
+        <p>The <strong>Claude profile</strong> choice in <strong>Just Claude</strong> and <strong>Launch as</strong> appears only when it is a real choice: you have more than one profile, and the folder belongs to no project. For a folder a project owns, <strong>Just Claude</strong> shows that project's profile as fixed, and <strong>Launch as</strong> does not ask at all. To change it, change the project's profile in its settings (<strong>Launch &rarr; Claude profile</strong>).</p>
         <p><strong>Launch as</strong> preselects the profile the terminal is already running under. If that profile has since been removed from this machine, it is shown as <code>(not configured on this machine)</code> and <strong>Launch</strong> stays disabled until you pick a profile that exists. It does not fall back to <code>Default</code> for you.</p>
         <p>A plain PowerShell terminal gets the same profile as a Claude terminal would in that folder, so typing <code>claude</code> in it later lands in the right place. This applies to every terminal MultiTerminal starts, whatever command it runs.</p>
         <p>After you restart MultiTerminal, a restored pane shows its start screen. Whatever you start from there is decided again by the rules above.</p>
@@ -167,7 +167,7 @@
             <tr>
               <td>The profile "is not configured on this machine"</td>
               <td>The project names a profile this machine does not have. Common after moving a project between machines, or after removing or renaming a profile.</td>
-              <td>Add a profile with that name in <strong>Settings &rarr; Claude Profiles</strong>, or choose another profile for the project in <strong>Edit Project</strong>.</td>
+              <td>Add a profile with that name in <strong>Settings &rarr; Claude Profiles</strong>, or choose another profile for the project in its settings (<strong>Launch &rarr; Claude profile</strong>).</td>
             </tr>
             <tr>
               <td>The profile "points at" a folder "which does not exist"</td>
@@ -192,17 +192,17 @@
             <tr>
               <td>"The folder looks moved or copied"</td>
               <td>The folder's <code>.claude\project.json</code> says it is a project that MultiTerminal has registered at a <em>different</em> folder, and the two disagree about the profile. MultiTerminal will not guess which is right.</td>
-              <td>If you moved the project, update its folder in <strong>Edit Project</strong>. If the folder is a copy, remove or correct the <code>.claude\project.json</code> inside it.</td>
+              <td>If you moved the project, point its <strong>Source</strong> path (project settings, <strong>Paths</strong>) at the new folder; the project folder itself is read-only there. If the folder is a copy, remove or correct the <code>.claude\project.json</code> inside it.</td>
             </tr>
             <tr>
               <td>The folder "is registered to more than one project" with different profiles</td>
               <td>Two projects claim the same folder and are set to different profiles.</td>
-              <td>Give both projects the same profile in <strong>Edit Project</strong>, or remove the duplicate project.</td>
+              <td>Give both projects the same profile in their settings (<strong>Launch &rarr; Claude profile</strong>), or delete the duplicate project (its settings, <strong>Danger zone</strong>, or the trash button on its Browse All row).</td>
             </tr>
             <tr>
               <td>A profile "was chosen for it, but its folder belongs to project&hellip;"</td>
               <td>A profile was picked for a folder that a project owns, and it is not that project's profile. With <strong>Launch as</strong> this can also appear after you picked: the identity turned out to have its work in a project's folder, not the folder you were asked about. The terminal is stopped and returned to its start screen; the project's profile is not used in place of your pick.</td>
-              <td>Start it without picking, or change the project's profile in <strong>Edit Project</strong>.</td>
+              <td>Start it without picking, or change the project's profile in its settings (<strong>Launch &rarr; Claude profile</strong>).</td>
             </tr>
             <tr>
               <td>MultiTerminal "could not work out which Claude profile it belongs under"</td>

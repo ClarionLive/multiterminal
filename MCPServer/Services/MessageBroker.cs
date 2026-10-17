@@ -6134,7 +6134,8 @@ namespace MultiTerminal.MCPServer.Services
 
         /// <summary>
         /// Compensating delete for a create whose caller failed AFTER <see cref="CreateProject"/> succeeded
-        /// (the Project Manager's rich save, task 9f95ab0c Run 3), so a retry starts clean. ID-bound: removes
+        /// (written for the Project Manager's rich save, task 9f95ab0c Run 3; no production caller since that
+        /// dialog was retired in e20e2ce0), so a retry starts clean. ID-bound: removes
         /// the row and cache entry with exactly this id, and the folder's project.json only if it carries
         /// this id. Returns null when done (or when there was nothing with that id), else why it could not.
         /// </summary>
@@ -6313,10 +6314,9 @@ namespace MultiTerminal.MCPServer.Services
         /// One global lock is fine: creates are rare and human-paced.
         ///
         /// What it covers: the paths that CREATE a project in a folder all run through this broker,
-        /// in-process: the start-screen New Project dialog (MainForm), the Project Manager dialog's New
-        /// Project (routed here in Run 2; it used to write a fresh project.json via
-        /// ProjectService.RegisterProject before the broker saw it), and POST /api/projects (so the
-        /// create_project MCP tool). ProjectService.RegisterProject now has no callers; the
+        /// in-process: the start-screen New Project dialog (MainForm) and POST /api/projects (so the
+        /// create_project MCP tool). (The Project Manager dialog's New Project also came here from Run 2
+        /// until the dialog was retired in e20e2ce0.) ProjectService.RegisterProject now has no callers; the
         /// ProjectRegistered sync hook that adopts its output still runs through CreateProject. Paths that
         /// are NOT covered, and why that is safe: ChangelogService/VersioningService and the edit dialogs
         /// re-save an already registered project under its own id; MainForm's auto-registration of a
@@ -6478,7 +6478,7 @@ namespace MultiTerminal.MCPServer.Services
             }
 
             // The database, not the _projects cache, is read first: rows written behind the broker's back
-            // (EditProjectDialog's and the start screen's SaveRichProject, migrations) reach the cache only
+            // (the start screen's SaveRichProject, the project settings form, migrations) reach the cache only
             // on restart.
             List<(string Id, string Name, string Path)> rows;
             try
@@ -6779,8 +6779,8 @@ namespace MultiTerminal.MCPServer.Services
 
         /// <summary>
         /// Canonical project-delete path. Every surface (REST DELETE /api/projects/{id}, the
-        /// delete_project MCP tool, the Project Manager dialog's callers, and the projects-pane
-        /// delete) routes here so a project is removed consistently:
+        /// delete_project MCP tool, the Home card and Browse All trash, and the project settings
+        /// form's Danger zone) routes here so a project is removed consistently:
         ///  - unregistered via <see cref="Services.ProjectService.UnregisterProject"/> — the only
         ///    removal that fires ProjectRemoved/RegistryChangedExternally (so CodeGraphWatcher drops
         ///    the root's FileSystemWatcher) AND deletes .claude/project.json when asked;
@@ -6928,6 +6928,46 @@ namespace MultiTerminal.MCPServer.Services
             RaiseSafe(ProjectsUpdated, projects);
         }
 
+        /// <summary>
+        /// Raises <see cref="ProjectsUpdated"/> for a project change written outside the broker: the project
+        /// settings form saves through <c>ProjectSettingsService</c> (ticket e20e2ce0), which writes the
+        /// project tables directly and then calls this so listeners refresh.
+        /// </summary>
+        public void NotifyProjectsChanged() => BroadcastProjectUpdate();
+
+        /// <summary>
+        /// The project settings form committed a new name and/or description to the project row itself
+        /// (ticket e20e2ce0), inside its own transaction. This brings the broker's cached project, the folder's
+        /// project.json and the activity feed in line with the STORED row. It writes nothing to the database,
+        /// so it can never put back an older name than the row holds. Does not broadcast (the caller notifies
+        /// once for the whole save). Returns false when the broker does not cache this project.
+        /// The activity entry describes what THIS save did (<paramref name="committedName"/>, null when it
+        /// changed only the description), not what the row holds when read: a rename that landed elsewhere
+        /// in between is adopted into the cache but not attributed to the settings form.
+        /// </summary>
+        public bool AdoptProjectNameFromDatabase(string projectId, string previousName, string committedName, string updatedBy)
+        {
+            if (string.IsNullOrWhiteSpace(projectId) || !_projects.ContainsKey(projectId))
+                return false;
+
+            RecacheProjectRowFromDb(projectId);
+            if (!_projects.TryGetValue(projectId, out var stored))
+                return false;
+
+            SyncProjectJsonNameAndDescription(projectId, stored.Name, stored.Description ?? string.Empty);
+            RecordActivity(new ActivityEvent
+            {
+                Terminal = updatedBy ?? "System",
+                Type = "project",
+                Action = "updated",
+                Content = committedName != null && !string.Equals(previousName, committedName, StringComparison.Ordinal)
+                    ? $"Renamed project: '{previousName}' -> '{committedName}'"
+                    : $"Updated project: {committedName ?? previousName}",
+                RelatedId = projectId
+            });
+            return true;
+        }
+
         // Project write path (P5 / 1df2a534) — same ordering rule as the task write path: clone → mutate
         // the clone → persist → swap into the cache ONLY on persist success, so a DB failure never leaves
         // the _projects cache ahead of the DB. Neither helper broadcasts (the caller decides). See the
@@ -7027,6 +7067,16 @@ namespace MultiTerminal.MCPServer.Services
             var row = _projectDb.GetAllProjects().FirstOrDefault(p => string.Equals(p.Id, projectId, StringComparison.Ordinal));
             if (row != null)
                 _projects.TryAdd(row.Id, row);
+        }
+
+        // Named census bypass (ticket e20e2ce0): REPLACES one cached row with the database row, for a change the
+        // project settings form committed itself. Seeds FROM the database, like CacheProjectRowFromDb; not a
+        // mutation. A row that no longer exists leaves the cache as it was.
+        private void RecacheProjectRowFromDb(string projectId)
+        {
+            var row = _projectDb.GetAllProjects().FirstOrDefault(p => string.Equals(p.Id, projectId, StringComparison.Ordinal));
+            if (row != null)
+                _projects[row.Id] = row;
         }
 
         private Project InsertProjectInternal(Project project)

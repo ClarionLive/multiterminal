@@ -93,7 +93,7 @@
     <Content Include="Terminal\terminal.html">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="ProjectPanel\panel.html">
+    <Content Include="ProjectSettings\project-settings.html">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="ChatPanel\chat-panel.html">

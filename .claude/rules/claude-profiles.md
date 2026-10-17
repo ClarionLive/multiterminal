@@ -24,7 +24,7 @@ of the machine (`SettingsService`, key `ClaudeProfiles`); a project stores a pro
 | Session data | `Services/ClaudeProfileDataRoots` | Which config folder is read or written: `ForProfileName`, `ForPaneOrFolder` / `ForAgentOrFolder`, `ForFolder` / `ForProject`, `AllExisting`; the path guards `IsUnderAnyRoot` and `IsSessionTranscriptPath`; `PlanPaneFlush`. |
 | Agent name to pane | `Services/ClaudeProfilePaneLookup` | The one seam from an agent name to the profile of the live terminal registered under it. `Configure`d once in MainForm's constructor. |
 | Agent teams | `Services/TeamWatcherService` | Watches every root; `BuildTeamKey`, `BuildSubagentPanelKey`. |
-| UI | `Dialogs/SettingsWpfDialog` + `Dialogs/ClaudeProfileEditorRules`, `Dialogs/EditProjectDialog` + `Services/ClaudeProfileChoices`, `Dialogs/IdentityPickerDialog`, `Dialogs/IdentityPickerProfileDialog` | Editing the list, choosing per project, picking per launch. |
+| UI | `Dialogs/SettingsWpfDialog` + `Dialogs/ClaudeProfileEditorRules`, `ProjectSettings/ProjectSettingsForm` (+ `project-settings.html`) + `Services/ClaudeProfileChoices`, `Dialogs/IdentityPickerDialog`, `Dialogs/IdentityPickerProfileDialog` | Editing the list, choosing per project, picking per launch. |
 | Easy setup (items 37-39, Owner 2026-10-16) | `ClaudeProfileEditorRules.SuggestFolder` / `FoldersToCreate`, `ClaudeProfileResolver.ValidateAllowingMissingFolders` / `IsSignedIn`, `Services/ClaudeProfileSignIn` | Add profile takes only a name: a NEW row's folder follows its name (`%USERPROFILE%\.claude-<slug>`) until the user edits it; a loaded row never follows its name, so renaming a stored profile cannot repoint it. Settings creates a missing folder on OK, after every other check and the removal confirmation. Each row shows Signed in / Needs sign-in (state file inside the folder, re-probed every 2s). Sign in opens a plain PowerShell console (`-NoProfile`, `CLAUDE_CONFIG_DIR` set, `MULTITERMINAL_*` stripped) in `%LOCALAPPDATA%\MultiTerminal\profile-sign-in`. NOT an MT pane on purpose: no plugin, no MCP, no registration, and it works while the modal Settings dialog is open. Sign in saves nothing. |
 
 ## Invariants a change must not break
@@ -125,10 +125,7 @@ of the machine (`SettingsService`, key `ClaudeProfiles`); a project stores a pro
    (`SessionContextWriter.SameContextRoot`); otherwise nothing is written.
 
    Still path-only, because no pane exists to ask: the startup session sync and crash-recovery
-   indexing and the periodic sync (MainForm, over registered projects); the Project panel
-   (`ProjectPanelDocument`, the selected project); View Session (`MainForm`) when its path is the
-   current project's or the last-used directory (when it is the last active terminal's folder it
-   asks by that pane: `GetClaudeProjectFolderForPane`); `SessionSyncService` and `SessionDiscovery` (a project path, or every root);
+   indexing and the periodic sync (MainForm, over registered projects); `SessionSyncService` and `SessionDiscovery` (a project path, or every root);
    `SessionLineageService.GetUnsummarizedSessions`; `SessionMemoryDatabase.FindUnindexedSessions`;
    the REST calls that carry a path and no terminal name; and any call naming an agent that is not
    a live MT terminal (a headless agent, a ClarionAssistant tab).

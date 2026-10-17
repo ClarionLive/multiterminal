@@ -52,12 +52,8 @@
 
 > Code outside this subsystem that calls into it.
 
-- `MainForm.OnMcpJsonWriteRequested` — `MainForm.cs:5159`
 - `MainForm.OnStartScreenNewProject` — `MainForm.cs:2542`
 - `MainForm.OnStartScreenProjectLaunched` — `MainForm.cs:2357`
-- `MainForm.OnProjectLaunchRequested` — `MainForm.cs:5207`
-- `ProjectPanelDocument.SyncGatewayProfile` — `Docking/ProjectPanelDocument.cs:724`
-- `ProjectPanelDocument.SendAvailableMcpServers` — `Docking/ProjectPanelDocument.cs:428`
 
 ## Gotchas
 

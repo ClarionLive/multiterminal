@@ -132,10 +132,6 @@ namespace MultiTerminal.Services
         private const float MinTerminalFontSize = 6f;
         private const float MaxTerminalFontSize = 32f;
 
-        // Prompts panel font size settings
-        private const string PromptsFontSizeKey = "PromptsFontSize";
-        private const float DefaultPromptsFontSize = 9f;
-
         // Chat panel font size settings
         private const string ChatFontSizeKey = "ChatFontSize";
         private const float DefaultChatFontSize = 13f;
@@ -550,28 +546,6 @@ namespace MultiTerminal.Services
         /// <summary>Sets the attention panel's alarm treatment. Unknown values store the default.</summary>
         public void SetAttentionPanelAlarm(string alarm)
             => Set(AttentionPanelAlarmKey, NormalizeFrom(AttentionAlarms, alarm));
-
-        /// <summary>
-        /// Gets the prompts panel font size (8-14pt range).
-        /// </summary>
-        public float GetPromptsFontSize()
-        {
-            string value = Get(PromptsFontSizeKey);
-            if (!string.IsNullOrEmpty(value) && float.TryParse(value, out float size))
-            {
-                return Math.Max(MinUIFontSize, Math.Min(MaxUIFontSize, size));
-            }
-            return DefaultPromptsFontSize;
-        }
-
-        /// <summary>
-        /// Sets the prompts panel font size.
-        /// </summary>
-        public void SetPromptsFontSize(float size)
-        {
-            size = Math.Max(MinUIFontSize, Math.Min(MaxUIFontSize, size));
-            Set(PromptsFontSizeKey, size.ToString("F1"));
-        }
 
         /// <summary>
         /// Gets the chat panel font size (8-14pt range).

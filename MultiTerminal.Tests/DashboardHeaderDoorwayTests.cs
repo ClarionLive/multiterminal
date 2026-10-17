@@ -143,9 +143,10 @@ namespace MultiTerminal.Tests
                 .Distinct()
                 .ToList();
 
-            // 11 panel/history toggles + show_menu + the 5 project actions. A rename of either send
-            // function would otherwise leave this fact checking nothing.
-            Assert.True(emitted.Count >= 17, $"Expected at least 17 header actions, extracted {emitted.Count}: {string.Join(", ", emitted)}");
+            // 10 panel/history toggles (the Project pane's went with the pane, ticket e20e2ce0) +
+            // show_menu + the 5 project actions. A rename of either send function would otherwise
+            // leave this fact checking nothing.
+            Assert.True(emitted.Count >= 16, $"Expected at least 16 header actions, extracted {emitted.Count}: {string.Join(", ", emitted)}");
 
             var unhandled = emitted
                 .Where(a => !body.Contains($"case \"{a}\":", StringComparison.Ordinal))

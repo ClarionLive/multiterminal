@@ -15,7 +15,8 @@ namespace MultiTerminal.FilePreviewPanel
 {
     /// <summary>
     /// Dockable file preview panel. Displays file content with syntax highlighting
-    /// and image preview. Designed to be opened from the Project Panel's file explorer.
+    /// and image preview. Opened from the header's Preview icon (the Project pane's file explorer
+    /// that also opened it was retired in e20e2ce0; see f789c458).
     /// </summary>
     public class FilePreviewPanelDocument : DockContent
     {

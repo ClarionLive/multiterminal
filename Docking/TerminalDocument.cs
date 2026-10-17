@@ -276,7 +276,7 @@ namespace MultiTerminal.Docking
 
         /// <summary>
         /// Forwarded from StartScreenControl: user clicked "New Project".
-        /// MainForm opens the EditProjectDialog.
+        /// MainForm opens the New Project dialog (NewProjectWpfDialog).
         /// </summary>
         public event EventHandler StartScreenNewProjectRequested;
 
@@ -292,6 +292,18 @@ namespace MultiTerminal.Docking
         /// then calls <see cref="RefreshStartScreenProjects"/> to update the card grid.
         /// </summary>
         public event EventHandler<string> StartScreenProjectDeleteRequested;
+
+        /// <summary>
+        /// The project settings gear was clicked (ticket e20e2ce0), on this pane's status bar or on a Home
+        /// card / Browse All row of its start screen. Carries the project id; MainForm opens the form.
+        /// </summary>
+        public event EventHandler<string> ProjectSettingsRequested;
+
+        /// <summary>
+        /// The project the status bar's gear opens: the registered project containing the pane's folder,
+        /// else the project it was launched for. Null when neither exists, and the gear is then disabled.
+        /// </summary>
+        public string SettingsProjectId { get; private set; }
 
         /// <summary>
         /// Function to retrieve available identity names for the "Launch as..." menu.
@@ -744,6 +756,11 @@ namespace MultiTerminal.Docking
                 }
             };
             _statusBar.HomeRequested += (s, e) => ReturnToStartScreen();
+            _statusBar.ProjectSettingsRequested += (s, e) =>
+            {
+                if (!string.IsNullOrEmpty(SettingsProjectId))
+                    ProjectSettingsRequested?.Invoke(this, SettingsProjectId);
+            };
             _statusBar.OpenFolderRequested += OnOpenFolderRequested;
             _statusBar.HudToggleRequested += (s, e) =>
             {
@@ -1080,6 +1097,7 @@ namespace MultiTerminal.Docking
             _startScreen.NewProjectRequested += (s, e) => StartScreenNewProjectRequested?.Invoke(this, e);
             _startScreen.JustClaudeRequested += (s, e) => StartScreenJustClaudeRequested?.Invoke(this, e);
             _startScreen.ProjectDeleteRequested += (s, id) => StartScreenProjectDeleteRequested?.Invoke(this, id);
+            _startScreen.ProjectSettingsRequested += (s, id) => ProjectSettingsRequested?.Invoke(this, id);
             Controls.Add(_startScreen);
             _startScreen.BringToFront();
             _isStartScreenVisible = true;
@@ -2268,8 +2286,8 @@ namespace MultiTerminal.Docking
             // Claude Code rewrites the terminal title ~1×/sec (spinner/status), but the
             // extracted directory is almost always unchanged. Only fire DirectoryChanged
             // (and re-arm the file watcher) when the directory ACTUALLY changed — otherwise
-            // MainForm.OnTerminalDirectoryChanged re-renders the whole Project panel every
-            // title tick, which the user sees as a per-second flash (task 5e36e90b).
+            // MainForm.OnTerminalDirectoryChanged re-renders project state every title tick
+            // (it used to redraw the whole Project panel: a per-second flash, task 5e36e90b).
             string directory = ExtractDirectoryFromTitle(e.Title);
             if (!string.IsNullOrEmpty(directory))
             {
@@ -3048,6 +3066,8 @@ namespace MultiTerminal.Docking
             }
             HeaderProjectName = projectName;
             HeaderWorkingOnProject = workingOn;
+            SettingsProjectId = projectId ?? _launchProjectId;
+            _statusBar.SetProjectSettingsAvailable(!string.IsNullOrEmpty(SettingsProjectId));
 
             _debugLogService?.Trace("TerminalDocument", $"UpdateStatusBar: Calling _statusBar.UpdateStatus with:");
             _debugLogService?.Trace("TerminalDocument", $"  - terminalName: '{terminalName}'");
