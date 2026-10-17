@@ -13,9 +13,9 @@ namespace MultiTerminal.Tests
     /// The project settings save path (ticket e20e2ce0), against a real temp SQLite DB and a real temp
     /// project folder with a .claude/project.json.
     ///
-    /// <para>Not covered: the form itself (that it sends these fields), the broker's rename (the stub host
-    /// below does nothing for it, so these facts show the service's own writes) and the gateway (only that
-    /// the service asks for a sync, and with which names).</para>
+    /// <para>Not covered: the form itself (that it sends these fields), the broker's re-read after a rename
+    /// (the stub host only records that it was asked) and the gateway (only that the service asks for a
+    /// sync, and with which names).</para>
     /// </summary>
     public sealed class ProjectSettingsServiceTests : IDisposable
     {
@@ -82,7 +82,7 @@ namespace MultiTerminal.Tests
             var stored = _db.GetRichProject(p.Id);
             Assert.Equal("dotnet build", stored.BuildCommand);
             Assert.Equal("dotnet", stored.ProjectType);
-            Assert.Empty(_host.Renames); // the name did not change, so the broker was not asked
+            Assert.Empty(_host.Renames); // the name did not change, so the host was not told of a rename
             Assert.Equal(1, _host.NotifyCount);
         }
 
@@ -161,14 +161,79 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
-        public void A_rename_goes_through_the_host_and_lands_in_the_row()
+        public void A_rename_lands_in_the_row_and_the_host_is_told_the_previous_name()
         {
             var p = Seed();
             var result = _service.Save(UpdateFor(p, ("name", "Renamed")));
 
             Assert.True(result.Success, result.Error);
-            Assert.Equal(new[] { (p.Id, "Renamed", (string)null) }, _host.Renames);
+            Assert.Equal(new[] { (p.Id, "SettingsProj") }, _host.Renames);
             Assert.Equal("Renamed", _db.GetRichProject(p.Id).Name);
+        }
+
+        /// <summary>
+        /// A rename is written inside the save's transaction, so the stale-form check covers it like any other
+        /// field: renaming in the form after an agent renamed the project elsewhere is refused, and the agent's
+        /// name stands. (Pipeline Run 2: the rename used to go through the broker after the commit, outside the
+        /// check.) Falsified: skipping the baseline check in Save turned this red at the first assertion.
+        /// </summary>
+        [Fact]
+        public void A_rename_that_collides_with_a_rename_made_elsewhere_is_refused()
+        {
+            var p = Seed();
+            var loaded = Snapshot(p);
+            _db.UpdateProjectField(p.Id, "name", "RenamedByAgent");
+
+            var result = _service.Save(FormSave(loaded, ("name", "RenamedInForm")));
+
+            Assert.False(result.Success);
+            Assert.True(result.Conflict);
+            Assert.Equal("RenamedByAgent", _db.GetRichProject(p.Id).Name);
+            Assert.Empty(_host.Renames);
+        }
+
+        /// <summary>
+        /// When the form could not load the project's lists, the page shows them empty and posts [] for each.
+        /// That must not be read as "the user deleted every row". Falsified: letting ListEdit return the
+        /// incoming list when the baseline list is null deleted the stored agent (red at the last assertion).
+        /// </summary>
+        [Fact]
+        public void A_list_the_form_could_not_load_is_never_saved()
+        {
+            var p = Seed();
+            _db.SaveProjectAgent(new ProjectAgent { ProjectId = p.Id, AgentName = "Kept", Role = "dev" });
+            var loaded = Snapshot(p);
+            loaded.Agents = null;   // as ProjectSettingsForm.SendLoad leaves it when GetProjectContext throws
+
+            var u = FormSave(new ProjectSettingsBaseline
+            {
+                Project = loaded.Project, Agents = new List<ProjectAgent>(), SpecialistAgents = loaded.SpecialistAgents,
+                McpServers = loaded.McpServers, Skills = loaded.Skills, Paths = loaded.Paths, Prompts = loaded.Prompts,
+            }, ("buildCommand", "dotnet build"));
+            u.Baseline = loaded;
+            var result = _service.Save(u);
+
+            Assert.True(result.Success, result.Error);
+            Assert.Equal("dotnet build", _db.GetRichProject(p.Id).BuildCommand);
+            Assert.Equal("Kept", _db.GetProjectAgents(p.Id).Single().AgentName);
+        }
+
+        /// <summary>
+        /// A blank stored Version loads as "0.1.0". The stored side of the conflict check must be read the same
+        /// way, or every Version edit on such a project is refused as "changed elsewhere". Falsified: comparing
+        /// the raw stored value turned this red at the first assertion.
+        /// </summary>
+        [Fact]
+        public void A_blank_stored_version_can_still_be_edited()
+        {
+            var p = Seed();
+            _db.UpdateProjectField(p.Id, "currentVersion", "");
+            var loaded = Snapshot(p);
+
+            var result = _service.Save(FormSave(loaded, ("currentVersion", "1.0.0")));
+
+            Assert.True(result.Success, result.Error);
+            Assert.Equal("1.0.0", _db.GetRichProject(p.Id).CurrentVersion);
         }
 
         [Fact]
@@ -381,15 +446,11 @@ namespace MultiTerminal.Tests
 
         private sealed class StubHost : IProjectSettingsHost
         {
-            public List<(string Id, string Name, string Description)> Renames { get; } = new List<(string, string, string)>();
+            public List<(string Id, string PreviousName)> Renames { get; } = new List<(string, string)>();
             public List<ISet<string>> GatewaySyncs { get; } = new List<ISet<string>>();
             public int NotifyCount { get; private set; }
 
-            public string RenameProject(string projectId, string name, string description)
-            {
-                Renames.Add((projectId, name, description));
-                return null;
-            }
+            public void ProjectRenamed(string projectId, string previousName) => Renames.Add((projectId, previousName));
 
             public void NotifyProjectsChanged() => NotifyCount++;
 

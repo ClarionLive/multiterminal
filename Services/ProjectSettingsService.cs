@@ -13,11 +13,12 @@ namespace MultiTerminal.Services
     public interface IProjectSettingsHost
     {
         /// <summary>
-        /// Renames the project and/or changes its description through the broker, which owns the cached
-        /// project name, syncs project.json and records the activity entry. Returns null on success, else
-        /// the reason it failed.
+        /// Called after a save COMMITTED a new name and/or description to the project row. Brings the broker's
+        /// cached project, the folder's project.json and the activity feed in line with the stored row. It
+        /// reads the row and writes nothing to the database, so it cannot put back a value older than the row
+        /// (a rename made elsewhere since the commit wins) and a failure here never undoes the save.
         /// </summary>
-        string RenameProject(string projectId, string name, string description);
+        void ProjectRenamed(string projectId, string previousName);
 
         /// <summary>Tells every listener the project list changed (MessageBroker.ProjectsUpdated).</summary>
         void NotifyProjectsChanged();
@@ -109,15 +110,17 @@ namespace MultiTerminal.Services
     ///
     /// <para>Order: validate everything first, so a bad value writes nothing; then ONE transaction that, with a
     /// baseline, drops what the user did not change and refuses if what they did change was also changed
-    /// elsewhere, then writes every scalar but name/description through
+    /// elsewhere, then writes every changed scalar (name and description included) through
     /// <see cref="ProjectDatabase.UpdateProjectField"/> (its whitelist, worktree-path guard and Claude profile
-    /// normalization) and diff-saves the six child tables; after the commit, the rename through the host; the
-    /// project.json copy of the fields that file carries; the gateway profile when MCP servers changed; then
-    /// one change notification.</para>
+    /// normalization) and diff-saves the six child tables; after the commit, the host brings the broker's
+    /// cache, project.json and the activity feed in line with a new name; the project.json copy of the other
+    /// fields that file carries; the gateway profile when MCP servers changed; then one change
+    /// notification.</para>
     ///
-    /// <para>The rename stays outside the transaction: it goes through the broker, which may write through
-    /// another connection, and that write would wait on this transaction's lock. So if the rename fails the
-    /// committed settings stand, and the result says so.</para>
+    /// <para>The rename is written inside the transaction, not by the broker, so the conflict check covers it
+    /// and a save either commits all of it or none of it. The broker has its own connection: asking it to
+    /// write inside the transaction would wait on this transaction's lock, and asking it to write after the
+    /// commit would reopen the window for a stale overwrite. So after the commit it only re-reads the row.</para>
     ///
     /// <para>project.json is written with <see cref="ProjectService.UpdateProjectJson"/>, never
     /// <see cref="ProjectService.SaveProject"/>. SaveProject re-upserts the row from the file, and the file
@@ -179,18 +182,20 @@ namespace MultiTerminal.Services
             if (listError != null)
                 return ProjectSettingsSaveResult.Fail(listError);
 
-            // ── Every scalar but name/description, and the child tables: one transaction ──
+            // ── Every changed scalar and the child tables: one transaction ────────────
             // The baseline check runs inside it too, so nothing written through ProjectDatabase can land
             // between the check and the writes.
             var result = new ProjectSettingsSaveResult { Success = true };
             Dictionary<string, string> changed = null;
             List<string> conflicts = null;
             string failedField = null;
+            string previousName = current.Name;
             try
             {
                 _db.RunInTransaction("ProjectSettingsService.Save", update.ProjectId, () =>
                 {
                     current = _db.GetRichProject(update.ProjectId) ?? current;
+                    previousName = current.Name;
                     if (update.Baseline?.Project != null)
                     {
                         conflicts = ApplyBaseline(update, current, normalized);
@@ -203,8 +208,6 @@ namespace MultiTerminal.Services
 
                     foreach (var pair in changed)
                     {
-                        if (pair.Key == "name" || pair.Key == "description")
-                            continue;
                         if (!_db.UpdateProjectField(update.ProjectId, pair.Key, pair.Value))
                         {
                             failedField = pair.Key;
@@ -235,33 +238,10 @@ namespace MultiTerminal.Services
                 return refused;
             }
 
-            // ── Name and description go through the broker (cache + project.json + activity) ──
-            // After the commit, never inside it: the broker may write through another connection, which
-            // would wait on the transaction's file lock while this thread holds it.
+            // ── A new name or description: broker cache, project.json, activity ───────
             bool renamed = changed.ContainsKey("name");
-            bool redescribed = changed.ContainsKey("description");
-            if (renamed || redescribed)
-            {
-                string error = _host.RenameProject(
-                    update.ProjectId,
-                    renamed ? changed["name"] : null,
-                    redescribed ? (changed["description"] ?? string.Empty) : null);
-                if (error != null)
-                {
-                    changed.Remove("name");
-                    changed.Remove("description");
-                    renamed = redescribed = false;
-                    result.Success = false;
-                    result.Error = $"Saving the name or description failed: {error} The other settings were saved.";
-                }
-                else
-                {
-                    // The broker writes the slim row; the description it writes is "" for a cleared one.
-                    // Restate both through the rich column writer so the rich row says exactly what was saved.
-                    if (renamed) _db.UpdateProjectField(update.ProjectId, "name", changed["name"]);
-                    if (redescribed) _db.UpdateProjectField(update.ProjectId, "description", changed["description"]);
-                }
-            }
+            if (renamed || changed.ContainsKey("description"))
+                _host.ProjectRenamed(update.ProjectId, previousName);
             result.ChangedFields.AddRange(changed.Keys);
 
             // ── project.json copy of the fields that file carries ────────────────────
@@ -299,7 +279,9 @@ namespace MultiTerminal.Services
                     normalized.Remove(key);   // untouched by the user
                     continue;
                 }
-                string stored = ReadField(current, key);
+                // Normalized like `loaded`: a blank stored Version reads as "0.1.0" there, and raw here it
+                // would match neither side and refuse every Version edit as a conflict.
+                string stored = NormalizeValue(key, ReadField(current, key));
                 if (!SameValue(key, stored, loaded) && !SameValue(key, stored, incoming))
                     conflicts.Add(key);
             }
@@ -314,11 +296,12 @@ namespace MultiTerminal.Services
         }
 
         // A list the user did not change is not saved (null). One they changed is saved only if the stored
-        // list is still what they loaded.
+        // list is still what they loaded. A list the form could not load (null in the baseline) is never
+        // saved: the page showed it empty, and saving that would delete every stored row.
         private static List<T> ListEdit<T>(List<T> incoming, List<T> loaded, List<T> stored, Func<IEnumerable<T>, string> key, string what, List<string> conflicts)
         {
             if (incoming == null || loaded == null)
-                return incoming;
+                return null;
             string loadedKey = key(loaded);
             if (key(incoming) == loadedKey)
                 return null;
@@ -415,7 +398,7 @@ namespace MultiTerminal.Services
 
         // ── project.json ───────────────────────────────────────────────────────────
 
-        // project.json carries name and description (the broker's rename already wrote those), plus these.
+        // project.json carries name and description (IProjectSettingsHost.ProjectRenamed syncs those), plus these.
         private static readonly string[] ProjectJsonFields = { "changeLog", "currentVersion", "isPinned", "defaultTerminal", "claudeProfile" };
 
         private void SyncProjectJson(Project current, Dictionary<string, string> changed, ProjectSettingsSaveResult result)

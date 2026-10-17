@@ -6911,6 +6911,36 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public void NotifyProjectsChanged() => BroadcastProjectUpdate();
 
+        /// <summary>
+        /// The project settings form committed a new name and/or description to the project row itself
+        /// (ticket e20e2ce0), inside its own transaction. This brings the broker's cached project, the folder's
+        /// project.json and the activity feed in line with the STORED row. It writes nothing to the database,
+        /// so it can never put back an older name than the row holds. Does not broadcast (the caller notifies
+        /// once for the whole save). Returns false when the broker does not cache this project.
+        /// </summary>
+        public bool AdoptProjectNameFromDatabase(string projectId, string previousName, string updatedBy)
+        {
+            if (string.IsNullOrWhiteSpace(projectId) || !_projects.ContainsKey(projectId))
+                return false;
+
+            RecacheProjectRowFromDb(projectId);
+            if (!_projects.TryGetValue(projectId, out var stored))
+                return false;
+
+            SyncProjectJsonNameAndDescription(projectId, stored.Name, stored.Description ?? string.Empty);
+            RecordActivity(new ActivityEvent
+            {
+                Terminal = updatedBy ?? "System",
+                Type = "project",
+                Action = "updated",
+                Content = !string.Equals(previousName, stored.Name, StringComparison.Ordinal)
+                    ? $"Renamed project: '{previousName}' -> '{stored.Name}'"
+                    : $"Updated project: {stored.Name}",
+                RelatedId = projectId
+            });
+            return true;
+        }
+
         // Project write path (P5 / 1df2a534) — same ordering rule as the task write path: clone → mutate
         // the clone → persist → swap into the cache ONLY on persist success, so a DB failure never leaves
         // the _projects cache ahead of the DB. Neither helper broadcasts (the caller decides). See the
@@ -7010,6 +7040,16 @@ namespace MultiTerminal.MCPServer.Services
             var row = _projectDb.GetAllProjects().FirstOrDefault(p => string.Equals(p.Id, projectId, StringComparison.Ordinal));
             if (row != null)
                 _projects.TryAdd(row.Id, row);
+        }
+
+        // Named census bypass (ticket e20e2ce0): REPLACES one cached row with the database row, for a change the
+        // project settings form committed itself. Seeds FROM the database, like CacheProjectRowFromDb; not a
+        // mutation. A row that no longer exists leaves the cache as it was.
+        private void RecacheProjectRowFromDb(string projectId)
+        {
+            var row = _projectDb.GetAllProjects().FirstOrDefault(p => string.Equals(p.Id, projectId, StringComparison.Ordinal));
+            if (row != null)
+                _projects[row.Id] = row;
         }
 
         private Project InsertProjectInternal(Project project)

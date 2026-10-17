@@ -64,6 +64,8 @@ const NAMED_BYPASSES = new Set([
   'LoadPersistedTasks',      // startup bootstrap seed FROM the DB (not a mutation)
   'LoadPersistedProjects',   // startup bootstrap seed
   'CacheProjectRowFromDb',   // 9f95ab0c Run 2: single-row form of LoadPersistedProjects (seed FROM the DB, not a mutation)
+  'RecacheProjectRowFromDb', // e20e2ce0: replaces one cached row FROM the DB after the project settings form committed
+                             // a rename in its own transaction (re-read, not a mutation; it writes no row)
   'LoadPersistedProfiles',   // startup bootstrap seed
   'ReorderTask',             // sort_order via dedicated column writers + bulk rebalance + cache refresh FROM db
   'DeleteProject',           // canonical unregister via ProjectService + coherent cache-restore-on-failure

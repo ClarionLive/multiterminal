@@ -27,29 +27,22 @@ namespace MultiTerminal.ProjectSettings
             _log = log;
         }
 
-        public string RenameProject(string projectId, string name, string description)
+        public void ProjectRenamed(string projectId, string previousName)
         {
-            if (_broker != null)
+            if (_broker != null && _broker.AdoptProjectNameFromDatabase(projectId, previousName, "project-settings"))
+                return;
+
+            // A project the broker does not cache: sync its project.json from the stored row ourselves.
+            try
             {
-                var result = _broker.UpdateProject(projectId, name, description, "project-settings");
-                if (result.Success)
-                    return null;
-
-                // The broker caches only the projects in the JSON registry. A project with a database row
-                // but no registry entry is still a real project: write it the way the broker would have.
-                if (result.Error == null || !result.Error.StartsWith("Project not found", StringComparison.Ordinal))
-                    return result.Error ?? "the broker refused the change";
+                var stored = _projectDb.GetRichProject(projectId);
+                if (stored != null && !string.IsNullOrWhiteSpace(stored.Path) && _projectService.IsProjectDirectory(stored.Path))
+                    _projectService.UpdateProjectJsonNameAndDescription(stored.Path, projectId, stored.Name, stored.Description ?? string.Empty);
             }
-
-            if (!string.IsNullOrWhiteSpace(name) && !_projectDb.UpdateProjectField(projectId, "name", name))
-                return "the project row was not found";
-            if (description != null)
-                _projectDb.UpdateProjectField(projectId, "description", description);
-
-            var path = _projectDb.GetRichProject(projectId)?.Path;
-            if (!string.IsNullOrWhiteSpace(path) && _projectService.IsProjectDirectory(path))
-                _projectService.UpdateProjectJsonNameAndDescription(path, projectId, name, description);
-            return null;
+            catch (Exception ex) when (ex is System.IO.IOException || ex is UnauthorizedAccessException)
+            {
+                _log?.Error("ProjectSettings", $"project.json name sync failed for {projectId}: {ex.Message}");
+            }
         }
 
         public void NotifyProjectsChanged() => _broker?.NotifyProjectsChanged();

@@ -255,8 +255,8 @@ namespace MultiTerminal.ProjectSettings
             try { lists = new ProjectContextService(_context.ProjectDb).GetProjectContext(_projectId); }
             catch (Exception ex) { _context.Log?.Error("ProjectSettings", $"Loading project lists failed: {ex.Message}"); }
 
-            // Lists that failed to load stay null in the baseline: the save then has nothing to compare
-            // them with and treats them as before (two-way), rather than as "everything was deleted".
+            // Lists that failed to load stay null in the baseline, and the save never writes a list whose
+            // baseline is null: the page shows it empty, and saving that would delete every stored row.
             _baseline = new ProjectSettingsBaseline
             {
                 Project = project,
@@ -269,6 +269,8 @@ namespace MultiTerminal.ProjectSettings
             };
 
             Post(ProjectSettingsPayload.BuildLoad(project, lists, GatherOptions(project), _isDark));
+            if (lists == null)
+                Notice("The project's agents, MCP servers, skills, paths and prompts could not be loaded, so changes to them will not be saved. Close and reopen the form to try again.", "error");
             _ = SendStatsAsync(project.Path);
         }
 
