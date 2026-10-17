@@ -190,7 +190,74 @@ namespace MultiTerminal.Services
             }
 
             // Raise event for UI update (subscribers should marshal to UI thread if needed)
-            LogMessageAdded?.Invoke(this, entry);
+            RaiseLogMessageAdded(entry);
+        }
+
+        /// <summary>
+        /// Task d41637ab: one subscriber's exception must never reach the code that called Log. That
+        /// caller is often a FileSystemWatcher or timer callback on a thread-pool thread, where an
+        /// unhandled exception ends the process: on 2026-10-16 a DebugPanel ListView fault, raised
+        /// through CodeGraphWatcher's error logging, took MultiTerminal down. Each subscriber is
+        /// called on its own, so a failing one does not starve the rest. The failure goes to
+        /// Debug.WriteLine, not to Log, which would raise into the same subscriber again.
+        /// </summary>
+        private void RaiseLogMessageAdded(DebugLogEntry entry)
+        {
+            var handlers = LogMessageAdded;
+            if (handlers == null) return;
+            foreach (EventHandler<DebugLogEntry> handler in handlers.GetInvocationList())
+            {
+                try
+                {
+                    handler(this, entry);
+                }
+                catch (Exception ex)
+                {
+                    ReportSubscriberFault(nameof(LogMessageAdded), ex);
+                }
+            }
+        }
+
+        /// <summary>Same isolation for LogCleared, which DebugController raises on a REST thread.</summary>
+        private void RaiseLogCleared()
+        {
+            var handlers = LogCleared;
+            if (handlers == null) return;
+            foreach (EventHandler handler in handlers.GetInvocationList())
+            {
+                try
+                {
+                    handler(this, EventArgs.Empty);
+                }
+                catch (Exception ex)
+                {
+                    ReportSubscriberFault(nameof(LogCleared), ex);
+                }
+            }
+        }
+
+        private const long SubscriberFaultReportIntervalMs = 5000;
+        private long _lastSubscriberFaultReportMs = long.MinValue;
+        private long _subscriberFaultsReported;
+
+        /// <summary>Test seam (InternalsVisibleTo): how many subscriber faults have been written out.</summary>
+        internal long SubscriberFaultsReported => Interlocked.Read(ref _subscriberFaultsReported);
+
+        /// <summary>
+        /// At most one report per <see cref="SubscriberFaultReportIntervalMs"/>. Unlimited reporting
+        /// would loop: with system-wide capture on, Debug.WriteLine from this process comes back as an
+        /// OutputDebugString message, which raises LogMessageAdded again into the subscriber that just
+        /// threw (OutputDebugStringListener does not filter out our own pid).
+        /// </summary>
+        private void ReportSubscriberFault(string eventName, Exception ex)
+        {
+            long now = Environment.TickCount64;
+            long last = Interlocked.Read(ref _lastSubscriberFaultReportMs);
+            if (last != long.MinValue && now - last < SubscriberFaultReportIntervalMs) return;
+            if (Interlocked.CompareExchange(ref _lastSubscriberFaultReportMs, now, last) != last) return;
+
+            Interlocked.Increment(ref _subscriberFaultsReported);
+            System.Diagnostics.Debug.WriteLine($"[DebugLogService] {eventName} subscriber threw: {ex}");
         }
 
         /// <summary>
@@ -239,7 +306,7 @@ namespace MultiTerminal.Services
         public void Clear()
         {
             while (_logQueue.TryDequeue(out _)) { }
-            LogCleared?.Invoke(this, EventArgs.Empty);
+            RaiseLogCleared();
         }
 
         /// <summary>
@@ -374,7 +441,7 @@ namespace MultiTerminal.Services
             }
 
             // Raise event for UI update
-            LogMessageAdded?.Invoke(this, entry);
+            RaiseLogMessageAdded(entry);
         }
 
         /// <summary>
