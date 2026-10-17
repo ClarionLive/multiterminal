@@ -104,6 +104,29 @@ namespace MultiTerminal.Docking
         // can drop the session's accumulated state (accumulator + all file-tail offsets) on close.
         private string _lastTokenSessionId;
 
+        // The Claude session running in this pane NOW (task ec2ed636). Deliberately separate from
+        // _lastTokenSessionId, which outlives the process on purpose (it is the key the token meter
+        // forgets on rollover/close). This one is cleared at every launch boundary; see
+        // ClaudeSessionTracker for the fencing that keeps a late poll tick from resurrecting it.
+        private readonly ClaudeSessionTracker _claudeSession = new ClaudeSessionTracker();
+
+        /// <summary>
+        /// The session id of the Claude process currently running in this pane, or <c>null</c> when
+        /// none is (start screen, stopped, exited) or the id has not been learned yet (task ec2ed636).
+        /// Learned from this pane's own statusline file, written by the CURRENT launch; cleared when a
+        /// launch starts, when the process exits, on Home, and on dispose.
+        ///
+        /// <para>Gaps, both in the "not learned" direction: the first ~1-3s after launch, and a Claude
+        /// whose project-level statusLine setting bypasses MT's statusline script, which then never
+        /// reports a session id at all. A caller using this to avoid offering a running session must
+        /// treat <c>null</c> on a started pane (<see cref="IsTerminalStarted"/>) as "unknown", not
+        /// "no session". In the other direction, a plain shell (no launch command) where the user ran
+        /// and then quit <c>claude</c> keeps the id until the shell itself exits.</para>
+        ///
+        /// <para>Safe to read from any thread; MainForm reads it on the UI thread.</para>
+        /// </summary>
+        public string CurrentClaudeSessionId => _claudeSession.SessionId;
+
         // Diff popup saved bounds and zoom (persisted across sessions)
         private static Rectangle? _diffPopupBounds;
         private static double _diffPopupZoom = 1.0;
@@ -1393,6 +1416,13 @@ namespace MultiTerminal.Docking
             ToolTipText = workingDirectory;
             _isTerminalStarted = true;
 
+            // A new launch: whatever Claude ran here before has been stopped ("Launch as..." stops it
+            // first; every other caller starts from the start screen). Forget its session id, and
+            // stamp the launch time so a statusline file the previous process wrote is not adopted
+            // as this launch's (task ec2ed636). Before WriteFallbackStatusline below, which carries
+            // no session id and so cannot be adopted anyway.
+            _claudeSession.BeginLaunch(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+
             // Derive project name for tab title: use project lookup, or fall back to folder name
             if (!string.IsNullOrEmpty(projectId) && _messageBroker != null)
             {
@@ -2412,6 +2442,7 @@ namespace MultiTerminal.Docking
 
             // Reset terminal state so the tab can be reused for a new session
             _isTerminalStarted = false;
+            _claudeSession.EndLaunch();   // the process is gone (task ec2ed636)
 
             // The launch is over: its nonce must not prove anything about the next one.
             RotateLaunchNonce();
@@ -2558,6 +2589,7 @@ namespace MultiTerminal.Docking
             {
                 _terminal.Stop();
                 _isTerminalStarted = false;
+                _claudeSession.EndLaunch();   // Stop() raises no ProcessExited (task ec2ed636)
                 RotateLaunchNonce();   // the launch is over (task 19a26090)
 
                 // Notify MainForm — OnTerminalExited handles UnregisterTerminal + doc map cleanup
@@ -3391,6 +3423,9 @@ namespace MultiTerminal.Docking
                     // lookup. The captured generation fences this tick: if the identity
                     // changes mid-tick, the payload is dropped instead of delivered/cached.
                     int identityGen = System.Threading.Volatile.Read(ref _statusLineIdentityGen);
+                    // Launch fence for CurrentClaudeSessionId (task ec2ed636), captured BEFORE the
+                    // file is read so a launch boundary during this tick rejects the adoption.
+                    long claudeLaunchGen = _claudeSession.Generation;
                     string terminalName = StatusLineIdentity;
                     if (string.IsNullOrEmpty(terminalName)) return;
 
@@ -3480,6 +3515,19 @@ namespace MultiTerminal.Docking
                         ? sidEl.GetString() : null;
                     string transcriptPath = root.TryGetProperty("transcriptPath", out var tpEl) && tpEl.ValueKind == JsonValueKind.String
                         ? tpEl.GetString() : null;
+
+                    // CurrentClaudeSessionId (task ec2ed636): only from this pane's OWN file (never the
+                    // same-name fallback, which is another pane's), only a strict identifier, and only
+                    // if the tracker confirms the file was written during the launch still running.
+                    if (!string.IsNullOrEmpty(tokenSessionId) && IsSafeStatusLineSegment(tokenSessionId))
+                    {
+                        long? fileTimestampMs = root.TryGetProperty("timestamp", out var tsEl)
+                            && tsEl.ValueKind == JsonValueKind.Number && tsEl.TryGetInt64(out long tsVal)
+                            ? tsVal : (long?)null;
+                        bool ownPaneFile = !string.IsNullOrEmpty(_docId)
+                            && Path.GetFileName(filePath).EndsWith("-" + _docId + ".json", StringComparison.OrdinalIgnoreCase);
+                        _claudeSession.TryAdopt(claudeLaunchGen, tokenSessionId, fileTimestampMs, ownPaneFile);
+                    }
                     // Read account-level quota from the shared file so all terminals
                     // show identical 5h/7d stats regardless of which one was updated last.
                     int? quota5h = null, quota7d = null, pace5h = null, pace7d = null;
@@ -3775,8 +3823,12 @@ namespace MultiTerminal.Docking
                     // suppressing recovery (pipeline Run-1 debugger HIGH-2). The identity-generation
                     // re-check keeps a stale tick from writing the PRIOR identity's content back over
                     // the cache a rename/promotion just cleared (ab50355f codex-security HIGH).
+                    // Nor across a launch boundary (task ec2ed636): a tick that straddled one had its
+                    // session-id adoption refused, and caching its content would stop the next tick
+                    // re-reading the file, so an idle new session would never be learned.
                     if (perTerminalChanged
-                        && System.Threading.Volatile.Read(ref _statusLineIdentityGen) == identityGen)
+                        && System.Threading.Volatile.Read(ref _statusLineIdentityGen) == identityGen
+                        && _claudeSession.Generation == claudeLaunchGen)
                     {
                         _lastStatusLineContent = content;
                     }
@@ -4194,6 +4246,8 @@ namespace MultiTerminal.Docking
                     _terminal.Dispose();
                     _terminal = null;
                 }
+
+                _claudeSession.EndLaunch();   // task ec2ed636
             }
             base.Dispose(disposing);
         }
@@ -4204,6 +4258,81 @@ namespace MultiTerminal.Docking
         protected override string GetPersistString()
         {
             return typeof(TerminalDocument).FullName;
+        }
+    }
+
+    /// <summary>
+    /// Which Claude session is running in one pane right now (task ec2ed636), behind
+    /// <see cref="TerminalDocument.CurrentClaudeSessionId"/>. Pure, so the launch fencing is testable
+    /// without a WebView2-backed document.
+    ///
+    /// <para>The statusline poll runs on a thread-pool timer while launches begin and end on the UI
+    /// thread, and the previous process's statusline file stays on disk after it exits. Three
+    /// fences keep a dead session from being reported as running:</para>
+    /// <list type="bullet">
+    /// <item>a generation bumped at every launch boundary, which the poll captures before reading the
+    /// file, so a tick that straddles a boundary adopts nothing;</item>
+    /// <item>an active flag, so a tick that starts after an exit cannot adopt from the leftover file;</item>
+    /// <item>the launch start time, so a new launch cannot adopt the previous process's file before
+    /// its own Claude has written one.</item>
+    /// </list>
+    /// <para>Writes are under one lock; <see cref="SessionId"/> is a volatile read.</para>
+    /// </summary>
+    internal sealed class ClaudeSessionTracker
+    {
+        private readonly object _gate = new object();
+        private long _generation;
+        private bool _launchActive;
+        private long _launchStartedMs;
+        private volatile string _sessionId;
+
+        /// <summary>The adopted session id of the running launch, or <c>null</c>.</summary>
+        public string SessionId => _sessionId;
+
+        /// <summary>Changes at every <see cref="BeginLaunch"/> and <see cref="EndLaunch"/>.</summary>
+        public long Generation
+        {
+            get { lock (_gate) { return _generation; } }
+        }
+
+        /// <summary>A launch has started at <paramref name="nowMs"/> (Unix ms); no session is known yet.</summary>
+        public void BeginLaunch(long nowMs)
+        {
+            lock (_gate)
+            {
+                _generation++;
+                _launchActive = true;
+                _launchStartedMs = nowMs;
+                _sessionId = null;
+            }
+        }
+
+        /// <summary>The launch's process has ended (or is being stopped); no session is running.</summary>
+        public void EndLaunch()
+        {
+            lock (_gate)
+            {
+                _generation++;
+                _launchActive = false;
+                _sessionId = null;
+            }
+        }
+
+        /// <summary>
+        /// Adopts <paramref name="sessionId"/> as the running session if, and only if, the generation
+        /// is still <paramref name="observedGeneration"/>, a launch is active, the file is this pane's
+        /// own, and it was written no earlier than the launch started. Returns whether it adopted.
+        /// </summary>
+        public bool TryAdopt(long observedGeneration, string sessionId, long? fileTimestampMs, bool ownPaneFile)
+        {
+            if (string.IsNullOrEmpty(sessionId) || !ownPaneFile || fileTimestampMs == null) return false;
+            lock (_gate)
+            {
+                if (observedGeneration != _generation || !_launchActive || fileTimestampMs.Value < _launchStartedMs)
+                    return false;
+                _sessionId = sessionId;
+                return true;
+            }
         }
     }
 
