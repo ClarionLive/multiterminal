@@ -190,7 +190,34 @@ namespace MultiTerminal.Services
             }
 
             // Raise event for UI update (subscribers should marshal to UI thread if needed)
-            LogMessageAdded?.Invoke(this, entry);
+            RaiseLogMessageAdded(entry);
+        }
+
+        /// <summary>
+        /// Task d41637ab: one subscriber's exception must never reach the code that called Log. That
+        /// caller is often a FileSystemWatcher or timer callback on a thread-pool thread, where an
+        /// unhandled exception ends the process: on 2026-10-16 a DebugPanel ListView fault, raised
+        /// through CodeGraphWatcher's error logging, took MultiTerminal down. Each subscriber is
+        /// called on its own, so a failing one does not starve the rest. The failure goes to
+        /// Debug.WriteLine, not to Log, which would raise into the same subscriber again.
+        /// </summary>
+        private void RaiseLogMessageAdded(DebugLogEntry entry)
+        {
+            var handlers = LogMessageAdded;
+            if (handlers == null) return;
+            foreach (EventHandler<DebugLogEntry> handler in handlers.GetInvocationList())
+            {
+                try
+                {
+                    handler(this, entry);
+                }
+#pragma warning disable CA1031 // Any subscriber fault is caught on purpose: see the summary above.
+                catch (Exception ex)
+#pragma warning restore CA1031
+                {
+                    System.Diagnostics.Debug.WriteLine($"[DebugLogService] LogMessageAdded subscriber threw: {ex}");
+                }
+            }
         }
 
         /// <summary>
@@ -374,7 +401,7 @@ namespace MultiTerminal.Services
             }
 
             // Raise event for UI update
-            LogMessageAdded?.Invoke(this, entry);
+            RaiseLogMessageAdded(entry);
         }
 
         /// <summary>

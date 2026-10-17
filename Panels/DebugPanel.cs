@@ -33,6 +33,10 @@ namespace MultiTerminal.Panels
         private bool _isPaused = false;
         private bool _isDisposed = false;
 
+        // Set from any thread when an entry was skipped because the panel had no handle; read on the
+        // UI thread in OnHandleCreated. Volatile so a set on a pool thread is seen there.
+        private volatile bool _resyncPending;
+
         public DebugPanel()
         {
             InitializeComponent();
@@ -204,10 +208,30 @@ namespace MultiTerminal.Panels
         {
             if (_isDisposed) return;
 
+            // Task d41637ab: InvokeRequired answers false when the panel has no handle (never shown,
+            // or hidden before its handle was made), even on a thread-pool thread. The old code then
+            // edited the ListView from that thread, and on 2026-10-16 a FileSystemWatcher error
+            // logged that way corrupted it and crashed MultiTerminal. With no handle there is no
+            // thread to marshal to, so leave the list alone and rebuild it from the service's buffer
+            // once a handle exists (OnHandleCreated).
+            if (!IsHandleCreated)
+            {
+                _resyncPending = true;
+                return;
+            }
+
             // Marshal to UI thread
             if (InvokeRequired)
             {
-                BeginInvoke(new Action(() => OnLogMessageAdded(sender, entry)));
+                try
+                {
+                    BeginInvoke(new Action(() => OnLogMessageAdded(sender, entry)));
+                }
+                catch (InvalidOperationException)
+                {
+                    // The handle was destroyed between the check above and this call.
+                    _resyncPending = true;
+                }
                 return;
             }
 
@@ -276,6 +300,32 @@ namespace MultiTerminal.Panels
             }
         }
 
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            if (_resyncPending) ResyncFromService();
+        }
+
+        /// <summary>
+        /// Rebuilds the list from the service's in-memory buffer, replacing entries that were skipped
+        /// while the panel had no handle. UI thread only.
+        /// </summary>
+        private void ResyncFromService()
+        {
+            _resyncPending = false;
+            if (_logService == null || _isDisposed) return;
+
+            _logListView.Items.Clear();
+            foreach (var entry in _logService.GetMessages())
+            {
+                AddLogEntry(entry);
+            }
+            UpdateCountLabel();
+        }
+
+        /// <summary>Test seam (InternalsVisibleTo): rows currently in the list.</summary>
+        internal int DisplayedEntryCount => _logListView.Items.Count;
+
         private void UpdateCountLabel()
         {
             if (_logService != null)
@@ -288,9 +338,23 @@ namespace MultiTerminal.Panels
         {
             if (_isDisposed) return;
 
+            // Same no-handle hazard as OnLogMessageAdded; the resync rebuilds from the emptied buffer.
+            if (!IsHandleCreated)
+            {
+                _resyncPending = true;
+                return;
+            }
+
             if (InvokeRequired)
             {
-                BeginInvoke(new Action(() => OnLogCleared(sender, e)));
+                try
+                {
+                    BeginInvoke(new Action(() => OnLogCleared(sender, e)));
+                }
+                catch (InvalidOperationException)
+                {
+                    _resyncPending = true;
+                }
                 return;
             }
 
