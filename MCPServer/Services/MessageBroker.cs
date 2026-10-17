@@ -6110,7 +6110,8 @@ namespace MultiTerminal.MCPServer.Services
 
         /// <summary>
         /// Compensating delete for a create whose caller failed AFTER <see cref="CreateProject"/> succeeded
-        /// (the Project Manager's rich save, task 9f95ab0c Run 3), so a retry starts clean. ID-bound: removes
+        /// (written for the Project Manager's rich save, task 9f95ab0c Run 3; no production caller since that
+        /// dialog was retired in e20e2ce0), so a retry starts clean. ID-bound: removes
         /// the row and cache entry with exactly this id, and the folder's project.json only if it carries
         /// this id. Returns null when done (or when there was nothing with that id), else why it could not.
         /// </summary>
@@ -6289,10 +6290,9 @@ namespace MultiTerminal.MCPServer.Services
         /// One global lock is fine: creates are rare and human-paced.
         ///
         /// What it covers: the paths that CREATE a project in a folder all run through this broker,
-        /// in-process: the start-screen New Project dialog (MainForm), the Project Manager dialog's New
-        /// Project (routed here in Run 2; it used to write a fresh project.json via
-        /// ProjectService.RegisterProject before the broker saw it), and POST /api/projects (so the
-        /// create_project MCP tool). ProjectService.RegisterProject now has no callers; the
+        /// in-process: the start-screen New Project dialog (MainForm) and POST /api/projects (so the
+        /// create_project MCP tool). (The Project Manager dialog's New Project also came here from Run 2
+        /// until the dialog was retired in e20e2ce0.) ProjectService.RegisterProject now has no callers; the
         /// ProjectRegistered sync hook that adopts its output still runs through CreateProject. Paths that
         /// are NOT covered, and why that is safe: ChangelogService/VersioningService and the edit dialogs
         /// re-save an already registered project under its own id; MainForm's auto-registration of a
@@ -6755,8 +6755,8 @@ namespace MultiTerminal.MCPServer.Services
 
         /// <summary>
         /// Canonical project-delete path. Every surface (REST DELETE /api/projects/{id}, the
-        /// delete_project MCP tool, the Project Manager dialog's callers, and the projects-pane
-        /// delete) routes here so a project is removed consistently:
+        /// delete_project MCP tool, the Home card and Browse All trash, and the project settings
+        /// form's Danger zone) routes here so a project is removed consistently:
         ///  - unregistered via <see cref="Services.ProjectService.UnregisterProject"/> — the only
         ///    removal that fires ProjectRemoved/RegistryChangedExternally (so CodeGraphWatcher drops
         ///    the root's FileSystemWatcher) AND deletes .claude/project.json when asked;

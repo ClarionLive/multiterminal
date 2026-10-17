@@ -2286,8 +2286,8 @@ namespace MultiTerminal.Docking
             // Claude Code rewrites the terminal title ~1×/sec (spinner/status), but the
             // extracted directory is almost always unchanged. Only fire DirectoryChanged
             // (and re-arm the file watcher) when the directory ACTUALLY changed — otherwise
-            // MainForm.OnTerminalDirectoryChanged re-renders the whole Project panel every
-            // title tick, which the user sees as a per-second flash (task 5e36e90b).
+            // MainForm.OnTerminalDirectoryChanged re-renders project state every title tick
+            // (it used to redraw the whole Project panel: a per-second flash, task 5e36e90b).
             string directory = ExtractDirectoryFromTitle(e.Title);
             if (!string.IsNullOrEmpty(directory))
             {

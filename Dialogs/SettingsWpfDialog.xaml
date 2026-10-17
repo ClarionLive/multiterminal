@@ -1282,7 +1282,7 @@
                         <TextBlock Foreground="#808080" FontFamily="Segoe UI" FontSize="11"
                                    Margin="4,0,4,0"
                                    TextWrapping="Wrap"
-                                   Text="To add a profile: click Add profile and type a name. The folder fills itself in and is created when you save (Browse picks another). Then click Sign in… and log in to Claude in the window that opens. Each profile keeps its own login, settings, plugins and history. Projects choose their profile in Edit Project."/>
+                                   Text="To add a profile: click Add profile and type a name. The folder fills itself in and is created when you save (Browse picks another). Then click Sign in… and log in to Claude in the window that opens. Each profile keeps its own login, settings, plugins and history. Projects choose their profile in Project Settings (the gear on a project's Home card)."/>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>

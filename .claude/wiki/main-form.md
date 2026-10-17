@@ -65,7 +65,6 @@
 - `OfficePanelDocument.ApplyTheme` — `OfficePanel/OfficePanelDocument.cs:539`
 - `ProfilePanelDocument.SetTheme` — `ProfilePanel/ProfilePanelDocument.cs:99`
 - `ProfilePanelRenderer.OnNavigationCompleted` — `ProfilePanel/ProfilePanelRenderer.cs:154`
-- `ProjectPanelDocument.SetTheme` — `Docking/ProjectPanelDocument.cs:164`
 - `TerminalControl.DoStart` — `Controls/TerminalControl.cs:231`
 - `TerminalControl.SetTheme` — `Controls/TerminalControl.cs:926`
 - `WebViewTerminalRenderer.OnTerminalReady` — `Terminal/WebViewTerminalRenderer.cs:355`

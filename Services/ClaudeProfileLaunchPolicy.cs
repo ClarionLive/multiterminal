@@ -190,7 +190,7 @@ namespace MultiTerminal.Services
                         $"The Claude profile '{requestedName ?? ClaudeProfile.DefaultName}' was chosen for it, but its folder belongs to project '{owner.ProjectName}', "
                         + $"which uses the Claude profile '{owner.ProfileName ?? ClaudeProfile.DefaultName}'. "
                         + "A terminal in a project's folder always runs under that project's profile. "
-                        + "To change it, choose another profile for the project in Edit Project.",
+                        + "To change it, choose another profile for the project in Project Settings (the gear on its Home card).",
                 };
             }
 
@@ -230,7 +230,7 @@ namespace MultiTerminal.Services
             string fixedName = owner.ProfileName ?? ClaudeProfile.DefaultName;
             return new ClaudeProfileLaunchChoice(
                 false, fixedName,
-                $"This folder belongs to project '{owner.ProjectName}', which uses '{fixedName}'. Change it in Edit Project.");
+                $"This folder belongs to project '{owner.ProjectName}', which uses '{fixedName}'. Change it in Project Settings.");
         }
 
         /// <summary>
@@ -391,7 +391,7 @@ namespace MultiTerminal.Services
             {
                 ClaudeProfileNameSource.Inherited => "Fix the profile in Settings > Claude Profiles.",
                 ClaudeProfileNameSource.Requested => "Fix the profile in Settings > Claude Profiles, or choose another one.",
-                _ => "Fix the profile in Settings > Claude Profiles, or choose another profile for the project in Edit Project.",
+                _ => "Fix the profile in Settings > Claude Profiles, or choose another profile for the project in Project Settings.",
             };
 
             return $"Not started: {launchLabel}. {DescribeOrigin(name)}{blockedReason} {fix} MultiTerminal does not fall back to another profile.";
@@ -616,7 +616,7 @@ namespace MultiTerminal.Services
                 $"'{o.Name}' ({ClaudeProfile.NormalizeName(o.ClaudeProfile) ?? ClaudeProfile.DefaultName})"));
             return new ClaudeProfileNameDecision(null, ClaudeProfileNameSource.Database, null, null)
             {
-                Conflict = $"The folder '{level}' is registered to more than one project, and they are set to different Claude profiles: {list}. MultiTerminal will not pick one. Give those projects the same Claude profile in Edit Project, or remove the duplicate project.",
+                Conflict = $"The folder '{level}' is registered to more than one project, and they are set to different Claude profiles: {list}. MultiTerminal will not pick one. Give those projects the same Claude profile in Project Settings, or remove the duplicate project.",
             };
         }
 
@@ -656,7 +656,7 @@ namespace MultiTerminal.Services
                     $"The folder '{level}' has a .claude\\project.json that says it is project '{fileName}' with the Claude profile '{fromFile.ProfileName ?? ClaudeProfile.DefaultName}', "
                     + $"but MultiTerminal has that project registered as '{rowElsewhere.Name}' {registeredAt} with the Claude profile '{rowProfile ?? ClaudeProfile.DefaultName}'. "
                     + "The folder looks moved or copied, and MultiTerminal will not guess which profile is right. "
-                    + "If the folder was moved, update the project's folder in Edit Project. "
+                    + "If the folder was moved, set the project's Source path to this folder in Project Settings (Paths). "
                     + "If it is a copy, remove or correct .claude\\project.json in this folder.",
             };
         }

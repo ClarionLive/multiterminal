@@ -983,7 +983,7 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Get all team member profiles that have is_team_lead = 1.
         /// Returns a list of lightweight profile summaries (id, displayName, avatarUrl)
-        /// for populating the team lead dropdown in the Project Panel.
+        /// for populating a team lead dropdown.
         /// ProjectDatabase shares the same multiterminal.db file as TaskDatabase, so it can
         /// query team_member_profiles directly.
         /// </summary>

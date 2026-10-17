@@ -3721,8 +3721,8 @@ namespace MultiTerminal
             // a refused launch creates nothing: the named project's profile, else the profile of the
             // project that owns the folder, else the inherited one (a helper's spawner), else Default.
             // onClaudeProfileRefused is how a caller with no human at the desk (spawn_helper) takes the
-            // refusal instead of a message box. A caller that has already decided (the Project Panel
-            // launch, which checks before it builds anything) passes decidedClaudeProfile instead.
+            // refusal instead of a message box. A caller that has already decided passes
+            // decidedClaudeProfile instead (none does since the Project pane's launch was retired, e20e2ce0).
             string claudeProfileLabel = !string.IsNullOrEmpty(identityName) ? $"terminal '{identityName}'" : "the terminal";
             string requestedDir = workingDirectory ?? _settings?.GetLastDirectory();
             Models.ClaudeProfile claudeProfile = decidedClaudeProfile;

@@ -136,7 +136,7 @@ namespace MultiTerminal.Tests
             Assert.Contains("registered as 'Acme'", decision.Refusal, StringComparison.Ordinal);
             Assert.Contains("with the Claude profile 'Work'", decision.Refusal, StringComparison.Ordinal);
             Assert.Contains(@".claude\project.json", decision.Refusal, StringComparison.Ordinal);
-            Assert.Contains("Edit Project", decision.Refusal, StringComparison.Ordinal);
+            Assert.Contains("Project Settings", decision.Refusal, StringComparison.Ordinal);
 
             // The advice for two projects registered at one folder does not apply here.
             Assert.DoesNotContain("duplicate project", decision.Refusal, StringComparison.Ordinal);
@@ -817,7 +817,7 @@ namespace MultiTerminal.Tests
             Assert.Contains("Project 'Acme' is set to the Claude profile 'ClientX'", decision.Refusal, StringComparison.Ordinal);
             Assert.Contains("not configured on this machine", decision.Refusal, StringComparison.Ordinal);
             Assert.Contains("Settings > Claude Profiles", decision.Refusal, StringComparison.Ordinal);
-            Assert.Contains("Edit Project", decision.Refusal, StringComparison.Ordinal);
+            Assert.Contains("Project Settings", decision.Refusal, StringComparison.Ordinal);
         }
 
         [Fact]
@@ -840,7 +840,7 @@ namespace MultiTerminal.Tests
             Assert.Equal(ClaudeProfileNameSource.Inherited, decision.Source);
             Assert.Contains("belongs to no project", decision.Refusal, StringComparison.Ordinal);
             Assert.Contains("'Gone'", decision.Refusal, StringComparison.Ordinal);
-            Assert.DoesNotContain("Edit Project", decision.Refusal, StringComparison.Ordinal);
+            Assert.DoesNotContain("Project Settings", decision.Refusal, StringComparison.Ordinal);
         }
 
         [Fact]
@@ -909,7 +909,7 @@ namespace MultiTerminal.Tests
                 Assert.Null(decision.Profile);
                 Assert.Contains("'Acme'", decision.Refusal, StringComparison.Ordinal);
                 Assert.Contains("'Work'", decision.Refusal, StringComparison.Ordinal);
-                Assert.Contains("Edit Project", decision.Refusal, StringComparison.Ordinal);
+                Assert.Contains("Project Settings", decision.Refusal, StringComparison.Ordinal);
             }
 
             Assert.Contains("'Personal'", atRoot.Refusal, StringComparison.Ordinal);
@@ -955,7 +955,7 @@ namespace MultiTerminal.Tests
             Assert.Equal(ClaudeProfileNameSource.Requested, decision.Source);
             Assert.Contains("'Gone'", decision.Refusal, StringComparison.Ordinal);
             Assert.Contains("not configured", decision.Refusal, StringComparison.Ordinal);
-            Assert.DoesNotContain("Edit Project", decision.Refusal, StringComparison.Ordinal);
+            Assert.DoesNotContain("Project Settings", decision.Refusal, StringComparison.Ordinal);
         }
 
         [Fact]
@@ -990,7 +990,7 @@ namespace MultiTerminal.Tests
             Assert.False(owned.CanChoose);
             Assert.Equal("Work", owned.FixedProfileName);
             Assert.Contains("'Acme'", owned.Reason, StringComparison.Ordinal);
-            Assert.Contains("Edit Project", owned.Reason, StringComparison.Ordinal);
+            Assert.Contains("Project Settings", owned.Reason, StringComparison.Ordinal);
 
             Assert.False(ownedDefault.CanChoose);
             Assert.Equal("Default", ownedDefault.FixedProfileName);

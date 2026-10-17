@@ -128,7 +128,7 @@ namespace MultiTerminal.Dialogs
 
             return which + " (a renamed profile counts as removed)." + Environment.NewLine + Environment.NewLine
                 + "Any project still set to one of them will refuse to start "
-                + "until you pick another profile for it in Edit Project. The folders themselves are not deleted."
+                + "until you pick another profile for it in Project Settings. The folders themselves are not deleted."
                 + Environment.NewLine + Environment.NewLine
                 + "Save anyway?";
         }

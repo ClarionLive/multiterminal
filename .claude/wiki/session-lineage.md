@@ -100,9 +100,6 @@
 - `HudSessionsRenderer.RefreshSessions` — `Controls/HudSessionsPanel/HudSessionsRenderer.cs:152`
 - `MainForm.InitializeMcpServerAndChatPanel` — `MainForm.cs:387`
 - `MainForm.OnSessionSyncTimerTick` — `MainForm.cs:3929`
-- `MainForm.OnViewSessionRequested` — `MainForm.cs:5507`
-- `ProjectPanelDocument.LoadSessionsForProjectAsync` — `Docking/ProjectPanelDocument.cs:977`
-- `ProjectPanelDocument.OnSyncSessionsRequested` — `Docking/ProjectPanelDocument.cs:1091`
 - `HudDashboardRenderer.RefreshProjectInfo` — `Controls/HudDashboardPanel/HudDashboardRenderer.cs:322`
 
 ## Gotchas
