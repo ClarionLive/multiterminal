@@ -76,6 +76,12 @@ namespace MultiTerminal.ProjectSettings
                     sourceAccounts = options.SourceAccounts.Select(a => new { value = a.Id, label = a.DisplayName }),
                     projectTypes = ProjectTypes.Select(t => new { value = t, label = t.Length == 0 ? "(none)" : t }),
                     statuses = Project.StatusValues.Select(s => new { value = s.ToLowerInvariant(), label = s }),
+                    launchModes = new[]
+                    {
+                        new { value = Project.LaunchModeToStorage(ProjectLaunchMode.Ask), label = "Ask each time" },
+                        new { value = Project.LaunchModeToStorage(ProjectLaunchMode.New), label = "Always start a new session" },
+                        new { value = Project.LaunchModeToStorage(ProjectLaunchMode.Continue), label = "Always continue the last session" },
+                    },
                     terminals = new[]
                     {
                         new { value = TerminalKindHelper.ClaudeCodeValue, label = "Claude Code" },

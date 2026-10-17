@@ -22,8 +22,12 @@ claude command is built, MT decides:
 The dialog offers New session (default), Continue last (agent, age, summary), and the last ~15
 sessions, helper and worktree sessions included. There is an editable name, prefilled with the
 session's original MT name. "Don't ask again" writes `launch_mode` via `ProjectDatabase.SetLaunchMode`
-(New maps to `new`, Continue to `continue`; picking a specific session leaves `ask`). Until the project
-settings form has a Launch-mode field, the only way back to `ask` is editing the database.
+(New maps to `new`, Continue to `continue`; picking a specific session leaves `ask`). The way back to
+`ask` is the **Launch mode** field in the project settings form's Launch section (the gear on a terminal's
+status bar, a Home card or a Browse All row): Ask each time / Always start a new session / Always continue
+the last session. It saves through `ProjectSettingsService`, which writes the column with
+`SetLaunchMode` inside the save's transaction, so `SetLaunchMode` stays its only writer; it applies at the
+next launch.
 
 ## Why transcripts, not MT's session tables
 

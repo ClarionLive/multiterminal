@@ -465,6 +465,76 @@ namespace MultiTerminal.Tests
             Assert.Empty(_db.GetProjectPrompts(p.Id));
         }
 
+        // The raw stored launch_mode, so a test can tell the explicit 'ask' SetLaunchMode writes from NULL.
+        private string RawLaunchMode(string projectId)
+        {
+            using var raw = new SQLiteConnection($"Data Source={_testDbPath}");
+            raw.Open();
+            using var cmd = new SQLiteCommand("SELECT launch_mode FROM projects WHERE id = @id", raw);
+            cmd.Parameters.AddWithValue("@id", projectId);
+            var value = cmd.ExecuteScalar();
+            return value == null || value is DBNull ? null : (string)value;
+        }
+
+        /// <summary>
+        /// The Launch mode field (ec2ed636 + e20e2ce0) saves through ProjectDatabase.SetLaunchMode, the
+        /// column's only writer, and says it applies at the next launch. Choosing Ask stores the explicit
+        /// 'ask' SetLaunchMode writes, not NULL. Falsified: sending launchMode through UpdateProjectField like
+        /// the other scalars made the save fail ("Saving 'launchMode' failed", red at the first assertion),
+        /// because UpdateProjectField does not whitelist launch_mode.
+        /// </summary>
+        [Fact]
+        public void Launch_mode_saves_through_SetLaunchMode_and_applies_at_next_launch()
+        {
+            var p = Seed();
+
+            var toContinue = _service.Save(UpdateFor(p, ("launchMode", "continue")));
+            Assert.True(toContinue.Success, toContinue.Error);
+            Assert.True(toContinue.AppliesAtNextLaunch);
+            Assert.Equal(ProjectLaunchMode.Continue, _db.GetRichProject(p.Id).LaunchMode);
+
+            var backToAsk = _service.Save(UpdateFor(p, ("launchMode", "ask")));
+            Assert.True(backToAsk.Success, backToAsk.Error);
+            Assert.Equal(ProjectLaunchMode.Ask, _db.GetRichProject(p.Id).LaunchMode);
+            Assert.Equal("ask", RawLaunchMode(p.Id));
+        }
+
+        /// <summary>
+        /// The launch mode is written inside the save's transaction, so a save that fails later rolls it back
+        /// with everything else. Falsified: taking the BeginTransaction/Commit out of
+        /// ProjectDatabase.RunInTransaction left launch_mode at 'new' (red at the LaunchMode assertion).
+        /// </summary>
+        [Fact]
+        public void A_failed_save_rolls_back_the_launch_mode_too()
+        {
+            var p = Seed();
+            using (var raw = new SQLiteConnection($"Data Source={_testDbPath}"))
+            {
+                raw.Open();
+                using var trigger = new SQLiteCommand(
+                    "CREATE TRIGGER refuse_prompts BEFORE INSERT ON project_prompts BEGIN SELECT RAISE(ABORT, 'refused by test'); END;", raw);
+                trigger.ExecuteNonQuery();
+            }
+
+            var u = UpdateFor(p, ("launchMode", "new"));
+            u.Prompts = new List<ProjectPromptEntry> { new ProjectPromptEntry { PromptType = "start", PromptText = "hello" } };
+            var result = _service.Save(u);
+
+            Assert.False(result.Success);
+            Assert.Equal(ProjectLaunchMode.Ask, _db.GetRichProject(p.Id).LaunchMode);
+            Assert.Null(RawLaunchMode(p.Id));
+        }
+
+        [Theory]
+        [InlineData("continue", "continue")]
+        [InlineData("NEW", "new")]
+        [InlineData("", "ask")]
+        [InlineData("sometimes", "ask")]
+        public void An_unknown_launch_mode_reads_as_ask(string sent, string normalized)
+        {
+            Assert.Equal(normalized, ProjectSettingsService.NormalizeValue("launchMode", sent));
+        }
+
         private sealed class StubHost : IProjectSettingsHost
         {
             public List<(string Id, string PreviousName)> Renames { get; } = new List<(string, string)>();

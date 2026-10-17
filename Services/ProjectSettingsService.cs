@@ -96,7 +96,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public static readonly IReadOnlyCollection<string> LaunchTimeFields = new HashSet<string>(StringComparer.Ordinal)
         {
-            "claudeProfile", "defaultTerminal", "quietStart", "launchCommand",
+            "claudeProfile", "launchMode", "defaultTerminal", "quietStart", "launchCommand",
         };
 
         /// <summary>True when this save changed something running terminals will not pick up until they restart.</summary>
@@ -138,7 +138,7 @@ namespace MultiTerminal.Services
         public static readonly IReadOnlyCollection<string> EditableFields = new HashSet<string>(StringComparer.Ordinal)
         {
             "name", "description", "projectType", "status", "currentVersion", "icon", "iconColor",
-            "isPinned", "createdBy", "claudeProfile", "defaultTerminal", "quietStart", "teamLead",
+            "isPinned", "createdBy", "claudeProfile", "launchMode", "defaultTerminal", "quietStart", "teamLead",
             "launchCommand", "sourcePath", "deployPath", "buildOutputPath", "buildCommand", "deployCommand",
             "gitRepoUrl", "gitDefaultBranch", "gitAutoCommit", "sourceControlAccountId", "changeLog",
         };
@@ -210,7 +210,13 @@ namespace MultiTerminal.Services
 
                     foreach (var pair in changed)
                     {
-                        if (!_db.UpdateProjectField(update.ProjectId, pair.Key, pair.Value))
+                        // launch_mode has one writer, SetLaunchMode (task ec2ed636); UpdateProjectField does not
+                        // whitelist it. SetLaunchMode takes the same re-entrant _dbLock on the same
+                        // connection, so it runs inside this transaction like every other write here.
+                        bool written = pair.Key == "launchMode"
+                            ? _db.SetLaunchMode(update.ProjectId, Project.ParseLaunchMode(pair.Value))
+                            : _db.UpdateProjectField(update.ProjectId, pair.Key, pair.Value);
+                        if (!written)
                         {
                             failedField = pair.Key;
                             throw new InvalidOperationException($"Saving '{pair.Key}' failed.");
@@ -358,6 +364,9 @@ namespace MultiTerminal.Services
                     return TerminalKindHelper.Normalize(value);
                 case "claudeProfile":
                     return ClaudeProfile.NormalizeName(value);
+                case "launchMode":
+                    // Unknown or blank reads as ask, the same rule as the stored value (task ec2ed636).
+                    return Project.LaunchModeToStorage(Project.ParseLaunchMode(value));
                 case "currentVersion":
                     return string.IsNullOrWhiteSpace(value) ? "0.1.0" : value;
                 default:
@@ -391,6 +400,7 @@ namespace MultiTerminal.Services
                 case "isPinned": return p.IsPinned ? "true" : "false";
                 case "createdBy": return p.CreatedBy;
                 case "claudeProfile": return ClaudeProfile.NormalizeName(p.ClaudeProfile);
+                case "launchMode": return Project.LaunchModeToStorage(p.LaunchMode);
                 case "defaultTerminal": return TerminalKindHelper.Normalize(p.DefaultTerminal);
                 case "quietStart": return p.IsQuietStart ? "true" : "false";
                 case "teamLead": return p.TeamLead;
