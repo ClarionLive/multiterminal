@@ -28,15 +28,26 @@ namespace MultiTerminal.Services
         /// <c>--dangerously-skip-permissions</c> with that project's local hooks/deny silently
         /// stripped (task 77d1182f).
         /// </param>
+        /// <param name="resumeSessionId">
+        /// Claude Code session id to resume (<c>--resume &lt;id&gt;</c>), or null/whitespace for a fresh
+        /// session. Must be a GUID; anything else throws <see cref="ArgumentException"/> (task ec2ed636).
+        /// </param>
         /// <returns>LaunchCommand with WorkingDirectory and AutoRunCommand ready for ConPtyTerminal.Start().</returns>
-        public static LaunchCommand BuildClaudeCommand(Models.Project project, string workingDirectory = null)
+        public static LaunchCommand BuildClaudeCommand(Models.Project project, string workingDirectory = null, string resumeSessionId = null)
         {
+            // Validate first: a bad id must fail before BuildFlags writes the settings file.
+            string resumeId = NormalizeResumeSessionId(resumeSessionId);
+
             string workingDir = workingDirectory ?? ResolveWorkingDirectory(project);
 
             // Build the claude CLI flags (just --mcp-config now — plugin handles hooks, CLAUDE.md, agents, skills)
             string flags = BuildFlags(workingDir);
 
-            string autoRunCommand = $"claude{flags} --dangerously-skip-permissions; exit";
+            // --resume goes after the flags so the command still starts with the bare `claude` token,
+            // which ConPtyTerminal.ApplySessionName needs to splice `-n '<name>'` in after.
+            string resumeFlag = resumeId == null ? string.Empty : $" --resume {resumeId}";
+
+            string autoRunCommand = $"claude{flags}{resumeFlag} --dangerously-skip-permissions; exit";
 
             return new LaunchCommand
             {
@@ -266,18 +277,45 @@ namespace MultiTerminal.Services
         /// card split button) should use this instead of calling the per-kind
         /// builder directly.
         /// </summary>
-        public static LaunchCommand BuildCommand(Models.TerminalKind kind, Models.Project project, string workingDirectory = null)
+        public static LaunchCommand BuildCommand(Models.TerminalKind kind, Models.Project project, string workingDirectory = null, string resumeSessionId = null)
         {
             // workingDirectory: explicit cwd for callers that know it (API-driven spawn); null
             // resolves from the project. See BuildClaudeCommand for why this is load-bearing.
             switch (kind)
             {
                 case Models.TerminalKind.Codex:
+                    // Codex resume is out of scope. Refuse rather than drop the id: a silently fresh
+                    // session looks like a resumed one until the conversation is missing. Checked
+                    // before BuildCodexCommand so its config/broker side effects never run.
+                    if (!string.IsNullOrWhiteSpace(resumeSessionId))
+                        throw new ArgumentException("Resuming a session is not supported for Codex terminals.", nameof(resumeSessionId));
                     return BuildCodexCommand(project, workingDirectory);
                 case Models.TerminalKind.ClaudeCode:
                 default:
-                    return BuildClaudeCommand(project, workingDirectory);
+                    return BuildClaudeCommand(project, workingDirectory, resumeSessionId);
             }
+        }
+
+        /// <summary>
+        /// Validates a resume session id and returns it in canonical lowercase "D" form
+        /// (<c>xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx</c>), or null when none was given (null/whitespace).
+        /// Uppercase hex is accepted and lowercased; braced, parenthesised and hyphenless forms are rejected.
+        /// <para>WHY A GUID AND NOT JUST QUOTED. The id is spliced unquoted into a PowerShell command line,
+        /// and every caller is MT code holding an id it read from Claude Code — so a non-GUID is a bug, and
+        /// throwing surfaces it where launching fresh would hide it. The canonical re-format means only
+        /// hex and hyphens ever reach the shell.</para>
+        /// <para>WHY NOT <c>--continue</c>. It picks the newest session in the cwd, which may be live in
+        /// another pane, and cannot reach a session recorded under a worktree's directory.</para>
+        /// </summary>
+        internal static string NormalizeResumeSessionId(string resumeSessionId)
+        {
+            if (string.IsNullOrWhiteSpace(resumeSessionId))
+                return null;
+
+            if (!Guid.TryParseExact(resumeSessionId, "D", out Guid id))
+                throw new ArgumentException($"Resume session id is not a GUID: '{resumeSessionId}'.", nameof(resumeSessionId));
+
+            return id.ToString("D"); // Guid.ToString is always lowercase.
         }
 
         /// <summary>
