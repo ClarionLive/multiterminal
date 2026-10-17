@@ -479,6 +479,10 @@
             transform: scale(1.15);
         }
 
+        /* The settings gear shares the trash's hover-reveal, but is not destructive. */
+        .card-settings:hover { color: var(--accent); }
+        .list-row-action.list-settings:hover { color: var(--accent); }
+
         /* Dropdown menus: Browse-All per-launch override, live status, live terminal. */
         .list-launch-popup,
         .card-status-popup,
@@ -1463,7 +1467,10 @@
                 '</div>' +
                 // Pin + delete relocated to the bottom-right corner.
                 '<div class="card-controls-bottom">' +
-                    '<button class="card-delete" ' +
+                    '<button class="card-delete card-settings" ' +
+                        'title="Project settings" ' +
+                        'aria-label="Project settings">&#9881;</button>' +
+                    '<button class="card-delete card-trash" ' +
                         'data-id="' + esc(project.id) + '" ' +
                         'title="Delete project from MultiTerminal" ' +
                         'aria-label="Delete project">&#128465;</button>' +
@@ -1497,8 +1504,14 @@
             renderGrid();
         });
 
+        // Settings gear — opens the project settings form (ticket e20e2ce0).
+        card.querySelector('.card-settings').addEventListener('click', function(e) {
+            e.stopPropagation();
+            postMsg({ type: 'open_project_settings', projectId: project.id });
+        });
+
         // Delete (trash) — host-side confirmation + canonical broker delete.
-        var delBtn = card.querySelector('.card-delete');
+        var delBtn = card.querySelector('.card-trash');
         if (delBtn) {
             delBtn.addEventListener('click', function(e) {
                 e.stopPropagation();
@@ -1726,10 +1739,12 @@
                 '<td><span class="last-opened" title="' + esc(project.lastOpenedAt || 'never') + '">' + relativeTime(project.lastOpenedAt) + '</span></td>' +
                 '<td class="list-terminal-cell"><span class="list-terminal-chip">' + esc(termName) + '</span></td>' +
                 '<td class="list-launch-cell">' +
-                    // Row actions, left to right: [settings gear, added by a later change]
-                    // [trash] [launch caret]. New buttons go before .list-delete and carry
-                    // class "list-row-action" so they share the row-hover styling.
+                    // Row actions, left to right: [settings gear] [trash] [launch caret]. New
+                    // buttons carry class "list-row-action" so they share the row-hover styling.
                     '<div class="list-row-actions">' +
+                        '<button class="list-row-action list-settings" ' +
+                            'title="Project settings" ' +
+                            'aria-label="Project settings">&#9881;</button>' +
                         '<button class="list-row-action list-delete" ' +
                             'title="Delete project from MultiTerminal" ' +
                             'aria-label="Delete project">&#128465;</button>' +
@@ -1764,6 +1779,13 @@
                 project.isPinned = !project.isPinned;
                 renderList();
                 renderGrid();   // keep the home grid's pinned-first order in step
+            });
+
+            // Settings gear — opens the project settings form (ticket e20e2ce0).
+            tr.querySelector('.list-settings').addEventListener('click', function(e) {
+                e.stopPropagation();
+                closeAllLaunchPopups(null);
+                postMsg({ type: 'open_project_settings', projectId: project.id });
             });
 
             // Delete (trash) — same delete_project message as the card trash; the host

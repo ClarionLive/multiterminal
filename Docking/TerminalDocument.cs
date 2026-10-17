@@ -294,6 +294,18 @@ namespace MultiTerminal.Docking
         public event EventHandler<string> StartScreenProjectDeleteRequested;
 
         /// <summary>
+        /// The project settings gear was clicked (ticket e20e2ce0), on this pane's status bar or on a Home
+        /// card / Browse All row of its start screen. Carries the project id; MainForm opens the form.
+        /// </summary>
+        public event EventHandler<string> ProjectSettingsRequested;
+
+        /// <summary>
+        /// The project the status bar's gear opens: the registered project containing the pane's folder,
+        /// else the project it was launched for. Null when neither exists, and the gear is then disabled.
+        /// </summary>
+        public string SettingsProjectId { get; private set; }
+
+        /// <summary>
         /// Function to retrieve available identity names for the "Launch as..." menu.
         /// Set by MainForm to provide identity list.
         /// </summary>
@@ -744,6 +756,11 @@ namespace MultiTerminal.Docking
                 }
             };
             _statusBar.HomeRequested += (s, e) => ReturnToStartScreen();
+            _statusBar.ProjectSettingsRequested += (s, e) =>
+            {
+                if (!string.IsNullOrEmpty(SettingsProjectId))
+                    ProjectSettingsRequested?.Invoke(this, SettingsProjectId);
+            };
             _statusBar.OpenFolderRequested += OnOpenFolderRequested;
             _statusBar.HudToggleRequested += (s, e) =>
             {
@@ -1080,6 +1097,7 @@ namespace MultiTerminal.Docking
             _startScreen.NewProjectRequested += (s, e) => StartScreenNewProjectRequested?.Invoke(this, e);
             _startScreen.JustClaudeRequested += (s, e) => StartScreenJustClaudeRequested?.Invoke(this, e);
             _startScreen.ProjectDeleteRequested += (s, id) => StartScreenProjectDeleteRequested?.Invoke(this, id);
+            _startScreen.ProjectSettingsRequested += (s, id) => ProjectSettingsRequested?.Invoke(this, id);
             Controls.Add(_startScreen);
             _startScreen.BringToFront();
             _isStartScreenVisible = true;
@@ -3048,6 +3066,8 @@ namespace MultiTerminal.Docking
             }
             HeaderProjectName = projectName;
             HeaderWorkingOnProject = workingOn;
+            SettingsProjectId = projectId ?? _launchProjectId;
+            _statusBar.SetProjectSettingsAvailable(!string.IsNullOrEmpty(SettingsProjectId));
 
             _debugLogService?.Trace("TerminalDocument", $"UpdateStatusBar: Calling _statusBar.UpdateStatus with:");
             _debugLogService?.Trace("TerminalDocument", $"  - terminalName: '{terminalName}'");

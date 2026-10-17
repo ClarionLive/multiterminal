@@ -94,6 +94,9 @@ namespace MultiTerminal.StartScreen
         /// </summary>
         public event EventHandler<string> ProjectDeleteRequested;
 
+        /// <summary>The settings gear on a Home card or Browse All row was clicked (ticket e20e2ce0). Carries the project id.</summary>
+        public event EventHandler<string> ProjectSettingsRequested;
+
         // ── Constructor ───────────────────────────────────────────────────────
 
         public StartScreenControl()
@@ -386,6 +389,16 @@ namespace MultiTerminal.StartScreen
                             // Validate: non-empty, GUID-length (36 chars max) — mirrors launch/pin.
                             if (!string.IsNullOrEmpty(delId) && delId.Length <= 36)
                                 ProjectDeleteRequested?.Invoke(this, delId);
+                        }
+                        break;
+
+                    case "open_project_settings":
+                        if (root.TryGetProperty("projectId", out var setIdEl) && setIdEl.ValueKind == JsonValueKind.String)
+                        {
+                            var setId = setIdEl.GetString();
+                            // Same validation as delete_project: non-empty, GUID-length at most.
+                            if (!string.IsNullOrEmpty(setId) && setId.Length <= 36)
+                                ProjectSettingsRequested?.Invoke(this, setId);
                         }
                         break;
 
