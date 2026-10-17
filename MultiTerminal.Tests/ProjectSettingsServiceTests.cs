@@ -87,12 +87,6 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
-        /// The retired Project Manager edit re-saved the row from project.json, which has no gitAutoCommit,
-        /// and so reset Auto-commit to off right after the dialog set it. A save that changes a project.json
-        /// field must leave Auto-commit as saved. Falsified: routing SyncProjectJson through
-        /// ProjectService.SaveProject(LoadProject(path)) turns the first assertion red.
-        /// </summary>
-        /// <summary>
         /// The form's "applies at next launch" message (item 2) follows what the save actually changed: a
         /// launch-time field says so, a field running terminals pick up at once does not.
         /// </summary>
@@ -112,6 +106,12 @@ namespace MultiTerminal.Tests
                 new HashSet<string>(ProjectSettingsSaveResult.LaunchTimeFields, StringComparer.Ordinal));
         }
 
+        /// <summary>
+        /// The retired Project Manager edit re-saved the row from project.json, which has no gitAutoCommit,
+        /// and so reset Auto-commit to off right after the dialog set it. A save that changes a project.json
+        /// field must leave Auto-commit as saved. Falsified: routing SyncProjectJson through
+        /// ProjectService.SaveProject(LoadProject(path)) turns the first assertion red.
+        /// </summary>
         [Fact]
         public void Auto_commit_survives_a_save_that_also_rewrites_project_json()
         {
@@ -254,6 +254,129 @@ namespace MultiTerminal.Tests
             Assert.True(again.Success);
             Assert.False(again.McpServersChanged);
             Assert.Single(_host.GatewaySyncs);
+        }
+
+        // What the form holds after loading: the stored project and lists, as ProjectSettingsForm.SendLoad keeps them.
+        private ProjectSettingsBaseline Snapshot(Project p)
+        {
+            var lists = new ProjectContextService(_db).GetProjectContext(p.Id);
+            return new ProjectSettingsBaseline
+            {
+                Project = _db.GetRichProject(p.Id),
+                Agents = lists.Agents, SpecialistAgents = lists.SpecialistAgents, McpServers = lists.McpServers,
+                Skills = lists.Skills, Paths = lists.Paths, Prompts = lists.Prompts,
+            };
+        }
+
+        // The page's save: every field and every list as loaded, with the user's edits applied on top.
+        private static ProjectSettingsUpdate FormSave(ProjectSettingsBaseline b, params (string Field, string Value)[] edits)
+        {
+            var u = new ProjectSettingsUpdate
+            {
+                ProjectId = b.Project.Id,
+                Baseline = b,
+                Agents = b.Agents.Select(a => new ProjectAgent { AgentName = a.AgentName, Role = a.Role, PreferredModel = a.PreferredModel }).ToList(),
+                SpecialistAgents = b.SpecialistAgents.ToList(),
+                McpServers = b.McpServers.ToList(),
+                Skills = b.Skills.ToList(),
+                Paths = b.Paths.ToList(),
+                Prompts = b.Prompts.ToList(),
+            };
+            foreach (var field in ProjectSettingsService.EditableFields)
+                u.Fields[field] = ProjectSettingsService.ReadField(b.Project, field) ?? string.Empty;
+            foreach (var (field, value) in edits)
+                u.Fields[field] = value;
+            return u;
+        }
+
+        /// <summary>
+        /// The form is modeless and can stay open for hours while a task's completion writes the changelog and
+        /// an agent adds a project agent over REST. Saving an unrelated edit must keep both: only what the user
+        /// changed against what the form loaded is written. Falsified: skipping the baseline check in Save
+        /// (the pre-fix two-way compare) turned this red at ChangedFields, which then also held changeLog:
+        /// the stale copy was being written back.
+        /// </summary>
+        [Fact]
+        public void A_stale_form_keeps_what_was_changed_elsewhere_after_it_loaded()
+        {
+            var p = Seed();
+            _db.SaveProjectAgent(new ProjectAgent { ProjectId = p.Id, AgentName = "Kept", Role = "dev" });
+            var loaded = Snapshot(p);
+
+            _db.UpdateProjectField(p.Id, "changeLog", "v0.2.0: written by task completion");
+            _db.SaveProjectAgent(new ProjectAgent { ProjectId = p.Id, AgentName = "AddedElsewhere", Role = "qa" });
+
+            var result = _service.Save(FormSave(loaded, ("buildCommand", "dotnet build")));
+
+            Assert.True(result.Success, result.Error);
+            Assert.Equal(new[] { "buildCommand" }, result.ChangedFields);
+            var stored = _db.GetRichProject(p.Id);
+            Assert.Equal("dotnet build", stored.BuildCommand);
+            Assert.Equal("v0.2.0: written by task completion", stored.ChangeLog);
+            Assert.Equal(new[] { "AddedElsewhere", "Kept" }, _db.GetProjectAgents(p.Id).Select(a => a.AgentName).OrderBy(n => n, StringComparer.Ordinal));
+        }
+
+        /// <summary>
+        /// When the user edited a setting that was ALSO changed elsewhere after the form loaded, neither copy
+        /// can be assumed right: the save is refused and writes nothing, not even the user's other edits.
+        /// Falsified: skipping the baseline check in Save turned this red at the first assertion (the save
+        /// succeeded and overwrote "elsewhere").
+        /// </summary>
+        [Fact]
+        public void An_edit_that_collides_with_a_change_made_elsewhere_is_refused_and_writes_nothing()
+        {
+            var p = Seed();
+            _db.SaveProjectAgent(new ProjectAgent { ProjectId = p.Id, AgentName = "Kept", Role = "dev" });
+            var loaded = Snapshot(p);
+
+            _db.UpdateProjectField(p.Id, "buildCommand", "elsewhere");
+            _db.SaveProjectAgent(new ProjectAgent { ProjectId = p.Id, AgentName = "AddedElsewhere" });
+
+            var u = FormSave(loaded, ("buildCommand", "mine"), ("deployCommand", "deploy.ps1"));
+            u.Agents.Add(new ProjectAgent { AgentName = "AddedHere" });
+            var result = _service.Save(u);
+
+            Assert.False(result.Success);
+            Assert.True(result.Conflict);
+            Assert.Contains("buildCommand", result.Error);
+            Assert.Contains("agents", result.Error);
+            var stored = _db.GetRichProject(p.Id);
+            Assert.Equal("elsewhere", stored.BuildCommand);
+            Assert.Null(stored.DeployCommand);
+            Assert.Equal(new[] { "AddedElsewhere", "Kept" }, _db.GetProjectAgents(p.Id).Select(a => a.AgentName).OrderBy(n => n, StringComparer.Ordinal));
+            Assert.Equal(0, _host.NotifyCount);
+        }
+
+        /// <summary>
+        /// A save that fails partway leaves the project exactly as it was: the scalars and the lists written
+        /// before the failure are rolled back with it. The failure is real, not simulated: a trigger makes the
+        /// database refuse the prompt insert, which runs after the scalars, agents and skills are written.
+        /// Falsified: taking the BeginTransaction/Commit out of ProjectDatabase.RunInTransaction turned this red
+        /// at the buildCommand assertion ("dotnet build" had been written before the prompt insert failed).
+        /// </summary>
+        [Fact]
+        public void A_save_that_fails_partway_writes_nothing()
+        {
+            var p = Seed();
+            _db.SaveProjectAgent(new ProjectAgent { ProjectId = p.Id, AgentName = "Kept", Role = "dev" });
+            using (var raw = new SQLiteConnection($"Data Source={_testDbPath}"))
+            {
+                raw.Open();
+                using var trigger = new SQLiteCommand(
+                    "CREATE TRIGGER refuse_prompts BEFORE INSERT ON project_prompts BEGIN SELECT RAISE(ABORT, 'refused by test'); END;", raw);
+                trigger.ExecuteNonQuery();
+            }
+
+            var u = UpdateFor(p, ("buildCommand", "dotnet build"));
+            u.Agents = new List<ProjectAgent> { new ProjectAgent { AgentName = "Replacement" } };
+            u.Prompts = new List<ProjectPromptEntry> { new ProjectPromptEntry { PromptType = "start", PromptText = "hello" } };
+            var result = _service.Save(u);
+
+            Assert.False(result.Success);
+            Assert.Contains("Nothing was saved", result.Error);
+            Assert.Null(_db.GetRichProject(p.Id).BuildCommand);
+            Assert.Equal("Kept", _db.GetProjectAgents(p.Id).Single().AgentName);
+            Assert.Empty(_db.GetProjectPrompts(p.Id));
         }
 
         private sealed class StubHost : IProjectSettingsHost

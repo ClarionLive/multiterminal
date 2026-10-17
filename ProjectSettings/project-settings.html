@@ -8,7 +8,7 @@
   Project settings form (ticket e20e2ce0). Hosted by ProjectSettings/ProjectSettingsForm.cs.
   Contract (ProjectSettingsPayload.cs):
     C# -> page : load, stats, saveResult, folderPicked, notice, theme, missing
-    page -> C# : ready, save, dirty, browseFolder, copyPath, openFolder, syncMcp, deleteProject, close
+    page -> C# : ready, save, reload, dirty, browseFolder, copyPath, openFolder, syncMcp, deleteProject, close
   Every scalar input carries data-field="<camelCase name>"; the set must equal
   ProjectSettingsService.EditableFields (ProjectSettingsPayloadTests pins it).
   All project values are written with textContent / .value, never innerHTML.
@@ -292,6 +292,7 @@
 
 <footer>
     <div class="status" id="status"></div>
+    <button class="btn" id="btn-reload" hidden title="Discard your edits and show the settings as they are stored now">Reload</button>
     <button class="btn" id="btn-close">Close</button>
     <button class="btn primary" id="btn-save" disabled>Save</button>
 </footer>
@@ -542,6 +543,7 @@
 
         state.baseline = JSON.stringify(collect());
         state.loaded = true;
+        $('btn-reload').hidden = true;
         lastDirty = false;
         post({ type: 'dirty', dirty: false });
         $('btn-save').disabled = true;
@@ -555,6 +557,7 @@
         setStatus('Saving…');
         post(collect());
     });
+    $('btn-reload').addEventListener('click', function () { post({ type: 'reload' }); });
     $('btn-close').addEventListener('click', function () { post({ type: 'close' }); });
     $('btn-copy-path').addEventListener('click', function () { post({ type: 'copyPath' }); });
     $('btn-open-folder').addEventListener('click', function () { post({ type: 'openFolder' }); });
@@ -600,8 +603,10 @@
                         setStatus(w ? saved + ' ' + w : saved, w ? 'error' : 'ok');
                     } else {
                         setStatus(msg.error || 'Save failed.', 'error');
+                        // Changed elsewhere since loading: saving again cannot succeed, so offer Reload.
+                        $('btn-reload').hidden = !msg.conflict;
                         onChanged();
-                        $('btn-save').disabled = false;
+                        $('btn-save').disabled = !!msg.conflict;
                     }
                     break;
                 case 'folderPicked':

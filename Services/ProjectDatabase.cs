@@ -550,6 +550,27 @@ namespace MultiTerminal.Services
             }
         }
 
+        /// <summary>
+        /// Runs <paramref name="body"/> as one transaction on this class's connection: every write the body
+        /// makes through this class's public methods commits together or not at all (ticket e20e2ce0, so a
+        /// project settings save cannot leave half its lists written). _dbLock is held throughout and is
+        /// re-entrant, so those methods run inside it unchanged; other threads wait for the commit.
+        /// The body must not touch another connection owner: that owner's write would wait on this
+        /// transaction's file lock while this thread waits on it.
+        /// </summary>
+        public void RunInTransaction(string operation, string projectId, Action body)
+        {
+            if (body == null) throw new ArgumentNullException(nameof(body));
+            // GATE BEFORE _dbLock, the SqliteWriteGate lock-ordering rule.
+            using var writeGate = SqliteWriteGate.EnterWrite(operation, projectId);
+            lock (_dbLock)
+            {
+                using var tx = _connection.BeginTransaction();
+                body();
+                tx.Commit();
+            }
+        }
+
         /// <summary>Every table whose rows belong to a project (project_id REFERENCES projects(id)).</summary>
         internal static readonly string[] ProjectChildTables =
         {

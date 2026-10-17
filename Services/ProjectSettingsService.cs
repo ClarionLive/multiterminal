@@ -44,6 +44,29 @@ namespace MultiTerminal.Services
         public List<ProjectSkill> Skills { get; set; }
         public List<ProjectPath> Paths { get; set; }
         public List<ProjectPromptEntry> Prompts { get; set; }
+
+        /// <summary>
+        /// What the form showed when it loaded, so the save can tell the user's edits from changes made
+        /// elsewhere since. Null means no baseline: every sent value counts as the user's (the unit tests
+        /// and any caller that just loaded the project).
+        /// </summary>
+        public ProjectSettingsBaseline Baseline { get; set; }
+    }
+
+    /// <summary>
+    /// The stored project and lists a settings form was loaded from. With it, a save writes only what the
+    /// user changed, and refuses (writing nothing) when one of those settings was also changed elsewhere
+    /// after the form loaded, instead of silently putting the form's stale copy back.
+    /// </summary>
+    public sealed class ProjectSettingsBaseline
+    {
+        public Project Project { get; set; }
+        public List<ProjectAgent> Agents { get; set; }
+        public List<ProjectSpecialistAgent> SpecialistAgents { get; set; }
+        public List<ProjectMcpServer> McpServers { get; set; }
+        public List<ProjectSkill> Skills { get; set; }
+        public List<ProjectPath> Paths { get; set; }
+        public List<ProjectPromptEntry> Prompts { get; set; }
     }
 
     /// <summary>What a save did. <see cref="Warnings"/> are things that saved but not everywhere.</summary>
@@ -57,6 +80,12 @@ namespace MultiTerminal.Services
         public List<string> ChangedFields { get; } = new List<string>();
 
         public bool McpServersChanged { get; set; }
+
+        /// <summary>
+        /// True when the save was refused because a setting the user edited was changed elsewhere after the
+        /// form loaded. Nothing was written; the form offers to reload.
+        /// </summary>
+        public bool Conflict { get; set; }
 
         /// <summary>
         /// The scalar fields a terminal reads only when it starts. Changing one does nothing to a terminal
@@ -78,11 +107,17 @@ namespace MultiTerminal.Services
     /// through it; it replaced EditProjectDialog's and the Project pane's separate writers, which covered
     /// different fields and told nothing else the project had changed.
     ///
-    /// <para>Order: validate everything first, so a bad value writes nothing; rename through the host; every
-    /// other scalar through <see cref="ProjectDatabase.UpdateProjectField"/> (its whitelist, worktree-path
-    /// guard and Claude profile normalization); the six child tables, diff-saved; the project.json copy of
-    /// the fields that file carries; the gateway profile when MCP servers changed; then one change
-    /// notification.</para>
+    /// <para>Order: validate everything first, so a bad value writes nothing; then ONE transaction that, with a
+    /// baseline, drops what the user did not change and refuses if what they did change was also changed
+    /// elsewhere, then writes every scalar but name/description through
+    /// <see cref="ProjectDatabase.UpdateProjectField"/> (its whitelist, worktree-path guard and Claude profile
+    /// normalization) and diff-saves the six child tables; after the commit, the rename through the host; the
+    /// project.json copy of the fields that file carries; the gateway profile when MCP servers changed; then
+    /// one change notification.</para>
+    ///
+    /// <para>The rename stays outside the transaction: it goes through the broker, which may write through
+    /// another connection, and that write would wait on this transaction's lock. So if the rename fails the
+    /// committed settings stand, and the result says so.</para>
     ///
     /// <para>project.json is written with <see cref="ProjectService.UpdateProjectJson"/>, never
     /// <see cref="ProjectService.SaveProject"/>. SaveProject re-upserts the row from the file, and the file
@@ -144,11 +179,65 @@ namespace MultiTerminal.Services
             if (listError != null)
                 return ProjectSettingsSaveResult.Fail(listError);
 
+            // ── Every scalar but name/description, and the child tables: one transaction ──
+            // The baseline check runs inside it too, so nothing written through ProjectDatabase can land
+            // between the check and the writes.
             var result = new ProjectSettingsSaveResult { Success = true };
-            var changed = normalized.Where(p => !SameValue(p.Key, ReadField(current, p.Key), p.Value))
-                                    .ToDictionary(p => p.Key, p => p.Value, StringComparer.Ordinal);
+            Dictionary<string, string> changed = null;
+            List<string> conflicts = null;
+            string failedField = null;
+            try
+            {
+                _db.RunInTransaction("ProjectSettingsService.Save", update.ProjectId, () =>
+                {
+                    current = _db.GetRichProject(update.ProjectId) ?? current;
+                    if (update.Baseline?.Project != null)
+                    {
+                        conflicts = ApplyBaseline(update, current, normalized);
+                        if (conflicts.Count > 0)
+                            return;   // nothing written; the empty transaction commits harmlessly
+                    }
+
+                    changed = normalized.Where(p => !SameValue(p.Key, ReadField(current, p.Key), p.Value))
+                                        .ToDictionary(p => p.Key, p => p.Value, StringComparer.Ordinal);
+
+                    foreach (var pair in changed)
+                    {
+                        if (pair.Key == "name" || pair.Key == "description")
+                            continue;
+                        if (!_db.UpdateProjectField(update.ProjectId, pair.Key, pair.Value))
+                        {
+                            failedField = pair.Key;
+                            throw new InvalidOperationException($"Saving '{pair.Key}' failed.");
+                        }
+                    }
+
+                    SaveAgents(update.ProjectId, update.Agents);
+                    SaveSpecialists(update.ProjectId, update.SpecialistAgents);
+                    result.McpServersChanged = SaveMcpServers(update.ProjectId, update.McpServers);
+                    SaveSkills(update.ProjectId, update.Skills);
+                    SavePaths(update.ProjectId, update.Paths);
+                    SavePrompts(update.ProjectId, update.Prompts);
+                });
+            }
+            catch (Exception ex) when (ex is System.Data.SQLite.SQLiteException || ex is InvalidOperationException)
+            {
+                string what = failedField != null ? $"Saving '{failedField}' failed." : $"Saving the settings failed: {ex.Message}";
+                return ProjectSettingsSaveResult.Fail(what + " Nothing was saved.");
+            }
+
+            if (conflicts != null && conflicts.Count > 0)
+            {
+                var refused = ProjectSettingsSaveResult.Fail(
+                    $"Nothing was saved: {string.Join(", ", conflicts)} changed somewhere else after this form was opened. " +
+                    "Reload to see the current settings, then make your changes again.");
+                refused.Conflict = true;
+                return refused;
+            }
 
             // ── Name and description go through the broker (cache + project.json + activity) ──
+            // After the commit, never inside it: the broker may write through another connection, which
+            // would wait on the transaction's file lock while this thread holds it.
             bool renamed = changed.ContainsKey("name");
             bool redescribed = changed.ContainsKey("description");
             if (renamed || redescribed)
@@ -158,38 +247,22 @@ namespace MultiTerminal.Services
                     renamed ? changed["name"] : null,
                     redescribed ? (changed["description"] ?? string.Empty) : null);
                 if (error != null)
-                    return ProjectSettingsSaveResult.Fail($"Saving the name or description failed: {error}");
-
-                // The broker writes the slim row; the description it writes is "" for a cleared one.
-                // Restate both through the rich column writer so the rich row says exactly what was saved.
-                if (renamed) _db.UpdateProjectField(update.ProjectId, "name", changed["name"]);
-                if (redescribed) _db.UpdateProjectField(update.ProjectId, "description", changed["description"]);
-            }
-
-            // ── Every other scalar ───────────────────────────────────────────────────
-            foreach (var pair in changed)
-            {
-                if (pair.Key == "name" || pair.Key == "description")
-                    continue;
-                if (!_db.UpdateProjectField(update.ProjectId, pair.Key, pair.Value))
-                    return PartialFail(result, $"Saving '{pair.Key}' failed.");
+                {
+                    changed.Remove("name");
+                    changed.Remove("description");
+                    renamed = redescribed = false;
+                    result.Success = false;
+                    result.Error = $"Saving the name or description failed: {error} The other settings were saved.";
+                }
+                else
+                {
+                    // The broker writes the slim row; the description it writes is "" for a cleared one.
+                    // Restate both through the rich column writer so the rich row says exactly what was saved.
+                    if (renamed) _db.UpdateProjectField(update.ProjectId, "name", changed["name"]);
+                    if (redescribed) _db.UpdateProjectField(update.ProjectId, "description", changed["description"]);
+                }
             }
             result.ChangedFields.AddRange(changed.Keys);
-
-            // ── Child tables ─────────────────────────────────────────────────────────
-            try
-            {
-                SaveAgents(update.ProjectId, update.Agents);
-                SaveSpecialists(update.ProjectId, update.SpecialistAgents);
-                result.McpServersChanged = SaveMcpServers(update.ProjectId, update.McpServers);
-                SaveSkills(update.ProjectId, update.Skills);
-                SavePaths(update.ProjectId, update.Paths);
-                SavePrompts(update.ProjectId, update.Prompts);
-            }
-            catch (Exception ex) when (ex is System.Data.SQLite.SQLiteException || ex is InvalidOperationException)
-            {
-                return PartialFail(result, $"Saving the project lists failed: {ex.Message}");
-            }
 
             // ── project.json copy of the fields that file carries ────────────────────
             SyncProjectJson(current, changed, result);
@@ -205,14 +278,72 @@ namespace MultiTerminal.Services
             return result;
         }
 
-        // Something was already written; still tell listeners, so the screen shows what is stored.
-        private ProjectSettingsSaveResult PartialFail(ProjectSettingsSaveResult result, string error)
+        // ── Baseline ───────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Drops from <paramref name="normalized"/> and <paramref name="update"/>'s lists everything the user
+        /// left as it was loaded, so a stale copy never overwrites a newer value. Returns the settings the user
+        /// changed that were ALSO changed elsewhere since loading (to a different value): the save is refused.
+        /// </summary>
+        private List<string> ApplyBaseline(ProjectSettingsUpdate update, Project current, Dictionary<string, string> normalized)
         {
-            result.Success = false;
-            result.Error = error + " Some settings before it were saved.";
-            _host.NotifyProjectsChanged();
-            return result;
+            var b = update.Baseline;
+            var conflicts = new List<string>();
+
+            foreach (var key in normalized.Keys.ToList())
+            {
+                string loaded = NormalizeValue(key, ReadField(b.Project, key));
+                string incoming = normalized[key];
+                if (SameValue(key, loaded, incoming))
+                {
+                    normalized.Remove(key);   // untouched by the user
+                    continue;
+                }
+                string stored = ReadField(current, key);
+                if (!SameValue(key, stored, loaded) && !SameValue(key, stored, incoming))
+                    conflicts.Add(key);
+            }
+
+            update.Agents = ListEdit(update.Agents, b.Agents, _db.GetProjectAgents(update.ProjectId), AgentsKey, "agents", conflicts);
+            update.SpecialistAgents = ListEdit(update.SpecialistAgents, b.SpecialistAgents, _db.GetProjectSpecialistAgents(update.ProjectId), SpecialistsKey, "specialist agents", conflicts);
+            update.McpServers = ListEdit(update.McpServers, b.McpServers, _db.GetProjectMcpServers(update.ProjectId), McpServersKey, "MCP servers", conflicts);
+            update.Skills = ListEdit(update.Skills, b.Skills, _db.GetProjectSkills(update.ProjectId), SkillsKey, "skills", conflicts);
+            update.Paths = ListEdit(update.Paths, b.Paths, _db.GetProjectPaths(update.ProjectId), PathsKey, "project paths", conflicts);
+            update.Prompts = ListEdit(update.Prompts, b.Prompts, _db.GetProjectPrompts(update.ProjectId), PromptsKey, "prompts", conflicts);
+            return conflicts;
         }
+
+        // A list the user did not change is not saved (null). One they changed is saved only if the stored
+        // list is still what they loaded.
+        private static List<T> ListEdit<T>(List<T> incoming, List<T> loaded, List<T> stored, Func<IEnumerable<T>, string> key, string what, List<string> conflicts)
+        {
+            if (incoming == null || loaded == null)
+                return incoming;
+            string loadedKey = key(loaded);
+            if (key(incoming) == loadedKey)
+                return null;
+            if (key(stored ?? new List<T>()) != loadedKey)
+                conflicts.Add(what);
+            return incoming;
+        }
+
+        // Each key is the list as the save would store it: blank-named rows dropped, null and "" the same,
+        // order-independent where the table has no order of its own.
+        private static string JoinRows(IEnumerable<string> rows) => string.Join("\u001e", rows.OrderBy(r => r, StringComparer.Ordinal));
+        private static string Row(params object[] cells) => string.Join("\u001f", cells.Select(c => c?.ToString() ?? string.Empty));
+
+        internal static string AgentsKey(IEnumerable<ProjectAgent> rows) =>
+            JoinRows(rows.Where(r => !string.IsNullOrWhiteSpace(r.AgentName)).Select(r => Row(r.AgentName, r.Role, r.PreferredModel)));
+        internal static string SpecialistsKey(IEnumerable<ProjectSpecialistAgent> rows) =>
+            JoinRows(rows.Where(r => !string.IsNullOrWhiteSpace(r.AgentType)).Select(r => Row(r.AgentType, r.IsEnabled, r.CustomPrompt)));
+        internal static string McpServersKey(IEnumerable<ProjectMcpServer> rows) =>
+            JoinRows(rows.Where(r => !string.IsNullOrWhiteSpace(r.ServerName)).Select(r => Row(r.ServerName, r.IsEnabled)));
+        internal static string SkillsKey(IEnumerable<ProjectSkill> rows) =>
+            JoinRows(rows.Where(r => !string.IsNullOrWhiteSpace(r.SkillName)).Select(r => Row(r.SkillName, r.IsEnabled)));
+        internal static string PathsKey(IEnumerable<ProjectPath> rows) =>
+            JoinRows(rows.Select(r => Row(r.Id, r.PathType, r.PathValue, r.Description)));
+        internal static string PromptsKey(IEnumerable<ProjectPromptEntry> rows) =>
+            JoinRows(rows.Select(r => Row(r.Id, r.PromptType, r.PromptText, r.DisplayOrder)));
 
         // ── Scalars ────────────────────────────────────────────────────────────────
 

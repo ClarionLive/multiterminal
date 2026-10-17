@@ -63,6 +63,10 @@ namespace MultiTerminal.ProjectSettings
         private bool _closeConfirmed;
         private string _projectPath;
 
+        // What the page was last loaded from. A save writes only what differs from it, and refuses when
+        // what the user changed was also changed elsewhere since (ProjectSettingsBaseline).
+        private ProjectSettingsBaseline _baseline;
+
         /// <summary>
         /// Opens the settings form for <paramref name="projectId"/>, or brings the one already open to the front.
         /// </summary>
@@ -198,6 +202,10 @@ namespace MultiTerminal.ProjectSettings
                 case "save":
                     Save(root);
                     break;
+                case "reload":
+                    _dirty = false;
+                    SendLoad();
+                    break;
                 case "dirty":
                     _dirty = root.TryGetProperty("dirty", out var d) && d.ValueKind == JsonValueKind.True;
                     break;
@@ -246,6 +254,19 @@ namespace MultiTerminal.ProjectSettings
             ProjectContext lists = null;
             try { lists = new ProjectContextService(_context.ProjectDb).GetProjectContext(_projectId); }
             catch (Exception ex) { _context.Log?.Error("ProjectSettings", $"Loading project lists failed: {ex.Message}"); }
+
+            // Lists that failed to load stay null in the baseline: the save then has nothing to compare
+            // them with and treats them as before (two-way), rather than as "everything was deleted".
+            _baseline = new ProjectSettingsBaseline
+            {
+                Project = project,
+                Agents = lists?.Agents,
+                SpecialistAgents = lists?.SpecialistAgents,
+                McpServers = lists?.McpServers,
+                Skills = lists?.Skills,
+                Paths = lists?.Paths,
+                Prompts = lists?.Prompts,
+            };
 
             Post(ProjectSettingsPayload.BuildLoad(project, lists, GatherOptions(project), _isDark));
             _ = SendStatsAsync(project.Path);
@@ -394,7 +415,9 @@ namespace MultiTerminal.ProjectSettings
             ProjectSettingsSaveResult result;
             try
             {
-                result = _context.Service.Save(ProjectSettingsPayload.ParseSave(_projectId, root));
+                var update = ProjectSettingsPayload.ParseSave(_projectId, root);
+                update.Baseline = _baseline;
+                result = _context.Service.Save(update);
             }
             catch (Exception ex)
             {
@@ -405,14 +428,14 @@ namespace MultiTerminal.ProjectSettings
             if (result.Success)
                 _dirty = false;
 
-            // Even a failed save may have written some fields before the failure.
+            // A save whose rename failed after the other settings committed still changed something.
             if (result.Success || result.ChangedFields.Count > 0)
             {
                 try { _context.ProjectSaved?.Invoke(_projectId); }
                 catch (Exception ex) { _context.Log?.Error("ProjectSettings", $"Refresh after save failed: {ex.Message}"); }
             }
 
-            Post(new { type = "saveResult", success = result.Success, error = result.Error, warnings = result.Warnings, nextLaunch = result.AppliesAtNextLaunch });
+            Post(new { type = "saveResult", success = result.Success, error = result.Error, warnings = result.Warnings, nextLaunch = result.AppliesAtNextLaunch, conflict = result.Conflict });
 
             // Reload so the page shows what is stored now (normalized values, new row ids).
             if (result.Success)
