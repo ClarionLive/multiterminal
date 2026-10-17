@@ -4032,6 +4032,7 @@ namespace MultiTerminal
             doc.StartScreenJustClaudeRequested += OnStartScreenJustClaude;
             doc.StartScreenNewProjectRequested += OnStartScreenNewProject;
             doc.StartScreenProjectDeleteRequested += OnStartScreenProjectDeleteRequested;
+            doc.ProjectSettingsRequested += (s, projectId) => OpenProjectSettings(projectId);
         }
 
         /// <summary>
@@ -4043,10 +4044,19 @@ namespace MultiTerminal
         /// </summary>
         private void OnStartScreenProjectDeleteRequested(object sender, string projectId)
         {
-            if (string.IsNullOrEmpty(projectId)) return;
+            ConfirmAndDeleteProject(this, projectId);
+        }
+
+        /// <summary>
+        /// The one project-delete confirmation (Home cards, Browse All rows and the project settings form's
+        /// Danger zone; ticket e20e2ce0). Returns true when the project was deleted.
+        /// </summary>
+        private bool ConfirmAndDeleteProject(System.Windows.Forms.IWin32Window owner, string projectId)
+        {
+            if (string.IsNullOrEmpty(projectId)) return false;
 
             var broker = _mcpServer?.Broker;
-            if (broker == null) return;
+            if (broker == null) return false;
 
             string name = broker.GetProjectsList()?.FirstOrDefault(p => p.Id == projectId)?.Name ?? projectId;
 
@@ -4065,22 +4075,100 @@ namespace MultiTerminal
             };
             page.Buttons.Add(deleteButton);
             page.Buttons.Add(cancelButton);
-            if (TaskDialog.ShowDialog(this, page) != deleteButton) return;
+            var ownerHandle = owner?.Handle ?? Handle;
+            if (TaskDialog.ShowDialog(ownerHandle, page) != deleteButton) return false;
             bool deleteLocalConfig = page.Verification.Checked;
 
             var result = broker.DeleteProject(projectId, "ui", deleteLocalConfig: deleteLocalConfig);
             if (!result.Success)
             {
                 MessageBox.Show(
-                    this,
+                    owner ?? this,
                     result.Error ?? "Failed to delete project.",
                     "Delete Project",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
-                return;
+                return false;
             }
 
-            (sender as TerminalDocument)?.RefreshStartScreenProjects();
+            ProjectSettings.ProjectSettingsForm.CloseForDeletedProject(projectId);
+            if (_currentProject?.Id == projectId)
+            {
+                _currentProject = null;
+                RefreshDashboardProjectInfo();
+            }
+            foreach (var doc in _dockPanel.Documents.OfType<TerminalDocument>().ToList())
+                doc.RefreshStartScreenProjects();
+            return true;
+        }
+
+        private ProjectSettings.ProjectSettingsContext _projectSettingsContext;
+
+        /// <summary>
+        /// Opens the project settings form (ticket e20e2ce0) for <paramref name="projectId"/>: the gear on a
+        /// terminal's status bar, on a Home card and on a Browse All row all come here.
+        /// </summary>
+        internal void OpenProjectSettings(string projectId)
+        {
+            if (string.IsNullOrWhiteSpace(projectId) || _sharedProjectDatabase == null || _projectService == null)
+                return;
+
+            if (_projectSettingsContext == null)
+            {
+                var host = new ProjectSettings.ProjectSettingsHost(
+                    _mcpServer?.Broker, _projectService, _sharedProjectDatabase, () => _gatewayService, _debugLogService);
+                _projectSettingsContext = new ProjectSettings.ProjectSettingsContext
+                {
+                    ProjectDb = _sharedProjectDatabase,
+                    Service = new ProjectSettingsService(_sharedProjectDatabase, _projectService, host),
+                    Gateway = () => _gatewayService,
+                    SyncMcpConfig = SyncProjectMcpConfig,
+                    DeleteProject = ConfirmAndDeleteProject,
+                    ProjectSaved = RefreshAfterProjectSettingsSaved,
+                    Log = _debugLogService,
+                };
+            }
+
+            ProjectSettings.ProjectSettingsForm.Open(this, projectId, _projectSettingsContext, _currentTheme.IsDark);
+        }
+
+        /// <summary>
+        /// The settings form's "Sync MCP config": syncs the gateway profile and removes a stale
+        /// {sourcePath}/.mcp.json (what the retired Project pane called "Write .mcp.json"). Null on success.
+        /// </summary>
+        private string SyncProjectMcpConfig(string projectId, string sourcePath)
+        {
+            if (_mcpConfigService == null) return "MCP config service not available";
+            try
+            {
+                _mcpConfigService.EnsureMcpConfigsForProject(projectId, sourcePath);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("MainForm", $"SyncProjectMcpConfig failed for {projectId}: {ex.Message}");
+                return ex.Message;
+            }
+        }
+
+        /// <summary>
+        /// After a project settings save (ticket e20e2ce0): everything on screen that shows the project
+        /// re-reads it. The header and the Home/Browse All lists; each terminal's status bar (name and
+        /// description come from the project rows); MainForm's own copy. Launch-time settings (profile,
+        /// terminal, quiet start, MCP) are read at the next launch, so nothing running is restarted.
+        /// </summary>
+        private void RefreshAfterProjectSettingsSaved(string projectId)
+        {
+            if (_currentProject?.Id == projectId)
+            {
+                _currentProject = _sharedProjectDatabase?.GetRichProject(projectId) ?? _currentProject;
+                RefreshDashboardProjectInfo();
+            }
+            foreach (var doc in _dockPanel.Documents.OfType<TerminalDocument>().ToList())
+            {
+                doc.RefreshStartScreenProjects();
+                doc.UpdateStatusBar();
+            }
         }
 
         /// <summary>
@@ -6655,6 +6743,7 @@ namespace MultiTerminal
         private void ApplyThemesToPanels()
         {
             bool isDark = _currentTheme.IsDark;
+            ProjectSettings.ProjectSettingsForm.ApplyThemeToAll(isDark);
             if (_projectPanel != null && !_projectPanel.IsDisposed && _projectPanel.Visible)
             {
                 _projectPanel.SetTheme(_currentTheme);

@@ -177,6 +177,44 @@ namespace MultiTerminal.Tests
             Assert.Equal(@"C:\mine", _db.GetProjectPaths(p.Id).Single().PathValue);
         }
 
+        /// <summary>
+        /// What the form loads, saved back untouched, writes nothing. This is the form's real round trip
+        /// (BuildLoad, then the page's save message, then Save) and covers the normalizations the two sides
+        /// must agree on: status case, a stored Claude profile this machine lacks, null quiet start, blank
+        /// optional text. Falsified: making ReadField return the raw nullable QuietStart (null, where the form
+        /// sends "false") turned this red and nothing else. Returning the raw Status instead would NOT: status
+        /// is compared ignoring case, so "Parked" and "parked" are already the same value to the service.
+        /// </summary>
+        [Fact]
+        public void An_untouched_form_save_writes_nothing()
+        {
+            var p = Seed(claudeProfile: "NotOnThisMachine");
+            _db.UpdateProjectField(p.Id, "status", "Parked");
+            _db.SaveProjectAgent(new ProjectAgent { ProjectId = p.Id, AgentName = "Kept", Role = "dev" });
+            var stored = _db.GetRichProject(p.Id);
+            var lists = new ProjectContextService(_db).GetProjectContext(p.Id);
+
+            string load = MultiTerminal.ProjectSettings.ProjectSettingsPayload.BuildLoad(
+                stored, lists, new MultiTerminal.ProjectSettings.ProjectSettingsOptions(), isDark: true);
+            using var loadDoc = System.Text.Json.JsonDocument.Parse(load);
+            var save = new Dictionary<string, object>
+            {
+                ["type"] = "save",
+                ["fields"] = loadDoc.RootElement.GetProperty("fields"),
+                ["agents"] = loadDoc.RootElement.GetProperty("lists").GetProperty("agents"),
+                ["mcpServers"] = loadDoc.RootElement.GetProperty("lists").GetProperty("mcpServers"),
+            };
+            using var saveDoc = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(save));
+
+            var result = _service.Save(MultiTerminal.ProjectSettings.ProjectSettingsPayload.ParseSave(p.Id, saveDoc.RootElement));
+
+            Assert.True(result.Success, result.Error);
+            Assert.Empty(result.ChangedFields);
+            Assert.False(result.McpServersChanged);
+            Assert.Equal("NotOnThisMachine", _db.GetRichProject(p.Id).ClaudeProfile);
+            Assert.Equal("Kept", _db.GetProjectAgents(p.Id).Single().AgentName);
+        }
+
         [Fact]
         public void The_gateway_is_synced_only_when_MCP_servers_change()
         {
