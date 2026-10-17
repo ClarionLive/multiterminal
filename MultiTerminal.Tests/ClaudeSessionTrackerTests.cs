@@ -25,6 +25,23 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void Launch_start_time_is_reported_only_while_a_launch_runs()
+        {
+            // Read by the launch prompt's null-session pane rule (task ec2ed636, item 4).
+            var t = new ClaudeSessionTracker();
+            Assert.Null(t.ActiveLaunchStartedMs);
+
+            t.BeginLaunch(LaunchMs);
+            Assert.Equal(LaunchMs, t.ActiveLaunchStartedMs);
+
+            t.EndLaunch();
+            Assert.Null(t.ActiveLaunchStartedMs);
+
+            t.BeginLaunch(LaunchMs + 500);
+            Assert.Equal(LaunchMs + 500, t.ActiveLaunchStartedMs);
+        }
+
+        [Fact]
         public void Exit_clears_and_the_leftover_file_cannot_bring_it_back()
         {
             var t = new ClaudeSessionTracker();

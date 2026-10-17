@@ -127,6 +127,17 @@ namespace MultiTerminal.Docking
         /// </summary>
         public string CurrentClaudeSessionId => _claudeSession.SessionId;
 
+        /// <summary>
+        /// When this pane's current launch started (UTC), or <c>null</c> when no launch is running
+        /// (task ec2ed636). The launch prompt uses it for a started pane whose
+        /// <see cref="CurrentClaudeSessionId"/> is still null: only a session written since this time
+        /// can be the one that pane holds.
+        /// </summary>
+        public DateTime? ClaudeLaunchStartedUtc =>
+            _claudeSession.ActiveLaunchStartedMs is long ms
+                ? DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime
+                : (DateTime?)null;
+
         // Diff popup saved bounds and zoom (persisted across sessions)
         private static Rectangle? _diffPopupBounds;
         private static double _diffPopupZoom = 1.0;
@@ -4288,6 +4299,12 @@ namespace MultiTerminal.Docking
 
         /// <summary>The adopted session id of the running launch, or <c>null</c>.</summary>
         public string SessionId => _sessionId;
+
+        /// <summary>The running launch's start time (Unix ms), or <c>null</c> when no launch is active.</summary>
+        public long? ActiveLaunchStartedMs
+        {
+            get { lock (_gate) { return _launchActive ? _launchStartedMs : (long?)null; } }
+        }
 
         /// <summary>Changes at every <see cref="BeginLaunch"/> and <see cref="EndLaunch"/>.</summary>
         public long Generation
