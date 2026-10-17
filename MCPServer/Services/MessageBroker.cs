@@ -378,6 +378,19 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Raises <see cref="ProjectNoteReadStateChanged"/> for a tab the Owner renamed or deleted in one pane,
+        /// marked <see cref="ProjectNoteReadStateChangedEventArgs.TabsChanged"/> so the other panes refresh
+        /// their tab list too. Without it a pane kept the old name, and opening the note there marked
+        /// nothing read: the badge stayed stuck in every terminal.
+        /// </summary>
+        public void NotifyProjectNoteTabsChanged(string projectPath, string renamedFrom = null, string renamedTo = null)
+        {
+            if (string.IsNullOrEmpty(projectPath)) return;
+            RaiseSafe(ProjectNoteReadStateChanged, new ProjectNoteReadStateChangedEventArgs(
+                TaskDatabase.CanonicalNoteTabKey(projectPath), tabsChanged: true, renamedFrom, renamedTo));
+        }
+
+        /// <summary>
         /// Activity service for auto-updating terminal activity on task operations.
         /// Set via DI after broker is created.
         /// </summary>

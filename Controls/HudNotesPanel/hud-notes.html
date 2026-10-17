@@ -988,8 +988,25 @@ function appendedSuffix(base, stored) {
 // (the Owner's text, then the agent's addition) and saved with it. Anything that is
 // not an append (a replace) cannot be merged; the Owner's text still wins, but the
 // status line says so instead of losing the agent's version silently.
+// The Owner renamed a tab in ANOTHER pane (task c133b27d). Move this page's state for
+// it to the new name before merging, so the current tab and any unsaved typing in it
+// survive instead of the merge treating the tab as deleted. A pane that already has
+// the new name (the one that did the rename) has nothing under the old one: no-op.
+function renameLocalTab(from, to) {
+    if (!from || !to || from === to || !(from in tabContents) || (to in tabContents)) return;
+    tabContents[to] = tabContents[from];
+    delete tabContents[from];
+    if (from in lastSavedContent) {
+        lastSavedContent[to] = lastSavedContent[from];
+        delete lastSavedContent[from];
+    }
+    if (activeTab === from) activeTab = to;
+    if (pendingConflict && pendingConflict.tab === from) pendingConflict.tab = to;
+}
+
 function mergeTabs(data) {
     if (document.body.classList.contains('no-project-state')) return;
+    if (data.renamed) renameLocalTab(data.renamed.from, data.renamed.to);
     const base = activeTab ? (lastSavedContent[activeTab] ?? '') : '';
     const activeDirty = !!activeTab && editor.value !== base;
     tabs = (data.tabs || []).map(toTabModel);
@@ -1046,7 +1063,10 @@ function applyUnreadState(data) {
     const byName = new Map((data.tabs || []).map(t => [t.name, t]));
     tabs.forEach(t => {
         const s = byName.get(t.name);
+        // A tab the host no longer has cannot be unread; keeping its old flag would
+        // leave a dot and a dropdown count that disagree with the header badge.
         if (s) { t.unread = !!s.unread; t.agentRev = Number(s.agentRev) || 0; }
+        else t.unread = false;
     });
     syncUnreadFromTabs();
     markActiveRead();

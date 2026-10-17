@@ -33,6 +33,7 @@ namespace MultiTerminal.Controls
         private MessageBroker _broker;
         private string _projectPath;
         private int _badgeCount;
+        private string _countedProject; // the project _badgeCount was counted for
         // The window whose minimise/restore changes whether the Owner can see us. Borrowed, not owned:
         // we only subscribe to it, and Dispose unsubscribes.
 #pragma warning disable CA2213
@@ -133,7 +134,8 @@ namespace MultiTerminal.Controls
 
         /// <summary>
         /// Re-reads the unread count and raises <see cref="BadgeCountChanged"/> when it moved. Runs whether
-        /// or not the page has loaded; that independence is the point.
+        /// or not the page has loaded; that independence is the point. A failed read keeps the last known
+        /// count: publishing 0 on an error would hide unread notes, which is the one thing the badge is for.
         /// </summary>
         internal void RecountUnread()
         {
@@ -143,8 +145,15 @@ namespace MultiTerminal.Controls
                 if (!string.IsNullOrEmpty(_projectPath) && _broker?.TaskDb != null)
                     count = _broker.TaskDb.CountUnreadNoteTabs(_projectPath);
             }
-            catch { /* a failed count shows no badge rather than taking down the HUD */ }
+            catch
+            {
+                // Keep the last known count; the next note event recounts. But never carry another
+                // project's count across a project switch: there, no badge is the honest answer.
+                if (string.Equals(_countedProject, _projectPath, StringComparison.Ordinal)) return;
+                count = 0;
+            }
 
+            _countedProject = _projectPath;
             if (count == _badgeCount) return;
             _badgeCount = count;
             BadgeCountChanged?.Invoke(this, EventArgs.Empty);
@@ -325,7 +334,11 @@ namespace MultiTerminal.Controls
 
             if (!IsForThisProject(e.ProjectKey)) return;
             RecountUnread();
-            if (_isInitialized) SendUnreadState();
+            if (!_isInitialized) return;
+            // A rename or delete in another pane makes this page's tab names stale: a flags-only update
+            // would leave it posting mark_read under a name that no longer exists, and the badge stuck.
+            if (e.TabsChanged) SendTabsMerge(e.RenamedFrom, e.RenamedTo);
+            else SendUnreadState();
         }
 
         private bool IsForThisProject(string projectKey)
@@ -397,24 +410,8 @@ namespace MultiTerminal.Controls
 
             try
             {
-                var taskDb = _broker?.TaskDb;
-                if (taskDb == null) return;
-
-                var tabs = taskDb.GetProjectNoteTabDetails(_projectPath);
-                var tabData = new List<object>();
-                foreach (var tab in tabs)
-                {
-                    tabData.Add(new
-                    {
-                        name = tab.Name,
-                        content = tab.Content,
-                        isDefault = tab.IsDefault,
-                        createdBy = tab.CreatedBy,
-                        updatedBy = tab.UpdatedBy,
-                        unread = tab.IsUnread,
-                        agentRev = tab.AgentRev,
-                    });
-                }
+                var tabData = BuildTabData();
+                if (tabData == null) return;
 
                 if (changedTab != null)
                     PostJsonMessage(new { type = "notes_changed", tabs = tabData, changedTab, changedBy });
@@ -422,6 +419,46 @@ namespace MultiTerminal.Controls
                     PostJsonMessage(new { type = "load_all_tabs", tabs = tabData, activeTab = selectTab });
                 else
                     PostJsonMessage(new { type = "load_all_tabs", tabs = tabData });
+            }
+            catch { }
+        }
+
+        private List<object> BuildTabData()
+        {
+            var taskDb = _broker?.TaskDb;
+            if (taskDb == null) return null;
+
+            var tabData = new List<object>();
+            foreach (var tab in taskDb.GetProjectNoteTabDetails(_projectPath))
+            {
+                tabData.Add(new
+                {
+                    name = tab.Name,
+                    content = tab.Content,
+                    isDefault = tab.IsDefault,
+                    createdBy = tab.CreatedBy,
+                    updatedBy = tab.UpdatedBy,
+                    unread = tab.IsUnread,
+                    agentRev = tab.AgentRev,
+                });
+            }
+            return tabData;
+        }
+
+        /// <summary>
+        /// The tab list changed in another pane (task c133b27d): send it as a <c>notes_changed</c> MERGE, which
+        /// keeps the Owner's current tab and unsaved typing, with the rename (if any) so the page can carry
+        /// that typing across to the new name. No <c>changedTab</c>: nothing was written by an agent.
+        /// </summary>
+        private void SendTabsMerge(string renamedFrom, string renamedTo)
+        {
+            if (string.IsNullOrEmpty(_projectPath)) return;
+            try
+            {
+                var tabData = BuildTabData();
+                if (tabData == null) return;
+                object renamed = renamedFrom != null && renamedTo != null ? new { from = renamedFrom, to = renamedTo } : null;
+                PostJsonMessage(new { type = "notes_changed", tabs = tabData, changedTab = (string)null, changedBy = (string)null, renamed });
             }
             catch { }
         }
@@ -480,18 +517,21 @@ namespace MultiTerminal.Controls
             catch { }
         }
 
-        private void RenameTab(string oldName, string newName)
+        internal void RenameTab(string oldName, string newName)
         {
             if (string.IsNullOrEmpty(_projectPath) || _broker?.TaskDb == null) return;
             try
             {
                 if (_broker.TaskDb.RenameNoteTab(_projectPath, oldName, newName))
+                {
                     LoadAllTabs();
+                    _broker.NotifyProjectNoteTabsChanged(_projectPath, oldName, newName); // other panes take the new name
+                }
             }
             catch { }
         }
 
-        private void DeleteTab(string tabName)
+        internal void DeleteTab(string tabName)
         {
             if (string.IsNullOrEmpty(_projectPath) || _broker?.TaskDb == null) return;
             try
@@ -499,7 +539,7 @@ namespace MultiTerminal.Controls
                 if (_broker.TaskDb.DeleteNoteTab(_projectPath, tabName))
                 {
                     LoadAllTabs();
-                    _broker.NotifyProjectNoteReadStateChanged(_projectPath); // an unread tab deleted drops the count
+                    _broker.NotifyProjectNoteTabsChanged(_projectPath); // drops the count, and the tab in other panes
                 }
             }
             catch { }

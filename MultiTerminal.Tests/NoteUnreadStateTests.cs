@@ -261,6 +261,70 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// A rename or delete in one pane must reach the other panes as a TAB-LIST change, with the old and
+        /// new names for a rename (debugger finding, pipeline Run 1). A flags-only event left the other
+        /// panes posting mark_read under the old name, which matches no row, so the badge stuck.
+        /// </summary>
+        [Fact]
+        public void Rename_and_delete_in_one_pane_announce_a_tab_list_change_to_the_others()
+        {
+            using var broker = new MessageBroker();
+            using var paneA = new HudNotesRenderer();
+            using var paneB = new HudNotesRenderer();
+            paneA.Initialize(broker);
+            paneB.Initialize(broker);
+            paneA.SetProject(_project);
+            paneB.SetProject(_project);
+            broker.WriteAgentProjectNote(_project, "Old", "x", "Alice", AgentNoteWriteMode.New);
+            broker.WriteAgentProjectNote(_project, "Doomed", "y", "Alice", AgentNoteWriteMode.New);
+            Assert.Equal(2, paneB.BadgeCount);
+            var seen = new System.Collections.Generic.List<ProjectNoteReadStateChangedEventArgs>();
+            broker.ProjectNoteReadStateChanged += (s, e) => seen.Add(e);
+
+            paneA.RenameTab("Old", "New");
+
+            var renamed = Assert.Single(seen);
+            Assert.True(renamed.TabsChanged);
+            Assert.Equal("Old", renamed.RenamedFrom);
+            Assert.Equal("New", renamed.RenamedTo);
+            Assert.Equal(2, paneB.BadgeCount); // a rename keeps the read state
+
+            seen.Clear();
+            paneA.DeleteTab("Doomed");
+
+            var deleted = Assert.Single(seen);
+            Assert.True(deleted.TabsChanged);
+            Assert.Null(deleted.RenamedFrom);
+            Assert.Equal(1, paneB.BadgeCount);
+        }
+
+        /// <summary>
+        /// A count that cannot be read keeps the last known value: publishing 0 on an error would hide
+        /// unread notes. The database is closed under the renderer to make the next count throw.
+        /// </summary>
+        [Fact]
+        public void A_failed_recount_keeps_the_last_known_count()
+        {
+            using var broker = new MessageBroker();
+            using var notes = new HudNotesRenderer();
+            notes.Initialize(broker);
+            notes.SetProject(_project);
+            broker.WriteAgentProjectNote(_project, "Steps", "x", "Alice", AgentNoteWriteMode.New);
+            Assert.Equal(1, notes.BadgeCount);
+
+            broker.TaskDb.Dispose();
+            Assert.ThrowsAny<Exception>(() => broker.TaskDb.CountUnreadNoteTabs(_project)); // the read really fails
+
+            notes.RecountUnread();
+
+            Assert.Equal(1, notes.BadgeCount);
+
+            // ...but a failed count after switching project must not show the old project's number.
+            notes.SetProject(_project + "-other");
+            Assert.Equal(0, notes.BadgeCount);
+        }
+
+        /// <summary>
         /// Minimise is judged on the TOP-LEVEL window (pipeline Run 1, debugger HIGH). A docked
         /// TerminalDocument is a DockContent, itself a non-top-level Form, and the main window's minimise
         /// never reaches it. The first assertion proves this arrangement reproduces that: FindForm, the
