@@ -17,8 +17,10 @@ namespace MultiTerminal.Services
         /// cached project, the folder's project.json and the activity feed in line with the stored row. It
         /// reads the row and writes nothing to the database, so it cannot put back a value older than the row
         /// (a rename made elsewhere since the commit wins) and a failure here never undoes the save.
+        /// <paramref name="committedName"/> is the name this save wrote, or null when it changed only the
+        /// description; the activity entry records that, not whatever the row holds by the time it is read.
         /// </summary>
-        void ProjectRenamed(string projectId, string previousName);
+        void ProjectRenamed(string projectId, string previousName, string committedName);
 
         /// <summary>Tells every listener the project list changed (MessageBroker.ProjectsUpdated).</summary>
         void NotifyProjectsChanged();
@@ -239,9 +241,20 @@ namespace MultiTerminal.Services
             }
 
             // ── A new name or description: broker cache, project.json, activity ───────
+            // The save is durable by now: a failure here is a warning, never a failed save, and the steps
+            // after it (project.json, gateway, the change notification) still run.
             bool renamed = changed.ContainsKey("name");
             if (renamed || changed.ContainsKey("description"))
-                _host.ProjectRenamed(update.ProjectId, previousName);
+            {
+                try
+                {
+                    _host.ProjectRenamed(update.ProjectId, previousName, renamed ? changed["name"] : null);
+                }
+                catch (Exception ex)
+                {
+                    result.Warnings.Add($"The new name was saved, but the open windows may show the old one until the next change: {ex.Message}");
+                }
+            }
             result.ChangedFields.AddRange(changed.Keys);
 
             // ── project.json copy of the fields that file carries ────────────────────

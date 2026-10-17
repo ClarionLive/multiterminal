@@ -27,9 +27,9 @@ namespace MultiTerminal.ProjectSettings
             _log = log;
         }
 
-        public void ProjectRenamed(string projectId, string previousName)
+        public void ProjectRenamed(string projectId, string previousName, string committedName)
         {
-            if (_broker != null && _broker.AdoptProjectNameFromDatabase(projectId, previousName, "project-settings"))
+            if (_broker != null && _broker.AdoptProjectNameFromDatabase(projectId, previousName, committedName, "project-settings"))
                 return;
 
             // A project the broker does not cache: sync its project.json from the stored row ourselves.

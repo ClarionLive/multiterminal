@@ -6917,8 +6917,11 @@ namespace MultiTerminal.MCPServer.Services
         /// project.json and the activity feed in line with the STORED row. It writes nothing to the database,
         /// so it can never put back an older name than the row holds. Does not broadcast (the caller notifies
         /// once for the whole save). Returns false when the broker does not cache this project.
+        /// The activity entry describes what THIS save did (<paramref name="committedName"/>, null when it
+        /// changed only the description), not what the row holds when read: a rename that landed elsewhere
+        /// in between is adopted into the cache but not attributed to the settings form.
         /// </summary>
-        public bool AdoptProjectNameFromDatabase(string projectId, string previousName, string updatedBy)
+        public bool AdoptProjectNameFromDatabase(string projectId, string previousName, string committedName, string updatedBy)
         {
             if (string.IsNullOrWhiteSpace(projectId) || !_projects.ContainsKey(projectId))
                 return false;
@@ -6933,9 +6936,9 @@ namespace MultiTerminal.MCPServer.Services
                 Terminal = updatedBy ?? "System",
                 Type = "project",
                 Action = "updated",
-                Content = !string.Equals(previousName, stored.Name, StringComparison.Ordinal)
-                    ? $"Renamed project: '{previousName}' -> '{stored.Name}'"
-                    : $"Updated project: {stored.Name}",
+                Content = committedName != null && !string.Equals(previousName, committedName, StringComparison.Ordinal)
+                    ? $"Renamed project: '{previousName}' -> '{committedName}'"
+                    : $"Updated project: {committedName ?? previousName}",
                 RelatedId = projectId
             });
             return true;

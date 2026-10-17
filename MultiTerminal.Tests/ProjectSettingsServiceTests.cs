@@ -193,6 +193,27 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// The broker's re-read after a rename runs once the save has committed. If it throws, the save is
+        /// still a success (with a warning), and the steps after it still run: the change notification and the
+        /// project.json sync. Falsified: removing the try/catch around ProjectRenamed in Save made the
+        /// exception escape (red at the Save call).
+        /// </summary>
+        [Fact]
+        public void A_failure_after_the_commit_is_a_warning_not_a_failed_save()
+        {
+            var p = Seed();
+            _host.ThrowOnRename = new System.Data.SQLite.SQLiteException("database is locked");
+
+            var result = _service.Save(UpdateFor(p, ("name", "Renamed"), ("currentVersion", "2.0.0")));
+
+            Assert.True(result.Success, result.Error);
+            Assert.Contains(result.Warnings, w => w.Contains("database is locked", StringComparison.Ordinal));
+            Assert.Equal("Renamed", _db.GetRichProject(p.Id).Name);
+            Assert.Equal("2.0.0", _projectService.LoadProject(_projectDir).CurrentVersion);
+            Assert.Equal(1, _host.NotifyCount);
+        }
+
+        /// <summary>
         /// When the form could not load the project's lists, the page shows them empty and posts [] for each.
         /// That must not be read as "the user deleted every row". Falsified: letting ListEdit return the
         /// incoming list when the baseline list is null deleted the stored agent (red at the last assertion).
@@ -450,7 +471,13 @@ namespace MultiTerminal.Tests
             public List<ISet<string>> GatewaySyncs { get; } = new List<ISet<string>>();
             public int NotifyCount { get; private set; }
 
-            public void ProjectRenamed(string projectId, string previousName) => Renames.Add((projectId, previousName));
+            public Exception ThrowOnRename { get; set; }
+
+            public void ProjectRenamed(string projectId, string previousName, string committedName)
+            {
+                Renames.Add((projectId, previousName));
+                if (ThrowOnRename != null) throw ThrowOnRename;
+            }
 
             public void NotifyProjectsChanged() => NotifyCount++;
 
