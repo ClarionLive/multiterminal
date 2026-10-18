@@ -328,7 +328,7 @@
                        { key: 'displayOrder', label: 'Order', kind: 'number' } ] }
     };
 
-    var state = { loaded: false, lists: {}, options: {}, baseline: '' , saving: false };
+    var state = { loaded: false, lists: {}, options: {}, baseline: '' , saving: false, reloading: false };
 
     function post(msg) {
         if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(msg);
@@ -544,6 +544,12 @@
         state.baseline = JSON.stringify(collect());
         state.loaded = true;
         $('btn-reload').hidden = true;
+        // After Reload the old "Nothing was saved: ..." message is stale; say what just happened instead
+        // (ticket e20e2ce0 item 8). Any other load (first open, after a save) leaves the status alone.
+        if (state.reloading) {
+            state.reloading = false;
+            setStatus('Outside changes have been loaded.', 'ok');
+        }
         lastDirty = false;
         post({ type: 'dirty', dirty: false });
         $('btn-save').disabled = true;
@@ -557,7 +563,7 @@
         setStatus('Saving…');
         post(collect());
     });
-    $('btn-reload').addEventListener('click', function () { post({ type: 'reload' }); });
+    $('btn-reload').addEventListener('click', function () { state.reloading = true; post({ type: 'reload' }); });
     $('btn-close').addEventListener('click', function () { post({ type: 'close' }); });
     $('btn-copy-path').addEventListener('click', function () { post({ type: 'copyPath' }); });
     $('btn-open-folder').addEventListener('click', function () { post({ type: 'openFolder' }); });

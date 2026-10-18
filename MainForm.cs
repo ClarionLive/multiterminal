@@ -3462,6 +3462,14 @@ namespace MultiTerminal
 
             // Apply activity panel font
             _activityPanel?.SetFontSize(dialog.ActivityPanelFontSize);
+
+            // The Home view preference (ticket e20e2ce0 item 8): visible start screens switch now.
+            foreach (var doc in _gridManager.GetTerminalDocuments())
+            {
+                if (!doc.IsStartScreenVisible) continue;
+                doc.RefreshStartScreenProjects();
+                doc.ShowStartScreenHome();
+            }
         }
 
         private void LoadSettings()

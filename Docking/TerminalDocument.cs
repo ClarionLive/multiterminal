@@ -2665,6 +2665,8 @@ namespace MultiTerminal.Docking
             _startScreen.BringToFront();
             _startScreen.Visible = true;
             _startScreen.RefreshProjects();
+            // Back on the Home view the preference names, not wherever the page was left (ticket e20e2ce0 item 8).
+            _startScreen.ShowHome();
 
             // Update tab title
             Text = "Home";
@@ -2695,6 +2697,13 @@ namespace MultiTerminal.Docking
         /// Whether the start screen is currently visible (shell not yet started / has exited).
         /// </summary>
         public bool IsStartScreenVisible => _isStartScreenVisible;
+
+        /// <summary>Puts a visible start screen on its preferred Home view (cards or list; ticket e20e2ce0 item 8).</summary>
+        public void ShowStartScreenHome()
+        {
+            if (!_isStartScreenVisible || _startScreen == null) return;
+            _startScreen.ShowHome();
+        }
 
         /// <summary>
         /// Switches a visible start screen to its Browse All view (the header's Browse All Projects
