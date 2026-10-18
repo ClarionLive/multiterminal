@@ -250,6 +250,7 @@ namespace MultiTerminal.Services
             RunMigration(nameof(MigrateNormalizeNoteTabPaths), MigrateNormalizeNoteTabPaths);
             RunMigration(nameof(MigrateAddNoteTabAuthorship), MigrateAddNoteTabAuthorship);
             RunMigration(nameof(MigrateAddNoteTabReadState), MigrateAddNoteTabReadState);
+            RunMigration(nameof(MigrateAddNoteTabPinAndCategory), MigrateAddNoteTabPinAndCategory);
 
             // Seed default agent profiles on first run
             SeedDefaultProfiles();
@@ -597,7 +598,17 @@ namespace MultiTerminal.Services
                     updated_by TEXT,
                     agent_rev INTEGER NOT NULL DEFAULT 0,
                     owner_read_rev INTEGER NOT NULL DEFAULT 0,
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    category_id INTEGER,
                     UNIQUE(project_path, tab_name)
+                );
+
+                -- Note categories (task 9a4a9d5e): one list for every project. General is built in and
+                -- never stored; a note with category_id NULL is in General. NOCASE stops near-duplicates.
+                CREATE TABLE IF NOT EXISTS note_categories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    created_at DATETIME DEFAULT (datetime('now'))
                 );
             ";
 
@@ -6517,8 +6528,7 @@ namespace MultiTerminal.Services
             GetProjectNoteTabs(projectPath); // reentrant under the same lock
             projectPath = NormalizeNoteTabPath(projectPath);
 
-            const string sql = @"SELECT tab_name, content, is_default, tab_order, created_by, updated_by, updated_at, agent_rev, owner_read_rev
-                                 FROM project_note_tabs WHERE project_path = @path ORDER BY tab_order";
+            const string sql = NoteTabSelectSql + " WHERE t.project_path = @path ORDER BY t.tab_order";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@path", projectPath);
             using var reader = cmd.ExecuteReader();
@@ -6576,8 +6586,7 @@ namespace MultiTerminal.Services
         private ProjectNoteTab FindNoteTabExact(string canonicalPath, string tabName)
         {
             using var gate = LockConn();
-            const string sql = @"SELECT tab_name, content, is_default, tab_order, created_by, updated_by, updated_at, agent_rev, owner_read_rev
-                                 FROM project_note_tabs WHERE project_path = @path AND tab_name = @name";
+            const string sql = NoteTabSelectSql + " WHERE t.project_path = @path AND t.tab_name = @name";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@path", canonicalPath);
             cmd.Parameters.AddWithValue("@name", tabName);
@@ -6611,9 +6620,38 @@ namespace MultiTerminal.Services
         /// Notes pane's <see cref="SaveNoteTab"/>, so an Owner save cannot land between the check and
         /// the write. Every mode is refused when the STORED text would exceed <see cref="AgentNoteMaxChars"/>.
         /// </summary>
-        public AgentNoteWriteResult WriteAgentNoteTab(string projectPath, string tabName, string content, string agentName, AgentNoteWriteMode mode)
+        public AgentNoteWriteResult WriteAgentNoteTab(string projectPath, string tabName, string content, string agentName, AgentNoteWriteMode mode, string category = null)
         {
             using var gate = LockConn();
+            var outcome = WriteAgentNoteTabCore(projectPath, tabName, content, agentName, mode, category, out long? categoryId);
+            if (!outcome.Succeeded) return outcome;
+
+            // Category (task 9a4a9d5e): applied when the note is CREATED, from the shared list only. An
+            // existing note keeps its category, so an agent's append never undoes the Owner refiling it.
+            string requested = category?.Trim();
+            bool created = outcome.Outcome == AgentNoteWriteOutcome.Created;
+            string note = null;
+            if (!string.IsNullOrEmpty(requested))
+            {
+                if (created && categoryId == null && !string.Equals(requested, NoteCategory.General, StringComparison.OrdinalIgnoreCase))
+                    note = $"Unknown category '{requested}'; the note is filed under {NoteCategory.General}. Existing categories: {NoteCategoryListText()}.";
+                else if (!created)
+                    note = "The note already existed, so it keeps its category; a category is applied only when a note is created.";
+            }
+            var stored = FindNoteTabExact(NormalizeNoteTabPath(projectPath), outcome.TabName);
+            return new AgentNoteWriteResult
+            {
+                Outcome = outcome.Outcome,
+                TabName = outcome.TabName,
+                Category = stored?.Category ?? NoteCategory.General,
+                CategoryNote = note,
+            };
+        }
+
+        private AgentNoteWriteResult WriteAgentNoteTabCore(string projectPath, string tabName, string content, string agentName, AgentNoteWriteMode mode, string category, out long? categoryId)
+        {
+            using var gate = LockConn();
+            categoryId = null;
             tabName = tabName?.Trim();
             agentName = agentName?.Trim();
             if (string.IsNullOrEmpty(projectPath)) return AgentNoteWriteResult.Refused(tabName, "A project is required.");
@@ -6625,11 +6663,12 @@ namespace MultiTerminal.Services
 
             GetProjectNoteTabs(projectPath); // heal/migrate first so ownership is read off canonical rows
             projectPath = NormalizeNoteTabPath(projectPath);
+            categoryId = FindNoteCategory(category)?.Id;
 
             var existing = FindNoteTab(projectPath, tabName);
             if (existing == null)
             {
-                InsertAgentNoteTab(projectPath, tabName, content, agentName);
+                InsertAgentNoteTab(projectPath, tabName, content, agentName, categoryId);
                 return new AgentNoteWriteResult { Outcome = AgentNoteWriteOutcome.Created, TabName = tabName };
             }
 
@@ -6645,7 +6684,7 @@ namespace MultiTerminal.Services
                             $"You already have a note named '{existing.Name}'. Use mode 'append' to add to it or 'replace' to rewrite it.");
                     }
                     string free = FreeNoteTabName(projectPath, tabName);
-                    InsertAgentNoteTab(projectPath, free, content, agentName);
+                    InsertAgentNoteTab(projectPath, free, content, agentName, categoryId);
                     return new AgentNoteWriteResult { Outcome = AgentNoteWriteOutcome.Created, TabName = free };
 
                 case AgentNoteWriteMode.Append:
@@ -6692,9 +6731,8 @@ namespace MultiTerminal.Services
             // tab_name's UNIQUE constraint is case-sensitive (SQLite BINARY), but the Notes pane refuses
             // a rename that differs only by case; matching NOCASE here keeps an agent from creating
             // "todo" next to the Owner's "Todo", which the Owner would read as the same tab.
-            const string sql = @"SELECT tab_name, content, is_default, tab_order, created_by, updated_by, updated_at, agent_rev, owner_read_rev
-                                 FROM project_note_tabs WHERE project_path = @path AND tab_name = @name COLLATE NOCASE
-                                 ORDER BY (tab_name = @name) DESC LIMIT 1";
+            const string sql = NoteTabSelectSql + @" WHERE t.project_path = @path AND t.tab_name = @name COLLATE NOCASE
+                                 ORDER BY (t.tab_name = @name) DESC LIMIT 1";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@path", canonicalPath);
             cmd.Parameters.AddWithValue("@name", tabName);
@@ -6713,20 +6751,22 @@ namespace MultiTerminal.Services
             return $"{baseName} ({Guid.NewGuid().ToString("N").Substring(0, 6)})";
         }
 
-        private void InsertAgentNoteTab(string canonicalPath, string tabName, string content, string agentName)
+        private void InsertAgentNoteTab(string canonicalPath, string tabName, string content, string agentName, long? categoryId)
         {
             using var gate = LockConn();
+            // Never pinned: only the Owner pins (task 9a4a9d5e).
             const string sql = @"
-                INSERT INTO project_note_tabs (id, project_path, tab_name, content, tab_order, is_default, created_at, updated_at, created_by, updated_by, agent_rev)
+                INSERT INTO project_note_tabs (id, project_path, tab_name, content, tab_order, is_default, created_at, updated_at, created_by, updated_by, agent_rev, category_id)
                 VALUES (@id, @path, @name, @content,
                         (SELECT COALESCE(MAX(tab_order), -1) + 1 FROM project_note_tabs WHERE project_path = @path),
-                        0, datetime('now'), datetime('now'), @agent, @agent, 1)";
+                        0, datetime('now'), datetime('now'), @agent, @agent, 1, @category)";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@id", Guid.NewGuid().ToString("N").Substring(0, 8));
             cmd.Parameters.AddWithValue("@path", canonicalPath);
             cmd.Parameters.AddWithValue("@name", tabName);
             cmd.Parameters.AddWithValue("@content", content);
             cmd.Parameters.AddWithValue("@agent", agentName);
+            cmd.Parameters.AddWithValue("@category", (object)categoryId ?? DBNull.Value);
             cmd.ExecuteNonQuery();
         }
 
@@ -6743,6 +6783,12 @@ namespace MultiTerminal.Services
             cmd.Parameters.AddWithValue("@agent", agentName);
             cmd.ExecuteNonQuery();
         }
+
+        // The columns ReadNoteTab reads, in its order. The category name is joined in (task 9a4a9d5e);
+        // a note with no category, or one whose category row is gone, reads as General.
+        private const string NoteTabSelectSql = @"SELECT t.tab_name, t.content, t.is_default, t.tab_order, t.created_by, t.updated_by,
+                                     t.updated_at, t.agent_rev, t.owner_read_rev, t.pinned, t.category_id, c.name
+                                 FROM project_note_tabs t LEFT JOIN note_categories c ON c.id = t.category_id";
 
         private static ProjectNoteTab ReadNoteTab(SQLiteDataReader reader)
         {
@@ -6767,6 +6813,9 @@ namespace MultiTerminal.Services
                 UpdatedAt = updatedAt,
                 AgentRev = reader.GetInt64(7),
                 OwnerReadRev = reader.GetInt64(8),
+                IsPinned = reader.GetInt64(9) != 0,
+                CategoryId = reader.IsDBNull(10) || reader.IsDBNull(11) ? null : reader.GetInt64(10),
+                Category = reader.IsDBNull(11) ? NoteCategory.General : reader.GetString(11),
             };
         }
 
@@ -6809,14 +6858,16 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Reorder note tabs by setting tab_order based on the provided name sequence.
+        /// Reorder the PINNED note tabs by setting tab_order from the provided name sequence (task 9a4a9d5e):
+        /// only the pinned group has a manual order, so an unpinned name is ignored rather than given a
+        /// position that would resurface the next time it is pinned.
         /// </summary>
         public void ReorderNoteTabs(string projectPath, List<string> tabNames)
         {
             using var gate = LockConn();
             if (string.IsNullOrEmpty(projectPath) || tabNames == null) return;
             projectPath = NormalizeNoteTabPath(projectPath); // canonical key — stable across path-spelling
-            const string sql = "UPDATE project_note_tabs SET tab_order = @order WHERE project_path = @path AND tab_name = @name";
+            const string sql = "UPDATE project_note_tabs SET tab_order = @order WHERE project_path = @path AND tab_name = @name AND pinned = 1";
             for (int i = 0; i < tabNames.Count; i++)
             {
                 using var cmd = new SQLiteCommand(sql, _connection);
@@ -6825,6 +6876,162 @@ namespace MultiTerminal.Services
                 cmd.Parameters.AddWithValue("@order", i);
                 cmd.ExecuteNonQuery();
             }
+        }
+
+        /// <summary>
+        /// Pins or unpins a note (task 9a4a9d5e). Owner-only. A newly pinned note goes to the END of the
+        /// pinned group; unpinning leaves its <c>tab_order</c> alone, since unpinned notes are sorted.
+        /// </summary>
+        /// <returns>True when the pin state changed.</returns>
+        public bool SetNoteTabPinned(string projectPath, string tabName, bool pinned)
+        {
+            using var gate = LockConn();
+            if (string.IsNullOrEmpty(projectPath) || string.IsNullOrEmpty(tabName)) return false;
+            projectPath = NormalizeNoteTabPath(projectPath);
+            string sql = pinned
+                ? @"UPDATE project_note_tabs SET pinned = 1,
+                        tab_order = (SELECT COALESCE(MAX(tab_order), -1) + 1 FROM project_note_tabs WHERE project_path = @path AND pinned = 1)
+                    WHERE project_path = @path AND tab_name = @name AND pinned = 0"
+                : "UPDATE project_note_tabs SET pinned = 0 WHERE project_path = @path AND tab_name = @name AND pinned = 1";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@path", projectPath);
+            cmd.Parameters.AddWithValue("@name", tabName);
+            return cmd.ExecuteNonQuery() > 0;
+        }
+
+        /// <summary>
+        /// Files a note under a category (task 9a4a9d5e). Owner-only. <paramref name="category"/> is a name
+        /// from the shared list, matched ignoring case; General (or null) clears it. An unknown name changes
+        /// nothing: categories are added through <see cref="AddNoteCategory"/>, never as a side effect.
+        /// </summary>
+        /// <returns>True when the note's category changed.</returns>
+        public bool SetNoteTabCategory(string projectPath, string tabName, string category)
+        {
+            using var gate = LockConn();
+            if (string.IsNullOrEmpty(projectPath) || string.IsNullOrEmpty(tabName)) return false;
+            var target = FindNoteCategory(category);
+            if (target == null) return false;
+            projectPath = NormalizeNoteTabPath(projectPath);
+            const string sql = @"UPDATE project_note_tabs SET category_id = @category
+                                 WHERE project_path = @path AND tab_name = @name AND category_id IS NOT @category";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@path", projectPath);
+            cmd.Parameters.AddWithValue("@name", tabName);
+            cmd.Parameters.AddWithValue("@category", (object)target.Id ?? DBNull.Value);
+            return cmd.ExecuteNonQuery() > 0;
+        }
+
+        /// <summary>Longest category name the Notes pane accepts (task 9a4a9d5e).</summary>
+        public const int NoteCategoryMaxLength = 40;
+
+        /// <summary>
+        /// Every category, General first, then the stored ones alphabetically (task 9a4a9d5e). This is the
+        /// order the Notes rail groups in.
+        /// </summary>
+        public List<NoteCategory> ListNoteCategories()
+        {
+            using var gate = LockConn();
+            var result = new List<NoteCategory> { new NoteCategory { Id = null, Name = NoteCategory.General } };
+            using var cmd = new SQLiteCommand("SELECT id, name FROM note_categories ORDER BY name COLLATE NOCASE", _connection);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                result.Add(new NoteCategory { Id = reader.GetInt64(0), Name = reader.GetString(1) });
+            return result;
+        }
+
+        private string NoteCategoryListText() => string.Join(", ", ListNoteCategories().ConvertAll(c => c.Name));
+
+        /// <summary>
+        /// The category named <paramref name="name"/>, ignoring case; General for null, empty or "General";
+        /// null when no such category exists.
+        /// </summary>
+        public NoteCategory FindNoteCategory(string name)
+        {
+            using var gate = LockConn();
+            name = name?.Trim();
+            if (string.IsNullOrEmpty(name) || string.Equals(name, NoteCategory.General, StringComparison.OrdinalIgnoreCase))
+                return new NoteCategory { Id = null, Name = NoteCategory.General };
+            using var cmd = new SQLiteCommand("SELECT id, name FROM note_categories WHERE name = @name COLLATE NOCASE", _connection);
+            cmd.Parameters.AddWithValue("@name", name);
+            using var reader = cmd.ExecuteReader();
+            return reader.Read() ? new NoteCategory { Id = reader.GetInt64(0), Name = reader.GetString(1) } : null;
+        }
+
+        /// <summary>True when <paramref name="name"/> may be stored as a category name.</summary>
+        internal static bool IsValidNoteCategoryName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name) || name.Trim().Length > NoteCategoryMaxLength) return false;
+            foreach (char c in name)
+            {
+                if (char.IsControl(c)) return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Adds a category to the shared list (task 9a4a9d5e). Owner-only. A name that already exists in any
+        /// case returns the existing category instead of a near-duplicate; "General" returns General.
+        /// </summary>
+        /// <returns>The category, or null when the name is not valid.</returns>
+        public NoteCategory AddNoteCategory(string name, out bool created)
+        {
+            using var gate = LockConn();
+            created = false;
+            if (!IsValidNoteCategoryName(name)) return null;
+            name = name.Trim();
+            var existing = FindNoteCategory(name);
+            if (existing != null) return existing;
+            using (var cmd = new SQLiteCommand("INSERT OR IGNORE INTO note_categories (name) VALUES (@name)", _connection))
+            {
+                cmd.Parameters.AddWithValue("@name", name);
+                created = cmd.ExecuteNonQuery() > 0;
+            }
+            return FindNoteCategory(name);
+        }
+
+        /// <summary>
+        /// Renames a category (task 9a4a9d5e). Owner-only. Refused for General, an invalid name, or a name
+        /// another category already has (ignoring case). A change of case only is allowed.
+        /// </summary>
+        public bool RenameNoteCategory(string oldName, string newName)
+        {
+            using var gate = LockConn();
+            if (!IsValidNoteCategoryName(newName)) return false;
+            newName = newName.Trim();
+            var current = FindNoteCategory(oldName);
+            if (current?.Id == null || string.Equals(newName, NoteCategory.General, StringComparison.OrdinalIgnoreCase)) return false;
+            var clash = FindNoteCategory(newName);
+            if (clash != null && clash.Id != current.Id) return false;
+            using var cmd = new SQLiteCommand("UPDATE note_categories SET name = @name WHERE id = @id AND name <> @name COLLATE BINARY", _connection);
+            cmd.Parameters.AddWithValue("@name", newName);
+            cmd.Parameters.AddWithValue("@id", current.Id.Value);
+            return cmd.ExecuteNonQuery() > 0;
+        }
+
+        /// <summary>
+        /// Deletes a category (task 9a4a9d5e). Owner-only. Its notes, in every project, move to General in
+        /// the same transaction, so no note is ever left pointing at a category that no longer exists.
+        /// </summary>
+        public bool DeleteNoteCategory(string name)
+        {
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.DeleteNoteCategory");
+            using var gate = LockConn();
+            var current = FindNoteCategory(name);
+            if (current?.Id == null) return false;
+            using var tx = _connection.BeginTransaction();
+            using (var move = new SQLiteCommand("UPDATE project_note_tabs SET category_id = NULL WHERE category_id = @id", _connection, tx))
+            {
+                move.Parameters.AddWithValue("@id", current.Id.Value);
+                move.ExecuteNonQuery();
+            }
+            int deleted;
+            using (var del = new SQLiteCommand("DELETE FROM note_categories WHERE id = @id", _connection, tx))
+            {
+                del.Parameters.AddWithValue("@id", current.Id.Value);
+                deleted = del.ExecuteNonQuery();
+            }
+            tx.Commit();
+            return deleted > 0;
         }
 
         /// <summary>
@@ -6997,6 +7204,36 @@ namespace MultiTerminal.Services
             if (!columns.Contains("owner_read_rev"))
             {
                 using var alter = new SQLiteCommand("ALTER TABLE project_note_tabs ADD COLUMN owner_read_rev INTEGER NOT NULL DEFAULT 0", _connection);
+                alter.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// Adds the Notes rail's pin and category (task 9a4a9d5e). Guarded per column, so a fresh database
+        /// (whose CREATE TABLE already has them) is a no-op. When <c>pinned</c> is newly added, every note
+        /// the Owner wrote (<c>created_by IS NULL</c>) is pinned in its current <c>tab_order</c>: the
+        /// Owner's hand-made tab order survives as the pinned group, and agent notes drop into the sorted
+        /// part (Owner decision). Every existing note starts in General (<c>category_id</c> NULL).
+        /// </summary>
+        private void MigrateAddNoteTabPinAndCategory()
+        {
+            var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using (var info = new SQLiteCommand("PRAGMA table_info(project_note_tabs)", _connection))
+            using (var reader = info.ExecuteReader())
+            {
+                while (reader.Read()) columns.Add(reader.GetString(1));
+            }
+
+            if (!columns.Contains("pinned"))
+            {
+                using (var alter = new SQLiteCommand("ALTER TABLE project_note_tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0", _connection))
+                    alter.ExecuteNonQuery();
+                using var seed = new SQLiteCommand("UPDATE project_note_tabs SET pinned = 1 WHERE created_by IS NULL", _connection);
+                seed.ExecuteNonQuery();
+            }
+            if (!columns.Contains("category_id"))
+            {
+                using var alter = new SQLiteCommand("ALTER TABLE project_note_tabs ADD COLUMN category_id INTEGER", _connection);
                 alter.ExecuteNonQuery();
             }
         }
