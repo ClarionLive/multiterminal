@@ -219,6 +219,45 @@ namespace MultiTerminal.Tests
             Assert.Null(omitted.CategoryNote);
         }
 
+        // ── REST: api/project-notes ──
+
+        private static System.Text.Json.JsonElement Body(Microsoft.AspNetCore.Mvc.IActionResult result)
+        {
+            var ok = Assert.IsType<Microsoft.AspNetCore.Mvc.OkObjectResult>(result);
+            return System.Text.Json.JsonSerializer.SerializeToElement(ok.Value);
+        }
+
+        [Fact]
+        public void Rest_write_takes_an_optional_category_and_an_unknown_one_lands_in_General()
+        {
+            using var broker = new MultiTerminal.MCPServer.Services.MessageBroker();
+            broker.TaskDb.AddNoteCategory("Live test", out _);
+            var api = new MultiTerminal.API.Controllers.ProjectNotesController(broker);
+            MultiTerminal.API.Controllers.WriteProjectNoteRequest Req(string tab, string category) => new()
+            {
+                ProjectPath = _project, TabName = tab, Content = "x", Author = "Alice", Mode = "new", Category = category,
+            };
+
+            var known = Body(api.WriteNote(Req("Known", "live test")));
+            var unknown = Body(api.WriteNote(Req("Unknown", "Made up")));
+            var omitted = Body(api.WriteNote(Req("Omitted", null)));
+
+            Assert.Equal("Live test", known.GetProperty("category").GetString());
+            Assert.Equal("General", unknown.GetProperty("category").GetString());
+            Assert.Contains("Unknown category", unknown.GetProperty("categoryNote").GetString(), StringComparison.Ordinal);
+            Assert.Equal("General", omitted.GetProperty("category").GetString());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, omitted.GetProperty("categoryNote").ValueKind);
+
+            var bad = api.WriteNote(Req("Bad", new string('x', TaskDatabase.NoteCategoryMaxLength + 1)));
+            Assert.Equal(400, Assert.IsType<Microsoft.AspNetCore.Mvc.ObjectResult>(bad).StatusCode);
+
+            var list = Body(api.ListNotes(null, _project));
+            Assert.Equal(new[] { "General", "Live test" }, list.GetProperty("categories").EnumerateArray().Select(c => c.GetString()).ToArray());
+            var listedKnown = list.GetProperty("tabs").EnumerateArray().Single(t => t.GetProperty("name").GetString() == "Known");
+            Assert.Equal("Live test", listedKnown.GetProperty("category").GetString());
+            Assert.Equal("Live test", Body(api.GetNote(null, _project, "Known")).GetProperty("category").GetString());
+        }
+
         /// <summary>
         /// A category is applied only when the note is created: an agent's later append must not undo the
         /// Owner refiling the note.
