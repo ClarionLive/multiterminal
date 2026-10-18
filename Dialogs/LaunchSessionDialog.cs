@@ -183,26 +183,28 @@ namespace MultiTerminal.Dialogs
             };
             _continueButton.Click += (s, e) => Finish(LaunchSessionChoice.ContinueLast, _model.ContinueCandidate);
             Controls.Add(_continueButton);
-            const int contextWidth = 170;
+            // The context part is an AutoSize label (its own colour, maybe bold) and the preview
+            // starts right after it (LayoutContinueRow), so the two read as one line. A fixed-width
+            // context label left a wide gap before the agent name (Owner's live test).
             _continueContext = new Label
             {
                 Text = cont == null ? string.Empty : "Context " + ContextText(cont),
                 Location = new Point(left + 150, y + 6),
-                Size = new Size(contextWidth, 20),
-                AutoEllipsis = true,
+                AutoSize = true,
                 Visible = cont != null,
             };
             Controls.Add(_continueContext);
-            var previewLeft = cont == null ? left + 150 : left + 150 + contextWidth + 10;
             _continuePreview = new Label
             {
-                Text = cont == null ? "No resumable session." : FormatPreview(cont),
-                Location = new Point(previewLeft, y + 6),
-                Size = new Size(left + width - previewLeft, 20),
+                Text = cont == null ? "No resumable session." : "·  " + FormatPreview(cont),
+                Location = new Point(left + 150, y + 6),
+                Size = new Size(width - 150, 20),
                 AutoEllipsis = true,
                 Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             };
             Controls.Add(_continuePreview);
+            _continueContext.SizeChanged += (s, e) => LayoutContinueRow();
+            LayoutContinueRow();
             if (cont != null)
             {
                 _toolTip.SetToolTip(_continuePreview, FormatTooltip(cont));
@@ -265,6 +267,17 @@ namespace MultiTerminal.Dialogs
                 item.SubItems.Add(e.Summary ?? "(no summary)");
                 _sessionList.Items.Add(item);
             }
+
+            // Age is sized from the list font, not a fixed pixel width: at the larger font a fixed 105px
+            // clipped "15 d ago" to "15 d a...". Measured with the flags the cell is drawn with; the
+            // padding is the cell's own on both sides plus a few pixels for the header's bold font.
+            const TextFormatFlags measureFlags = TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
+            var ageTexts = LaunchSessionChoiceModel.AgeWidthSamples()
+                .Concat(_sessionList.Items.Cast<ListViewItem>().Select(i => i.SubItems[ColAge].Text));
+            var ageWidth = LaunchSessionChoiceModel.FitColumnWidth(
+                ageTexts, t => TextRenderer.MeasureText(t, _listFont, Size.Empty, measureFlags).Width, (2 * CellPadding) + 6,
+                TextRenderer.MeasureText("Age", _listBoldFont, Size.Empty, measureFlags).Width + (2 * CellPadding) + 6);
+            _sessionList.Columns[ColAge].Width = ageWidth;
 
             _sessionList.DrawColumnHeader += OnDrawColumnHeader;
             _sessionList.DrawItem += (s, e) => { /* every cell is drawn in DrawSubItem */ };
@@ -346,6 +359,17 @@ namespace MultiTerminal.Dialogs
             SetNameProgrammatically(_model.InitialNameFor(_defaultChoice, _newSessionName));
             _newButton.Enter += (s, e) => PrefillFor(LaunchSessionChoice.NewSession);
             _continueButton.Enter += (s, e) => PrefillFor(LaunchSessionChoice.ContinueLast);
+        }
+
+        // Puts the preview right after the context label, keeping its right edge (it is anchored right).
+        private void LayoutContinueRow()
+        {
+            // Not _continueContext.Visible: that reads false until the form itself is shown.
+            if (_continueContext == null || _continuePreview == null || _model.ContinueCandidate == null)
+                return;
+            var newLeft = _continueContext.Right + 4;
+            var right = _continuePreview.Right;
+            _continuePreview.Bounds = new Rectangle(newLeft, _continuePreview.Top, Math.Max(40, right - newLeft), _continuePreview.Height);
         }
 
         private Button DefaultButton => _defaultChoice == LaunchSessionChoice.ContinueLast ? _continueButton : _newButton;
@@ -578,6 +602,7 @@ namespace MultiTerminal.Dialogs
                         btn.ForeColor = theme.ToolbarForeground;
                         btn.FlatStyle = FlatStyle.Flat;
                         btn.FlatAppearance.BorderColor = theme.StatusForeground;
+                        btn.Paint += PaintDisabledButton;
                     }
                 }
             }
@@ -594,6 +619,38 @@ namespace MultiTerminal.Dialogs
                     _continueContext.Font = _continueContextBoldFont;
                 }
             }
+        }
+
+        // A disabled FlatStyle button draws its text in a system grey that vanishes on the dark theme
+        // (Resume selected read as an empty black box). Only the DISABLED state is painted here, over
+        // the native drawing: dim text and a dim but visible border. Enabled buttons keep the native
+        // flat drawing at full strength, focus rectangle and all; a disabled button cannot hold focus,
+        // so no focus cue is lost. Hooked only when a theme is applied (system drawing is fine without).
+        private void PaintDisabledButton(object sender, PaintEventArgs e)
+        {
+            if (sender is not Button btn || btn.Enabled)
+                return;
+            var back = btn.BackColor;
+            var text = Blend(btn.ForeColor, back, 0.45);
+            var border = Blend(btn.FlatAppearance.BorderColor, back, 0.4);
+            var rect = btn.ClientRectangle;
+            using (var brush = new SolidBrush(back))
+                e.Graphics.FillRectangle(brush, rect);
+            using (var pen = new Pen(border))
+                e.Graphics.DrawRectangle(pen, 0, 0, rect.Width - 1, rect.Height - 1);
+            TextRenderer.DrawText(e.Graphics, btn.Text, btn.Font, rect, text,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.HidePrefix);
+        }
+
+        /// <summary>
+        /// <paramref name="from"/> moved <paramref name="towards"/> by <paramref name="amount"/> (0 = unchanged,
+        /// 1 = <paramref name="towards"/>). Internal for tests.
+        /// </summary>
+        internal static Color Blend(Color from, Color towards, double amount)
+        {
+            amount = Math.Clamp(amount, 0, 1);
+            int Mix(int a, int b) => (int)Math.Round(a + ((b - a) * amount));
+            return Color.FromArgb(Mix(from.R, towards.R), Mix(from.G, towards.G), Mix(from.B, towards.B));
         }
 
         protected override void Dispose(bool disposing)
