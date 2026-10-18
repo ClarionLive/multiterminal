@@ -89,6 +89,55 @@ namespace MultiTerminal.Tests
             Assert.All(db.GetProjectNoteTabDetails(_project), t => Assert.Equal(NoteCategory.General, t.Category));
         }
 
+        /// <summary>
+        /// The pin seed is keyed on the column being new, so the column and the seed must land together
+        /// (pipeline Run 1, cross-model adversary HIGH). A trigger makes the seed fail on the first start,
+        /// as a crash or a full disk between the two statements would; the next start must still pin the
+        /// Owner's notes. Applied as two separate statements, the column survives the failure, the re-run
+        /// skips the seed, and this fails at the final assertion.
+        /// </summary>
+        [Fact]
+        public void An_upgrade_that_fails_part_way_still_pins_the_owners_notes_on_the_next_start()
+        {
+            using (var raw = new SQLiteConnection($"Data Source={_testDbPath};Version=3;"))
+            {
+                raw.Open();
+                using var create = new SQLiteCommand(@"
+                    CREATE TABLE project_note_tabs (
+                        id TEXT PRIMARY KEY, project_path TEXT NOT NULL, tab_name TEXT NOT NULL,
+                        content TEXT DEFAULT '', tab_order INTEGER NOT NULL DEFAULT 0,
+                        is_default INTEGER NOT NULL DEFAULT 0,
+                        created_at DATETIME DEFAULT (datetime('now')), updated_at DATETIME DEFAULT (datetime('now')),
+                        created_by TEXT, updated_by TEXT,
+                        agent_rev INTEGER NOT NULL DEFAULT 0, owner_read_rev INTEGER NOT NULL DEFAULT 0,
+                        UNIQUE(project_path, tab_name));
+                    CREATE TRIGGER fail_seed BEFORE UPDATE ON project_note_tabs BEGIN SELECT RAISE(ABORT, 'simulated failure'); END;", raw);
+                create.ExecuteNonQuery();
+                using var insert = new SQLiteCommand(@"
+                    INSERT INTO project_note_tabs (id, project_path, tab_name, content, tab_order, is_default)
+                    VALUES ('a1', @p, 'General', 'x', 0, 1), ('a2', @p, 'Todo', 'y', 1, 0)", raw);
+                insert.Parameters.AddWithValue("@p", TaskDatabase.CanonicalNoteTabKey(_project));
+                insert.ExecuteNonQuery();
+            }
+            SQLiteConnection.ClearAllPools();
+
+            Assert.ThrowsAny<Exception>(() => new TaskDatabase().Dispose()); // the first start fails in the seed
+            SQLiteConnection.ClearAllPools();
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            using (var raw = new SQLiteConnection($"Data Source={_testDbPath};Version=3;"))
+            {
+                raw.Open();
+                using var drop = new SQLiteCommand("DROP TRIGGER fail_seed", raw);
+                drop.ExecuteNonQuery();
+            }
+            SQLiteConnection.ClearAllPools();
+
+            using var db = new TaskDatabase();
+
+            Assert.Equal(new[] { "General", "Todo" }, PinnedInOrder(db, _project));
+        }
+
         // ── Pinning and the manual order ──
 
         [Fact]

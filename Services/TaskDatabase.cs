@@ -7214,6 +7214,10 @@ namespace MultiTerminal.Services
         /// the Owner wrote (<c>created_by IS NULL</c>) is pinned in its current <c>tab_order</c>: the
         /// Owner's hand-made tab order survives as the pinned group, and agent notes drop into the sorted
         /// part (Owner decision). Every existing note starts in General (<c>category_id</c> NULL).
+        /// The ALTERs and the seed run in ONE transaction (pipeline Run 1, cross-model adversary HIGH):
+        /// the seed is keyed on the column being NEW, so a start that died after adding <c>pinned</c> but
+        /// before seeding it would have left a column the re-run skips, and every Owner note unpinned with
+        /// nothing to say so. Rolled back together, the re-run finds the old table and does all of it.
         /// </summary>
         private void MigrateAddNoteTabPinAndCategory()
         {
@@ -7223,19 +7227,23 @@ namespace MultiTerminal.Services
             {
                 while (reader.Read()) columns.Add(reader.GetString(1));
             }
+            if (columns.Contains("pinned") && columns.Contains("category_id")) return;
 
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.MigrateAddNoteTabPinAndCategory");
+            using var tx = _connection.BeginTransaction();
             if (!columns.Contains("pinned"))
             {
-                using (var alter = new SQLiteCommand("ALTER TABLE project_note_tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0", _connection))
+                using (var alter = new SQLiteCommand("ALTER TABLE project_note_tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0", _connection, tx))
                     alter.ExecuteNonQuery();
-                using var seed = new SQLiteCommand("UPDATE project_note_tabs SET pinned = 1 WHERE created_by IS NULL", _connection);
+                using var seed = new SQLiteCommand("UPDATE project_note_tabs SET pinned = 1 WHERE created_by IS NULL", _connection, tx);
                 seed.ExecuteNonQuery();
             }
             if (!columns.Contains("category_id"))
             {
-                using var alter = new SQLiteCommand("ALTER TABLE project_note_tabs ADD COLUMN category_id INTEGER", _connection);
+                using var alter = new SQLiteCommand("ALTER TABLE project_note_tabs ADD COLUMN category_id INTEGER", _connection, tx);
                 alter.ExecuteNonQuery();
             }
+            tx.Commit();
         }
 
         /// <summary>
