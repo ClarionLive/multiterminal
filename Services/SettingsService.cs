@@ -189,6 +189,14 @@ namespace MultiTerminal.Services
         // registration and ordering (__tasks__, __graph__, __git__, ...), so the persistence
         // vocabulary and the registration vocabulary cannot drift apart.
         private const string HudTabZoomKeyPrefix = "HudTabZoom:";
+
+        // The HUD Notes rail (task 9a4a9d5e): one setting for every pane (Owner decision), not per pane.
+        private const string HudNotesRailWidthKey = "HudNotesRailWidth";
+        private const string HudNotesRailCollapsedKey = "HudNotesRailCollapsed";
+        private const string HudNotesFoldedCategoriesKey = "HudNotesFoldedCategories";
+        public const int HudNotesRailMinWidth = 140;
+        public const int HudNotesRailMaxWidth = 420;
+        public const int HudNotesRailDefaultWidth = 215;
         private const double DefaultAgentPanelZoom = 1.0;
         private const double DefaultTaskHudZoom = 1.0;
         private const double DefaultAgentPanelSplitRatio = 0.75;
@@ -238,6 +246,46 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Returns "on" or "off". Default is "on" — the gate has graduated from spike.
         /// </summary>
+        /// <summary>
+        /// The Notes rail's width (clamped), whether it is collapsed, and which category groups are folded
+        /// (task 9a4a9d5e). A missing or unreadable value falls back to the default rather than failing.
+        /// </summary>
+        public (int Width, bool Collapsed, string[] Folded) GetHudNotesRail()
+        {
+            int width = int.TryParse(Get(HudNotesRailWidthKey), System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out int w) ? w : HudNotesRailDefaultWidth;
+            bool collapsed = string.Equals(Get(HudNotesRailCollapsedKey), "true", StringComparison.OrdinalIgnoreCase);
+            string[] folded = Array.Empty<string>();
+            try
+            {
+                string json = Get(HudNotesFoldedCategoriesKey);
+                if (!string.IsNullOrEmpty(json))
+                    folded = System.Text.Json.JsonSerializer.Deserialize<string[]>(json) ?? Array.Empty<string>();
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // A hand-edited or truncated value: nothing folded is the safe reading.
+            }
+            return (ClampNotesRailWidth(width), collapsed, folded);
+        }
+
+        /// <summary>Saves the Notes rail state (task 9a4a9d5e). The width is clamped.</summary>
+        public void SetHudNotesRail(int width, bool collapsed, IEnumerable<string> folded)
+        {
+            lock (_sync)
+            {
+                bool wasBatch = _batchMode;
+                _batchMode = true;
+                Set(HudNotesRailWidthKey, ClampNotesRailWidth(width).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                Set(HudNotesRailCollapsedKey, collapsed ? "true" : "false");
+                Set(HudNotesFoldedCategoriesKey, System.Text.Json.JsonSerializer.Serialize(folded ?? Array.Empty<string>()));
+                _batchMode = wasBatch;
+                if (!_batchMode) Save();
+            }
+        }
+
+        internal static int ClampNotesRailWidth(int width) => Math.Clamp(width, HudNotesRailMinWidth, HudNotesRailMaxWidth);
+
         public string GetWorktreeMode()
         {
             string raw = Get(WorktreeModeKey);

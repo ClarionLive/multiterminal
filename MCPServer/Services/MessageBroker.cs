@@ -393,6 +393,16 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// The shared note-category list changed: a category was added, renamed or deleted (task 9a4a9d5e).
+        /// The list is global, so EVERY Notes pane refreshes, whatever project it shows: a rename or delete
+        /// also changes the category shown on notes in other projects.
+        /// </summary>
+        public event EventHandler<EventArgs> NoteCategoriesChanged;
+
+        /// <summary>Raises <see cref="NoteCategoriesChanged"/>.</summary>
+        public void NotifyNoteCategoriesChanged() => RaiseSafe(NoteCategoriesChanged, EventArgs.Empty);
+
+        /// <summary>
         /// Activity service for auto-updating terminal activity on task operations.
         /// Set via DI after broker is created.
         /// </summary>

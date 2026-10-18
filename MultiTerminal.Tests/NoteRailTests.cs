@@ -219,6 +219,112 @@ namespace MultiTerminal.Tests
             Assert.Null(omitted.CategoryNote);
         }
 
+        // ── Host: the Notes renderer ──
+
+        private static System.Collections.Generic.List<System.Text.Json.JsonElement> Merges(System.Collections.Generic.List<string> posted)
+            => posted.Select(j => System.Text.Json.JsonDocument.Parse(j).RootElement.Clone())
+                     .Where(m => m.GetProperty("type").GetString() == "notes_changed").ToList();
+
+        private static System.Text.Json.JsonElement LastTab(System.Collections.Generic.List<string> posted, string name)
+            => Merges(posted).Last().GetProperty("tabs").EnumerateArray().Single(t => t.GetProperty("name").GetString() == name);
+
+        private static MultiTerminal.Controls.HudNotesRenderer Pane(MultiTerminal.MCPServer.Services.MessageBroker broker, string project, System.Collections.Generic.List<string> posted)
+        {
+            var pane = new MultiTerminal.Controls.HudNotesRenderer();
+            pane.Initialize(broker);
+            pane.SetProject(project);
+            pane.AttachPageForTests(posted.Add);
+            return pane;
+        }
+
+        /// <summary>
+        /// A pin or a pinned reorder in one pane reaches every pane on the project, as a merge carrying the
+        /// stored state. Reorder used to tell nobody.
+        /// </summary>
+        [Fact]
+        public void Pin_and_reorder_in_one_pane_reach_the_other_panes()
+        {
+            using var broker = new MultiTerminal.MCPServer.Services.MessageBroker();
+            broker.TaskDb.SaveNoteTab(_project, "A", "a");
+            broker.TaskDb.SaveNoteTab(_project, "B", "b");
+            var postedA = new System.Collections.Generic.List<string>();
+            var postedB = new System.Collections.Generic.List<string>();
+            using var paneA = Pane(broker, _project, postedA);
+            using var paneB = Pane(broker, _project, postedB);
+
+            postedB.Clear();
+            paneA.PinTab("A", true);
+            paneA.PinTab("B", true);
+            Assert.True(LastTab(postedB, "A").GetProperty("pinned").GetBoolean());
+            Assert.True(LastTab(postedA, "B").GetProperty("pinned").GetBoolean()); // the acting pane takes the same path
+
+            postedB.Clear();
+            paneA.ReorderTabs(new System.Collections.Generic.List<string> { "B", "A" });
+            var order = Merges(postedB).Last().GetProperty("tabs").EnumerateArray().Select(t => t.GetProperty("name").GetString()).ToArray();
+            Assert.Equal(new[] { "B", "A" }, order);
+        }
+
+        /// <summary>
+        /// The category list is global: adding one in a pane on project 1 reaches a pane on project 2, and a
+        /// rename changes the category shown on project 2's notes.
+        /// </summary>
+        [Fact]
+        public void Category_changes_reach_panes_on_every_project()
+        {
+            using var broker = new MultiTerminal.MCPServer.Services.MessageBroker();
+            string other = _project + "-other";
+            broker.TaskDb.SaveNoteTab(_project, "Here", "x");
+            broker.TaskDb.SaveNoteTab(other, "There", "y");
+            var postedHere = new System.Collections.Generic.List<string>();
+            var postedThere = new System.Collections.Generic.List<string>();
+            using var here = Pane(broker, _project, postedHere);
+            using var there = Pane(broker, other, postedThere);
+
+            postedThere.Clear();
+            here.AddCategory("Live test", fileTabName: "Here");
+            var categories = Merges(postedThere).Last().GetProperty("categories").EnumerateArray().Select(c => c.GetString()).ToArray();
+            Assert.Equal(new[] { "General", "Live test" }, categories);
+            Assert.Equal("Live test", LastTab(postedHere, "Here").GetProperty("category").GetString());
+
+            there.SetCategory("There", "Live test");
+            postedThere.Clear();
+            here.RenameCategory("Live test", "Live tests");
+            Assert.Equal("Live tests", LastTab(postedThere, "There").GetProperty("category").GetString());
+
+            postedThere.Clear();
+            here.DeleteCategory("Live tests");
+            Assert.Equal("General", LastTab(postedThere, "There").GetProperty("category").GetString());
+        }
+
+        [Fact]
+        public void Rail_state_is_saved_once_for_every_pane_and_the_width_is_clamped()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), $"mt-rail-settings-{Guid.NewGuid():N}");
+            try
+            {
+                var settings = new SettingsService(dir);
+                using var broker = new MultiTerminal.MCPServer.Services.MessageBroker();
+                using var pane = new MultiTerminal.Controls.HudNotesRenderer { Settings = settings };
+                Assert.Equal((SettingsService.HudNotesRailDefaultWidth, false), (settings.GetHudNotesRail().Width, settings.GetHudNotesRail().Collapsed));
+
+                pane.SaveRailState(System.Text.Json.JsonDocument.Parse("{\"width\":9999,\"collapsed\":true,\"folded\":[\"Live test\",\"bad\\u0001name\"]}").RootElement);
+
+                var reread = new SettingsService(dir).GetHudNotesRail(); // a restart reads it back
+                Assert.Equal(SettingsService.HudNotesRailMaxWidth, reread.Width);
+                Assert.True(reread.Collapsed);
+                Assert.Equal(new[] { "Live test" }, reread.Folded);
+
+                // A message without "collapsed" (a narrow pane's) leaves the saved value alone.
+                pane.SaveRailState(System.Text.Json.JsonDocument.Parse("{\"width\":200}").RootElement);
+                Assert.True(settings.GetHudNotesRail().Collapsed);
+                Assert.Equal(200, settings.GetHudNotesRail().Width);
+            }
+            finally
+            {
+                if (Directory.Exists(dir)) Directory.Delete(dir, true);
+            }
+        }
+
         // ── REST: api/project-notes ──
 
         private static System.Text.Json.JsonElement Body(Microsoft.AspNetCore.Mvc.IActionResult result)

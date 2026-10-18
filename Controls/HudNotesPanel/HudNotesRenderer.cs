@@ -42,6 +42,9 @@ namespace MultiTerminal.Controls
         private bool? _lastSentSeen;
         private Action<string> _pageSinkForTests; // stands in for the WebView2 page in tests
 
+        /// <summary>Where the rail's width, collapsed state and folded groups are kept (task 9a4a9d5e). Tests swap it.</summary>
+        internal SettingsService Settings { get; set; } = SettingsService.Default;
+
         public event EventHandler<double> ZoomChanged;
 
         /// <inheritdoc/>
@@ -233,10 +236,53 @@ namespace MultiTerminal.Controls
                         _webView.ZoomFactorChanged += (s, ev) => ZoomChanged?.Invoke(this, _webView.ZoomFactor);
                         if (Math.Abs(_pendingZoom - 1.0) > 0.01)
                             _webView.ZoomFactor = _pendingZoom;
+                        SendRailState();
                         LoadAllTabs();
                         _lastSentSeen = null;
                         HookSeenForm();
                         SendSeen();
+                        break;
+
+                    case "pin_tab":
+                        if (root.TryGetProperty("tabName", out var pinNameEl) &&
+                            root.TryGetProperty("pinned", out var pinnedEl) &&
+                            (pinnedEl.ValueKind == JsonValueKind.True || pinnedEl.ValueKind == JsonValueKind.False))
+                        {
+                            PinTab(pinNameEl.GetString(), pinnedEl.GetBoolean());
+                        }
+                        break;
+
+                    case "set_category":
+                        if (root.TryGetProperty("tabName", out var catTabEl) && root.TryGetProperty("category", out var catEl))
+                        {
+                            SetCategory(catTabEl.GetString(), catEl.GetString());
+                        }
+                        break;
+
+                    case "add_category":
+                        if (root.TryGetProperty("name", out var addCatEl))
+                        {
+                            string fileTab = root.TryGetProperty("tabName", out var fileTabEl) ? fileTabEl.GetString() : null;
+                            AddCategory(addCatEl.GetString(), fileTab);
+                        }
+                        break;
+
+                    case "rename_category":
+                        if (root.TryGetProperty("oldName", out var oldCatEl) && root.TryGetProperty("newName", out var newCatEl))
+                        {
+                            RenameCategory(oldCatEl.GetString(), newCatEl.GetString());
+                        }
+                        break;
+
+                    case "delete_category":
+                        if (root.TryGetProperty("name", out var delCatEl))
+                        {
+                            DeleteCategory(delCatEl.GetString());
+                        }
+                        break;
+
+                    case "rail_state":
+                        SaveRailState(root);
                         break;
 
                     case "mark_read":
@@ -310,12 +356,14 @@ namespace MultiTerminal.Controls
             {
                 _broker.ProjectNotesChanged -= OnProjectNotesChanged;
                 _broker.ProjectNoteReadStateChanged -= OnProjectNoteReadStateChanged;
+                _broker.NoteCategoriesChanged -= OnNoteCategoriesChanged;
             }
             _broker = broker;
             if (_broker != null)
             {
                 _broker.ProjectNotesChanged += OnProjectNotesChanged;
                 _broker.ProjectNoteReadStateChanged += OnProjectNoteReadStateChanged;
+                _broker.NoteCategoriesChanged += OnNoteCategoriesChanged;
             }
             RecountUnread();
         }
@@ -364,6 +412,23 @@ namespace MultiTerminal.Controls
             {
                 return false; // handle torn down between the check and the post
             }
+        }
+
+        /// <summary>
+        /// The shared category list changed (task 9a4a9d5e). It is global, so every pane refreshes whatever
+        /// project it shows: a rename or delete changes the category shown on its notes too. Sent as a
+        /// merge, which keeps the Owner's current note and unsaved typing.
+        /// </summary>
+        private void OnNoteCategoriesChanged(object sender, EventArgs e)
+        {
+            if (IsDisposed) return;
+            if (InvokeRequired)
+            {
+                PostToUiThread(() => OnNoteCategoriesChanged(sender, e));
+                return;
+            }
+            if (!_isInitialized) return;
+            SendTabsMerge(null, null);
         }
 
         private bool IsForThisProject(string projectKey)
@@ -436,12 +501,13 @@ namespace MultiTerminal.Controls
                 var tabData = BuildTabData();
                 if (tabData == null) return;
 
+                var categories = CategoryNames();
                 if (changedTab != null)
-                    PostJsonMessage(new { type = "notes_changed", tabs = tabData, changedTab, changedBy });
+                    PostJsonMessage(new { type = "notes_changed", tabs = tabData, categories, changedTab, changedBy });
                 else if (selectTab != null)
-                    PostJsonMessage(new { type = "load_all_tabs", tabs = tabData, activeTab = selectTab });
+                    PostJsonMessage(new { type = "load_all_tabs", tabs = tabData, categories, activeTab = selectTab });
                 else
-                    PostJsonMessage(new { type = "load_all_tabs", tabs = tabData });
+                    PostJsonMessage(new { type = "load_all_tabs", tabs = tabData, categories });
             }
             catch { }
         }
@@ -463,10 +529,33 @@ namespace MultiTerminal.Controls
                     updatedBy = tab.UpdatedBy,
                     unread = tab.IsUnread,
                     agentRev = tab.AgentRev,
+                    pinned = tab.IsPinned,
+                    category = tab.Category,
+                    changedAt = ChangedAtMs(tab),
                 });
             }
             return tabData;
         }
+
+        // The shared category names, General first (the rail's group order); just General if unreadable.
+        private List<string> CategoryNames()
+        {
+            try
+            {
+                return _broker?.TaskDb?.ListNoteCategories().ConvertAll(c => c.Name) ?? new List<string> { NoteCategory.General };
+            }
+            catch
+            {
+                return new List<string> { NoteCategory.General };
+            }
+        }
+
+        // When the tab last changed, in Unix ms, for the rail's newest-first order. updated_at is
+        // SQLite datetime('now'), which is UTC; 0 when unknown sorts last.
+        internal static long ChangedAtMs(ProjectNoteTab tab)
+            => tab?.UpdatedAt is DateTime at
+                ? new DateTimeOffset(DateTime.SpecifyKind(at, DateTimeKind.Utc)).ToUnixTimeMilliseconds()
+                : 0;
 
         /// <summary>
         /// The tab list changed in another pane (task c133b27d): send it as a <c>notes_changed</c> MERGE, which
@@ -481,7 +570,7 @@ namespace MultiTerminal.Controls
                 var tabData = BuildTabData();
                 if (tabData == null) return;
                 object renamed = renamedFrom != null && renamedTo != null ? new { from = renamedFrom, to = renamedTo } : null;
-                PostJsonMessage(new { type = "notes_changed", tabs = tabData, changedTab = (string)null, changedBy = (string)null, renamed });
+                PostJsonMessage(new { type = "notes_changed", tabs = tabData, categories = CategoryNames(), changedTab = (string)null, changedBy = (string)null, renamed });
             }
             catch { }
         }
@@ -596,12 +685,109 @@ namespace MultiTerminal.Controls
             catch { }
         }
 
-        private void ReorderTabs(List<string> tabNames)
+        // Reorders the pinned group only (task 9a4a9d5e), and now tells the other panes, which before kept
+        // the old order until they reloaded.
+        internal void ReorderTabs(List<string> tabNames)
         {
             if (string.IsNullOrEmpty(_projectPath) || _broker?.TaskDb == null) return;
             try
             {
                 _broker.TaskDb.ReorderNoteTabs(_projectPath, tabNames);
+                _broker.NotifyProjectNoteTabsChanged(_projectPath);
+            }
+            catch { }
+        }
+
+        // ── Rail: pin, category (task 9a4a9d5e). Each change is announced, and this pane takes it back
+        // through the same announcement as every other pane, so there is one refresh path, not two.
+
+        internal void PinTab(string tabName, bool pinned)
+        {
+            if (string.IsNullOrEmpty(_projectPath) || _broker?.TaskDb == null || string.IsNullOrEmpty(tabName)) return;
+            try
+            {
+                if (_broker.TaskDb.SetNoteTabPinned(_projectPath, tabName, pinned))
+                    _broker.NotifyProjectNoteTabsChanged(_projectPath);
+            }
+            catch { }
+        }
+
+        internal void SetCategory(string tabName, string category)
+        {
+            if (string.IsNullOrEmpty(_projectPath) || _broker?.TaskDb == null || string.IsNullOrEmpty(tabName)) return;
+            try
+            {
+                if (_broker.TaskDb.SetNoteTabCategory(_projectPath, tabName, category))
+                    _broker.NotifyProjectNoteTabsChanged(_projectPath);
+            }
+            catch { }
+        }
+
+        // The dropdown's "Add…": adds the category to the shared list (or finds it, ignoring case) and, when
+        // a note is given, files it there in the same step.
+        internal void AddCategory(string name, string fileTabName)
+        {
+            if (_broker?.TaskDb == null) return;
+            try
+            {
+                var category = _broker.TaskDb.AddNoteCategory(name, out bool created);
+                if (category == null) return;
+                bool filed = !string.IsNullOrEmpty(fileTabName) && !string.IsNullOrEmpty(_projectPath)
+                             && _broker.TaskDb.SetNoteTabCategory(_projectPath, fileTabName, category.Name);
+                if (created || filed) _broker.NotifyNoteCategoriesChanged();
+            }
+            catch { }
+        }
+
+        internal void RenameCategory(string oldName, string newName)
+        {
+            if (_broker?.TaskDb == null) return;
+            try
+            {
+                if (_broker.TaskDb.RenameNoteCategory(oldName, newName))
+                    _broker.NotifyNoteCategoriesChanged();
+            }
+            catch { }
+        }
+
+        internal void DeleteCategory(string name)
+        {
+            if (_broker?.TaskDb == null) return;
+            try
+            {
+                if (_broker.TaskDb.DeleteNoteCategory(name))
+                    _broker.NotifyNoteCategoriesChanged();
+            }
+            catch { }
+        }
+
+        private void SendRailState()
+        {
+            var (width, collapsed, folded) = Settings.GetHudNotesRail();
+            PostJsonMessage(new { type = "rail_state", width, collapsed, folded });
+        }
+
+        // The page sends this after a resize, collapse or fold. A narrow pane does not send its forced
+        // collapse, so it cannot overwrite the setting the wide panes use.
+        internal void SaveRailState(JsonElement root)
+        {
+            try
+            {
+                var (width, collapsed, folded) = Settings.GetHudNotesRail();
+                if (root.TryGetProperty("width", out var w) && w.TryGetInt32(out int newWidth)) width = newWidth;
+                if (root.TryGetProperty("collapsed", out var c) && (c.ValueKind == JsonValueKind.True || c.ValueKind == JsonValueKind.False))
+                    collapsed = c.GetBoolean();
+                if (root.TryGetProperty("folded", out var f) && f.ValueKind == JsonValueKind.Array)
+                {
+                    var names = new List<string>();
+                    foreach (var item in f.EnumerateArray())
+                    {
+                        if (item.ValueKind == JsonValueKind.String && TaskDatabase.IsValidNoteCategoryName(item.GetString()))
+                            names.Add(item.GetString().Trim());
+                    }
+                    folded = names.ToArray();
+                }
+                Settings.SetHudNotesRail(width, collapsed, folded);
             }
             catch { }
         }
@@ -661,6 +847,7 @@ namespace MultiTerminal.Controls
                 {
                     _broker.ProjectNotesChanged -= OnProjectNotesChanged;
                     _broker.ProjectNoteReadStateChanged -= OnProjectNoteReadStateChanged;
+                    _broker.NoteCategoriesChanged -= OnNoteCategoriesChanged;
                 }
                 if (_seenForm != null)
                 {
