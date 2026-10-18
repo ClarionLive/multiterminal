@@ -402,6 +402,39 @@ namespace MultiTerminal.Services
             return $"{(int)age.TotalDays} d ago";
         }
 
+        /// <summary>
+        /// The widest text <see cref="FormatRelativeAge"/> produces in each of its forms (two-digit
+        /// minutes and hours, three-digit days), so the Age column is sized for any row a later
+        /// refresh could show, not just the rows present now.
+        /// </summary>
+        public static IReadOnlyList<string> AgeWidthSamples()
+        {
+            var now = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            return new[]
+            {
+                FormatRelativeAge(now, now),
+                FormatRelativeAge(now.AddMinutes(-59), now),
+                FormatRelativeAge(now.AddHours(-23), now),
+                FormatRelativeAge(now.AddDays(-999), now),
+            };
+        }
+
+        /// <summary>
+        /// A column width that fits the widest of <paramref name="texts"/> as measured by
+        /// <paramref name="measure"/> (the caller passes the list font's measurement), plus
+        /// <paramref name="padding"/>. Null or empty texts are ignored; never below <paramref name="minimum"/>.
+        /// </summary>
+        public static int FitColumnWidth(IEnumerable<string> texts, Func<string, int> measure, int padding, int minimum = 0)
+        {
+            ArgumentNullException.ThrowIfNull(measure);
+            var widest = (texts ?? Enumerable.Empty<string>())
+                .Where(t => !string.IsNullOrEmpty(t))
+                .Select(measure)
+                .DefaultIfEmpty(0)
+                .Max();
+            return Math.Max(minimum, widest + padding);
+        }
+
         /// <summary>Share of the window at which the context column turns to the warning colour.</summary>
         public const double ContextWarningShare = 0.80;
 

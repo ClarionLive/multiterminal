@@ -437,5 +437,35 @@ namespace MultiTerminal.Tests
             Assert.DoesNotContain("\u200B", tip, StringComparison.Ordinal);
             Assert.Equal(cwd, entry.Cwd); // the value a resume launches from is untouched
         }
+
+        [Fact]
+        public void Age_width_samples_are_the_widest_form_of_each_age_shape()
+        {
+            Assert.Equal(new[] { "just now", "59 min ago", "23 h ago", "999 d ago" }, LaunchSessionChoiceModel.AgeWidthSamples());
+        }
+
+        [Fact]
+        public void Fit_column_width_takes_the_widest_measured_text_plus_padding()
+        {
+            // Measure by length so the widest text is unambiguous; "15 d ago" is the clipped value from the live test.
+            var width = LaunchSessionChoiceModel.FitColumnWidth(
+                new[] { "15 d ago", "25 min ago", null, string.Empty, "3 h ago" }, t => t.Length * 10, padding: 20);
+
+            Assert.Equal(("25 min ago".Length * 10) + 20, width);
+        }
+
+        [Fact]
+        public void Fit_column_width_never_goes_below_the_minimum()
+        {
+            Assert.Equal(60, LaunchSessionChoiceModel.FitColumnWidth(new[] { "x" }, t => 5, padding: 4, minimum: 60));
+            Assert.Equal(60, LaunchSessionChoiceModel.FitColumnWidth(null, t => 5, padding: 4, minimum: 60));
+        }
+
+        [Fact]
+        public void Disabled_button_blend_lands_between_its_two_colours()
+        {
+            var dim = MultiTerminal.Dialogs.LaunchSessionDialog.Blend(System.Drawing.Color.FromArgb(200, 100, 0), System.Drawing.Color.FromArgb(0, 0, 100), 0.5);
+            Assert.Equal(System.Drawing.Color.FromArgb(100, 50, 50).ToArgb(), dim.ToArgb());
+        }
     }
 }
