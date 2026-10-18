@@ -29,8 +29,9 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
-        /// GET /api/project-notes?projectId=X (or projectPath=Y): every tab with its authorship and size,
-        /// without the content. A null createdBy means the Owner wrote the tab.
+        /// GET /api/project-notes?projectId=X (or projectPath=Y): every tab with its authorship, size, pin and
+        /// category, without the content, plus the shared category list (task 9a4a9d5e). A null createdBy
+        /// means the Owner wrote the tab.
         /// </summary>
         [HttpGet]
         public IActionResult ListNotes([FromQuery] string projectId, [FromQuery] string projectPath)
@@ -47,8 +48,11 @@ namespace MultiTerminal.API.Controllers
                 updatedBy = t.UpdatedBy,
                 updatedAt = t.UpdatedAt,
                 length = t.Content?.Length ?? 0,
+                category = t.Category,
+                pinned = t.IsPinned,
             }).ToList();
-            return Ok(new { projectKey = key, count = tabs.Count, tabs });
+            var categories = _broker.TaskDb.ListNoteCategories().Select(c => c.Name).ToList();
+            return Ok(new { projectKey = key, count = tabs.Count, tabs, categories });
         }
 
         /// <summary>GET /api/project-notes/tab?projectId=X&amp;tabName=Y: one tab including its content.</summary>
@@ -75,15 +79,18 @@ namespace MultiTerminal.API.Controllers
                 createdBy = tab.CreatedBy,
                 updatedBy = tab.UpdatedBy,
                 updatedAt = tab.UpdatedAt,
+                category = tab.Category,
                 content = tab.Content,
             });
         }
 
         /// <summary>
         /// POST /api/project-notes: an agent writes a note.
-        /// Body: { projectId | projectPath, tabName, content, author (required), mode: new|append|replace }.
-        /// 200 { outcome, tabName, projectKey } (tabName may differ from the request when "new" collided
-        /// with someone else's tab); 409 with the reason when the ownership rules refuse the write.
+        /// Body: { projectId | projectPath, tabName, content, author (required), mode: new|append|replace,
+        /// category (optional) }.
+        /// 200 { outcome, tabName, projectKey, category, categoryNote } (tabName may differ from the request
+        /// when "new" collided with someone else's tab; categoryNote says why a requested category was not
+        /// used); 409 with the reason when the ownership rules refuse the write.
         /// </summary>
         [HttpPost]
         public IActionResult WriteNote([FromBody] WriteProjectNoteRequest request)
@@ -100,11 +107,16 @@ namespace MultiTerminal.API.Controllers
                 return Problem(detail: $"content is limited to {MaxContentLength} characters", statusCode: 400);
             if (!TryParseMode(request.Mode, out var mode))
                 return Problem(detail: $"mode must be new, append or replace (got '{request.Mode}')", statusCode: 400);
+            // Optional, and never refused for being unknown: it lands in General and categoryNote says so.
+            // Only a malformed value (too long, control characters) is a bad request.
+            string category = string.IsNullOrWhiteSpace(request.Category) ? null : request.Category.Trim();
+            if (category != null && !TaskDatabase.IsValidNoteCategoryName(category))
+                return Problem(detail: $"category must be one line of at most {TaskDatabase.NoteCategoryMaxLength} characters", statusCode: 400);
 
             var (key, error) = ResolveKey(request.ProjectId, request.ProjectPath);
             if (error != null) return error;
 
-            var result = _broker.WriteAgentProjectNote(key, tabName, request.Content ?? "", request.Author, mode);
+            var result = _broker.WriteAgentProjectNote(key, tabName, request.Content ?? "", request.Author, mode, category);
             if (!result.Succeeded)
                 return Problem(detail: result.Reason, statusCode: 409);
 
@@ -113,6 +125,8 @@ namespace MultiTerminal.API.Controllers
                 outcome = result.Outcome.ToString().ToLowerInvariant(),
                 tabName = result.TabName,
                 projectKey = key,
+                category = result.Category,
+                categoryNote = result.CategoryNote,
             });
         }
 
@@ -171,5 +185,8 @@ namespace MultiTerminal.API.Controllers
         public string Author { get; set; }
 
         public string Mode { get; set; }
+
+        /// <summary>Optional category from the shared list (task 9a4a9d5e); unknown lands in General.</summary>
+        public string Category { get; set; }
     }
 }

@@ -1944,13 +1944,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           "Save a note for the Owner as a tab in the project's Notes pane (HUD 📝 Notes). Use it for anything the Owner must do or check LATER — steps after a restart or redeploy, manual test steps, deploy steps — so they don't have to copy it out of chat. The tab shows up live, marked with your name. " +
           "You can never change a tab the Owner wrote. mode 'new' (default) adds a tab; if the name is taken by the Owner or another agent you get 'Name (2)', but if YOU already have a tab of that name it is refused so you update it instead of piling up copies. " +
           "mode 'append' adds to the end of your own tab (and still works after the Owner edited it). mode 'replace' rewrites your own tab, but only while nobody else has edited it since your last write. " +
-          "Use list_project_notes to find your earlier note first.",
+          "Use list_project_notes to find your earlier note first. " +
+          "category (optional) files a NEW note under one of the Owner's existing categories (list_project_notes shows them); an unknown one lands in General, and an existing note keeps the category it has.",
         inputSchema: {
           type: "object",
           properties: {
             tabName: { type: "string", description: "Tab title, one line, at most 80 characters (e.g. \"After redeploy: c8ee0eec\")" },
             content: { type: "string", description: "The note text (plain text; shown in a monospace editor)" },
             mode: { type: "string", enum: ["new", "append", "replace"], description: "new (default), append or replace; see the tool description" },
+            category: { type: "string", description: "Optional. An existing category for a new note (e.g. \"Live test\"). Unknown names land in General; agents cannot create categories." },
             projectId: { type: "string", description: "Project ID. Defaults to this terminal's project." },
             projectPath: { type: "string", description: "Absolute project root folder, instead of projectId (not a worktree path)." },
             agentName: { type: "string", description: "Your MultiTerminal name, recorded as the author. Defaults to MULTITERMINAL_NAME." },
@@ -1961,7 +1963,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "list_project_notes",
         description:
-          "List the project's note tabs (HUD 📝 Notes) with who wrote each one, or read one tab's full text by passing tabName. A tab with no author was written by the Owner.",
+          "List the project's note tabs (HUD 📝 Notes) with who wrote each one and its category, plus the Owner's category list, or read one tab's full text by passing tabName. A tab with no author was written by the Owner.",
         inputSchema: {
           type: "object",
           properties: {
@@ -4970,6 +4972,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             content: args.content,
             mode: args.mode || "new",
             author,
+            ...(args.category ? { category: args.category } : {}),
           });
         } catch (err) {
           if (err.status === 409) {
@@ -4984,7 +4987,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return {
           content: [{
             type: "text",
-            text: `✅ Note ${result.outcome}: "${result.tabName}"${renamed} in the Notes pane of ${result.projectKey}, marked as written by ${author}.`,
+            text: `✅ Note ${result.outcome}: "${result.tabName}"${renamed} in the Notes pane of ${result.projectKey}, marked as written by ${author}, category ${result.category || "General"}.` +
+              (result.categoryNote ? `\n⚠ ${result.categoryNote}` : ""),
           }],
         };
       }
@@ -5006,6 +5010,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             createdBy: tab.createdBy ?? null,
             updatedBy: tab.updatedBy ?? null,
             updatedAt: tab.updatedAt ?? null,
+            category: tab.category ?? "General",
             content: tab.content || "",
           };
           return { content: [{ type: "text", text: `📝 One project note.\n${DATA_NOTICE}\n${JSON.stringify(note, null, 2)}` }] };
@@ -5015,12 +5020,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           name: t.name,
           createdBy: t.createdBy ?? null,
           updatedBy: t.updatedBy ?? null,
+          category: t.category ?? "General",
           length: t.length,
         }));
+        const categories = list.categories || ["General"];
         return {
           content: [{
             type: "text",
-            text: `📝 ${tabs.length} note tab(s) in ${list.projectKey}. Pass tabName to read one.\n${DATA_NOTICE}\n${JSON.stringify(tabs, null, 2)}`,
+            text: `📝 ${tabs.length} note tab(s) in ${list.projectKey}. Pass tabName to read one.\n${DATA_NOTICE}\n${JSON.stringify({ categories, tabs }, null, 2)}`,
           }],
         };
       }
