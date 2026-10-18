@@ -40,6 +40,7 @@ namespace MultiTerminal.Controls
         private Form _seenForm;
 #pragma warning restore CA2213
         private bool? _lastSentSeen;
+        private Action<string> _pageSinkForTests; // stands in for the WebView2 page in tests
 
         public event EventHandler<double> ZoomChanged;
 
@@ -129,6 +130,8 @@ namespace MultiTerminal.Controls
             bool seen = IsSeenByOwner();
             if (_lastSentSeen == seen) return;
             _lastSentSeen = seen;
+            _broker?.DebugLogService?.Trace("HudNotesRenderer",
+                $"seen={seen} window={_seenForm?.Name ?? "(none)"} state={_seenForm?.WindowState.ToString() ?? "-"}");
             PostJsonMessage(new { type = "seen", seen });
         }
 
@@ -326,9 +329,7 @@ namespace MultiTerminal.Controls
             if (e == null || IsDisposed) return;
             if (InvokeRequired)
             {
-                if (!IsHandleCreated) return;
-                try { BeginInvoke(new Action(() => OnProjectNoteReadStateChanged(sender, e))); }
-                catch (InvalidOperationException) { /* handle torn down between the check and the post */ }
+                PostToUiThread(() => OnProjectNoteReadStateChanged(sender, e));
                 return;
             }
 
@@ -339,6 +340,30 @@ namespace MultiTerminal.Controls
             // would leave it posting mark_read under a name that no longer exists, and the badge stuck.
             if (e.TabsChanged) SendTabsMerge(e.RenamedFrom, e.RenamedTo);
             else SendUnreadState();
+        }
+
+        /// <summary>
+        /// Runs <paramref name="action"/> on the UI thread from a broker event raised elsewhere (agent note
+        /// writes arrive on the REST thread). Posts through the nearest control that HAS a window handle,
+        /// not necessarily this one: a Notes tab that has never been shown has no handle of its own (it is
+        /// created hidden), while <see cref="Control.InvokeRequired"/> is already true through its parent.
+        /// Requiring our own handle dropped every agent write for such a pane, so its badge never counted
+        /// a new note until the page was first opened (Owner live test of c133b27d, bug 2).
+        /// </summary>
+        internal bool PostToUiThread(Action action)
+        {
+            Control target = this;
+            while (target != null && !target.IsHandleCreated) target = target.Parent;
+            if (target == null || target.IsDisposed) return false;
+            try
+            {
+                target.BeginInvoke(action);
+                return true;
+            }
+            catch (InvalidOperationException)
+            {
+                return false; // handle torn down between the check and the post
+            }
         }
 
         private bool IsForThisProject(string projectKey)
@@ -355,9 +380,7 @@ namespace MultiTerminal.Controls
             if (e == null || IsDisposed) return;
             if (InvokeRequired)
             {
-                if (!IsHandleCreated) return;
-                try { BeginInvoke(new Action(() => OnProjectNotesChanged(sender, e))); }
-                catch (InvalidOperationException) { /* handle torn down between the check and the post */ }
+                PostToUiThread(() => OnProjectNotesChanged(sender, e));
                 return;
             }
 
@@ -485,13 +508,41 @@ namespace MultiTerminal.Controls
             if (string.IsNullOrEmpty(_projectPath) || _broker?.TaskDb == null || string.IsNullOrEmpty(tabName)) return;
             // The page asks only while it believes it is seen; re-check here, since a WebView2 message can
             // arrive after the window was minimised or the Notes tab switched away.
-            if (!IsSeenByOwner()) return;
+            if (!IsSeenByOwner())
+            {
+                RefuseMarkRead();
+                return;
+            }
             try
             {
                 if (_broker.TaskDb.MarkNoteTabRead(_projectPath, tabName, seenRev))
                     _broker.NotifyProjectNoteReadStateChanged(_projectPath);
+                else
+                    SendUnreadState(); // a stale rev: the page dropped its dot, so give it the stored truth and the current rev
             }
             catch { }
+        }
+
+        /// <summary>
+        /// The page asked to mark a tab read while the Owner could not see it. The page has already
+        /// cleared its dot, so without an answer the note stays unread in the database with nothing on
+        /// screen to say so, and nothing ever asks again (Owner live test of c133b27d, bug 1: a note
+        /// appended while MT was minimised stayed at agent_rev 3 / owner_read_rev 2 after the restore).
+        /// Tell the page it is not seen and restore its flags; the next real visibility change then
+        /// sends <c>seen</c> again, which re-marks the active tab with the revision it now holds.
+        /// The page only asks while it believes it is seen, so a refusal also means the host missed the
+        /// change that hid it. Why it can miss one is not known (moving the pane to another window was
+        /// tried and is noticed). Re-resolve and re-subscribe the window here anyway, so whatever detached
+        /// it cannot also hide the restore that should re-mark the tab.
+        /// </summary>
+        private void RefuseMarkRead()
+        {
+            HookSeenForm();
+            _broker?.DebugLogService?.Trace("HudNotesRenderer",
+                $"mark_read refused (not seen); last sent seen={_lastSentSeen?.ToString() ?? "none"} window={_seenForm?.Name ?? "(none)"}");
+            _lastSentSeen = false;
+            PostJsonMessage(new { type = "seen", seen = false });
+            SendUnreadState();
         }
 
         private void SaveTab(string tabName, string content)
@@ -561,6 +612,11 @@ namespace MultiTerminal.Controls
 
         private void PostJsonMessage(object data)
         {
+            if (_pageSinkForTests != null)
+            {
+                _pageSinkForTests(JsonSerializer.Serialize(data));
+                return;
+            }
             if (!_isInitialized || _webView?.CoreWebView2 == null) return;
             try
             {
@@ -568,6 +624,29 @@ namespace MultiTerminal.Controls
                 _webView.CoreWebView2.PostWebMessageAsJson(json);
             }
             catch { }
+        }
+
+        /// <summary>
+        /// Tests only: behave as if the page had loaded and sent <c>ready</c>, delivering every message the
+        /// host would post to the page to <paramref name="sink"/> as JSON. No WebView2 is created.
+        /// <see cref="DetachSeenWindowForTests"/> stops listening to the window, to reproduce a host that
+        /// missed a minimise (Owner live test of c133b27d, bug 1).
+        /// </summary>
+        internal void DetachSeenWindowForTests()
+        {
+            if (_seenForm == null) return;
+            _seenForm.Resize -= OnSeenFormChanged;
+            _seenForm.VisibleChanged -= OnSeenFormChanged;
+            _seenForm = null;
+        }
+
+        internal void AttachPageForTests(Action<string> sink)
+        {
+            _pageSinkForTests = sink;
+            _isInitialized = true;
+            _lastSentSeen = null;
+            HookSeenForm();
+            SendSeen();
         }
 
         // -------------------------------------------------------------------------

@@ -2,6 +2,7 @@ using System;
 using System.Data.SQLite;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using MultiTerminal.Controls;
 using MultiTerminal.MCPServer.Models;
 using MultiTerminal.MCPServer.Services;
@@ -341,6 +342,162 @@ namespace MultiTerminal.Tests
 
             Assert.Same(dockedDocument, pane.FindForm());
             Assert.Same(mainWindow, HudNotesRenderer.SeenWindowFor(pane));
+        }
+
+        // ── Owner live test of c133b27d (46ccfe0): the two item-2 failures ──
+
+        private static void PumpUntil(Func<bool> done, int timeoutMs = 5000)
+        {
+            var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+            while (!done() && DateTime.UtcNow < deadline)
+            {
+                System.Windows.Forms.Application.DoEvents();
+                System.Threading.Thread.Sleep(10);
+            }
+        }
+
+        private static System.Collections.Generic.List<JsonElement> Parse(System.Collections.Generic.List<string> posted)
+            => posted.Select(j => JsonDocument.Parse(j).RootElement.Clone()).ToList();
+
+        private static bool PostedSeen(System.Collections.Generic.List<string> posted, bool value)
+            => Parse(posted).Any(m => m.GetProperty("type").GetString() == "seen" && m.GetProperty("seen").GetBoolean() == value);
+
+        private static JsonElement? PostedUnreadState(System.Collections.Generic.List<string> posted, string tab)
+        {
+            foreach (var m in Parse(posted).Where(m => m.GetProperty("type").GetString() == "unread_state"))
+                foreach (var t in m.GetProperty("tabs").EnumerateArray())
+                    if (t.GetProperty("name").GetString() == tab) return t;
+            return null;
+        }
+
+        /// <summary>
+        /// Bug 2. An agent write is raised on the REST thread. In a running terminal the HUD's window exists,
+        /// so <c>InvokeRequired</c> is true, but a Notes tab that has never been shown has no handle of its
+        /// own; the old marshal required one and dropped the event, so the header stayed blank until the page
+        /// was opened. The other tests raise the write on the test thread with no window at all, which is
+        /// why they never saw it. The precondition assertion proves this arrangement is the failing one.
+        /// </summary>
+        [Fact]
+        public void A_never_shown_pane_counts_an_agent_note_written_on_another_thread()
+        {
+            using var broker = new MessageBroker();
+            using var hud = new System.Windows.Forms.Form();
+            using var notes = new HudNotesRenderer();
+            hud.Controls.Add(notes);
+            _ = hud.Handle; // the HUD's window exists, as it does in a running terminal
+            notes.Initialize(broker);
+            notes.SetProject(_project);
+            Assert.False(notes.IsHandleCreated); // the hidden Notes tab never got a handle of its own
+
+            // A plain thread, joined, rather than an awaited task: the test must stay on the window's thread
+            // to pump the message the write posts back to it.
+            var restThread = new System.Threading.Thread(() =>
+                broker.WriteAgentProjectNote(_project, "Steps", "x", "Alice", AgentNoteWriteMode.New));
+            restThread.Start();
+            restThread.Join();
+            PumpUntil(() => notes.BadgeCount == 1);
+
+            Assert.Equal(1, notes.BadgeCount);
+        }
+
+        // A real window, so minimise and restore are real. Kept off-screen and out of the taskbar.
+        private static System.Windows.Forms.Form OffscreenWindow() => new System.Windows.Forms.Form
+        {
+            ShowInTaskbar = false,
+            StartPosition = System.Windows.Forms.FormStartPosition.Manual,
+            Location = new System.Drawing.Point(-3000, -3000),
+            Size = new System.Drawing.Size(300, 200),
+        };
+
+        /// <summary>
+        /// Bug 1. Live, a note appended while MT was minimised stayed at agent_rev 3 / owner_read_rev 2 after
+        /// the restore, with no dot on screen. The DB proves the host refused the page's mark_read, and the
+        /// page only asks while it believes it is seen, so the host never told it about the minimise. WHY it
+        /// missed it is not known (moving the pane to another window was tried: it is noticed), so this
+        /// simulates the state by detaching the window listener; the precondition assertion proves the
+        /// minimise went unnoticed. A refusal must re-resolve the window, tell the
+        /// page it is not seen, and give back the stored flags with the current rev; the restore then sends
+        /// seen again, which is the page's cue to mark the active tab with that rev.
+        /// </summary>
+        [Fact]
+        public void A_mark_read_refused_after_an_unnoticed_minimise_restores_the_dot_and_the_restore_re_marks_it()
+        {
+            using var broker = new MessageBroker();
+            using var window = OffscreenWindow();
+            using var notes = new HudNotesRenderer { Dock = System.Windows.Forms.DockStyle.Fill };
+            window.Controls.Add(notes);
+            notes.Initialize(broker);
+            notes.SetProject(_project);
+            var posted = new System.Collections.Generic.List<string>();
+            notes.AttachPageForTests(posted.Add);
+            window.Show();
+            notes.Visible = true; // the Notes HUD tab is the selected one
+            Assert.True(PostedSeen(posted, true));
+            Assert.True(notes.IsSeenByOwner());
+            notes.DetachSeenWindowForTests(); // the host will miss the minimise, as it did live
+
+            broker.WriteAgentProjectNote(_project, "Steps", "one", "Alice", AgentNoteWriteMode.New);
+            posted.Clear();
+            window.WindowState = System.Windows.Forms.FormWindowState.Minimized;
+            System.Windows.Forms.Application.DoEvents();
+            Assert.False(notes.IsSeenByOwner());
+            Assert.False(PostedSeen(posted, false)); // the precondition: the host missed the minimise
+            broker.WriteAgentProjectNote(_project, "Steps", "two", "Alice", AgentNoteWriteMode.Append);
+            long rev = Tab(broker.TaskDb, _project, "Steps").AgentRev;
+            posted.Clear();
+
+            notes.MarkRead("Steps", rev); // the page's ask, sent because it still believes it is seen
+
+            Assert.Equal(1, broker.TaskDb.CountUnreadNoteTabs(_project));
+            Assert.True(PostedSeen(posted, false));
+            var state = PostedUnreadState(posted, "Steps");
+            Assert.NotNull(state);
+            Assert.True(state.Value.GetProperty("unread").GetBoolean());
+            Assert.Equal(rev, state.Value.GetProperty("agentRev").GetInt64());
+
+            posted.Clear();
+            window.WindowState = System.Windows.Forms.FormWindowState.Normal;
+            System.Windows.Forms.Application.DoEvents();
+            Assert.True(PostedSeen(posted, true));
+
+            notes.MarkRead("Steps", rev); // what the page sends on that seen
+            Assert.Equal(0, broker.TaskDb.CountUnreadNoteTabs(_project));
+            Assert.Equal(0, notes.BadgeCount);
+        }
+
+        /// <summary>
+        /// Bug 1, the other half: a mark_read carrying an older rev than the stored one (the page had not yet
+        /// received the latest append) leaves the tab unread. The page cleared its dot when it asked, so the
+        /// host must answer with the stored flags and the CURRENT rev, or the page never asks again.
+        /// </summary>
+        [Fact]
+        public void A_mark_read_with_a_stale_rev_gives_the_page_the_current_rev()
+        {
+            using var broker = new MessageBroker();
+            using var window = OffscreenWindow();
+            using var notes = new HudNotesRenderer { Dock = System.Windows.Forms.DockStyle.Fill };
+            window.Controls.Add(notes);
+            notes.Initialize(broker);
+            notes.SetProject(_project);
+            var posted = new System.Collections.Generic.List<string>();
+            notes.AttachPageForTests(posted.Add);
+            window.Show();
+            notes.Visible = true;
+            Assert.True(notes.IsSeenByOwner());
+
+            broker.WriteAgentProjectNote(_project, "Steps", "one", "Alice", AgentNoteWriteMode.New);
+            long shown = Tab(broker.TaskDb, _project, "Steps").AgentRev;
+            broker.WriteAgentProjectNote(_project, "Steps", "two", "Alice", AgentNoteWriteMode.Append);
+            long current = Tab(broker.TaskDb, _project, "Steps").AgentRev;
+            posted.Clear();
+
+            notes.MarkRead("Steps", shown);
+
+            Assert.Equal(1, broker.TaskDb.CountUnreadNoteTabs(_project));
+            var state = PostedUnreadState(posted, "Steps");
+            Assert.NotNull(state);
+            Assert.True(state.Value.GetProperty("unread").GetBoolean());
+            Assert.Equal(current, state.Value.GetProperty("agentRev").GetInt64());
         }
 
         // ── HUD tab badge ──
