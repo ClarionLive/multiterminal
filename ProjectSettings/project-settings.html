@@ -626,6 +626,7 @@
                     applyTheme(msg.theme);
                     break;
                 case 'missing':
+                    state.reloading = false;
                     var main = document.querySelector('main');
                     while (main.firstChild) main.removeChild(main.firstChild);
                     var p = document.createElement('div'); p.className = 'missing'; p.textContent = msg.text;

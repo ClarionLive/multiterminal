@@ -648,8 +648,6 @@
         /* Pin column: the same star as the card pin, sized for a table row. */
         .list-pin-cell {
             width: 24px;
-            min-width: 24px;
-            max-width: 24px;
             text-align: center;
         }
 
@@ -950,8 +948,9 @@
         }
 
         /* Pin, icon and Name stay put when the list scrolls sideways (ticket e20e2ce0 item 8).
-           Each left offset is the width + 20px padding of the columns before it, so the widths
-           below are fixed, not left to the table: pin 24 (+20) -> icon at 44; icon 32 (+20) -> name at 96. */
+           The left offsets are the MEASURED widths of the columns before them, set by
+           updateStickyOffsets() after every render: a table cell grows to fit its content (the pin
+           header's sort arrow and order badge widen it), so no fixed number stays right. */
         .list-table .sticky-col {
             position: sticky;
             z-index: 1;
@@ -959,16 +958,17 @@
         }
         .list-table th.sticky-col { z-index: 3; }
         .list-table .list-pin-cell.sticky-col  { left: 0; }
-        .list-table .list-icon-cell.sticky-col { left: 44px; }
+        .list-table .list-icon-cell.sticky-col { left: var(--sticky-icon-left, 0px); }
         .list-table .list-name-cell.sticky-col {
-            left: 96px;
-            min-width: 180px;
-            max-width: 260px;
+            left: var(--sticky-name-left, 0px);
             box-shadow: inset -1px 0 0 var(--border);
         }
         .list-row:hover td.sticky-col { background-color: var(--bg-card-hover); }
+        /* Table cells ignore max-width, so the cap sits on the blocks inside the name cell. */
         .list-name-cell .list-name,
         .list-name-cell .list-path {
+            min-width: 160px;
+            max-width: 260px;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
@@ -990,8 +990,6 @@
 
         .list-icon-cell {
             width: 32px;
-            min-width: 32px;
-            max-width: 32px;
         }
 
         .list-icon {
@@ -1815,6 +1813,9 @@
 
             body.appendChild(tr);
         });
+
+        // Rows and the header badges (updateSortHeaders runs first) settle the column widths.
+        updateStickyOffsets();
     }
 
     /* ---------------------------------------------------------------
@@ -1883,6 +1884,18 @@
         return na < nb ? -1 : (na > nb ? 1 : 0);
     }
 
+    // Sets the sticky columns' left offsets from the real widths of the columns before them. Skipped
+    // while the list is hidden (every width reads 0 then); showBrowseAll calls it again once visible.
+    function updateStickyOffsets() {
+        var pin = document.getElementById('sort-pin');
+        var icon = pin && pin.nextElementSibling;
+        if (!pin || !icon || pin.offsetWidth === 0) return;
+        var table = document.getElementById('list-table');
+        table.style.setProperty('--sticky-icon-left', pin.offsetWidth + 'px');
+        table.style.setProperty('--sticky-name-left', (pin.offsetWidth + icon.offsetWidth) + 'px');
+    }
+    window.addEventListener('resize', updateStickyOffsets);
+
     function setSort(column, event) {
         sortKeys = nextSortKeys(sortKeys, column, !!(event && event.shiftKey));
         updateSortHeaders();
@@ -1938,6 +1951,7 @@
         renderList();
         document.getElementById('view-home').classList.remove('active');
         document.getElementById('view-browse').classList.add('active');
+        updateStickyOffsets();   // measurable only now that the list is visible
         document.getElementById('search-input').focus();
     }
 
