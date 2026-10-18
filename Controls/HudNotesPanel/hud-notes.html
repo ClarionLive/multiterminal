@@ -351,7 +351,7 @@ const ICON = {
 };
 const GENERAL = 'General';
 const CATEGORY_MAX = 40;          // TaskDatabase.NoteCategoryMaxLength
-const RAIL_MIN = 140, RAIL_MAX = 420, RAIL_DEFAULT = 215;
+const RAIL_MIN = 140, RAIL_MAX = 420, RAIL_DEFAULT = 215;   // SettingsService.HudNotesRail{Min,Max,Default}Width
 const NARROW_PX = 380;            // below this the rail starts collapsed and opens over the editor
 
 let tabs = [];           // [{name, content, isDefault, createdBy, updatedBy, unread, agentRev, pinned, category, changedAt}]
@@ -420,6 +420,13 @@ function visibleOrder() {
     const out = pinned.map(t => t.name);
     groups.forEach(g => { if (searchText.trim() || !folded.has(g.cat)) g.notes.forEach(t => out.push(t.name)); });
     return out;
+}
+
+// The note at the top of the rail, for when there is no current one. Stored order is the pinned
+// order, not the rail's, so tabs[0] can sit mid-list.
+function firstRailNote() {
+    const order = visibleOrder();
+    return order.length ? order[0] : (tabs.length ? tabs[0].name : null);
 }
 
 function setSticky(name) {
@@ -582,6 +589,11 @@ function renderRail() {
     miniBadge.title = `${n} unread`;
 
     const scrollTop = railList.scrollTop;
+    // Rebuilding removes a focused inline editor, and a removal can fire blur: mark it cancelled so
+    // that blur can never commit half-typed text, and carry the typing into the rebuilt editor.
+    const oldEditor = railList.querySelector('.inline-edit');
+    const pendingText = oldEditor ? oldEditor.value : null;
+    if (oldEditor) oldEditor.dataset.cancelled = '1';
     railList.innerHTML = '';
     const { pinned, groups } = railGroups();
     if (pinned.length) {
@@ -607,6 +619,10 @@ function renderRail() {
     }
     railList.scrollTop = scrollTop;
     renderTitle();
+    const newEditor = railList.querySelector('.inline-edit');
+    if (newEditor && pendingText !== null) newEditor.value = pendingText;
+    // An edit whose row is not drawn would leave every row and header click ignored; drop it.
+    if (editing && !newEditor) editing = null;
     focusInlineEditor();
 }
 
@@ -720,7 +736,7 @@ function inlineEditor(value, commit) {
     input.dataset.original = value;
     let done = false;
     const finish = (save) => {
-        if (done) return;
+        if (done || input.dataset.cancelled) return;
         done = true;
         const original = input.dataset.original;
         const next = input.value.trim();
@@ -744,8 +760,21 @@ function focusInlineEditor() {
     if (input && document.activeElement !== input) { input.focus(); input.select(); }
 }
 
+// Rename and delete act on a row in the rail, so first make sure it is drawn: its group unfolded,
+// a search that hides it cleared, the rail open. F2, Ctrl+W and Del reach notes the rail is hiding.
+function revealNote(name) {
+    const t = tabs.find(n => n.name === name);
+    if (!t) return;
+    if (searchText.trim() && !matches(t, searchText.trim())) { searchText = ''; searchInput.value = ''; }
+    const cat = categoryOf(t);
+    if (!t.pinned && folded.has(cat)) { folded.delete(cat); sendRailState(); }
+    if (isNarrow()) overlayOpen = true;
+    else if (railCollapsed) { railCollapsed = false; sendRailState(); }
+}
+
 function startNoteRename(name) {
     hideMenu();
+    revealNote(name);
     editing = { kind: 'note', name };
     confirmFor = null;
     renderRail();
@@ -822,7 +851,11 @@ function hideMenu() {
     flushPendingRender();
 }
 
-function onMenuOutside(e) { if (menuEl && !menuEl.contains(e.target)) hideMenu(); }
+// The category dropdown's own button toggles the list in its click handler; closing it here first
+// would make that click reopen it.
+function onMenuOutside(e) {
+    if (menuEl && !menuEl.contains(e.target) && !catSelect.contains(e.target)) hideMenu();
+}
 function onMenuKeydown(e) {
     if (e.key === 'Escape' && !(e.target && e.target.classList && e.target.classList.contains('inline-edit'))) {
         e.preventDefault(); e.stopPropagation(); hideMenu();
@@ -910,6 +943,7 @@ function askDeleteNote(name) {
     const t = tabs.find(n => n.name === name);
     hideMenu();
     if (!t || t.isDefault) return;
+    revealNote(name);
     confirmFor = { kind: 'note', name };
     renderRail();
 }
@@ -1215,7 +1249,7 @@ function mergeTabs(data) {
     lastSavedContent = nextSaved;
 
     if (!activeTab || !tabs.some(t => t.name === activeTab)) {
-        activeTab = tabs.length > 0 ? tabs[0].name : null;
+        activeTab = firstRailNote();
         editor.value = activeTab ? (tabContents[activeTab] || '') : '';
         setSticky(activeTab);
     } else if (editor.value !== tabContents[activeTab]) {
@@ -1255,8 +1289,8 @@ function applyUnreadState(data) {
 }
 
 // A live update must not tear down what the Owner is in the middle of: an inline
-// rename, a delete confirm or an open menu. The data above is already merged; only
-// the redraw waits until they are gone.
+// rename or an open menu. The data above is already merged; only the redraw waits
+// until they are gone. (A delete confirm needs no wait: it is redrawn from confirmFor.)
 function railBusy() { return !!railList.querySelector('.inline-edit') || !!menuEl; }
 
 function renderRailWhenIdle() {
@@ -1289,7 +1323,7 @@ function loadAllTabs(data) {
     if (data.activeTab && tabs.some(t => t.name === data.activeTab)) {
         activeTab = data.activeTab;
     } else if (!activeTab || !tabs.some(t => t.name === activeTab)) {
-        activeTab = tabs.length > 0 ? tabs[0].name : null;
+        activeTab = firstRailNote();
     }
 
     editor.value = activeTab ? (tabContents[activeTab] || '') : '';
@@ -1308,7 +1342,7 @@ function applyRailState(data) {
     railWidth = Math.max(RAIL_MIN, Math.min(RAIL_MAX, Number(data.width) || RAIL_DEFAULT));
     railCollapsed = !!data.collapsed;
     folded = new Set(Array.isArray(data.folded) ? data.folded : []);
-    renderRail();
+    renderRailWhenIdle();
 }
 
 // Relative times ("3m") age while the pane is open.

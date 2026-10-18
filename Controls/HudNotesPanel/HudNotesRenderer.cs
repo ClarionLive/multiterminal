@@ -45,6 +45,11 @@ namespace MultiTerminal.Controls
         /// <summary>Where the rail's width, collapsed state and folded groups are kept (task 9a4a9d5e). Tests swap it.</summary>
         internal SettingsService Settings { get; set; } = SettingsService.Default;
 
+        // The rail state is ONE setting for every pane, so a save in one pane is pushed to all of them
+        // (pipeline Run 1, debugger MEDIUM): a pane that only read it on load would write its stale copy
+        // back on its next fold or resize, and undo another pane's change. Raised on the UI thread.
+        private static event EventHandler<SettingsService> RailStateSaved;
+
         public event EventHandler<double> ZoomChanged;
 
         /// <inheritdoc/>
@@ -71,6 +76,13 @@ namespace MultiTerminal.Controls
             ResumeLayout(false);
 
             VisibleChanged += OnVisibleChanged;
+            RailStateSaved += OnRailStateSaved;
+        }
+
+        private void OnRailStateSaved(object sender, SettingsService settings)
+        {
+            if (IsDisposed || !ReferenceEquals(settings, Settings)) return;
+            SendRailState();
         }
 
         private void OnVisibleChanged(object sender, EventArgs e)
@@ -734,7 +746,10 @@ namespace MultiTerminal.Controls
                 if (category == null) return;
                 bool filed = !string.IsNullOrEmpty(fileTabName) && !string.IsNullOrEmpty(_projectPath)
                              && _broker.TaskDb.SetNoteTabCategory(_projectPath, fileTabName, category.Name);
-                if (created || filed) _broker.NotifyNoteCategoriesChanged();
+                // A new category changes the list every pane shows; filing under an existing one
+                // changes only this project's notes.
+                if (created) _broker.NotifyNoteCategoriesChanged();
+                else if (filed) _broker.NotifyProjectNoteTabsChanged(_projectPath);
             }
             catch { }
         }
@@ -788,6 +803,7 @@ namespace MultiTerminal.Controls
                     folded = names.ToArray();
                 }
                 Settings.SetHudNotesRail(width, collapsed, folded);
+                RailStateSaved?.Invoke(this, Settings);
             }
             catch { }
         }
@@ -843,6 +859,7 @@ namespace MultiTerminal.Controls
         {
             if (disposing)
             {
+                RailStateSaved -= OnRailStateSaved;
                 if (_broker != null)
                 {
                     _broker.ProjectNotesChanged -= OnProjectNotesChanged;

@@ -374,6 +374,38 @@ namespace MultiTerminal.Tests
             }
         }
 
+        /// <summary>
+        /// The rail state is one setting for every pane, so a save in one pane is pushed to the others
+        /// (pipeline Run 1, debugger MEDIUM). Without it a pane keeps the copy it read on load and writes it
+        /// back on its next fold or resize, undoing the first pane's change.
+        /// </summary>
+        [Fact]
+        public void A_rail_state_saved_in_one_pane_is_pushed_to_the_other_panes()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), $"mt-rail-settings-{Guid.NewGuid():N}");
+            try
+            {
+                var settings = new SettingsService(dir);
+                using var broker = new MultiTerminal.MCPServer.Services.MessageBroker();
+                var postedB = new System.Collections.Generic.List<string>();
+                using var paneA = new MultiTerminal.Controls.HudNotesRenderer { Settings = settings };
+                using var paneB = new MultiTerminal.Controls.HudNotesRenderer { Settings = settings };
+                paneB.AttachPageForTests(postedB.Add);
+                postedB.Clear();
+
+                paneA.SaveRailState(System.Text.Json.JsonDocument.Parse("{\"width\":300,\"collapsed\":false,\"folded\":[\"Live test\"]}").RootElement);
+
+                var pushed = postedB.Select(j => System.Text.Json.JsonDocument.Parse(j).RootElement.Clone())
+                                    .Last(m => m.GetProperty("type").GetString() == "rail_state");
+                Assert.Equal(300, pushed.GetProperty("width").GetInt32());
+                Assert.Equal(new[] { "Live test" }, pushed.GetProperty("folded").EnumerateArray().Select(f => f.GetString()).ToArray());
+            }
+            finally
+            {
+                if (Directory.Exists(dir)) Directory.Delete(dir, true);
+            }
+        }
+
         // ── REST: api/project-notes ──
 
         private static System.Text.Json.JsonElement Body(Microsoft.AspNetCore.Mvc.IActionResult result)
