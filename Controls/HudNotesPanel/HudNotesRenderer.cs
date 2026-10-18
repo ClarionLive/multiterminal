@@ -130,6 +130,8 @@ namespace MultiTerminal.Controls
             bool seen = IsSeenByOwner();
             if (_lastSentSeen == seen) return;
             _lastSentSeen = seen;
+            _broker?.DebugLogService?.Trace("HudNotesRenderer",
+                $"seen={seen} window={_seenForm?.Name ?? "(none)"} state={_seenForm?.WindowState.ToString() ?? "-"}");
             PostJsonMessage(new { type = "seen", seen });
         }
 
@@ -528,9 +530,16 @@ namespace MultiTerminal.Controls
         /// appended while MT was minimised stayed at agent_rev 3 / owner_read_rev 2 after the restore).
         /// Tell the page it is not seen and restore its flags; the next real visibility change then
         /// sends <c>seen</c> again, which re-marks the active tab with the revision it now holds.
+        /// The page only asks while it believes it is seen, so a refusal also means the host missed the
+        /// change that hid it. Why it can miss one is not known (moving the pane to another window was
+        /// tried and is noticed). Re-resolve and re-subscribe the window here anyway, so whatever detached
+        /// it cannot also hide the restore that should re-mark the tab.
         /// </summary>
         private void RefuseMarkRead()
         {
+            HookSeenForm();
+            _broker?.DebugLogService?.Trace("HudNotesRenderer",
+                $"mark_read refused (not seen); last sent seen={_lastSentSeen?.ToString() ?? "none"} window={_seenForm?.Name ?? "(none)"}");
             _lastSentSeen = false;
             PostJsonMessage(new { type = "seen", seen = false });
             SendUnreadState();
@@ -620,7 +629,17 @@ namespace MultiTerminal.Controls
         /// <summary>
         /// Tests only: behave as if the page had loaded and sent <c>ready</c>, delivering every message the
         /// host would post to the page to <paramref name="sink"/> as JSON. No WebView2 is created.
+        /// <see cref="DetachSeenWindowForTests"/> stops listening to the window, to reproduce a host that
+        /// missed a minimise (Owner live test of c133b27d, bug 1).
         /// </summary>
+        internal void DetachSeenWindowForTests()
+        {
+            if (_seenForm == null) return;
+            _seenForm.Resize -= OnSeenFormChanged;
+            _seenForm.VisibleChanged -= OnSeenFormChanged;
+            _seenForm = null;
+        }
+
         internal void AttachPageForTests(Action<string> sink)
         {
             _pageSinkForTests = sink;

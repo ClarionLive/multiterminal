@@ -411,13 +411,16 @@ namespace MultiTerminal.Tests
 
         /// <summary>
         /// Bug 1. Live, a note appended while MT was minimised stayed at agent_rev 3 / owner_read_rev 2 after
-        /// the restore, with no dot on screen: the page asked to mark it read, the host refused (not seen), the
-        /// page had already cleared its dot, and nothing ever asked again. A refusal must tell the page it is
-        /// not seen and give it back the stored flags with the current rev; the restore then sends seen again,
-        /// which is the page's cue to mark the active tab with that rev.
+        /// the restore, with no dot on screen. The DB proves the host refused the page's mark_read, and the
+        /// page only asks while it believes it is seen, so the host never told it about the minimise. WHY it
+        /// missed it is not known (moving the pane to another window was tried: it is noticed), so this
+        /// simulates the state by detaching the window listener; the precondition assertion proves the
+        /// minimise went unnoticed. A refusal must re-resolve the window, tell the
+        /// page it is not seen, and give back the stored flags with the current rev; the restore then sends
+        /// seen again, which is the page's cue to mark the active tab with that rev.
         /// </summary>
         [Fact]
-        public void A_mark_read_refused_while_minimised_restores_the_dot_and_the_restore_re_marks_it()
+        public void A_mark_read_refused_after_an_unnoticed_minimise_restores_the_dot_and_the_restore_re_marks_it()
         {
             using var broker = new MessageBroker();
             using var window = OffscreenWindow();
@@ -429,16 +432,21 @@ namespace MultiTerminal.Tests
             notes.AttachPageForTests(posted.Add);
             window.Show();
             notes.Visible = true; // the Notes HUD tab is the selected one
+            Assert.True(PostedSeen(posted, true));
             Assert.True(notes.IsSeenByOwner());
+            notes.DetachSeenWindowForTests(); // the host will miss the minimise, as it did live
 
             broker.WriteAgentProjectNote(_project, "Steps", "one", "Alice", AgentNoteWriteMode.New);
+            posted.Clear();
             window.WindowState = System.Windows.Forms.FormWindowState.Minimized;
             System.Windows.Forms.Application.DoEvents();
+            Assert.False(notes.IsSeenByOwner());
+            Assert.False(PostedSeen(posted, false)); // the precondition: the host missed the minimise
             broker.WriteAgentProjectNote(_project, "Steps", "two", "Alice", AgentNoteWriteMode.Append);
             long rev = Tab(broker.TaskDb, _project, "Steps").AgentRev;
             posted.Clear();
 
-            notes.MarkRead("Steps", rev); // the page's ask, arriving while minimised
+            notes.MarkRead("Steps", rev); // the page's ask, sent because it still believes it is seen
 
             Assert.Equal(1, broker.TaskDb.CountUnreadNoteTabs(_project));
             Assert.True(PostedSeen(posted, false));
