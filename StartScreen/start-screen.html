@@ -1230,7 +1230,7 @@
             </table>
             <!-- Browse All as cards, when the Home view preference is cards (ticket e20e2ce0 item 8). -->
             <div id="browse-cards" class="project-grid" style="display:none;"></div>
-            <div id="list-no-results" class="list-no-results" style="display:none;">No projects match your search.</div>
+            <div id="list-no-results" class="list-no-results" style="display:none;">No projects match your search or filter.</div>
         </div>
     </div>
 
@@ -1738,7 +1738,17 @@
         noResults.style.display = 'none';
 
         if (asCards) {
-            filtered.forEach(function(project, idx) { cards.appendChild(buildCard(project, idx)); });
+            filtered.forEach(function(project, idx) {
+                var card = buildCard(project, idx);
+                // Browse All re-renders on every search keystroke and card action: no staggered fade-in
+                // (it would replay each time, taking seconds with many projects). .project-card starts at
+                // opacity 0 and only the animation raises it, so turning the animation off must set it too.
+                card.style.animation = 'none';
+                card.style.opacity = '1';
+                // The Home grid sets pin tooltips in a delayed pass over #card-container only.
+                card.querySelector('.card-pin').setAttribute('title', project.isPinned ? 'Unpin project' : 'Pin project');
+                cards.appendChild(card);
+            });
             return;
         }
 

@@ -163,7 +163,7 @@ test('Browse All follows the Home view preference', () => {
 
 // The card layout's Sort dropdown reads and writes the SAME saved spec as the list headers: the default
 // selects "Pinned, then name", a Shift-click sort with no preset shows as custom, and every preset is a
-// spec the page (and so SettingsService) keeps unchanged. Falsified: making sortPresetFor always return
+// spec the page's own parse/format keeps unchanged (SettingsService's normalizer is not run here). Falsified: making sortPresetFor always return
 // 'custom' turned this red at the first assertion.
 test('the card layout sort dropdown maps the saved sort to its presets', () => {
   const s = load();
