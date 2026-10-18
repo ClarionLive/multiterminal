@@ -1889,10 +1889,13 @@
     function updateStickyOffsets() {
         var pin = document.getElementById('sort-pin');
         var icon = pin && pin.nextElementSibling;
-        if (!pin || !icon || pin.offsetWidth === 0) return;
+        if (!pin || !icon) return;
+        // getBoundingClientRect, not offsetWidth: column widths are fractional at non-100% zoom.
+        var pinW = pin.getBoundingClientRect().width, iconW = icon.getBoundingClientRect().width;
+        if (pinW === 0) return;
         var table = document.getElementById('list-table');
-        table.style.setProperty('--sticky-icon-left', pin.offsetWidth + 'px');
-        table.style.setProperty('--sticky-name-left', (pin.offsetWidth + icon.offsetWidth) + 'px');
+        table.style.setProperty('--sticky-icon-left', pinW + 'px');
+        table.style.setProperty('--sticky-name-left', (pinW + iconW) + 'px');
     }
     window.addEventListener('resize', updateStickyOffsets);
 
