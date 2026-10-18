@@ -900,6 +900,9 @@
             scrollbar-color: var(--border) transparent;
         }
 
+        /* Browse All as cards (Home view = cards): room for the cards' hover lift and shadows. */
+        #browse-cards { padding: 8px 2px 4px; }
+
         .project-list-wrap::-webkit-scrollbar { width: 6px; }
         .project-list-wrap::-webkit-scrollbar-track { background: transparent; }
         .project-list-wrap::-webkit-scrollbar-thumb {
@@ -1189,6 +1192,10 @@
                     <option value="all">All</option>
                 </select>
             </label>
+            <!-- Card layout only (Home view = cards): the same saved sort as the list's headers. -->
+            <label class="status-filter-wrap" id="browse-sort-wrap" style="display:none;">Sort
+                <select id="browse-sort" onchange="onBrowseSortChange(this.value)"></select>
+            </label>
             <!-- Same message as the home view's New Project button (NewProjectWpfDialog flow). -->
             <button class="action-btn" onclick="postMsg({type:'new_project'})">
                 <svg viewBox="0 0 16 16" fill="currentColor">
@@ -1221,7 +1228,9 @@
                 </thead>
                 <tbody id="list-body"></tbody>
             </table>
-            <div id="list-no-results" class="list-no-results" style="display:none;">No projects match your search.</div>
+            <!-- Browse All as cards, when the Home view preference is cards (ticket e20e2ce0 item 8). -->
+            <div id="browse-cards" class="project-grid" style="display:none;"></div>
+            <div id="list-no-results" class="list-no-results" style="display:none;">No projects match your search or filter.</div>
         </div>
     </div>
 
@@ -1548,8 +1557,9 @@
             pinBtn.textContent = project.isPinned ? '★' : '☆';
             pinBtn.classList.toggle('pinned', project.isPinned);
             pinBtn.setAttribute('title', project.isPinned ? 'Unpin project' : 'Pin project');
-            // Re-render to reorder
+            // Re-render to reorder; the card may be in Browse All's card layout too.
             renderGrid();
+            renderList();
         });
 
         // Settings gear — opens the project settings form (ticket e20e2ce0).
@@ -1599,6 +1609,7 @@
                 project.status = newStatus;                 // optimistic
                 postMsg({ type: 'set_project_status', projectId: project.id, status: newStatus });
                 renderGrid();                               // reflect new badge + status filter
+                renderList();                               // ...in Browse All's cards/rows too
             });
         }
 
@@ -1633,6 +1644,7 @@
                 project.defaultTerminal = newTerm;            // optimistic
                 postMsg({ type: 'set_project_terminal', projectId: project.id, terminal: newTerm });
                 renderGrid();                                 // reflect new terminal label
+                renderList();                                 // ...in Browse All's cards/rows too
             });
         }
 
@@ -1709,11 +1721,37 @@
 
         filtered.sort(function(a, b) { return compareBySortKeys(a, b, sortKeys); });
 
+        // One interface (ticket e20e2ce0 item 8): with the Home view set to cards, Browse All shows the
+        // same filtered, searched, sorted projects as cards; the table is the list preference's layout.
+        var asCards = browseLayout(homeView) === 'cards';
+        var cards = document.getElementById('browse-cards');
+        document.getElementById('list-table').style.display = asCards ? 'none' : '';
+        cards.style.display = asCards ? '' : 'none';
+        document.getElementById('browse-sort-wrap').style.display = asCards ? '' : 'none';
+        cards.innerHTML = '';
+        if (asCards) updateBrowseSortSelect();
+
         if (filtered.length === 0) {
             noResults.style.display = '';
             return;
         }
         noResults.style.display = 'none';
+
+        if (asCards) {
+            filtered.forEach(function(project, idx) {
+                var card = buildCard(project, idx);
+                // Browse All re-renders on every search keystroke and card action: no staggered fade-in
+                // (it would replay each time, taking seconds with many projects). .project-card starts at
+                // opacity 0 and only the animation raises it, so turning the animation off must set it too.
+                card.style.animation = 'none';
+                // Archived cards keep their dimming (.project-card.is-archived is 0.62).
+                card.style.opacity = normalizeStatus(project.status) === 'Archived' ? '0.62' : '1';
+                // The Home grid sets pin tooltips in a delayed pass over #card-container only.
+                card.querySelector('.card-pin').setAttribute('title', project.isPinned ? 'Unpin project' : 'Pin project');
+                cards.appendChild(card);
+            });
+            return;
+        }
 
         filtered.forEach(function(project) {
             var tr = document.createElement('tr');
@@ -1882,6 +1920,62 @@
         }
         var na = (a.name || '').toLowerCase(), nb = (b.name || '').toLowerCase();
         return na < nb ? -1 : (na > nb ? 1 : 0);
+    }
+
+    // Which layout Browse All uses: the Home view preference decides, so there is one interface
+    // (ticket e20e2ce0 item 8). Anything but 'cards' is the table.
+    function browseLayout(view) {
+        return view === 'cards' ? 'cards' : 'list';
+    }
+
+    // The card layout's Sort dropdown: presets over the SAME saved sort spec the list headers use.
+    // A sort set by Shift-clicking headers in the list layout that matches no preset shows as Custom
+    // and is kept as it is until a preset is picked.
+    var SORT_PRESETS = [
+        { spec: 'pin:asc,name:asc',    label: 'Pinned, then name' },
+        { spec: 'pin:asc,opened:desc', label: 'Pinned, then last opened' },
+        { spec: 'opened:desc',         label: 'Last opened' },
+        { spec: 'name:asc',            label: 'Name' },
+        { spec: 'created:desc',        label: 'Newest created' },
+        { spec: 'status:asc',          label: 'Status' },
+        { spec: 'type:asc',            label: 'Type' }
+    ];
+
+    // The preset a sort matches, or 'custom'. Compared on the cleaned spec, so case and spacing
+    // differences in a stored value still match.
+    function sortPresetFor(keys) {
+        var spec = formatSortSpec(keys);
+        for (var i = 0; i < SORT_PRESETS.length; i++) {
+            if (formatSortSpec(parseSortSpec(SORT_PRESETS[i].spec)) === spec) return SORT_PRESETS[i].spec;
+        }
+        return 'custom';
+    }
+
+    function updateBrowseSortSelect() {
+        var sel = document.getElementById('browse-sort');
+        var current = sortPresetFor(sortKeys);
+        sel.innerHTML = '';
+        if (current === 'custom') {
+            var custom = document.createElement('option');
+            custom.value = 'custom';
+            custom.textContent = 'Custom (from the list)';
+            sel.appendChild(custom);
+        }
+        SORT_PRESETS.forEach(function(p) {
+            var opt = document.createElement('option');
+            opt.value = p.spec;
+            opt.textContent = p.label;
+            sel.appendChild(opt);
+        });
+        sel.value = current;
+    }
+
+    function onBrowseSortChange(spec) {
+        if (spec === 'custom') return;
+        sortKeys = parseSortSpec(spec);
+        updateSortHeaders();
+        renderList();
+        postMsg({ type: 'save_sort', sort: formatSortSpec(sortKeys) });
     }
 
     // Sets the sticky columns' left offsets from the real widths of the columns before them. Skipped

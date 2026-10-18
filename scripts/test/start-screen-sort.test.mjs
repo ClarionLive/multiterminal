@@ -40,19 +40,33 @@ function varLine(name) {
   return m[0];
 }
 
+// The multi-line `var SORT_PRESETS = [ ... ];` array literal from the page.
+function presetsBlock() {
+  const start = PAGE.indexOf('var SORT_PRESETS = [');
+  assert.ok(start >= 0, 'could not find "var SORT_PRESETS = ["');
+  const end = PAGE.indexOf('];', start);
+  assert.ok(end > start, 'unterminated SORT_PRESETS');
+  const text = PAGE.slice(start, end + 2);
+  assert.ok((text.match(/spec:/g) || []).length >= 5, 'SORT_PRESETS extraction looks truncated');
+  return text;
+}
+
 function load() {
   const sandbox = { out: null };
   vm.runInNewContext([
     varLine('SORT_COLUMNS'),
     varLine('MAX_SORT_KEYS'),
     varLine('DEFAULT_SORT'),
+    presetsBlock(),
     extract(PAGE, 'function normalizeStatus('),
     extract(PAGE, 'function parseSortSpec('),
     extract(PAGE, 'function formatSortSpec('),
     extract(PAGE, 'function nextSortKeys('),
     extract(PAGE, 'function sortValue('),
     extract(PAGE, 'function compareBySortKeys('),
-    'out = { parseSortSpec, formatSortSpec, nextSortKeys, compareBySortKeys, SORT_COLUMNS, DEFAULT_SORT };',
+    extract(PAGE, 'function browseLayout('),
+    extract(PAGE, 'function sortPresetFor('),
+    'out = { parseSortSpec, formatSortSpec, nextSortKeys, compareBySortKeys, browseLayout, sortPresetFor, SORT_PRESETS, SORT_COLUMNS, DEFAULT_SORT };',
   ].join('\n'), sandbox);
   // Arrays made inside the vm context have that context's Array prototype, which deepStrictEqual
   // rejects; round-trip them into this realm.
@@ -65,6 +79,9 @@ function load() {
     sort: (list, keys) => list.slice().sort((a, b) => o.compareBySortKeys(a, b, keys)).map((p) => p.name),
     columns: plain(o.SORT_COLUMNS),
     defaultSpec: o.DEFAULT_SORT,
+    layout: (view) => o.browseLayout(view),
+    presetFor: (keys) => o.sortPresetFor(keys),
+    presets: plain(o.SORT_PRESETS),
   };
 }
 
@@ -131,4 +148,29 @@ test('the page and SettingsService agree on the sortable columns', () => {
   const csharp = [...decl.matchAll(/"([a-z]+)"/g)].map((m) => m[1]);
   assert.equal(csharp.length, 8, `expected 8 columns in the C# set, found ${csharp.length}`);
   assert.deepEqual([...csharp].sort(), [...s.columns].sort());
+});
+
+// The Owner's "one interface" (item 8, live test on c7af159): with the Home view set to cards, Browse All
+// shows cards too, and only 'cards' means cards. Falsified: making browseLayout always return 'list' (the
+// pre-fix behaviour, where Browse All was always the table) turned this red at the first assertion.
+test('Browse All follows the Home view preference', () => {
+  const s = load();
+  assert.equal(s.layout('cards'), 'cards');
+  assert.equal(s.layout('list'), 'list');
+  assert.equal(s.layout(undefined), 'list');
+  assert.equal(s.layout('Cards'), 'list');   // the page only ever holds the normalized lowercase value
+});
+
+// The card layout's Sort dropdown reads and writes the SAME saved spec as the list headers: the default
+// selects "Pinned, then name", a Shift-click sort with no preset shows as custom, and every preset is a
+// spec the page's own parse/format keeps unchanged (SettingsService's normalizer is not run here). Falsified: making sortPresetFor always return
+// 'custom' turned this red at the first assertion.
+test('the card layout sort dropdown maps the saved sort to its presets', () => {
+  const s = load();
+  assert.equal(s.presetFor(s.parse('')), 'pin:asc,name:asc');
+  assert.equal(s.presetFor(s.parse('PIN:asc, opened:DESC')), 'pin:asc,opened:desc');
+  assert.equal(s.presetFor(s.parse('pin:asc,type:desc,lead:asc')), 'custom');
+  for (const p of s.presets) {
+    assert.equal(s.format(s.parse(p.spec)), p.spec, `preset "${p.label}" is not a clean spec`);
+  }
 });
