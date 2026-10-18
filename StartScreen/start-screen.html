@@ -1744,7 +1744,8 @@
                 // (it would replay each time, taking seconds with many projects). .project-card starts at
                 // opacity 0 and only the animation raises it, so turning the animation off must set it too.
                 card.style.animation = 'none';
-                card.style.opacity = '1';
+                // Archived cards keep their dimming (.project-card.is-archived is 0.62).
+                card.style.opacity = normalizeStatus(project.status) === 'Archived' ? '0.62' : '1';
                 // The Home grid sets pin tooltips in a delayed pass over #card-container only.
                 card.querySelector('.card-pin').setAttribute('title', project.isPinned ? 'Unpin project' : 'Pin project');
                 cards.appendChild(card);
