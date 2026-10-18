@@ -53,6 +53,10 @@ namespace MultiTerminal.StartScreen
         private bool _browseAllPending;
 
         private const string ShowBrowseAllMessage = "{\"type\":\"show_browse_all\"}";
+        private const string ShowHomeMessage = "{\"type\":\"show_home\"}";
+
+        /// <summary>Where the Home view and Browse All sort preferences live (ticket e20e2ce0 item 8).</summary>
+        internal SettingsService Settings { get; set; } = SettingsService.Default;
 
         private bool _isInitializing;
         private bool _initializePending;
@@ -193,6 +197,22 @@ namespace MultiTerminal.StartScreen
                 return;
             }
             PostMessage(ShowBrowseAllMessage);
+        }
+
+        /// <summary>
+        /// Puts the page on the Home view the preference names (cards or the Browse All list), as when the
+        /// start screen is shown again. Before the page is ready this does nothing: its first load opens on
+        /// that view anyway.
+        /// </summary>
+        public void ShowHome()
+        {
+            if (InvokeRequired)
+            {
+                Invoke(new Action(ShowHome));
+                return;
+            }
+            if (_pageReady)
+                PostMessage(ShowHomeMessage);
         }
 
         /// <summary>
@@ -414,6 +434,13 @@ namespace MultiTerminal.StartScreen
                         NewProjectRequested?.Invoke(this, EventArgs.Empty);
                         break;
 
+                    case "save_sort":
+                        // The Browse All sort changed (a header click). Stored normalized, so a page can
+                        // never write a column or direction the list does not have.
+                        if (root.TryGetProperty("sort", out var sortEl) && sortEl.ValueKind == JsonValueKind.String)
+                            Settings.SetStartScreenSort(sortEl.GetString());
+                        break;
+
                     case "browse_all":
                         // Re-send full list (same as ready — JS uses this to remove any search filter)
                         SendProjectsToWebView();
@@ -480,10 +507,15 @@ namespace MultiTerminal.StartScreen
                     });
                 }
 
+                // The Home view and Browse All sort preferences ride along (ticket e20e2ce0 item 8). The page
+                // adopts the sort every time but switches views only on first load and on show_home, so a
+                // refresh after a pin or a launch never moves the user between views.
                 var payload = JsonSerializer.Serialize(new
                 {
                     type = "projects",
-                    projects = projectDtos
+                    projects = projectDtos,
+                    homeView = Settings.GetStartScreenHomeView(),
+                    sort = Settings.GetStartScreenSort(),
                 }, JsonOptions.Unicode);
 
                 PostMessage(payload);

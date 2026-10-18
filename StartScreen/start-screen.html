@@ -458,7 +458,7 @@
             padding: 2px 4px;
             font-size: 13px;
             line-height: 1;
-            color: var(--text-muted);
+            color: var(--text-secondary);
             opacity: 0;
             pointer-events: none;
             transition: opacity 0.15s, color 0.15s, transform 0.15s;
@@ -467,8 +467,9 @@
             border-radius: 4px;
         }
 
+        /* Full strength on hover (was 0.65, which faded into the card; ticket e20e2ce0 item 8). */
         .project-card:hover .card-delete {
-            opacity: 0.65;
+            opacity: 1;
             pointer-events: auto;
         }
 
@@ -622,26 +623,22 @@
             gap: 2px;
         }
 
-        /* Per-row action buttons (trash, and the settings gear another change adds).
-           Dim until the row is hovered, like the card trash; deletion is still
-           confirmed host-side. */
+        /* Per-row action buttons (settings gear, trash). Always fully visible, in the same
+           colour as the row's other text controls (the Owner found the old dimmed icons faded
+           into the background, ticket e20e2ce0 item 8); deletion is still confirmed host-side. */
         .list-row-action {
             background: none;
             border: none;
             cursor: pointer;
             padding: 3px 5px;
-            font-size: 12px;
+            font-size: 14px;
             line-height: 1;
-            color: var(--text-muted);
+            color: var(--text-secondary);
             border-radius: 4px;
-            opacity: 0.35;
-            transition: opacity 0.15s, color 0.15s, background-color 0.15s;
+            transition: color 0.15s, background-color 0.15s;
         }
 
-        .list-row:hover .list-row-action { opacity: 0.75; }
-
         .list-row-action:hover {
-            opacity: 1;
             color: var(--text-primary);
             background-color: var(--badge-bg);
         }
@@ -935,6 +932,47 @@
         .list-table th:hover { color: var(--text-secondary); }
         .list-table th.sort-asc::after  { content: ' ↑'; }
         .list-table th.sort-desc::after { content: ' ↓'; }
+        /* Position of a column in a multi-column sort (Shift-click), shown only with 2+ keys. */
+        .list-table th .sort-order {
+            display: inline-block;
+            margin-left: 3px;
+            min-width: 13px;
+            padding: 0 3px;
+            border-radius: 7px;
+            font-size: 9px;
+            line-height: 13px;
+            text-align: center;
+            background-color: var(--accent);
+            color: #fff;
+            letter-spacing: 0;
+        }
+
+        /* Pin, icon and Name stay put when the list scrolls sideways (ticket e20e2ce0 item 8).
+           The left offsets are the MEASURED widths of the columns before them, set by
+           updateStickyOffsets() after every render: a table cell grows to fit its content (the pin
+           header's sort arrow and order badge widen it), so no fixed number stays right. */
+        .list-table .sticky-col {
+            position: sticky;
+            z-index: 1;
+            background-color: var(--bg-primary);
+        }
+        .list-table th.sticky-col { z-index: 3; }
+        .list-table .list-pin-cell.sticky-col  { left: 0; }
+        .list-table .list-icon-cell.sticky-col { left: var(--sticky-icon-left, 0px); }
+        .list-table .list-name-cell.sticky-col {
+            left: var(--sticky-name-left, 0px);
+            box-shadow: inset -1px 0 0 var(--border);
+        }
+        .list-row:hover td.sticky-col { background-color: var(--bg-card-hover); }
+        /* Table cells ignore max-width, so the cap sits on the blocks inside the name cell. */
+        .list-name-cell .list-name,
+        .list-name-cell .list-path {
+            min-width: 160px;
+            max-width: 260px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
 
         .list-row {
             cursor: pointer;
@@ -1127,7 +1165,7 @@
     <!-- BROWSE ALL VIEW -->
     <div id="view-browse" class="view">
         <div class="browse-header">
-            <button class="back-btn" onclick="showHome()">
+            <button class="back-btn" id="browse-back" onclick="showHome()">
                 <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
                     <path fill-rule="evenodd" d="M15 8a.5.5 0 0 0-.5-.5H2.707l3.147-3.146a.5.5 0 1 0-.708-.708l-4 4a.5.5 0 0 0 0 .708l4 4a.5.5 0 0 0 .708-.708L2.707 8.5H14.5A.5.5 0 0 0 15 8z"/>
                 </svg>
@@ -1158,21 +1196,25 @@
                 </svg>
                 New Project
             </button>
+            <!-- Shown only when the list IS the Home view, so it keeps the card view's other actions. -->
+            <button class="action-btn list-home-action" style="display:none;" onclick="postMsg({type:'just_claude'})">Just Claude</button>
+            <button class="action-btn list-home-action" style="display:none;" onclick="postMsg({type:'open_powershell'})">Open PowerShell</button>
         </div>
 
         <div class="project-list-wrap">
             <table class="list-table" id="list-table">
                 <thead>
                     <tr>
-                        <th id="sort-pin"     onclick="setSort('pin')" class="list-pin-cell" title="Sort by pinned">&#9733;</th>
-                        <th class="list-icon-cell"></th>
-                        <th id="sort-name"    onclick="setSort('name')"     class="sort-asc">Name</th>
-                        <th id="sort-type"    onclick="setSort('type')">Type</th>
-                        <th id="sort-version" onclick="setSort('version')">Version</th>
-                        <th id="sort-status"  onclick="setSort('status')">Status</th>
-                        <th id="sort-lead"    onclick="setSort('lead')">Team Lead</th>
-                        <th id="sort-created" onclick="setSort('created')">Created</th>
-                        <th id="sort-opened"  onclick="setSort('opened')">Last Opened</th>
+                        <!-- Click sorts by a column; Shift-click adds it as the next sort key (ticket e20e2ce0 item 8). -->
+                        <th id="sort-pin"     onclick="setSort('pin', event)" class="list-pin-cell sticky-col" title="Sort by pinned (Shift-click to add a sort key)">&#9733;</th>
+                        <th class="list-icon-cell sticky-col"></th>
+                        <th id="sort-name"    onclick="setSort('name', event)" class="list-name-cell sticky-col" title="Shift-click to add a sort key">Name</th>
+                        <th id="sort-type"    onclick="setSort('type', event)">Type</th>
+                        <th id="sort-version" onclick="setSort('version', event)">Version</th>
+                        <th id="sort-status"  onclick="setSort('status', event)">Status</th>
+                        <th id="sort-lead"    onclick="setSort('lead', event)">Team Lead</th>
+                        <th id="sort-created" onclick="setSort('created', event)">Created</th>
+                        <th id="sort-opened"  onclick="setSort('opened', event)">Last Opened</th>
                         <th>Terminal</th>
                         <th></th>
                     </tr>
@@ -1193,8 +1235,14 @@
        State
        --------------------------------------------------------------- */
     var allProjects = [];          // full project list received from C#
-    var currentSort = 'name';      // 'pin' | 'name' | 'type' | 'version' | 'status' | 'lead' | 'created' | 'opened'
-    var currentSortDir = 'asc';    // 'asc' | 'desc'
+    // Browse All sort keys, primary first: [{ col, dir }]. col is one of SORT_COLUMNS, dir 'asc' | 'desc'.
+    // Pinned first by default; the remembered sort arrives with the project list (ticket e20e2ce0 item 8).
+    var SORT_COLUMNS = ['pin', 'name', 'type', 'version', 'status', 'lead', 'created', 'opened'];
+    var MAX_SORT_KEYS = 3;
+    var DEFAULT_SORT = 'pin:asc,name:asc';
+    var sortKeys = parseSortSpec(DEFAULT_SORT);
+    var homeView = 'list';         // 'list' | 'cards', the Settings preference; also arrives with the projects
+    var homeViewApplied = false;   // the first project list opens the preferred view; later ones never move it
     var searchQuery = '';
     var statusFilter = 'default';  // 'default'(Active+Parked) | 'active' | 'parked' | 'archived' | 'all'
     var dataLoaded = false;
@@ -1659,41 +1707,7 @@
             );
         });
 
-        // Sort filtered list by current column
-        filtered.sort(function(a, b) {
-            var va, vb;
-            if (currentSort === 'pin') {
-                // First click (asc) puts pinned rows on top.
-                va = a.isPinned ? 0 : 1;
-                vb = b.isPinned ? 0 : 1;
-            } else if (currentSort === 'version') {
-                va = (a.currentVersion || '').toLowerCase();
-                vb = (b.currentVersion || '').toLowerCase();
-            } else if (currentSort === 'type') {
-                va = (a.projectType || '').toLowerCase();
-                vb = (b.projectType || '').toLowerCase();
-            } else if (currentSort === 'status') {
-                va = normalizeStatus(a.status).toLowerCase();
-                vb = normalizeStatus(b.status).toLowerCase();
-            } else if (currentSort === 'lead') {
-                va = (a.teamLead || '').toLowerCase();
-                vb = (b.teamLead || '').toLowerCase();
-            } else if (currentSort === 'created') {
-                va = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-                vb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-            } else if (currentSort === 'opened') {
-                va = a.lastOpenedAt ? new Date(a.lastOpenedAt).getTime() : 0;
-                vb = b.lastOpenedAt ? new Date(b.lastOpenedAt).getTime() : 0;
-            } else {
-                va = (a.name || '').toLowerCase();
-                vb = (b.name || '').toLowerCase();
-            }
-            if (va < vb) return currentSortDir === 'asc' ? -1 : 1;
-            if (va > vb) return currentSortDir === 'asc' ? 1 : -1;
-            // Stable tiebreak by name so equal keys (e.g. every pinned row) don't shuffle.
-            var na = (a.name || '').toLowerCase(), nb = (b.name || '').toLowerCase();
-            return na < nb ? -1 : (na > nb ? 1 : 0);
-        });
+        filtered.sort(function(a, b) { return compareBySortKeys(a, b, sortKeys); });
 
         if (filtered.length === 0) {
             noResults.style.display = '';
@@ -1711,18 +1725,18 @@
             var termName = (termKind === 'codex') ? 'Codex' : 'Claude Code';
             var pinned = !!project.isPinned;
             tr.innerHTML =
-                '<td class="list-pin-cell">' +
+                '<td class="list-pin-cell sticky-col">' +
                     '<button class="list-pin' + (pinned ? ' pinned' : '') + '" ' +
                         'title="' + (pinned ? 'Unpin project' : 'Pin project') + '" ' +
                         'aria-label="' + (pinned ? 'Unpin' : 'Pin') + '">' +
                         (pinned ? '★' : '☆') +
                     '</button>' +
                 '</td>' +
-                '<td class="list-icon-cell">' +
+                '<td class="list-icon-cell sticky-col">' +
                     '<div class="list-icon" style="background-color:' + esc(color) + '">' + esc(label) + '</div>' +
                 '</td>' +
-                '<td>' +
-                    '<div class="list-name">' + esc(project.name) + '</div>' +
+                '<td class="list-name-cell sticky-col">' +
+                    '<div class="list-name" title="' + esc(project.name) + '">' + esc(project.name) + '</div>' +
                     '<div class="list-path" title="' + esc(project.path || '') + '">' + esc(project.path || '') + '</div>' +
                 '</td>' +
                 '<td>' + (project.projectType
@@ -1799,30 +1813,116 @@
 
             body.appendChild(tr);
         });
+
+        // Rows and the header badges (updateSortHeaders runs first) settle the column widths.
+        updateStickyOffsets();
     }
 
     /* ---------------------------------------------------------------
-       Sort column header management
+       Browse All sort (ticket e20e2ce0 item 8). Pure functions first, so
+       scripts/test/start-screen-sort.test.mjs runs them as written; the
+       column list and the spec format must match SettingsService's
+       StartScreenSortColumns / NormalizeStartScreenSort.
        --------------------------------------------------------------- */
-    function setSort(column) {
-        if (currentSort === column) {
-            currentSortDir = currentSortDir === 'asc' ? 'desc' : 'asc';
-        } else {
-            currentSort = column;
-            currentSortDir = 'asc';
+    // (SORT_COLUMNS, MAX_SORT_KEYS and DEFAULT_SORT are declared with the state above, before first use.)
+
+    // "pin:asc,opened:desc" -> [{col:'pin',dir:'asc'},{col:'opened',dir:'desc'}]. Unknown columns and
+    // repeats are dropped; nothing valid left means the default (pinned first, then name).
+    function parseSortSpec(spec) {
+        var keys = [];
+        String(spec || '').split(',').forEach(function(part) {
+            var bits = part.split(':');
+            var col = (bits[0] || '').trim().toLowerCase();
+            if (SORT_COLUMNS.indexOf(col) < 0 || keys.some(function(k) { return k.col === col; })) return;
+            if (keys.length >= MAX_SORT_KEYS) return;
+            keys.push({ col: col, dir: (bits[1] || '').trim().toLowerCase() === 'desc' ? 'desc' : 'asc' });
+        });
+        return keys.length ? keys : [{ col: 'pin', dir: 'asc' }, { col: 'name', dir: 'asc' }];
+    }
+
+    function formatSortSpec(keys) {
+        return keys.map(function(k) { return k.col + ':' + k.dir; }).join(',');
+    }
+
+    // A header click. Plain: that column alone (a second click on the sole key flips it). Shift
+    // (additive): flips the column if it is already a key, else appends it as the next key.
+    function nextSortKeys(keys, col, additive) {
+        var at = -1;
+        keys.forEach(function(k, i) { if (k.col === col) at = i; });
+        if (additive) {
+            var copy = keys.map(function(k) { return { col: k.col, dir: k.dir }; });
+            if (at >= 0) copy[at].dir = copy[at].dir === 'asc' ? 'desc' : 'asc';
+            else if (copy.length < MAX_SORT_KEYS) copy.push({ col: col, dir: 'asc' });
+            return copy;
         }
+        if (keys.length === 1 && at === 0) return [{ col: col, dir: keys[0].dir === 'asc' ? 'desc' : 'asc' }];
+        return [{ col: col, dir: 'asc' }];
+    }
+
+    // The value a column sorts by. Ascending pin puts pinned rows first; dates sort by time.
+    function sortValue(p, col) {
+        switch (col) {
+            case 'pin':     return p.isPinned ? 0 : 1;
+            case 'version': return (p.currentVersion || '').toLowerCase();
+            case 'type':    return (p.projectType || '').toLowerCase();
+            case 'status':  return normalizeStatus(p.status).toLowerCase();
+            case 'lead':    return (p.teamLead || '').toLowerCase();
+            case 'created': return p.createdAt ? new Date(p.createdAt).getTime() : 0;
+            case 'opened':  return p.lastOpenedAt ? new Date(p.lastOpenedAt).getTime() : 0;
+            default:        return (p.name || '').toLowerCase();
+        }
+    }
+
+    // Compares by each key in turn; the name breaks a full tie so equal rows never shuffle.
+    function compareBySortKeys(a, b, keys) {
+        for (var i = 0; i < keys.length; i++) {
+            var va = sortValue(a, keys[i].col), vb = sortValue(b, keys[i].col);
+            if (va < vb) return keys[i].dir === 'asc' ? -1 : 1;
+            if (va > vb) return keys[i].dir === 'asc' ? 1 : -1;
+        }
+        var na = (a.name || '').toLowerCase(), nb = (b.name || '').toLowerCase();
+        return na < nb ? -1 : (na > nb ? 1 : 0);
+    }
+
+    // Sets the sticky columns' left offsets from the real widths of the columns before them. Skipped
+    // while the list is hidden (every width reads 0 then); showBrowseAll calls it again once visible.
+    function updateStickyOffsets() {
+        var pin = document.getElementById('sort-pin');
+        var icon = pin && pin.nextElementSibling;
+        if (!pin || !icon) return;
+        // getBoundingClientRect, not offsetWidth: column widths are fractional at non-100% zoom.
+        var pinW = pin.getBoundingClientRect().width, iconW = icon.getBoundingClientRect().width;
+        if (pinW === 0) return;
+        var table = document.getElementById('list-table');
+        table.style.setProperty('--sticky-icon-left', pinW + 'px');
+        table.style.setProperty('--sticky-name-left', (pinW + iconW) + 'px');
+    }
+    window.addEventListener('resize', updateStickyOffsets);
+
+    function setSort(column, event) {
+        sortKeys = nextSortKeys(sortKeys, column, !!(event && event.shiftKey));
         updateSortHeaders();
         renderList();
+        postMsg({ type: 'save_sort', sort: formatSortSpec(sortKeys) });
     }
 
     function updateSortHeaders() {
-        ['pin','name','type','version','status','lead','created','opened'].forEach(function(col) {
+        SORT_COLUMNS.forEach(function(col) {
             var th = document.getElementById('sort-' + col);
             if (!th) return;
-            // classList, not className: some headers carry a layout class (list-pin-cell).
+            // classList, not className: some headers carry layout classes (list-pin-cell, sticky-col).
             th.classList.remove('sort-asc', 'sort-desc');
-            if (currentSort === col) {
-                th.classList.add(currentSortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+            var old = th.querySelector('.sort-order');
+            if (old) old.parentNode.removeChild(old);
+            for (var i = 0; i < sortKeys.length; i++) {
+                if (sortKeys[i].col !== col) continue;
+                th.classList.add(sortKeys[i].dir === 'asc' ? 'sort-asc' : 'sort-desc');
+                if (sortKeys.length > 1) {
+                    var badge = document.createElement('span');
+                    badge.className = 'sort-order';
+                    badge.textContent = String(i + 1);
+                    th.appendChild(badge);
+                }
             }
         });
     }
@@ -1838,6 +1938,7 @@
     /* ---------------------------------------------------------------
        View switching
        --------------------------------------------------------------- */
+    // The card view. Its Back button and the list's Home-only actions follow which view is Home.
     function showHome() {
         document.getElementById('view-browse').classList.remove('active');
         document.getElementById('view-home').classList.add('active');
@@ -1845,24 +1946,41 @@
 
     function showBrowseAll() {
         postMsg({ type: 'browse_all' });
-        // Switch view; also request full list from C# (C# may send updated projects)
+        // Switch view; also request full list from C# (C# may send updated projects).
+        // The sort is NOT reset: it is the remembered one (ticket e20e2ce0 item 8).
         document.getElementById('search-input').value = '';
         searchQuery = '';
-        currentSort = 'name';
-        currentSortDir = 'asc';
         updateSortHeaders();
         renderList();
         document.getElementById('view-home').classList.remove('active');
         document.getElementById('view-browse').classList.add('active');
+        updateStickyOffsets();   // measurable only now that the list is visible
         document.getElementById('search-input').focus();
+    }
+
+    // Opens the Home view the Settings preference names (ticket e20e2ce0 item 8). With 'list' the
+    // Browse All list is Home: no Back button (there is nowhere to go back to), and it carries the card
+    // view's Just Claude / Open PowerShell actions. With no projects at all, the card view's welcome
+    // state is shown whatever the preference, since an empty list has nothing to offer.
+    function applyHomeView() {
+        var listIsHome = homeView !== 'cards' && allProjects.length > 0;
+        document.getElementById('browse-back').style.display = listIsHome ? 'none' : '';
+        var extras = document.querySelectorAll('.list-home-action');
+        for (var i = 0; i < extras.length; i++) extras[i].style.display = listIsHome ? '' : 'none';
+        if (listIsHome) showBrowseAll();
+        else showHome();
     }
 
     /* ---------------------------------------------------------------
        Handle data from C# (projects array)
        --------------------------------------------------------------- */
-    function onProjectsReceived(projects) {
+    function onProjectsReceived(projects, prefs) {
         allProjects = projects || [];
         dataLoaded = true;
+        if (prefs) {
+            if (prefs.homeView) homeView = prefs.homeView === 'cards' ? 'cards' : 'list';
+            if (prefs.sort) { sortKeys = parseSortSpec(prefs.sort); updateSortHeaders(); }
+        }
 
         // Hide skeleton
         document.getElementById('skeleton-grid').style.display = 'none';
@@ -1883,6 +2001,13 @@
         // Keep Browse All in step too: a delete, pin or status change made from the list
         // re-pushes the projects, and the table must drop/refresh that row.
         renderList();
+
+        // Only the first list opens the preferred view; a refresh after a pin or launch must not
+        // move the user. Reopening the start screen sends show_home for that.
+        if (!homeViewApplied) {
+            homeViewApplied = true;
+            applyHomeView();
+        }
     }
 
     /* ---------------------------------------------------------------
@@ -1932,7 +2057,10 @@
         // JSON messages
         if (data && typeof data === 'object') {
             if (data.type === 'projects') {
-                onProjectsReceived(data.projects);
+                onProjectsReceived(data.projects, { homeView: data.homeView, sort: data.sort });
+            } else if (data.type === 'show_home') {
+                // The start screen was shown again (the status bar's Home), or the preference changed.
+                applyHomeView();
             } else if (data.type === 'show_browse_all') {
                 // The header's Browse All Projects button (task 4cac608c)
                 showBrowseAll();

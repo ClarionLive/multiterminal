@@ -3392,11 +3392,14 @@ namespace MultiTerminal
 
         private void ShowSettingsDialog()
         {
+            string homeViewBefore = _settings.GetStartScreenHomeView();
             var dialog = new SettingsWpfDialog(_settings, _currentTheme.IsDark, _ownerProfileService, _sourceControlAccountService);
             new WindowInteropHelper(dialog) { Owner = this.Handle };
             if (dialog.ShowDialog() == true)
             {
                 ApplySettingsFromDialog(dialog);
+                if (!string.Equals(homeViewBefore, _settings.GetStartScreenHomeView(), StringComparison.Ordinal))
+                    ApplyStartScreenHomeViewChange();
             }
         }
 
@@ -3462,6 +3465,18 @@ namespace MultiTerminal
 
             // Apply activity panel font
             _activityPanel?.SetFontSize(dialog.ActivityPanelFontSize);
+        }
+
+        // The Home view preference changed in Settings (ticket e20e2ce0 item 8): visible start screens
+        // switch now. Only on a real change, so an unrelated Settings OK never moves anyone off their view.
+        private void ApplyStartScreenHomeViewChange()
+        {
+            foreach (var doc in _gridManager.GetTerminalDocuments())
+            {
+                if (!doc.IsStartScreenVisible) continue;
+                doc.RefreshStartScreenProjects();
+                doc.ShowStartScreenHome();
+            }
         }
 
         private void LoadSettings()

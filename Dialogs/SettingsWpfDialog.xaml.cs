@@ -153,7 +153,15 @@ namespace MultiTerminal.Dialogs
             CodexEffortCombo.Items.Add(SettingsService.CodexEffortMedium);
             CodexEffortCombo.Items.Add(SettingsService.CodexEffortLow);
             CodexEffortCombo.SelectedIndex = 0;
+
+            // Home view: index 0 = list (the default), 1 = cards. HomeViewChoice maps them.
+            HomeViewCombo.Items.Add("Project list (Browse All)");
+            HomeViewCombo.Items.Add("Project cards");
+            HomeViewCombo.SelectedIndex = 0;
         }
+
+        // The Home view combo's items in index order (ticket e20e2ce0 item 8).
+        private static readonly string[] HomeViewChoice = { SettingsService.StartScreenHomeViewList, SettingsService.StartScreenHomeViewCards };
 
         private void LoadSettings()
         {
@@ -189,6 +197,7 @@ namespace MultiTerminal.Dialogs
 
             // Default working directory
             DefaultWorkingDirText.Text = _settings.GetDefaultWorkingDirectory() ?? "";
+            HomeViewCombo.SelectedIndex = Math.Max(0, Array.IndexOf(HomeViewChoice, _settings.GetStartScreenHomeView()));
 
             // Git: per-task worktree isolation
             WorktreeModeCheck.IsChecked = string.Equals(
@@ -238,6 +247,7 @@ namespace MultiTerminal.Dialogs
                 _settings.SetAgentPanelCloseMode(AgentPanelCloseMode);
 
                 _settings.SetDefaultWorkingDirectory(DefaultWorkingDirText.Text?.Trim());
+                _settings.SetStartScreenHomeView(HomeViewChoice[Math.Max(0, HomeViewCombo.SelectedIndex)]);
 
                 _settings.SetWorktreeMode(
                     WorktreeModeCheck.IsChecked == true
