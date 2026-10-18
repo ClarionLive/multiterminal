@@ -244,9 +244,6 @@ namespace MultiTerminal.Services
         public const string WorktreeModeOff = "off";
 
         /// <summary>
-        /// Returns "on" or "off". Default is "on" — the gate has graduated from spike.
-        /// </summary>
-        /// <summary>
         /// The Notes rail's width (clamped), whether it is collapsed, and which category groups are folded
         /// (task 9a4a9d5e). A missing or unreadable value falls back to the default rather than failing.
         /// </summary>
@@ -286,6 +283,9 @@ namespace MultiTerminal.Services
 
         internal static int ClampNotesRailWidth(int width) => Math.Clamp(width, HudNotesRailMinWidth, HudNotesRailMaxWidth);
 
+        /// <summary>
+        /// Returns "on" or "off". Default is "on" — the gate has graduated from spike.
+        /// </summary>
         public string GetWorktreeMode()
         {
             string raw = Get(WorktreeModeKey);
