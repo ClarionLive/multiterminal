@@ -374,5 +374,48 @@ namespace MultiTerminal.Tests
         {
             Assert.Equal(expected, LaunchSessionChoiceModel.FormatRelativeAge(Now.AddMinutes(-minutesAgo), Now));
         }
+
+        [Theory]
+        [InlineData(142_350, 200_000, "142k / 200k (71%)")]
+        [InlineData(221_642, 1_000_000, "221k / 1M (22%)")]
+        // truncated, not rounded: 79.95% must not read as 80% while it is not highlighted
+        [InlineData(159_900, 200_000, "159k / 200k (79%)")]
+        [InlineData(180_000, 200_000, "180k / 200k (90%)")]
+        [InlineData(850, 200_000, "850 / 200k (0%)")]
+        [InlineData(1_250_000, null, "1.2M")]
+        [InlineData(142_350, null, "142k")]
+        [InlineData(null, 200_000, "—")]
+        [InlineData(null, null, "—")]
+        public void Context_text(int? tokens, int? window, string expected)
+        {
+            Assert.Equal(expected, LaunchSessionChoiceModel.FormatContext(tokens, window));
+        }
+
+        [Theory]
+        [InlineData(159_999, 200_000, ContextLevel.Normal)]
+        [InlineData(160_000, 200_000, ContextLevel.Warning)]
+        [InlineData(179_999, 200_000, ContextLevel.Warning)]
+        [InlineData(180_000, 200_000, ContextLevel.Critical)]
+        [InlineData(950_000, 1_000_000, ContextLevel.Critical)]
+        [InlineData(180_000, 1_000_000, ContextLevel.Normal)]
+        [InlineData(180_000, null, ContextLevel.Unknown)]
+        [InlineData(null, 200_000, ContextLevel.Unknown)]
+        public void Context_level(int? tokens, int? window, ContextLevel expected)
+        {
+            Assert.Equal(expected, LaunchSessionChoiceModel.ContextLevelOf(tokens, window));
+        }
+
+        [Theory]
+        [InlineData(0, "0")]
+        [InlineData(999, "999")]
+        [InlineData(1_000, "1k")]
+        [InlineData(199_999, "199k")]
+        [InlineData(1_000_000, "1M")]
+        [InlineData(1_099_999, "1M")]
+        [InlineData(2_500_000, "2.5M")]
+        public void Token_count(int tokens, string expected)
+        {
+            Assert.Equal(expected, LaunchSessionChoiceModel.FormatTokenCount(tokens));
+        }
     }
 }
