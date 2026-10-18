@@ -19,6 +19,22 @@ namespace MultiTerminal.Services
         PickedSession = 2,
     }
 
+    /// <summary>How full a session's context was at its last turn, for the launch dialog's colouring.</summary>
+    public enum ContextLevel
+    {
+        /// <summary>No usage, or no known window.</summary>
+        Unknown = 0,
+
+        /// <summary>Below <see cref="LaunchSessionChoiceModel.ContextWarningShare"/>.</summary>
+        Normal = 1,
+
+        /// <summary>At or above <see cref="LaunchSessionChoiceModel.ContextWarningShare"/>.</summary>
+        Warning = 2,
+
+        /// <summary>At or above <see cref="LaunchSessionChoiceModel.ContextCriticalShare"/>.</summary>
+        Critical = 3,
+    }
+
     /// <summary>What a project launch does about sessions, before any UI is shown (task ec2ed636).</summary>
     public enum LaunchSessionAction
     {
@@ -384,6 +400,51 @@ namespace MultiTerminal.Services
             if (age < TimeSpan.FromHours(1)) return $"{(int)age.TotalMinutes} min ago";
             if (age < TimeSpan.FromDays(1)) return $"{(int)age.TotalHours} h ago";
             return $"{(int)age.TotalDays} d ago";
+        }
+
+        /// <summary>Share of the window at which the context column turns to the warning colour.</summary>
+        public const double ContextWarningShare = 0.80;
+
+        /// <summary>Share of the window at which the context column turns to the critical colour.</summary>
+        public const double ContextCriticalShare = 0.90;
+
+        /// <summary>
+        /// The context-used cell: "142k / 200k (71%)", "142k" when the window is unknown, "—" when the
+        /// transcript tail held no usage. The percentage is truncated, never rounded up, so the text
+        /// agrees with <see cref="ContextLevelOf"/> (79.9% reads "79%" and is not highlighted).
+        /// </summary>
+        public static string FormatContext(int? tokens, int? window)
+        {
+            if (!tokens.HasValue || tokens.Value <= 0)
+                return "—";
+            if (!window.HasValue || window.Value <= 0)
+                return FormatTokenCount(tokens.Value);
+            var percent = (int)Math.Floor(tokens.Value * 100.0 / window.Value);
+            return $"{FormatTokenCount(tokens.Value)} / {FormatTokenCount(window.Value)} ({percent}%)";
+        }
+
+        /// <summary>How full the context is, for colouring; <see cref="ContextLevel.Unknown"/> without a window.</summary>
+        public static ContextLevel ContextLevelOf(int? tokens, int? window)
+        {
+            if (!tokens.HasValue || tokens.Value <= 0 || !window.HasValue || window.Value <= 0)
+                return ContextLevel.Unknown;
+            var share = (double)tokens.Value / window.Value;
+            if (share >= ContextCriticalShare) return ContextLevel.Critical;
+            if (share >= ContextWarningShare) return ContextLevel.Warning;
+            return ContextLevel.Normal;
+        }
+
+        /// <summary>"850", "142k", "1M", "1.2M": truncated, so a nearly-full window never reads as full.</summary>
+        public static string FormatTokenCount(int tokens)
+        {
+            if (tokens < 1000)
+                return tokens.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (tokens < 1_000_000)
+                return (tokens / 1000).ToString(System.Globalization.CultureInfo.InvariantCulture) + "k";
+            var tenths = tokens / 100_000;
+            return tenths % 10 == 0
+                ? (tenths / 10).ToString(System.Globalization.CultureInfo.InvariantCulture) + "M"
+                : (tenths / 10.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "M";
         }
 
         private static string MayBeOpenReasonFor(SessionCatalogEntry entry, DateTime? earliestUnknownLaunch)

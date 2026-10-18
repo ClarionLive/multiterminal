@@ -495,5 +495,474 @@ namespace MultiTerminal.Tests
             var entry = Assert.Single(List());
             Assert.Equal(kept, entry.SessionId);
         }
+
+        // ---- item 7: context used ----
+
+        // The real shape of an assistant line (Claude Code 2.1.301, transcript 99e83244, 2026-10-16),
+        // trimmed to the fields the catalog reads plus a few it must ignore.
+        private static string AssistantWithUsage(string cwd, string model, long input, long cacheRead, long cacheCreation,
+            bool isSidechain = false, string requestedModel = null)
+            => JsonSerializer.Serialize(new Dictionary<string, object>
+            {
+                ["parentUuid"] = Guid.NewGuid().ToString(),
+                ["isSidechain"] = isSidechain,
+                ["message"] = new Dictionary<string, object>
+                {
+                    ["model"] = model,
+                    ["type"] = "message",
+                    ["role"] = "assistant",
+                    ["content"] = new object[] { new { type = "text", text = "done" } },
+                    ["usage"] = new Dictionary<string, object>
+                    {
+                        ["input_tokens"] = input,
+                        ["cache_creation_input_tokens"] = cacheCreation,
+                        ["cache_read_input_tokens"] = cacheRead,
+                        ["output_tokens"] = 439,
+                        ["cache_creation"] = new { ephemeral_1h_input_tokens = cacheCreation, ephemeral_5m_input_tokens = 0 },
+                    },
+                },
+                ["requestedModel"] = requestedModel,
+                ["type"] = "assistant",
+                ["uuid"] = Guid.NewGuid().ToString(),
+                ["cwd"] = cwd,
+            });
+
+        [Fact]
+        public void Context_usage_is_input_plus_cache_read_plus_cache_creation_and_ignores_output()
+        {
+            var line = AssistantWithUsage(_projectRoot, "claude-opus-5-5", 2, 221579, 61, requestedModel: "claude-opus-5-5");
+
+            Assert.True(SessionCatalog.TryReadContextUsage(line, out var tokens, out var model, out var requested));
+            Assert.Equal(2 + 221579 + 61, tokens);
+            Assert.Equal("claude-opus-5-5", model);
+            Assert.Equal("claude-opus-5-5", requested);
+        }
+
+        [Fact]
+        public void Context_usage_counts_a_missing_field_as_zero()
+        {
+            var line = JsonSerializer.Serialize(new
+            {
+                type = "assistant",
+                message = new { model = "claude-opus-5", usage = new { input_tokens = 5, cache_read_input_tokens = 1000 } },
+            });
+
+            Assert.True(SessionCatalog.TryReadContextUsage(line, out var tokens, out _, out _));
+            Assert.Equal(1005, tokens);
+        }
+
+        [Fact]
+        public void Context_usage_rejects_lines_that_are_not_a_main_thread_assistant_turn_with_usage()
+        {
+            Assert.False(SessionCatalog.TryReadContextUsage(User("hi", _projectRoot), out _, out _, out _));
+            Assert.False(SessionCatalog.TryReadContextUsage(Assistant("no usage", _projectRoot), out _, out _, out _));
+            Assert.False(SessionCatalog.TryReadContextUsage(
+                AssistantWithUsage(_projectRoot, "claude-opus-5-5", 1, 5000, 0, isSidechain: true), out _, out _, out _));
+            Assert.False(SessionCatalog.TryReadContextUsage(
+                AssistantWithUsage(_projectRoot, "<synthetic>", 1, 5000, 0), out _, out _, out _));
+            Assert.False(SessionCatalog.TryReadContextUsage(
+                AssistantWithUsage(_projectRoot, "claude-opus-5-5", 0, 0, 0), out _, out _, out _));
+            Assert.False(SessionCatalog.TryReadContextUsage("{\"type\":\"assistant\",\"message\":", out _, out _, out _));
+            Assert.False(SessionCatalog.TryReadContextUsage(null, out _, out _, out _));
+        }
+
+        [Theory]
+        // every current model is 1M (model table cached 2026-10-06), including the ids seen in real transcripts
+        [InlineData("claude-opus-5-5", 1_000_000)]
+        [InlineData("claude-opus-5", 1_000_000)]
+        [InlineData("claude-fable-5-1", 1_000_000)]
+        [InlineData("claude-mythos-5-1", 1_000_000)]
+        [InlineData("claude-sonnet-5-5", 1_000_000)]
+        [InlineData("claude-haiku-5-5", 1_000_000)]
+        [InlineData("claude-opus-4-8", 1_000_000)]
+        [InlineData("claude-sonnet-4-6", 1_000_000)]
+        // the 200k ones, with and without date suffixes (a date is not a minor version)
+        [InlineData("claude-haiku-4-5", 200_000)]
+        [InlineData("claude-haiku-4-5-20251001", 200_000)]
+        [InlineData("claude-sonnet-4-5-20250929", 200_000)]
+        [InlineData("claude-sonnet-4-20250514", 200_000)]
+        [InlineData("claude-opus-4-1", 200_000)]
+        [InlineData("claude-3-5-sonnet-20241022", 200_000)]
+        [InlineData("claude-3-opus-20240229", 200_000)]
+        // Claude Code's 1M selector
+        [InlineData("claude-sonnet-4-5[1m]", 1_000_000)]
+        [InlineData("claude-sonnet-4-5-20250929[1M]", 1_000_000)]
+        // unknown: tokens only
+        [InlineData("<synthetic>", null)]
+        [InlineData("gpt-5", null)]
+        [InlineData("claude-instant-1", null)]
+        [InlineData("", null)]
+        [InlineData(null, null)]
+        public void Context_window_from_the_model_id(string model, int? expected)
+        {
+            Assert.Equal(expected, SessionCatalog.ContextWindowFor(model));
+        }
+
+        [Fact]
+        public void Context_window_takes_the_requested_models_1m_suffix_and_drops_a_window_the_tokens_disprove()
+        {
+            Assert.Equal(1_000_000, SessionCatalog.ResolveContextWindow(150_000, "claude-sonnet-4-5-20250929", "claude-sonnet-4-5[1m]"));
+            Assert.Equal(200_000, SessionCatalog.ResolveContextWindow(150_000, "claude-sonnet-4-5-20250929", null));
+            Assert.Null(SessionCatalog.ResolveContextWindow(250_000, "claude-sonnet-4-5-20250929", null));
+            Assert.Null(SessionCatalog.ResolveContextWindow(1000, "<synthetic>", null));
+            Assert.Null(SessionCatalog.ResolveContextWindow(null, "claude-opus-5-5", null));
+        }
+
+        [Fact]
+        public void Listed_session_carries_the_context_of_its_LAST_main_thread_assistant_turn()
+        {
+            var id = Write(_rootFolder, Now.AddHours(-1),
+                User("go", _projectRoot),
+                AssistantWithUsage(_projectRoot, "claude-haiku-4-5", 10, 50_000, 0),
+                AssistantWithUsage(_projectRoot, "claude-haiku-4-5", 3, 150_000, 1_000),
+                // a later subagent turn and a synthetic error turn must not replace it
+                AssistantWithUsage(_projectRoot, "claude-haiku-4-5", 1, 5, 0, isSidechain: true),
+                AssistantWithUsage(_projectRoot, "<synthetic>", 0, 0, 0),
+                User("thanks", _projectRoot));
+
+            var entry = Assert.Single(List());
+            Assert.Equal(id, entry.SessionId);
+            Assert.Equal(151_003, entry.ContextTokens);
+            Assert.Equal(200_000, entry.ContextWindow);
+        }
+
+        [Fact]
+        public void Listed_session_without_usage_has_no_context()
+        {
+            WriteSimple(_rootFolder, Now.AddHours(-1));
+
+            var entry = Assert.Single(List());
+            Assert.Null(entry.ContextTokens);
+            Assert.Null(entry.ContextWindow);
+        }
+
+        [Fact]
+        public void Context_is_found_behind_a_final_line_larger_than_the_tail_window()
+        {
+            // One big tool result after the last reply: the 64KB tail holds no complete line with usage.
+            var bigResult = UserBlocks(new object[]
+            {
+                new { type = "tool_result", tool_use_id = "toolu_x", content = new string('r', SessionCatalog.TailBytes + 10_000) },
+            }, _projectRoot);
+            Write(_rootFolder, Now.AddHours(-1),
+                User("go", _projectRoot),
+                AssistantWithUsage(_projectRoot, "claude-opus-5-5", 2, 300_000, 0),
+                bigResult);
+
+            var entry = Assert.Single(List());
+            Assert.Equal(300_002, entry.ContextTokens);
+            Assert.Equal(1_000_000, entry.ContextWindow);
+        }
+
+        // ---- item 7: helper summaries ----
+
+        private static string ToolUse(string id, string name, string cwd)
+            => JsonSerializer.Serialize(new
+            {
+                type = "assistant",
+                isSidechain = false,
+                message = new
+                {
+                    model = "claude-opus-5-5",
+                    role = "assistant",
+                    content = new object[] { new { type = "tool_use", id, name, input = new { } } },
+                },
+                uuid = Guid.NewGuid().ToString(),
+                cwd,
+            });
+
+        private static string ToolResultText(string toolUseId, string text, string cwd)
+            => UserBlocks(new object[]
+            {
+                new { tool_use_id = toolUseId, type = "tool_result", content = new object[] { new { type = "text", text } } },
+            }, cwd);
+
+        // The exact header mcp/index.js get_my_spawn_job prints, then the job.
+        private static string JobText(string job) =>
+            "\U0001F4CB YOUR JOB from Alice (you are Notes). Carry it out now. When you report back, message Alice.\n\n" + job;
+
+        [Fact]
+        public void Spawn_job_summary_is_the_first_line_of_the_job_body_not_the_header()
+        {
+            Assert.Equal(
+                "You are Notes, resuming ticket c133b27d (the unread-note badge).",
+                SessionCatalog.SpawnJobSummaryFrom(JobText("You are Notes, resuming ticket c133b27d (the unread-note badge).\n\nFIX THESE (item 2):")));
+            Assert.Equal(
+                "Fix the badge",
+                SessionCatalog.SpawnJobSummaryFrom(JobText("\n\n## Fix the badge\n- details")));
+        }
+
+        [Fact]
+        public void Spawn_job_summary_rejects_text_that_is_not_a_job()
+        {
+            Assert.Null(SessionCatalog.SpawnJobSummaryFrom("No spawn job is waiting for you."));
+            Assert.Null(SessionCatalog.SpawnJobSummaryFrom("Error: MultiTerminal is not reachable\n\nretry later"));
+            Assert.Null(SessionCatalog.SpawnJobSummaryFrom(JobText("   \n\n  ")));
+            Assert.Null(SessionCatalog.SpawnJobSummaryFrom(null));
+        }
+
+        [Fact]
+        public void Spawn_job_summary_strips_control_and_bidi_characters_and_is_capped()
+        {
+            // U+202E (right-to-left override) would make the line render reversed; U+0007 is BEL.
+            var summary = SessionCatalog.SpawnJobSummaryFrom(JobText("Fix‮ the\u0007 badge​ now"));
+            Assert.Equal("Fix the badge now", summary);
+
+            var longLine = SessionCatalog.SpawnJobSummaryFrom(JobText(new string('a', 500)));
+            Assert.Equal(SessionCatalog.SummaryMaxChars, longLine.Length);
+            Assert.EndsWith("…", longLine, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void Spawn_job_is_found_only_in_the_result_of_the_get_my_spawn_job_call()
+        {
+            // Each decoy result NAMES get_my_spawn_job, as ToolSearch's real result does: a decoy that did
+            // not would be skipped by the line prefilter and never parsed, so it would prove nothing
+            // about the tool_use_id match (falsification showed exactly that for the first draft).
+            var lines = new[]
+            {
+                ToolUse("toolu_search", "ToolSearch", _projectRoot),
+                ToolResultText("toolu_search", JobText("Decoy before: get_my_spawn_job loaded"), _projectRoot),
+                ToolUse("toolu_job", "mcp__multiterminal__get_my_spawn_job", _projectRoot),
+                ToolResultText("toolu_read", JobText("Decoy after: a file read mentioning get_my_spawn_job"), _projectRoot),
+                ToolResultText("toolu_job", JobText("The real job"), _projectRoot),
+            };
+
+            Assert.Equal("The real job", SessionCatalog.SpawnJobSummaryFromLines(lines));
+        }
+
+        private string WriteHelperTranscript(string job, bool isHelper)
+        {
+            var cwd = _projectRoot;
+            var lines = new List<string>
+            {
+                Hook(isHelper ? "## Spawned Agent: Notes\nSpawned by: Alice" : "MULTITERMINAL_NAME=Bob", cwd),
+                User("collect my job", cwd),
+            };
+            // Real helper transcripts carry ~600KB of hook output and tool loading before the job
+            // result (measured 2026-10-18: lines 53-55, 630-690KB in), well past the 256KB head.
+            var padding = new string('p', 8000);
+            for (var i = 0; i < 80; i++)
+                lines.Add(JsonSerializer.Serialize(new { type = "progress", data = padding, cwd }));
+            lines.Add(ToolUse("toolu_job", "mcp__multiterminal__get_my_spawn_job", cwd));
+            lines.Add(ToolResultText("toolu_job", JobText(job), cwd));
+            lines.Add(Assistant("on it", cwd));
+            return Write(_rootFolder, Now.AddHours(-1), lines.ToArray());
+        }
+
+        [Fact]
+        public void Helper_summary_is_its_spawn_job_even_beyond_the_head_window()
+        {
+            var id = WriteHelperTranscript("You are Notes, resuming ticket c133b27d (the unread-note badge).", isHelper: true);
+            Assert.True(new FileInfo(Path.Combine(_rootFolder, id + ".jsonl")).Length > SessionCatalog.HeadMaxBytes * 2,
+                "fixture must put the job well beyond the head window");
+
+            var entry = Assert.Single(List());
+            Assert.True(entry.IsHelper);
+            Assert.Equal("You are Notes, resuming ticket c133b27d (the unread-note badge).", entry.Summary);
+        }
+
+        [Fact]
+        public void Non_helper_summary_ignores_a_spawn_job_result_and_keeps_the_first_prompt()
+        {
+            WriteHelperTranscript("You are Notes, resuming ticket c133b27d.", isHelper: false);
+
+            var entry = Assert.Single(List());
+            Assert.False(entry.IsHelper);
+            Assert.Equal("collect my job", entry.Summary);
+        }
+
+        // ---- review of 702e4fa: read budget, head-continuing job scan, display sanitising ----
+
+        private const string Job = "You are Notes, resuming ticket c133b27d.";
+
+        // A helper transcript laid out like the real ones: hook, first prompt, ~640KB of padding, the
+        // job call and result, a reply WITH usage, then optionally one >64KB tool result so the usage
+        // is only within reach of the ContextTailBytes fallback.
+        private string WriteBudgetHelper(DateTime when, bool usageBehindBigResult)
+        {
+            var cwd = _projectRoot;
+            var lines = new List<string>
+            {
+                Hook("## Spawned Agent: Notes\nSpawned by: Alice", cwd),
+                User("collect my job", cwd),
+            };
+            var padding = new string('p', 8000);
+            for (var i = 0; i < 80; i++)
+                lines.Add(JsonSerializer.Serialize(new { type = "progress", data = padding, cwd }));
+            lines.Add(ToolUse("toolu_job", "mcp__multiterminal__get_my_spawn_job", cwd));
+            lines.Add(ToolResultText("toolu_job", JobText(Job), cwd));
+            lines.Add(AssistantWithUsage(cwd, "claude-opus-5-5", 2, 300_000, 0));
+            if (usageBehindBigResult)
+            {
+                lines.Add(UserBlocks(new object[]
+                {
+                    new { type = "tool_result", tool_use_id = "toolu_x", content = new string('r', SessionCatalog.TailBytes + 10_000) },
+                }, cwd));
+            }
+            return Write(_rootFolder, when, lines.ToArray());
+        }
+
+        private long LengthOf(string id) => new FileInfo(Path.Combine(_rootFolder, id + ".jsonl")).Length;
+
+        private static long Mandatory(long length) =>
+            Math.Min(length, SessionCatalog.HeadMaxBytes) + Math.Min(length, SessionCatalog.TailBytes);
+
+        private static long Optional(long length) =>
+            Math.Min(length, SessionCatalog.ContextTailBytes) +
+            (Math.Min(length, SessionCatalog.SpawnJobScanMaxBytes) - SessionCatalog.HeadMaxBytes);
+
+        [Fact]
+        public void Optional_reads_stop_when_the_byte_budget_is_spent_and_the_entries_are_still_listed()
+        {
+            var newer = WriteBudgetHelper(Now.AddHours(-1), usageBehindBigResult: true);
+            var older = WriteBudgetHelper(Now.AddHours(-2), usageBehindBigResult: true);
+            long a = LengthOf(newer), b = LengthOf(older);
+            Assert.True(a > SessionCatalog.ContextTailBytes && a < SessionCatalog.SpawnJobScanMaxBytes, "fixture size");
+            Assert.Equal(24L * 1024 * 1024, SessionCatalog.DefaultReadByteBudget);
+
+            // Control: with the default budget both get the job summary and the context from the
+            // larger tail, and every byte read is accounted for.
+            var full = Catalog();
+            var entries = full.List(_projectRoot, new HashSet<string>(), Now).ToDictionary(e => e.SessionId);
+            Assert.Equal(Job, entries[newer].Summary);
+            Assert.Equal(300_002, entries[newer].ContextTokens);
+            Assert.Equal(Job, entries[older].Summary);
+            Assert.Equal(300_002, entries[older].ContextTokens);
+            Assert.Equal(Mandatory(a) + Optional(a) + Mandatory(b) + Optional(b), full.BytesReadLastList);
+
+            // The budget is per List call and cumulative: enough for the newer entry's optional reads,
+            // none left for the older one's. The older entry is still listed, with "no context" and the
+            // fallback summary (its first prompt).
+            var limited = Catalog();
+            limited.ReadByteBudget = Mandatory(a) + Optional(a) + Mandatory(b);
+            entries = limited.List(_projectRoot, new HashSet<string>(), Now).ToDictionary(e => e.SessionId);
+            Assert.Equal(2, entries.Count);
+            Assert.Equal(Job, entries[newer].Summary);
+            Assert.Equal(300_002, entries[newer].ContextTokens);
+            Assert.Equal("collect my job", entries[older].Summary);
+            Assert.Null(entries[older].ContextTokens);
+            Assert.True(entries[older].IsHelper);
+            Assert.Equal(limited.ReadByteBudget, limited.BytesReadLastList);
+
+            // An exhausted budget: only the mandatory reads, every entry still listed.
+            var none = Catalog();
+            none.ReadByteBudget = 0;
+            var bare = none.List(_projectRoot, new HashSet<string>(), Now);
+            Assert.Equal(2, bare.Count);
+            Assert.All(bare, e => Assert.Null(e.ContextTokens));
+            Assert.All(bare, e => Assert.Equal("collect my job", e.Summary));
+            Assert.Equal(Mandatory(a) + Mandatory(b), none.BytesReadLastList);
+        }
+
+        [Fact]
+        public void Helper_job_scan_continues_from_the_end_of_the_head_and_never_rereads_it()
+        {
+            // Beyond the head: the scan reads only [HeadMaxBytes, length). Re-reading the head would add
+            // HeadMaxBytes to the count.
+            var beyond = WriteBudgetHelper(Now.AddHours(-1), usageBehindBigResult: false);
+            var length = LengthOf(beyond);
+            var catalog = Catalog();
+            var entry = Assert.Single(catalog.List(_projectRoot, new HashSet<string>(), Now));
+            Assert.Equal(Job, entry.Summary);
+            Assert.Equal(300_002, entry.ContextTokens); // usage in the 64KB tail: no fallback read
+            Assert.Equal(Mandatory(length) + (length - SessionCatalog.HeadMaxBytes), catalog.BytesReadLastList);
+        }
+
+        [Fact]
+        public void Helper_job_inside_the_head_is_found_without_any_further_read()
+        {
+            var cwd = _projectRoot;
+            var lines = new List<string>
+            {
+                Hook("## Spawned Agent: Notes\nSpawned by: Alice", cwd),
+                User("collect my job", cwd),
+                ToolUse("toolu_job", "mcp__multiterminal__get_my_spawn_job", cwd),
+                ToolResultText("toolu_job", JobText(Job), cwd),
+            };
+            var padding = new string('p', 8000);
+            for (var i = 0; i < 80; i++)
+                lines.Add(JsonSerializer.Serialize(new { type = "progress", data = padding, cwd }));
+            lines.Add(AssistantWithUsage(cwd, "claude-opus-5-5", 2, 300_000, 0));
+            var id = Write(_rootFolder, Now.AddHours(-1), lines.ToArray());
+            var length = LengthOf(id);
+            Assert.True(length > SessionCatalog.HeadMaxBytes, "fixture must exceed the head window");
+
+            var catalog = Catalog();
+            var entry = Assert.Single(catalog.List(_projectRoot, new HashSet<string>(), Now));
+            Assert.Equal(Job, entry.Summary);
+            Assert.Equal(Mandatory(length), catalog.BytesReadLastList);
+        }
+
+        [Fact]
+        public void Helper_job_result_straddling_the_head_boundary_is_reassembled()
+        {
+            var cwd = _projectRoot;
+            var lines = new List<string>
+            {
+                Hook("## Spawned Agent: Notes\nSpawned by: Alice", cwd),
+                User("collect my job", cwd),
+            };
+            var toolUse = ToolUse("toolu_job", "mcp__multiterminal__get_my_spawn_job", cwd);
+            long bytes = lines.Sum(l => Encoding.UTF8.GetByteCount(l) + 1);
+            var padding = new string('p', 1000);
+            while (bytes + 1100 + Encoding.UTF8.GetByteCount(toolUse) + 1 < SessionCatalog.HeadMaxBytes - 2000)
+            {
+                var pad = JsonSerializer.Serialize(new { type = "progress", data = padding, cwd });
+                lines.Add(pad);
+                bytes += Encoding.UTF8.GetByteCount(pad) + 1;
+            }
+            lines.Add(toolUse);
+            bytes += Encoding.UTF8.GetByteCount(toolUse) + 1;
+            // The job's first line, then 20KB more of job body: the result line spans the boundary.
+            var result = ToolResultText("toolu_job", JobText(Job + "\n" + new string('j', 20_000)), cwd);
+            lines.Add(result);
+            lines.Add(AssistantWithUsage(cwd, "claude-opus-5-5", 2, 300_000, 0));
+            Assert.True(bytes < SessionCatalog.HeadMaxBytes && bytes + Encoding.UTF8.GetByteCount(result) > SessionCatalog.HeadMaxBytes,
+                "the result line must straddle the head boundary");
+            Write(_rootFolder, Now.AddHours(-1), lines.ToArray());
+
+            var entry = Assert.Single(List());
+            Assert.Equal(Job, entry.Summary);
+        }
+
+        [Fact]
+        public void A_rejected_helper_gets_no_optional_reads()
+        {
+            var id = WriteBudgetHelper(Now.AddHours(-1), usageBehindBigResult: true);
+            var catalog = Catalog();
+            catalog.DirectoryExists = _ => false; // its cwd (the project root) is "gone"
+            Assert.Empty(catalog.List(_projectRoot, new HashSet<string>(), Now));
+            Assert.Equal(1, catalog.TranscriptsReadLastList);
+            Assert.Equal(Mandatory(LengthOf(id)), catalog.BytesReadLastList);
+        }
+
+        [Fact]
+        public void Agent_and_spawner_names_are_sanitised_from_the_transcript_and_from_the_lookup()
+        {
+            // U+202E right-to-left override, U+2066 left-to-right isolate, U+200B zero-width space.
+            var fromHook = Write(_rootFolder, Now.AddHours(-1),
+                Hook("MULTITERMINAL_NAME=Ev‮il\nSpawned by: Al⁦ice​", _projectRoot),
+                User("x", _projectRoot));
+            var fromLookup = Write(_rootFolder, Now.AddHours(-2),
+                Hook("MULTITERMINAL_NAME=Plain", _projectRoot),
+                User("y", _projectRoot));
+
+            var catalog = Catalog(names: id => id == fromLookup ? "Bo​b‮" : null);
+            var entries = List(catalog).ToDictionary(e => e.SessionId);
+
+            Assert.Equal("Evil", entries[fromHook].AgentName);
+            Assert.Equal("Alice", entries[fromHook].SpawnedBy);
+            Assert.Equal("Bob", entries[fromLookup].AgentName);
+        }
+
+        [Fact]
+        public void Display_text_drops_control_bidi_and_zero_width_characters_and_caps_only_when_asked()
+        {
+            Assert.Equal("abc def", SessionCatalog.ToDisplayText("a‮b​c\t\u0007 def"));
+            Assert.Null(SessionCatalog.ToDisplayText("‮​"));
+            Assert.Equal(300, SessionCatalog.ToDisplayText(new string('a', 300)).Length);
+            Assert.Equal(10, SessionCatalog.ToDisplayText(new string('a', 300), 10).Length);
+        }
     }
 }

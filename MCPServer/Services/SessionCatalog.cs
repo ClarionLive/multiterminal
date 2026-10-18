@@ -51,6 +51,15 @@ namespace MultiTerminal.MCPServer.Services
         public string WorktreeId { get; set; }
 
         public SessionCatalogStatus Status { get; set; }
+
+        // Context in use at the session's LAST main-thread assistant turn: input_tokens +
+        // cache_read_input_tokens + cache_creation_input_tokens of that turn's message.usage. Null when
+        // the bounded tail holds no such turn (see SessionCatalog.TryReadContextUsage).
+        public int? ContextTokens { get; set; }
+
+        // The context window of the model that produced that turn (SessionCatalog.ResolveContextWindow),
+        // or null when the model is unrecognised or the tokens exceed the guessed window.
+        public int? ContextWindow { get; set; }
     }
 
     /// <summary>
@@ -74,6 +83,46 @@ namespace MultiTerminal.MCPServer.Services
         internal const int HeadMaxBytes = 256 * 1024;
         internal const int TailBytes = 64 * 1024;
         internal const int SummaryMaxChars = 160;
+
+        /// <summary>
+        /// Second, larger tail read, made only when the <see cref="TailBytes"/> window holds no
+        /// assistant turn with usage (typically one big tool result at the end). Measured
+        /// 2026-10-18 on 108 real MT transcripts: 3 had no usage in the last 64KB, 1 in the last 512KB.
+        /// </summary>
+        internal const int ContextTailBytes = 512 * 1024;
+
+        /// <summary>
+        /// How far into a HELPER's transcript to look for its get_my_spawn_job result. Measured
+        /// 2026-10-18 on five real helper transcripts (c133b27d, e20e2ce0): the result sits at lines
+        /// 53-55, 630-690KB in, behind the SessionStart hook output, so the 256KB head never reaches it.
+        /// </summary>
+        internal const int SpawnJobScanMaxBytes = 1536 * 1024;
+
+        internal const int SpawnJobScanMaxLines = 400;
+
+        public const int StandardContextWindow = 200_000;
+
+        public const int LargeContextWindow = 1_000_000;
+
+        // claude-<family>-<major>[-<minor>], where a minor is one or two digits (an 8-digit date
+        // suffix such as claude-sonnet-4-20250514 is not a minor version).
+        // WHEN A NEW MODEL ID SHIPS: a new family name goes into the alternation below (an unknown
+        // family is null, so the dialog shows tokens with no window); a window that differs from the
+        // rules in ContextWindowFor is changed there, together with the
+        // SessionCatalogTests.Context_window_from_the_model_id theory.
+        private static readonly Regex ModelIdPattern = new Regex(
+            @"^claude-(?<family>opus|sonnet|haiku|fable|mythos)-(?<major>\d{1,2})(?:-(?<minor>\d{1,2})(?!\d))?",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        // Pre-4 naming: claude-3-5-sonnet-20241022, claude-3-opus-20240229.
+        private static readonly Regex LegacyModelIdPattern = new Regex(
+            @"^claude-[1-3](?:-\d)?-(?:opus|sonnet|haiku)",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        // mcp/index.js get_my_spawn_job: "<clipboard emoji> YOUR JOB from <spawner> (you are <name>). ...\n\n<job>".
+        private static readonly Regex SpawnJobHeaderPattern = new Regex(
+            @"^\W*YOUR JOB from\b",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         private static readonly Regex NameMarkerPattern = new Regex(
             @"^\s*MULTITERMINAL_NAME=([^\s'""<>`]+)",
@@ -149,6 +198,25 @@ namespace MultiTerminal.MCPServer.Services
         internal int TranscriptsReadLastList { get; private set; }
 
         /// <summary>
+        /// Default for <see cref="ReadByteBudget"/>. The catalog runs synchronously on the UI thread, and
+        /// without a byte cap the worst case is max * <see cref="ReadBudgetFactor"/> transcripts each read
+        /// head + tail + <see cref="ContextTailBytes"/> + <see cref="SpawnJobScanMaxBytes"/> (~45 x 2.3MB).
+        /// </summary>
+        internal const long DefaultReadByteBudget = 24L * 1024 * 1024;
+
+        /// <summary>
+        /// Bytes one <see cref="List"/> call may read before the OPTIONAL reads stop: the
+        /// <see cref="ContextTailBytes"/> usage fallback and the helper spawn-job scan. An optional read
+        /// is made only when it fits in what is left; otherwise the entry is still listed, with no
+        /// context or with the fallback summary. The mandatory head and tail reads are always made (and
+        /// counted), so a List call reads at most max(budget, its mandatory reads). Test seam.
+        /// </summary>
+        internal long ReadByteBudget { get; set; } = DefaultReadByteBudget;
+
+        /// <summary>Test seam: how many transcript bytes the last <see cref="List"/> call read.</summary>
+        internal long BytesReadLastList { get; private set; }
+
+        /// <summary>
         /// Gets how recently a transcript may have been written before it is reported as
         /// <see cref="SessionCatalogStatus.PossiblyOpenElsewhere"/>.
         /// </summary>
@@ -190,6 +258,7 @@ namespace MultiTerminal.MCPServer.Services
             }
 
             TranscriptsReadLastList = 0;
+            BytesReadLastList = 0;
 
             // Only a local drive root can produce a resumable cwd (ValidateResumeCwd), so a UNC or
             // device-path project lists nothing, without reading a single transcript.
@@ -241,6 +310,7 @@ namespace MultiTerminal.MCPServer.Services
             // The first occurrence of an id wins (the newest copy, if a session is in two folders).
             var readBudget = (long)max * ReadBudgetFactor;
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var meter = new ReadMeter(ReadByteBudget);
             foreach (var candidate in candidates.OrderByDescending(c => c.LastWriteUtc))
             {
                 if (results.Count >= max || TranscriptsReadLastList >= readBudget)
@@ -253,7 +323,7 @@ namespace MultiTerminal.MCPServer.Services
                 TranscriptsReadLastList++;
                 try
                 {
-                    var entry = BuildEntry(root, candidate.Path, candidate.FolderName, candidate.LastWriteUtc, utcNow);
+                    var entry = BuildEntry(root, candidate.Path, candidate.FolderName, candidate.LastWriteUtc, utcNow, meter);
                     if (entry != null)
                         results.Add(entry);
                 }
@@ -261,6 +331,10 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     // Belt and braces: one bad transcript must never take down the whole list.
                     Debug.WriteLine($"[SessionCatalog] skipped {candidate.Path}: {ex.Message}");
+                }
+                finally
+                {
+                    BytesReadLastList = meter.Used;
                 }
             }
 
@@ -327,9 +401,9 @@ namespace MultiTerminal.MCPServer.Services
             }
         }
 
-        private SessionCatalogEntry BuildEntry(string root, string path, string folderName, DateTime lastWriteUtc, DateTime utcNow)
+        private SessionCatalogEntry BuildEntry(string root, string path, string folderName, DateTime lastWriteUtc, DateTime utcNow, ReadMeter meter)
         {
-            var scan = TranscriptScan.Read(path);
+            var scan = TranscriptScan.Read(path, meter);
             if (scan == null || !scan.HasTurns)
                 return null; // empty or aborted session: nothing to resume
 
@@ -339,8 +413,12 @@ namespace MultiTerminal.MCPServer.Services
             if (string.IsNullOrEmpty(cwd) || !DirectoryExists(cwd))
                 return null; // e.g. a deleted worktree: `claude --resume` could not start there
 
+            // Only now, for an entry that will be listed, the optional (budgeted) reads.
+            var isHelper = scan.SpawnedBy != null || scan.IsSpawnedAgent;
+            scan.ReadOptional(path, meter, isHelper);
+
             var sessionId = Path.GetFileNameWithoutExtension(path);
-            var spawnedBy = scan.SpawnedBy;
+            var spawnedBy = ToDisplayText(scan.SpawnedBy);
 
             return new SessionCatalogEntry
             {
@@ -348,14 +426,23 @@ namespace MultiTerminal.MCPServer.Services
                 Cwd = cwd,
                 TranscriptPath = path,
                 LastActivityUtc = lastWriteUtc,
-                AgentName = CleanLookup(_agentNameLookup, sessionId) ?? scan.AgentName,
-                IsHelper = spawnedBy != null || scan.IsSpawnedAgent,
+                // Names are transcript or DB text, sanitised like the summary (no control, bidi or
+                // zero-width characters). The name also prefills the launch name, which is wanted: a
+                // name that renders as something other than what it contains is not one to launch under.
+                AgentName = ToDisplayText(CleanLookup(_agentNameLookup, sessionId)) ?? ToDisplayText(scan.AgentName),
+                IsHelper = isHelper,
                 SpawnedBy = spawnedBy,
-                Summary = ToSummaryLine(CleanLookup(_summaryLookup, sessionId)) ?? ToSummaryLine(scan.FirstPrompt),
+                // A helper's first prompt is only its "collect your job" instruction; the job itself
+                // (the get_my_spawn_job result) says what the session was for.
+                Summary = (isHelper ? scan.SpawnJobSummary : null) ??
+                          ToSummaryLine(CleanLookup(_summaryLookup, sessionId)) ??
+                          ToSummaryLine(scan.FirstPrompt),
                 WorktreeId = GetWorktreeId(root, cwd),
                 Status = utcNow - lastWriteUtc < RecentWriteWindow
                     ? SessionCatalogStatus.PossiblyOpenElsewhere
                     : SessionCatalogStatus.Available,
+                ContextTokens = scan.ContextTokens,
+                ContextWindow = ResolveContextWindow(scan.ContextTokens, scan.ContextModel, scan.ContextRequestedModel),
             };
         }
 
@@ -520,14 +607,189 @@ namespace MultiTerminal.MCPServer.Services
             }
         }
 
-        internal static string ToSummaryLine(string text)
+        /// <summary>
+        /// The context window for a model id, or null when the id is not recognised (the dialog then
+        /// shows tokens only). A <c>[1m]</c> suffix (Claude Code's 1M-context selector) means 1M.
+        /// Otherwise, per the model table cached 2026-10-06: Fable and Mythos, every generation-5
+        /// model, and Opus/Sonnet 4.6 and later are 1M; Haiku 4.x, Opus/Sonnet before 4.6 and every
+        /// pre-4 model are 200k. An unrecognised id (including <c>&lt;synthetic&gt;</c>) is null.
+        /// </summary>
+        public static int? ContextWindowFor(string modelId)
+        {
+            if (string.IsNullOrWhiteSpace(modelId))
+                return null;
+            var id = modelId.Trim();
+            if (id.EndsWith("[1m]", StringComparison.OrdinalIgnoreCase))
+                return LargeContextWindow;
+            if (LegacyModelIdPattern.IsMatch(id))
+                return StandardContextWindow;
+
+            var m = ModelIdPattern.Match(id);
+            if (!m.Success)
+                return null;
+            var family = m.Groups["family"].Value.ToLowerInvariant();
+            var major = int.Parse(m.Groups["major"].Value, System.Globalization.CultureInfo.InvariantCulture);
+            var minor = m.Groups["minor"].Success
+                ? int.Parse(m.Groups["minor"].Value, System.Globalization.CultureInfo.InvariantCulture)
+                : 0;
+
+            if (family == "fable" || family == "mythos" || major >= 5)
+                return LargeContextWindow;
+            if (major == 4 && (family == "opus" || family == "sonnet") && minor >= 6)
+                return LargeContextWindow;
+            return StandardContextWindow;
+        }
+
+        /// <summary>
+        /// The window to show for <paramref name="tokens"/>: the larger of what the response model and
+        /// the requested model (which may carry the <c>[1m]</c> suffix) imply. Null when neither is
+        /// recognised, or when the tokens already exceed the guess: the transcript then proves the
+        /// guess wrong (e.g. a 200k model run with a 1M beta), and "250k / 200k (125%)" would be a lie.
+        /// </summary>
+        internal static int? ResolveContextWindow(int? tokens, string model, string requestedModel)
+        {
+            if (!tokens.HasValue)
+                return null;
+            var a = ContextWindowFor(model);
+            var b = ContextWindowFor(requestedModel);
+            int? window = a.HasValue && b.HasValue ? Math.Max(a.Value, b.Value) : a ?? b;
+            return window.HasValue && tokens.Value > window.Value ? null : window;
+        }
+
+        /// <summary>
+        /// The context in use recorded by one transcript line, or false when the line is not a
+        /// main-thread assistant turn with usage. Real shape (Claude Code 2.1.301, 2026-10-16):
+        /// <c>{"type":"assistant","isSidechain":false,"requestedModel":"claude-opus-5-5",
+        /// "message":{"model":"claude-opus-5-5","usage":{"input_tokens":2,
+        /// "cache_creation_input_tokens":61,"cache_read_input_tokens":221579,"output_tokens":439,...}}}</c>.
+        /// Context = input + cache_read + cache_creation (output tokens are not yet context). Sidechain
+        /// turns, <c>&lt;synthetic&gt;</c> error turns and all-zero usage are rejected.
+        /// </summary>
+        internal static bool TryReadContextUsage(string jsonLine, out int tokens, out string model, out string requestedModel)
+        {
+            tokens = 0;
+            model = null;
+            requestedModel = null;
+            if (string.IsNullOrWhiteSpace(jsonLine))
+                return false;
+            try
+            {
+                using var doc = JsonDocument.Parse(jsonLine);
+                return TryReadContextUsage(doc.RootElement, out tokens, out model, out requestedModel);
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+        }
+
+        private static bool TryReadContextUsage(JsonElement obj, out int tokens, out string model, out string requestedModel)
+        {
+            tokens = 0;
+            model = null;
+            requestedModel = null;
+            if (obj.ValueKind != JsonValueKind.Object || !IsString(obj, "type", "assistant"))
+                return false;
+            if (obj.TryGetProperty("isSidechain", out var side) && side.ValueKind == JsonValueKind.True)
+                return false;
+            if (!obj.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object)
+                return false;
+            if (!message.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object)
+                return false;
+
+            model = message.TryGetProperty("model", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() : null;
+            if (string.Equals(model, "<synthetic>", StringComparison.Ordinal))
+                return false;
+            requestedModel = obj.TryGetProperty("requestedModel", out var rm) && rm.ValueKind == JsonValueKind.String ? rm.GetString() : null;
+
+            long total = 0;
+            foreach (var field in new[] { "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens" })
+            {
+                if (usage.TryGetProperty(field, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out var n) && n > 0)
+                    total += n;
+            }
+            if (total <= 0 || total > int.MaxValue)
+                return false;
+            tokens = (int)total;
+            return true;
+        }
+
+        private static bool IsString(JsonElement obj, string name, string expected) =>
+            obj.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String &&
+            string.Equals(v.GetString(), expected, StringComparison.Ordinal);
+
+        /// <summary>
+        /// The summary line for a helper, from the text of its get_my_spawn_job tool result: the first
+        /// non-blank line of the job body, after the "YOUR JOB from ..." header paragraph, with
+        /// leading markdown markers removed. Null for anything else (an error, "no job", a result
+        /// without the header): untrusted transcript text that does not look like a job is not shown.
+        /// </summary>
+        internal static string SpawnJobSummaryFrom(string toolResultText)
+        {
+            if (string.IsNullOrWhiteSpace(toolResultText))
+                return null;
+            var text = toolResultText.Replace("\r\n", "\n", StringComparison.Ordinal).TrimStart();
+            if (!SpawnJobHeaderPattern.IsMatch(text))
+                return null;
+            var split = text.IndexOf("\n\n", StringComparison.Ordinal);
+            if (split < 0)
+                return null;
+            foreach (var raw in text.Substring(split + 2).Split('\n'))
+            {
+                var line = raw.Trim().TrimStart('#', '>', '*', '-', ' ', '\t').Trim();
+                var summary = ToSummaryLine(line);
+                if (summary != null)
+                    return summary;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// One display line from untrusted text: control and format characters removed (including
+        /// bidi overrides and zero-width characters, which could make a line render as something other
+        /// than what it contains), whitespace collapsed, capped at <see cref="SummaryMaxChars"/>.
+        /// </summary>
+        internal static string ToSummaryLine(string text) => ToDisplayText(text, SummaryMaxChars);
+
+        /// <summary>
+        /// Untrusted text (transcript- or database-derived) made safe to DISPLAY on one line: control
+        /// and format characters removed (bidi overrides and isolates, zero-width characters), all
+        /// whitespace collapsed to single spaces, trimmed, and, when <paramref name="maxChars"/> is
+        /// given, capped with an ellipsis. Null when nothing visible is left. For displayed copies only:
+        /// the cwd a resume starts in keeps its exact form.
+        /// </summary>
+        public static string ToDisplayText(string text, int? maxChars = null)
         {
             if (string.IsNullOrWhiteSpace(text))
                 return null;
-            var line = WhitespacePattern.Replace(text, " ").Trim();
+            var line = WhitespacePattern.Replace(StripControlChars(text), " ").Trim();
             if (line.Length == 0)
                 return null;
-            return line.Length <= SummaryMaxChars ? line : line.Substring(0, SummaryMaxChars - 1).TrimEnd() + "\u2026";
+            if (!maxChars.HasValue || line.Length <= maxChars.Value)
+                return line;
+            return line.Substring(0, Math.Max(0, maxChars.Value - 1)).TrimEnd() + "\u2026";
+        }
+
+        /// <summary>Test seam: the helper-job search over already-split transcript lines.</summary>
+        internal static string SpawnJobSummaryFromLines(IEnumerable<string> lines) =>
+            TranscriptScan.SpawnJobSummaryFromLines(lines);
+
+        private static string StripControlChars(string text)
+        {
+            var sb = new StringBuilder(text.Length);
+            foreach (var c in text)
+            {
+                if (char.IsWhiteSpace(c))
+                {
+                    sb.Append(' ');
+                    continue;
+                }
+                var cat = char.GetUnicodeCategory(c);
+                if (cat == System.Globalization.UnicodeCategory.Control || cat == System.Globalization.UnicodeCategory.Format)
+                    continue;
+                sb.Append(c);
+            }
+            return sb.ToString();
         }
 
         private static bool IsPlaceholderName(string name) =>
@@ -547,6 +809,20 @@ namespace MultiTerminal.MCPServer.Services
                 }
             }
             return null;
+        }
+
+        /// <summary>The bytes one <see cref="List"/> call has read, against its <see cref="ReadByteBudget"/>.</summary>
+        private sealed class ReadMeter
+        {
+            private readonly long _budget;
+
+            public ReadMeter(long budget) => _budget = budget;
+
+            public long Used { get; private set; }
+
+            public bool CanAfford(long bytes) => Used + bytes <= _budget;
+
+            public void Charge(long bytes) => Used += Math.Max(0, bytes);
         }
 
         /// <summary>
@@ -570,32 +846,35 @@ namespace MultiTerminal.MCPServer.Services
 
             public string FirstPrompt { get; set; }
 
-            public static TranscriptScan Read(string path)
+            public int? ContextTokens { get; set; }
+
+            public string ContextModel { get; set; }
+
+            public string ContextRequestedModel { get; set; }
+
+            public string SpawnJobSummary { get; set; }
+
+            // The file length at the mandatory read, and the head bytes and complete head lines, kept
+            // so the optional spawn-job scan starts where the head ended instead of re-reading it.
+            private long _length;
+            private byte[] _headBytes;
+            private List<string> _headLines;
+
+            public static TranscriptScan Read(string path, ReadMeter meter)
             {
-                string headText;
-                string tailText;
-                long length;
-                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-                {
-                    length = fs.Length;
-                    if (length == 0)
-                        return null;
-                    headText = ReadChunk(fs, 0, (int)Math.Min(length, HeadMaxBytes));
-                    var tailStart = Math.Max(0, length - TailBytes);
-                    tailText = ReadChunk(fs, tailStart, (int)(length - tailStart));
-                    if (tailStart > 0)
-                    {
-                        // The first segment of the tail window is a partial line.
-                        var nl = tailText.IndexOf('\n', StringComparison.Ordinal);
-                        tailText = nl < 0 ? string.Empty : tailText.Substring(nl + 1);
-                    }
-                }
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                var length = fs.Length;
+                if (length == 0)
+                    return null;
+                var headBytes = ReadBytes(fs, 0, (int)Math.Min(length, HeadMaxBytes), meter);
+                var headText = Encoding.UTF8.GetString(headBytes);
+                var tailText = ReadTail(fs, length, TailBytes, meter);
 
                 var headLines = headText.Split('\n').ToList();
                 if (length > HeadMaxBytes && headLines.Count > 0)
                     headLines.RemoveAt(headLines.Count - 1); // partial line at the window edge
 
-                var scan = new TranscriptScan();
+                var scan = new TranscriptScan { _length = length, _headBytes = headBytes, _headLines = headLines };
                 var hookTexts = new List<string>();
                 string agentNameRecord = null;
 
@@ -638,7 +917,153 @@ namespace MultiTerminal.MCPServer.Services
                 return scan;
             }
 
-            private static string ReadChunk(FileStream fs, long offset, int count)
+            /// <summary>
+            /// The reads made only for an entry that passed every cheap rejection check, each only when
+            /// it fits in <paramref name="meter"/>'s remaining budget: the larger usage tail when the
+            /// mandatory tail held no usage, and a helper's spawn-job scan.
+            /// </summary>
+            public void ReadOptional(string path, ReadMeter meter, bool isHelper)
+            {
+                var wantUsage = !ContextTokens.HasValue && _length > TailBytes;
+                if (isHelper)
+                {
+                    // The head is already in memory: a job found there costs no read at all.
+                    SpawnJobSummary = SpawnJobSummaryFromLines(_headLines.Take(SpawnJobScanMaxLines));
+                }
+                var wantJobScan = isHelper && SpawnJobSummary == null && _length > HeadMaxBytes;
+                if (!wantUsage && !wantJobScan)
+                    return;
+
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                if (wantUsage)
+                {
+                    // No assistant turn with usage in the last TailBytes (one big tool result at the
+                    // end): look once more over a larger tail, for usage only.
+                    var size = Math.Min(_length, ContextTailBytes);
+                    if (meter.CanAfford(size))
+                    {
+                        foreach (var raw in ReadTail(fs, _length, ContextTailBytes, meter).Split('\n'))
+                            ScanUsageOnly(raw);
+                    }
+                }
+                if (wantJobScan)
+                    SpawnJobSummary = FindSpawnJobSummaryBeyondHead(fs, meter);
+            }
+
+            private static string ReadTail(FileStream fs, long length, int bytes, ReadMeter meter)
+            {
+                var tailStart = Math.Max(0, length - bytes);
+                var text = Encoding.UTF8.GetString(ReadBytes(fs, tailStart, (int)(length - tailStart), meter));
+                if (tailStart == 0)
+                    return text;
+                // The first segment of the tail window is a partial line.
+                var nl = text.IndexOf('\n', StringComparison.Ordinal);
+                return nl < 0 ? string.Empty : text.Substring(nl + 1);
+            }
+
+            /// <summary>
+            /// A helper's job when it is not in the head (measured: it usually is not): the bytes from
+            /// the end of the head read up to <see cref="SpawnJobScanMaxBytes"/> are appended to the head
+            /// bytes already in memory, so the head is never read twice and a line (or a UTF-8
+            /// character) straddling the head boundary is reassembled. Bounded by
+            /// <see cref="SpawnJobScanMaxLines"/>; only lines naming the tool or a pending id are parsed.
+            /// Skipped (null) when the read does not fit the budget.
+            /// </summary>
+            private string FindSpawnJobSummaryBeyondHead(FileStream fs, ReadMeter meter)
+            {
+                var start = _headBytes.Length;
+                var count = (int)(Math.Min(_length, SpawnJobScanMaxBytes) - start);
+                if (count <= 0 || !meter.CanAfford(count))
+                    return null;
+                var rest = ReadBytes(fs, start, count, meter);
+                var all = new byte[start + rest.Length];
+                Buffer.BlockCopy(_headBytes, 0, all, 0, start);
+                Buffer.BlockCopy(rest, 0, all, start, rest.Length);
+
+                var lines = Encoding.UTF8.GetString(all).Split('\n').ToList();
+                if (_length > SpawnJobScanMaxBytes && lines.Count > 0)
+                    lines.RemoveAt(lines.Count - 1); // partial line at the window edge
+                return SpawnJobSummaryFromLines(lines.Take(SpawnJobScanMaxLines));
+            }
+
+            internal static string SpawnJobSummaryFromLines(IEnumerable<string> lines)
+            {
+                var toolUseIds = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var raw in lines)
+                {
+                    var namesTool = raw.Contains("get_my_spawn_job", StringComparison.Ordinal);
+                    if (!namesTool && !toolUseIds.Any(id => raw.Contains(id, StringComparison.Ordinal)))
+                        continue;
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(raw.Trim());
+                        var obj = doc.RootElement;
+                        if (obj.ValueKind != JsonValueKind.Object ||
+                            !obj.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object ||
+                            !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
+                        {
+                            continue;
+                        }
+                        var type = GetString(obj, "type");
+                        foreach (var block in content.EnumerateArray())
+                        {
+                            if (block.ValueKind != JsonValueKind.Object)
+                                continue;
+                            var blockType = GetString(block, "type");
+                            if (type == "assistant" && blockType == "tool_use")
+                            {
+                                var name = GetString(block, "name");
+                                var id = GetString(block, "id");
+                                if (name != null && !string.IsNullOrEmpty(id) && name.EndsWith("get_my_spawn_job", StringComparison.Ordinal))
+                                    toolUseIds.Add(id);
+                            }
+                            else if (type == "user" && blockType == "tool_result")
+                            {
+                                var id = GetString(block, "tool_use_id");
+                                if (id == null || !toolUseIds.Contains(id))
+                                    continue;
+                                var summary = SpawnJobSummaryFrom(ToolResultText(block));
+                                if (summary != null)
+                                    return summary;
+                            }
+                        }
+                    }
+                    catch (JsonException)
+                    {
+                        // Malformed line: skip it.
+                    }
+                }
+                return null;
+            }
+
+            private static string ToolResultText(JsonElement block)
+            {
+                if (!block.TryGetProperty("content", out var content))
+                    return null;
+                if (content.ValueKind == JsonValueKind.String)
+                    return content.GetString();
+                if (content.ValueKind != JsonValueKind.Array)
+                    return null;
+                var sb = new StringBuilder();
+                foreach (var part in content.EnumerateArray())
+                {
+                    if (part.ValueKind == JsonValueKind.Object && GetString(part, "type") == "text")
+                        sb.Append(GetString(part, "text")).Append('\n');
+                }
+                return sb.ToString();
+            }
+
+            private void ScanUsageOnly(string raw)
+            {
+                if (TryReadContextUsage(raw, out var tokens, out var model, out var requested))
+                {
+                    ContextTokens = tokens;
+                    ContextModel = model;
+                    ContextRequestedModel = requested;
+                }
+            }
+
+            private static byte[] ReadBytes(FileStream fs, long offset, int count, ReadMeter meter)
             {
                 var buffer = new byte[count];
                 fs.Seek(offset, SeekOrigin.Begin);
@@ -650,7 +1075,10 @@ namespace MultiTerminal.MCPServer.Services
                         break;
                     total += n;
                 }
-                return Encoding.UTF8.GetString(buffer, 0, total);
+                meter.Charge(total);
+                if (total < count)
+                    Array.Resize(ref buffer, total);
+                return buffer;
             }
 
             private static string DecodeJsonString(string escaped)
@@ -721,6 +1149,13 @@ namespace MultiTerminal.MCPServer.Services
                     var type = GetString(obj, "type");
                     if (type == "user" || type == "assistant")
                         HasTurns = true;
+                    // Lines are in file order, so the last one that qualifies wins.
+                    if (TryReadContextUsage(obj, out var tokens, out var model, out var requested))
+                    {
+                        ContextTokens = tokens;
+                        ContextModel = model;
+                        ContextRequestedModel = requested;
+                    }
                     return true;
                 }
                 catch (JsonException)
