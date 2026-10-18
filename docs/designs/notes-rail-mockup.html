@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notes Rail Mockup</title>
+<!--
+  Ticket 9a4a9d5e: MOCKUP ONLY, not production code. Replaces the HUD Notes tab strip with a
+  collapsible left rail. Theme tokens are copied verbatim from Controls/HudNotesPanel/hud-notes.html
+  (dark = body, light = body.light) so the frames look like the real pane.
+-->
+<style>
+/* ── The real hud-notes.html tokens, scoped to a frame ── */
+.t-dark {
+    --bg-primary: #1a1a2e; --bg-editor: #1e1e30; --bg-header: #12122a;
+    --bg-tab: #1e1e30; --bg-tab-active: #2a2a4a; --bg-tab-hover: #252545;
+    --border: #2a2a4a; --text-primary: #e0e0e0; --text-secondary: #a0a0b8;
+    --text-muted: #707088; --accent: #89b4fa; --save-indicator: #a6e3a1;
+    --danger: #f38ba8; --drop-indicator: #89b4fa;
+    --mark: rgba(137,180,250,0.30);
+}
+.t-light {
+    --bg-primary: #f5f5f5; --bg-editor: #ffffff; --bg-header: #e8e8e8;
+    --bg-tab: #e0e0e0; --bg-tab-active: #ffffff; --bg-tab-hover: #ebebeb;
+    --border: #dcdcdc; --text-primary: #333333; --text-secondary: #666666;
+    --text-muted: #999999; --accent: #1e66f5; --save-indicator: #40a02b;
+    --danger: #d20f39; --drop-indicator: #1e66f5;
+    --mark: rgba(30,102,245,0.18);
+}
+
+/* ── Gallery page (not part of the design) ── */
+:root { --page-bg: #101018; --page-text: #c8c8d8; --page-muted: #80809a; --page-card: #181826; --page-line: #2a2a3a; }
+@media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) { --page-bg: #eef0f4; --page-text: #222; --page-muted: #667; --page-card: #fff; --page-line: #d8dbe2; }
+}
+:root[data-theme="light"] { --page-bg: #eef0f4; --page-text: #222; --page-muted: #667; --page-card: #fff; --page-line: #d8dbe2; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--page-bg); color: var(--page-text); font-family: "Segoe UI", system-ui, sans-serif; font-size: 13px; padding: 20px 16px 40px; }
+h1 { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+.lede { color: var(--page-muted); max-width: 900px; line-height: 1.5; margin-bottom: 18px; }
+.grid { display: flex; flex-wrap: wrap; gap: 22px; align-items: flex-start; }
+.cell { background: var(--page-card); border: 1px solid var(--page-line); border-radius: 8px; padding: 10px; max-width: 100%; }
+.cell h2 { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+.cell p { font-size: 12px; color: var(--page-muted); margin-bottom: 8px; max-width: 700px; line-height: 1.45; }
+.scroll-x { overflow-x: auto; max-width: 100%; }
+.legend { margin-top: 26px; max-width: 900px; line-height: 1.6; }
+.legend h2 { font-size: 14px; margin-bottom: 6px; }
+.legend li { margin-left: 18px; color: var(--page-text); }
+.legend li b { font-weight: 600; }
+
+/* ── The Notes pane, as it would be ── */
+.pane {
+    position: relative; height: 330px; overflow: hidden; border: 1px solid var(--border);
+    background: var(--bg-primary); color: var(--text-primary);
+    font-family: "Segoe UI", system-ui, sans-serif; font-size: 12px;
+    display: flex; flex-direction: column;
+}
+.notes-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 12px; background: var(--bg-header); border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.notes-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--text-secondary); }
+.save-status { font-size: 9px; color: var(--save-indicator); }
+.body-row { flex: 1; display: flex; min-height: 0; position: relative; }
+
+/* Rail */
+.rail { position: relative; display: flex; flex-direction: column; background: var(--bg-header); border-right: 1px solid var(--border); flex-shrink: 0; min-width: 0; }
+.rail-top { display: flex; align-items: center; gap: 4px; padding: 6px 6px 6px 8px; border-bottom: 1px solid var(--border); }
+.search { flex: 1; min-width: 0; display: flex; align-items: center; gap: 5px; background: var(--bg-editor); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; }
+.search.focused { border-color: var(--accent); }
+.search svg { flex-shrink: 0; color: var(--text-muted); }
+.search input { flex: 1; min-width: 0; border: none; outline: none; background: transparent; color: var(--text-primary); font: inherit; font-size: 11px; }
+.search input::placeholder { color: var(--text-muted); }
+.search .clear { color: var(--text-muted); cursor: pointer; font-size: 10px; }
+.icon-btn { width: 22px; height: 22px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; border-radius: 4px; color: var(--text-muted); cursor: pointer; user-select: none; font-size: 14px; }
+.icon-btn:hover { background: var(--bg-tab-hover); color: var(--accent); }
+.rail-list { flex: 1; overflow-y: auto; padding: 4px 0 6px; }
+.rail-list::-webkit-scrollbar { width: 4px; }
+.rail-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.group { display: flex; align-items: center; gap: 6px; padding: 6px 10px 3px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); }
+.group .count { font-weight: 600; letter-spacing: 0; }
+.row { position: relative; display: flex; align-items: center; gap: 5px; padding: 4px 6px 4px 10px; cursor: pointer; user-select: none; color: var(--text-secondary); }
+.row:hover, .row.hover { background: var(--bg-tab-hover); color: var(--text-primary); }
+.row.active { background: var(--bg-tab-active); color: var(--text-primary); font-weight: 600; box-shadow: inset 2px 0 0 var(--accent); }
+.row .grip { width: 8px; color: var(--text-muted); font-size: 9px; letter-spacing: -2px; opacity: 0; cursor: grab; flex-shrink: 0; }
+.row.pinned:hover .grip, .row.pinned.hover .grip { opacity: 1; }
+.row .agent { font-size: 9px; color: var(--accent); flex-shrink: 0; }
+.row .name-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.row .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
+.row.unread .name { color: var(--text-primary); font-weight: 600; }
+.row .snippet { font-size: 10px; font-weight: 400; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+.row .meta { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+.row .time { font-size: 9px; color: var(--text-muted); font-weight: 400; }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
+.row .actions { display: none; align-items: center; gap: 1px; flex-shrink: 0; }
+.row:hover .actions, .row.hover .actions { display: flex; }
+.row:hover .time, .row.hover .time { display: none; }
+.act { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; border-radius: 3px; color: var(--text-muted); }
+.act:hover, .act.hot { background: var(--bg-tab-active); color: var(--accent); }
+.act.del:hover, .act.del.hot { background: var(--danger); color: #fff; }
+.act.on { color: var(--accent); }
+.row.drop-above::before { content: ''; position: absolute; left: 8px; right: 8px; top: -1px; height: 2px; background: var(--drop-indicator); border-radius: 1px; }
+.row.dragging { opacity: .4; }
+mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1px; }
+.rename-input { width: 100%; background: var(--bg-editor); color: var(--text-primary); border: 1px solid var(--accent); border-radius: 2px; font: inherit; font-size: 11px; padding: 0 3px; outline: none; }
+.confirm { display: flex; align-items: center; gap: 6px; margin: 2px 6px 4px 10px; padding: 5px 7px; border: 1px solid var(--danger); border-radius: 4px; background: var(--bg-tab-active); font-size: 10px; color: var(--text-primary); }
+.confirm span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.confirm button { padding: 2px 8px; border: none; border-radius: 3px; font-size: 10px; cursor: pointer; font-family: inherit; }
+.confirm .yes { background: var(--danger); color: #fff; }
+.confirm .no { background: var(--border); color: var(--text-primary); }
+.empty { padding: 14px 10px; color: var(--text-muted); font-size: 11px; text-align: center; }
+.resize { position: absolute; top: 0; right: -3px; width: 6px; height: 100%; cursor: col-resize; z-index: 2; }
+.resize::after { content: ''; position: absolute; left: 2px; top: 0; bottom: 0; width: 2px; background: transparent; transition: background .15s; }
+.resize:hover::after, .resize.hot::after { background: var(--accent); }
+
+/* Collapsed rail */
+.rail.collapsed { width: 30px !important; align-items: center; padding-top: 5px; gap: 4px; }
+.mini-badge { min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px; background: var(--accent); color: var(--bg-primary); font-size: 9px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.mini-sep { width: 14px; height: 1px; background: var(--border); }
+
+/* Narrow pane: the expanded rail floats over the editor */
+.rail.overlay { position: absolute; top: 0; left: 0; bottom: 0; z-index: 3; box-shadow: 4px 0 14px rgba(0,0,0,.35); }
+.scrim { position: absolute; inset: 0; background: rgba(0,0,0,.25); z-index: 2; }
+
+/* Editor */
+.editor { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg-editor); }
+.editor-title { display: flex; align-items: center; gap: 6px; padding: 5px 12px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--text-secondary); }
+.editor-title b { color: var(--text-primary); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.editor-title .by { color: var(--text-muted); font-size: 10px; white-space: nowrap; }
+.editor textarea { flex: 1; background: var(--bg-editor); color: var(--text-primary); border: none; padding: 10px 14px; font-family: "Cascadia Code", Consolas, "Courier New", monospace; font-size: 12px; line-height: 1.5; resize: none; outline: none; }
+.tooltip { position: absolute; z-index: 5; background: var(--bg-tab-active); color: var(--text-primary); border: 1px solid var(--border); border-radius: 3px; padding: 3px 7px; font-size: 10px; white-space: nowrap; box-shadow: 0 3px 8px rgba(0,0,0,.3); pointer-events: none; }
+</style>
+</head>
+<body>
+<h1>HUD Notes: left rail (mockup, ticket 9a4a9d5e)</h1>
+<p class="lede">The tab strip, the ‹ › arrows and the ▾ list are gone. Every note is a row in a rail on the left: <b>pinned</b> notes first in your own drag order, then everything else <b>unread first, then newest</b>. The search box matches names and contents. The rail collapses to a thin strip and can be resized from its right edge. The header badge and read tracking are unchanged. <b>The first frame is live</b>: type in the search, click rows, pin and unpin, and collapse or expand it.</p>
+
+<div class="grid">
+  <div class="cell"><h2>1. Live: dark, normal width</h2><p>Try searching for <i>deploy</i> or <i>merge</i>. Hover a row for pin ⟂, rename ✎ and delete ✕. A pinned row also shows a drag grip ⋮⋮. A dot marks a note that is unread. ✦ marks a note an agent wrote; hover it to see who.</p><div class="scroll-x" id="f-live"></div></div>
+  <div class="cell"><h2>2. Light, normal width: search with a match highlighted</h2><p>"redeploy" matches one note's name, and the text of two others. Those rows show a one-line snippet with the match, because their names alone would not tell you why they are listed.</p><div class="scroll-x" id="f-search"></div></div>
+  <div class="cell"><h2>3. Dark: rename, delete confirm, drag within pinned</h2><p>Double-click (or ✎) renames in place. ✕ asks in the row, with the same confirm as today. Dragging only works inside the pinned group; the line shows where the note will land.</p><div class="scroll-x" id="f-edit"></div></div>
+  <div class="cell"><h2>4. Light, normal width: rail collapsed</h2><p>A 30px strip: expand », the unread count, and + new note. The editor gets the full width.</p><div class="scroll-x" id="f-collapsed"></div></div>
+  <div class="cell"><h2>5. Dark, narrow HUD: collapsed by default</h2><p>Below about 380px the rail starts collapsed, so the editor stays usable.</p><div class="scroll-x" id="f-narrow"></div></div>
+  <div class="cell"><h2>6. Light, narrow HUD: rail opened over the editor</h2><p>When the HUD is narrow, expanding the rail lays it over the editor. Picking a note (or clicking outside) closes it again.</p><div class="scroll-x" id="f-narrow-open"></div></div>
+  <div class="cell"><h2>7. Dark, resizing the rail</h2><p>Drag the rail's right edge (highlighted). The width is remembered.</p><div class="scroll-x" id="f-resize"></div></div>
+</div>
+
+<div class="legend">
+  <h2>What each mark means</h2>
+  <ul>
+    <li><b>Pinned</b> group: your notes, in your drag order. Pin or unpin with ⟂ on the row. Only you can pin; an agent's new note always arrives unpinned.</li>
+    <li><b>Notes</b> group: everything else, sorted unread first, then by last change, newest first. There is no drag here, so automatic order and manual order never mix.</li>
+    <li><b>●</b> unread: an agent wrote or changed the note since you last saw it. <b>✦</b> an agent wrote it (the tooltip says which one). The time is the last change.</li>
+    <li>The HUD tab header badge counts unread notes exactly as it does today.</li>
+  </ul>
+</div>
+
+<script>
+const ICON = {
+    search: '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="7" cy="7" r="5"/><path d="M11 11l4 4"/></svg>',
+    pin: '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M10.5 1.5l4 4-1.4 1.4-.8-.4-2.6 2.6.4 3.3-1.4 1.4-2.9-2.9-3.6 3.6-.7-.7 3.6-3.6L2.2 7.3l1.4-1.4 3.3.4 2.6-2.6-.4-.8z"/></svg>',
+    pen: '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M11 2.5l2.5 2.5L6 12.5H3.5V10z"/></svg>',
+    x: '<svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3l10 10M13 3L3 13"/></svg>',
+};
+
+// Sample project notes. pinned rows keep the given order (that is the manual order).
+const NOTES = [
+    { name: 'General', pinned: true, by: null, unread: false, mins: 2880, text: 'Owner scratchpad.\n\n- ask Gear about the int-1017b merge\n- deploy after the batch lands' },
+    { name: 'Todo', pinned: true, by: null, unread: false, mins: 300, text: '[ ] review 9a4a9d5e mockup\n[ ] restart test for c133b27d item 0\n[x] badge re-test' },
+    { name: 'Release checklist', pinned: true, by: null, unread: false, mins: 10080, text: '1. git status clean\n2. build Release\n3. exit MT, run deploy.ps1, relaunch' },
+    { name: 'After redeploy: c133b27d', pinned: false, by: 'Notes', unread: true, mins: 3, text: 'Re-test after the item 2 fix.\n13. Restore marks it read...\n15. Pane whose Notes was never opened...' },
+    { name: 'Live test: 9a4a9d5e rail', pinned: false, by: 'Alice', unread: true, mins: 12, text: 'Walk the Owner through the mockup, then collect answers on pinning and persistence.' },
+    { name: 'Gear: int-1017b merge steps', pinned: false, by: 'Gear', unread: false, mins: 70, text: 'Merge order: e20e2ce0, ec2ed636, then c133b27d. Redeploy once.' },
+    { name: 'Ideas', pinned: false, by: null, unread: false, mins: 1500, text: 'Rail could group by agent later. Search operators?' },
+    { name: 'Badge test 1', pinned: false, by: 'Notes', unread: false, mins: 1440, text: 'Appended line 1\n\nAppended line 2' },
+    { name: 'Badge test 2', pinned: false, by: 'Notes', unread: false, mins: 1460, text: 'x' },
+];
+
+function ago(m) {
+    if (m < 60) return m + 'm';
+    if (m < 1440) return Math.round(m / 60) + 'h';
+    return Math.round(m / 1440) + 'd';
+}
+function esc(s) { return s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function hl(s, q) {
+    if (!q) return esc(s);
+    const i = s.toLowerCase().indexOf(q.toLowerCase());
+    if (i < 0) return esc(s);
+    return esc(s.slice(0, i)) + '<mark>' + esc(s.slice(i, i + q.length)) + '</mark>' + esc(s.slice(i + q.length));
+}
+function snippet(text, q) {
+    const flat = text.replace(/\s+/g, ' ');
+    const i = flat.toLowerCase().indexOf(q.toLowerCase());
+    const start = Math.max(0, i - 14);
+    return (start > 0 ? '…' : '') + hl(flat.slice(start, start + 60), q);
+}
+
+// The ordering rule: pinned in manual order, then unread first, then newest.
+function ordered(notes, q) {
+    const match = n => !q || n.name.toLowerCase().includes(q.toLowerCase()) || n.text.toLowerCase().includes(q.toLowerCase());
+    const pinned = notes.filter(n => n.pinned && match(n));
+    const rest = notes.filter(n => !n.pinned && match(n)).sort((a, b) => (b.unread - a.unread) || (a.mins - b.mins));
+    return { pinned, rest };
+}
+
+function rowHtml(n, s) {
+    const q = s.search || '';
+    const nameHit = q && n.name.toLowerCase().includes(q.toLowerCase());
+    const cls = ['row', n.pinned ? 'pinned' : '', n.unread ? 'unread' : '', n.name === s.active ? 'active' : '',
+        n.name === s.hover ? 'hover' : '', n.name === s.dragging ? 'dragging' : '', n.name === s.dropAbove ? 'drop-above' : ''].join(' ');
+    const nameCell = n.name === s.renaming
+        ? `<input class="rename-input" value="${esc(s.renameTo || n.name)}">`
+        : `<span class="name" title="${esc(n.name)}">${hl(n.name, q)}</span>` + (q && !nameHit ? `<span class="snippet">${snippet(n.text, q)}</span>` : '');
+    const hot = a => (n.name === s.hover && s.hotAction === a ? ' hot' : '');
+    let html = `<div class="${cls}" data-name="${esc(n.name)}">
+        <span class="grip">${n.pinned ? '⋮⋮' : ''}</span>
+        ${n.by ? `<span class="agent" title="Written by ${esc(n.by)}">✦</span>` : ''}
+        <span class="name-wrap">${nameCell}</span>
+        <span class="meta">
+            ${n.unread ? '<span class="dot" title="Unread"></span>' : ''}
+            <span class="time">${ago(n.mins)}</span>
+            <span class="actions">
+                <span class="act pin${n.pinned ? ' on' : ''}${hot('pin')}" title="${n.pinned ? 'Unpin' : 'Pin'}">${ICON.pin}</span>
+                <span class="act ren${hot('ren')}" title="Rename">${ICON.pen}</span>
+                <span class="act del${hot('del')}" title="Delete">${ICON.x}</span>
+            </span>
+        </span></div>`;
+    if (n.name === s.confirmDelete) html += `<div class="confirm"><span>Delete this note?</span><button class="yes">Delete</button><button class="no">Cancel</button></div>`;
+    return html;
+}
+
+function railHtml(notes, s) {
+    const unread = notes.filter(n => n.unread).length;
+    const cls = 'rail' + (s.collapsed ? ' collapsed' : '') + (s.overlay ? ' overlay' : '');
+    if (s.collapsed) {
+        return `<div class="${cls}">
+            <span class="icon-btn" data-act="expand" title="Show notes">»</span>
+            ${unread ? `<span class="mini-badge" title="${unread} unread">${unread}</span>` : ''}
+            <span class="mini-sep"></span>
+            <span class="icon-btn" title="New note">+</span>
+        </div>`;
+    }
+    const { pinned, rest } = ordered(notes, s.search);
+    let list = '';
+    if (pinned.length) list += `<div class="group">Pinned <span class="count">${pinned.length}</span></div>` + pinned.map(n => rowHtml(n, s)).join('');
+    if (rest.length) list += `<div class="group">Notes <span class="count">${rest.length}</span></div>` + rest.map(n => rowHtml(n, s)).join('');
+    if (!pinned.length && !rest.length) list = `<div class="empty">No note matches "${esc(s.search)}"</div>`;
+    return `<div class="${cls}" style="width:${s.railWidth || 210}px">
+        <div class="rail-top">
+            <label class="search${s.search ? ' focused' : ''}">${ICON.search}<input placeholder="Search notes" value="${esc(s.search || '')}">${s.search ? '<span class="clear" data-act="clear" title="Clear">✕</span>' : ''}</label>
+            <span class="icon-btn" title="New note">+</span>
+            <span class="icon-btn" data-act="collapse" title="Hide notes list">«</span>
+        </div>
+        <div class="rail-list">${list}</div>
+        <div class="resize${s.resizeHot ? ' hot' : ''}" title="Drag to resize"></div>
+    </div>`;
+}
+
+function paneHtml(notes, s) {
+    const active = notes.find(n => n.name === s.active) || notes[0];
+    const by = active.by ? `✦ Written by ${esc(active.by)}` : '';
+    return `<div class="pane ${s.theme}" style="width:${s.width}px${s.height ? ';height:' + s.height + 'px' : ''}">
+        <div class="notes-header"><span class="notes-title">Project Notes</span><span class="save-status">${s.status || ''}</span></div>
+        <div class="body-row">
+            ${s.overlay ? '<div class="scrim"></div>' : ''}
+            ${railHtml(notes, s)}
+            <div class="editor">
+                <div class="editor-title"><b>${esc(active.name)}</b><span class="by">${by}</span></div>
+                <textarea spellcheck="false">${esc(active.text)}</textarea>
+            </div>
+        </div>
+        ${s.tooltip ? `<div class="tooltip" style="${s.tooltip.pos}">${esc(s.tooltip.text)}</div>` : ''}
+    </div>`;
+}
+
+function render(id, notes, s) { document.getElementById(id).innerHTML = paneHtml(notes, s); }
+
+// Static frames
+const clone = () => NOTES.map(n => ({ ...n }));
+(function () { // give the pinned Release checklist a content-only match for frame 2
+    const n = clone(); n[2].text = 'Exit MT, run deploy.ps1, relaunch. Redeploy once per batch.';
+    render('f-search', n, { theme: 't-light', width: 640, active: 'Release checklist', search: 'redeploy' });
+})();
+render('f-edit', clone(), { theme: 't-dark', width: 640, height: 400, active: 'Todo', renaming: 'Gear: int-1017b merge steps', renameTo: 'Merge steps (int-1017b)',
+    confirmDelete: 'Badge test 2', dragging: 'Release checklist', dropAbove: 'General', status: 'Saved' });
+render('f-collapsed', clone(), { theme: 't-light', width: 640, active: 'Todo', collapsed: true });
+render('f-narrow', clone(), { theme: 't-dark', width: 340, active: 'Todo', collapsed: true });
+render('f-narrow-open', clone(), { theme: 't-light', width: 340, active: 'Todo', overlay: true, railWidth: 230, hover: 'Gear: int-1017b merge steps',
+    tooltip: { text: 'Written by Gear', pos: 'left:18px;top:212px' } });
+render('f-resize', clone(), { theme: 't-dark', width: 640, active: 'General', railWidth: 280, resizeHot: true, hover: 'Live test: 9a4a9d5e rail', hotAction: 'pin' });
+
+// Live frame
+const live = { notes: clone(), s: { theme: 't-dark', width: 640, active: 'After redeploy: c133b27d', search: '' } };
+// Opening an unread note reads it (as today); the live frame starts with that one selected, so read it.
+live.notes.find(n => n.name === live.s.active).unread = false;
+function renderLive(keepFocus) {
+    render('f-live', live.notes, live.s);
+    const input = document.querySelector('#f-live .search input');
+    if (input && keepFocus) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+}
+document.getElementById('f-live').addEventListener('input', e => {
+    if (e.target.matches('.search input')) { live.s.search = e.target.value; renderLive(true); }
+});
+document.getElementById('f-live').addEventListener('click', e => {
+    const act = e.target.closest('[data-act]')?.dataset.act;
+    if (act === 'collapse') { live.s.collapsed = true; return renderLive(); }
+    if (act === 'expand') { live.s.collapsed = false; return renderLive(); }
+    if (act === 'clear') { live.s.search = ''; return renderLive(true); }
+    const row = e.target.closest('.row');
+    if (!row) return;
+    const note = live.notes.find(n => n.name === row.dataset.name);
+    if (e.target.closest('.act.pin')) {
+        note.pinned = !note.pinned;
+        if (note.pinned) { live.notes = live.notes.filter(n => n !== note); const lastPinned = live.notes.map(n => n.pinned).lastIndexOf(true); live.notes.splice(lastPinned + 1, 0, note); }
+        return renderLive();
+    }
+    if (e.target.closest('.act')) return; // rename/delete are shown in frame 3
+    live.s.active = note.name;
+    note.unread = false; // seen
+    renderLive();
+});
+renderLive();
+</script>
+</body>
+</html>
