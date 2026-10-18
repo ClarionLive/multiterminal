@@ -771,5 +771,198 @@ namespace MultiTerminal.Tests
             Assert.False(entry.IsHelper);
             Assert.Equal("collect my job", entry.Summary);
         }
+
+        // ---- review of 702e4fa: read budget, head-continuing job scan, display sanitising ----
+
+        private const string Job = "You are Notes, resuming ticket c133b27d.";
+
+        // A helper transcript laid out like the real ones: hook, first prompt, ~640KB of padding, the
+        // job call and result, a reply WITH usage, then optionally one >64KB tool result so the usage
+        // is only within reach of the ContextTailBytes fallback.
+        private string WriteBudgetHelper(DateTime when, bool usageBehindBigResult)
+        {
+            var cwd = _projectRoot;
+            var lines = new List<string>
+            {
+                Hook("## Spawned Agent: Notes\nSpawned by: Alice", cwd),
+                User("collect my job", cwd),
+            };
+            var padding = new string('p', 8000);
+            for (var i = 0; i < 80; i++)
+                lines.Add(JsonSerializer.Serialize(new { type = "progress", data = padding, cwd }));
+            lines.Add(ToolUse("toolu_job", "mcp__multiterminal__get_my_spawn_job", cwd));
+            lines.Add(ToolResultText("toolu_job", JobText(Job), cwd));
+            lines.Add(AssistantWithUsage(cwd, "claude-opus-5-5", 2, 300_000, 0));
+            if (usageBehindBigResult)
+            {
+                lines.Add(UserBlocks(new object[]
+                {
+                    new { type = "tool_result", tool_use_id = "toolu_x", content = new string('r', SessionCatalog.TailBytes + 10_000) },
+                }, cwd));
+            }
+            return Write(_rootFolder, when, lines.ToArray());
+        }
+
+        private long LengthOf(string id) => new FileInfo(Path.Combine(_rootFolder, id + ".jsonl")).Length;
+
+        private static long Mandatory(long length) =>
+            Math.Min(length, SessionCatalog.HeadMaxBytes) + Math.Min(length, SessionCatalog.TailBytes);
+
+        private static long Optional(long length) =>
+            Math.Min(length, SessionCatalog.ContextTailBytes) +
+            (Math.Min(length, SessionCatalog.SpawnJobScanMaxBytes) - SessionCatalog.HeadMaxBytes);
+
+        [Fact]
+        public void Optional_reads_stop_when_the_byte_budget_is_spent_and_the_entries_are_still_listed()
+        {
+            var newer = WriteBudgetHelper(Now.AddHours(-1), usageBehindBigResult: true);
+            var older = WriteBudgetHelper(Now.AddHours(-2), usageBehindBigResult: true);
+            long a = LengthOf(newer), b = LengthOf(older);
+            Assert.True(a > SessionCatalog.ContextTailBytes && a < SessionCatalog.SpawnJobScanMaxBytes, "fixture size");
+            Assert.Equal(24L * 1024 * 1024, SessionCatalog.DefaultReadByteBudget);
+
+            // Control: with the default budget both get the job summary and the context from the
+            // larger tail, and every byte read is accounted for.
+            var full = Catalog();
+            var entries = full.List(_projectRoot, new HashSet<string>(), Now).ToDictionary(e => e.SessionId);
+            Assert.Equal(Job, entries[newer].Summary);
+            Assert.Equal(300_002, entries[newer].ContextTokens);
+            Assert.Equal(Job, entries[older].Summary);
+            Assert.Equal(300_002, entries[older].ContextTokens);
+            Assert.Equal(Mandatory(a) + Optional(a) + Mandatory(b) + Optional(b), full.BytesReadLastList);
+
+            // The budget is per List call and cumulative: enough for the newer entry's optional reads,
+            // none left for the older one's. The older entry is still listed, with "no context" and the
+            // fallback summary (its first prompt).
+            var limited = Catalog();
+            limited.ReadByteBudget = Mandatory(a) + Optional(a) + Mandatory(b);
+            entries = limited.List(_projectRoot, new HashSet<string>(), Now).ToDictionary(e => e.SessionId);
+            Assert.Equal(2, entries.Count);
+            Assert.Equal(Job, entries[newer].Summary);
+            Assert.Equal(300_002, entries[newer].ContextTokens);
+            Assert.Equal("collect my job", entries[older].Summary);
+            Assert.Null(entries[older].ContextTokens);
+            Assert.True(entries[older].IsHelper);
+            Assert.Equal(limited.ReadByteBudget, limited.BytesReadLastList);
+
+            // An exhausted budget: only the mandatory reads, every entry still listed.
+            var none = Catalog();
+            none.ReadByteBudget = 0;
+            var bare = none.List(_projectRoot, new HashSet<string>(), Now);
+            Assert.Equal(2, bare.Count);
+            Assert.All(bare, e => Assert.Null(e.ContextTokens));
+            Assert.All(bare, e => Assert.Equal("collect my job", e.Summary));
+            Assert.Equal(Mandatory(a) + Mandatory(b), none.BytesReadLastList);
+        }
+
+        [Fact]
+        public void Helper_job_scan_continues_from_the_end_of_the_head_and_never_rereads_it()
+        {
+            // Beyond the head: the scan reads only [HeadMaxBytes, length). Re-reading the head would add
+            // HeadMaxBytes to the count.
+            var beyond = WriteBudgetHelper(Now.AddHours(-1), usageBehindBigResult: false);
+            var length = LengthOf(beyond);
+            var catalog = Catalog();
+            var entry = Assert.Single(catalog.List(_projectRoot, new HashSet<string>(), Now));
+            Assert.Equal(Job, entry.Summary);
+            Assert.Equal(300_002, entry.ContextTokens); // usage in the 64KB tail: no fallback read
+            Assert.Equal(Mandatory(length) + (length - SessionCatalog.HeadMaxBytes), catalog.BytesReadLastList);
+        }
+
+        [Fact]
+        public void Helper_job_inside_the_head_is_found_without_any_further_read()
+        {
+            var cwd = _projectRoot;
+            var lines = new List<string>
+            {
+                Hook("## Spawned Agent: Notes\nSpawned by: Alice", cwd),
+                User("collect my job", cwd),
+                ToolUse("toolu_job", "mcp__multiterminal__get_my_spawn_job", cwd),
+                ToolResultText("toolu_job", JobText(Job), cwd),
+            };
+            var padding = new string('p', 8000);
+            for (var i = 0; i < 80; i++)
+                lines.Add(JsonSerializer.Serialize(new { type = "progress", data = padding, cwd }));
+            lines.Add(AssistantWithUsage(cwd, "claude-opus-5-5", 2, 300_000, 0));
+            var id = Write(_rootFolder, Now.AddHours(-1), lines.ToArray());
+            var length = LengthOf(id);
+            Assert.True(length > SessionCatalog.HeadMaxBytes, "fixture must exceed the head window");
+
+            var catalog = Catalog();
+            var entry = Assert.Single(catalog.List(_projectRoot, new HashSet<string>(), Now));
+            Assert.Equal(Job, entry.Summary);
+            Assert.Equal(Mandatory(length), catalog.BytesReadLastList);
+        }
+
+        [Fact]
+        public void Helper_job_result_straddling_the_head_boundary_is_reassembled()
+        {
+            var cwd = _projectRoot;
+            var lines = new List<string>
+            {
+                Hook("## Spawned Agent: Notes\nSpawned by: Alice", cwd),
+                User("collect my job", cwd),
+            };
+            var toolUse = ToolUse("toolu_job", "mcp__multiterminal__get_my_spawn_job", cwd);
+            long bytes = lines.Sum(l => Encoding.UTF8.GetByteCount(l) + 1);
+            var padding = new string('p', 1000);
+            while (bytes + 1100 + Encoding.UTF8.GetByteCount(toolUse) + 1 < SessionCatalog.HeadMaxBytes - 2000)
+            {
+                var pad = JsonSerializer.Serialize(new { type = "progress", data = padding, cwd });
+                lines.Add(pad);
+                bytes += Encoding.UTF8.GetByteCount(pad) + 1;
+            }
+            lines.Add(toolUse);
+            bytes += Encoding.UTF8.GetByteCount(toolUse) + 1;
+            // The job's first line, then 20KB more of job body: the result line spans the boundary.
+            var result = ToolResultText("toolu_job", JobText(Job + "\n" + new string('j', 20_000)), cwd);
+            lines.Add(result);
+            lines.Add(AssistantWithUsage(cwd, "claude-opus-5-5", 2, 300_000, 0));
+            Assert.True(bytes < SessionCatalog.HeadMaxBytes && bytes + Encoding.UTF8.GetByteCount(result) > SessionCatalog.HeadMaxBytes,
+                "the result line must straddle the head boundary");
+            Write(_rootFolder, Now.AddHours(-1), lines.ToArray());
+
+            var entry = Assert.Single(List());
+            Assert.Equal(Job, entry.Summary);
+        }
+
+        [Fact]
+        public void A_rejected_helper_gets_no_optional_reads()
+        {
+            var id = WriteBudgetHelper(Now.AddHours(-1), usageBehindBigResult: true);
+            var catalog = Catalog();
+            catalog.DirectoryExists = _ => false; // its cwd (the project root) is "gone"
+            Assert.Empty(catalog.List(_projectRoot, new HashSet<string>(), Now));
+            Assert.Equal(1, catalog.TranscriptsReadLastList);
+            Assert.Equal(Mandatory(LengthOf(id)), catalog.BytesReadLastList);
+        }
+
+        [Fact]
+        public void Agent_and_spawner_names_are_sanitised_from_the_transcript_and_from_the_lookup()
+        {
+            // U+202E right-to-left override, U+2066 left-to-right isolate, U+200B zero-width space.
+            var fromHook = Write(_rootFolder, Now.AddHours(-1),
+                Hook("MULTITERMINAL_NAME=Ev‮il\nSpawned by: Al⁦ice​", _projectRoot),
+                User("x", _projectRoot));
+            var fromLookup = Write(_rootFolder, Now.AddHours(-2),
+                Hook("MULTITERMINAL_NAME=Plain", _projectRoot),
+                User("y", _projectRoot));
+
+            var catalog = Catalog(names: id => id == fromLookup ? "Bo​b‮" : null);
+            var entries = List(catalog).ToDictionary(e => e.SessionId);
+
+            Assert.Equal("Evil", entries[fromHook].AgentName);
+            Assert.Equal("Alice", entries[fromHook].SpawnedBy);
+            Assert.Equal("Bob", entries[fromLookup].AgentName);
+        }
+
+        [Fact]
+        public void Display_text_drops_control_bidi_and_zero_width_characters_and_caps_only_when_asked()
+        {
+            Assert.Equal("abc def", SessionCatalog.ToDisplayText("a‮b​c\t\u0007 def"));
+            Assert.Null(SessionCatalog.ToDisplayText("‮​"));
+            Assert.Equal(300, SessionCatalog.ToDisplayText(new string('a', 300)).Length);
+            Assert.Equal(10, SessionCatalog.ToDisplayText(new string('a', 300), 10).Length);
+        }
     }
 }

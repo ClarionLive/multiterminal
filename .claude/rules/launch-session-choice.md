@@ -48,9 +48,17 @@ text leads the Continue-last preview.
 **Helper summaries.** A helper's first prompt is only "collect your job", so for a helper the
 summary is the first line of its `get_my_spawn_job` result body (after the `YOUR JOB from` header),
 matched by `tool_use_id`. In real helper transcripts that result is ~650KB in, past the 256KB head,
-so helpers alone get a bounded second read (1.5MB / 400 lines). Every summary goes through
-`ToSummaryLine`, which strips control and format characters (bidi overrides, zero-width) and caps
-the length: it is untrusted transcript text.
+so helpers alone get a bounded second read (to 1.5MB / 400 lines) that continues from the end of the
+head bytes already in memory (the head is never read twice; a job inside the head costs no read).
+Every summary goes through `ToSummaryLine`, and every other displayed transcript- or DB-derived
+string (agent name, spawner, the tooltip's cwd, the worktree id) through `ToDisplayText`, which
+strips control and format characters (bidi overrides, zero-width): it is untrusted text. The cwd a
+resume launches from is never altered; only the tooltip's copy is.
+
+**Read budget.** The catalog runs on the UI thread. The 512KB usage tail and the helper job scan are
+OPTIONAL reads, made only for an entry that passed every rejection check and only while the
+per-`List` byte budget (`DefaultReadByteBudget`, 24MB) has room; otherwise the entry is still listed
+with `—` context or its fallback summary. The 256KB head and 64KB tail are always read.
 
 ## Why transcripts, not MT's session tables
 

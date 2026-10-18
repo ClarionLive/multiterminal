@@ -2,6 +2,7 @@ using System;
 using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
+using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Models;
 using MultiTerminal.Services;
 using MultiTerminal.Terminal;
@@ -55,6 +56,7 @@ namespace MultiTerminal.Dialogs
         private ImageList _rowHeightImages;
         private Font _listFont;
         private Font _listBoldFont;
+        private Font _continueContextBoldFont;
 
         private readonly LaunchSessionChoiceModel _model;
         private readonly string _newSessionName;
@@ -257,7 +259,7 @@ namespace MultiTerminal.Dialogs
                     Tag = candidate,
                     ToolTipText = FormatTooltip(candidate),
                 };
-                item.SubItems.Add(string.IsNullOrEmpty(e.WorktreeId) ? "project folder" : $"worktree {e.WorktreeId}");
+                item.SubItems.Add(string.IsNullOrEmpty(e.WorktreeId) ? "project folder" : $"worktree {SessionCatalog.ToDisplayText(e.WorktreeId)}");
                 item.SubItems.Add(LaunchSessionChoiceModel.FormatRelativeAge(e.LastActivityUtc, _nowUtc));
                 item.SubItems.Add(ContextText(candidate));
                 item.SubItems.Add(e.Summary ?? "(no summary)");
@@ -275,8 +277,15 @@ namespace MultiTerminal.Dialogs
                     SetNameProgrammatically(LaunchSessionChoiceModel.DefaultNameFor(LaunchSessionChoice.PickedSession, candidate, _newSessionName));
                 _sessionList.Invalidate(); // owner-drawn rows: repaint the old and new selection fully
             };
-            // Double-click (and Enter, when the list handles it) resumes the selected session.
-            _sessionList.ItemActivate += (s, e) => ResumeSelected();
+            // ONE path per gesture (review of 702e4fa): a double-click resumes through MouseDoubleClick,
+            // and Enter through the AcceptButton swap below. ItemActivate is deliberately NOT handled:
+            // it also fires for Enter, so with both wired one keypress could reach Finish twice and,
+            // after the user answered No to the "may be open elsewhere" confirm, ask again.
+            _sessionList.MouseDoubleClick += (s, e) =>
+            {
+                if (e.Button == MouseButtons.Left && _sessionList.HitTest(e.Location).Item != null)
+                    ResumeSelected();
+            };
             // While the list has focus, Enter means "resume selected", not the dialog's default button.
             _sessionList.Enter += (s, e) => AcceptButton = _resumeSelectedButton;
             _sessionList.Leave += (s, e) => AcceptButton = DefaultButton;
@@ -409,8 +418,17 @@ namespace MultiTerminal.Dialogs
             var textRect = new Rectangle(bounds.X + CellPadding, bounds.Y, Math.Max(0, bounds.Width - (2 * CellPadding)), bounds.Height);
             TextRenderer.DrawText(e.Graphics, e.SubItem.Text, font, textRect, fore, flags);
 
+            // The focus rectangle spans the whole row. It is drawn with the LAST column, after every
+            // other cell of the row has been painted, from the first column's left edge to this one's
+            // right edge (Item.Bounds is not used: like column 0's bounds, it varies by version).
             if (e.ColumnIndex == ColSummary && e.Item.Focused && _sessionList.Focused)
-                ControlPaint.DrawFocusRectangle(e.Graphics, e.Item.Bounds, fore, selected ? _selectionBack : _listBack);
+            {
+                var rowLeft = bounds.X;
+                for (var i = 0; i < ColSummary; i++)
+                    rowLeft -= _sessionList.Columns[i].Width;
+                var row = Rectangle.FromLTRB(rowLeft, bounds.Top, bounds.Right, bounds.Bottom);
+                ControlPaint.DrawFocusRectangle(e.Graphics, row, fore, selected ? _selectionBack : _listBack);
+            }
         }
 
         // Warning and critical colours readable on both the theme's list background and its selection.
@@ -444,7 +462,7 @@ namespace MultiTerminal.Dialogs
         private void Finish(LaunchSessionChoice choice, LaunchSessionCandidate candidate)
         {
             if (DialogResult == DialogResult.OK)
-                return; // Enter can reach both the list (ItemActivate) and the accept button
+                return; // already finished
             if (choice != LaunchSessionChoice.NewSession)
             {
                 if (candidate == null)
@@ -507,9 +525,11 @@ namespace MultiTerminal.Dialogs
             return c.Entry.IsHelper ? $"{name} [Helper]" : name;
         }
 
-        private static string FormatTooltip(LaunchSessionCandidate c)
+        // Internal for tests. The cwd is transcript text: the tooltip shows a sanitised COPY; the
+        // entry's Cwd, which the resume is launched from, is never altered.
+        internal static string FormatTooltip(LaunchSessionCandidate c)
         {
-            var tip = $"{c.Entry.SessionId}\n{c.Entry.Cwd}\nContext: {ContextText(c)}";
+            var tip = $"{c.Entry.SessionId}\n{SessionCatalog.ToDisplayText(c.Entry.Cwd)}\nContext: {ContextText(c)}";
             if (!string.IsNullOrEmpty(c.Entry.Summary))
                 tip += "\n" + c.Entry.Summary;
             if (c.MayBeOpenElsewhere)
@@ -569,7 +589,10 @@ namespace MultiTerminal.Dialogs
                 var level = LaunchSessionChoiceModel.ContextLevelOf(cont.Entry.ContextTokens, cont.Entry.ContextWindow);
                 _continueContext.ForeColor = ContextColor(level, _continueContext.ForeColor);
                 if (level == ContextLevel.Critical)
-                    _continueContext.Font = new Font("Segoe UI", BaseFontSize, FontStyle.Bold);
+                {
+                    _continueContextBoldFont = new Font("Segoe UI", BaseFontSize, FontStyle.Bold);
+                    _continueContext.Font = _continueContextBoldFont;
+                }
             }
         }
 
@@ -583,6 +606,7 @@ namespace MultiTerminal.Dialogs
                 _rowHeightImages?.Dispose();
                 _listFont?.Dispose();
                 _listBoldFont?.Dispose();
+                _continueContextBoldFont?.Dispose();
             }
         }
 

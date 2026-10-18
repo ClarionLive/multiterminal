@@ -106,6 +106,10 @@ namespace MultiTerminal.MCPServer.Services
 
         // claude-<family>-<major>[-<minor>], where a minor is one or two digits (an 8-digit date
         // suffix such as claude-sonnet-4-20250514 is not a minor version).
+        // WHEN A NEW MODEL ID SHIPS: a new family name goes into the alternation below (an unknown
+        // family is null, so the dialog shows tokens with no window); a window that differs from the
+        // rules in ContextWindowFor is changed there, together with the
+        // SessionCatalogTests.Context_window_from_the_model_id theory.
         private static readonly Regex ModelIdPattern = new Regex(
             @"^claude-(?<family>opus|sonnet|haiku|fable|mythos)-(?<major>\d{1,2})(?:-(?<minor>\d{1,2})(?!\d))?",
             RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
@@ -194,6 +198,25 @@ namespace MultiTerminal.MCPServer.Services
         internal int TranscriptsReadLastList { get; private set; }
 
         /// <summary>
+        /// Default for <see cref="ReadByteBudget"/>. The catalog runs synchronously on the UI thread, and
+        /// without a byte cap the worst case is max * <see cref="ReadBudgetFactor"/> transcripts each read
+        /// head + tail + <see cref="ContextTailBytes"/> + <see cref="SpawnJobScanMaxBytes"/> (~45 x 2.3MB).
+        /// </summary>
+        internal const long DefaultReadByteBudget = 24L * 1024 * 1024;
+
+        /// <summary>
+        /// Bytes one <see cref="List"/> call may read before the OPTIONAL reads stop: the
+        /// <see cref="ContextTailBytes"/> usage fallback and the helper spawn-job scan. An optional read
+        /// is made only when it fits in what is left; otherwise the entry is still listed, with no
+        /// context or with the fallback summary. The mandatory head and tail reads are always made (and
+        /// counted), so a List call reads at most max(budget, its mandatory reads). Test seam.
+        /// </summary>
+        internal long ReadByteBudget { get; set; } = DefaultReadByteBudget;
+
+        /// <summary>Test seam: how many transcript bytes the last <see cref="List"/> call read.</summary>
+        internal long BytesReadLastList { get; private set; }
+
+        /// <summary>
         /// Gets how recently a transcript may have been written before it is reported as
         /// <see cref="SessionCatalogStatus.PossiblyOpenElsewhere"/>.
         /// </summary>
@@ -235,6 +258,7 @@ namespace MultiTerminal.MCPServer.Services
             }
 
             TranscriptsReadLastList = 0;
+            BytesReadLastList = 0;
 
             // Only a local drive root can produce a resumable cwd (ValidateResumeCwd), so a UNC or
             // device-path project lists nothing, without reading a single transcript.
@@ -286,6 +310,7 @@ namespace MultiTerminal.MCPServer.Services
             // The first occurrence of an id wins (the newest copy, if a session is in two folders).
             var readBudget = (long)max * ReadBudgetFactor;
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var meter = new ReadMeter(ReadByteBudget);
             foreach (var candidate in candidates.OrderByDescending(c => c.LastWriteUtc))
             {
                 if (results.Count >= max || TranscriptsReadLastList >= readBudget)
@@ -298,7 +323,7 @@ namespace MultiTerminal.MCPServer.Services
                 TranscriptsReadLastList++;
                 try
                 {
-                    var entry = BuildEntry(root, candidate.Path, candidate.FolderName, candidate.LastWriteUtc, utcNow);
+                    var entry = BuildEntry(root, candidate.Path, candidate.FolderName, candidate.LastWriteUtc, utcNow, meter);
                     if (entry != null)
                         results.Add(entry);
                 }
@@ -306,6 +331,10 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     // Belt and braces: one bad transcript must never take down the whole list.
                     Debug.WriteLine($"[SessionCatalog] skipped {candidate.Path}: {ex.Message}");
+                }
+                finally
+                {
+                    BytesReadLastList = meter.Used;
                 }
             }
 
@@ -372,9 +401,9 @@ namespace MultiTerminal.MCPServer.Services
             }
         }
 
-        private SessionCatalogEntry BuildEntry(string root, string path, string folderName, DateTime lastWriteUtc, DateTime utcNow)
+        private SessionCatalogEntry BuildEntry(string root, string path, string folderName, DateTime lastWriteUtc, DateTime utcNow, ReadMeter meter)
         {
-            var scan = TranscriptScan.Read(path);
+            var scan = TranscriptScan.Read(path, meter);
             if (scan == null || !scan.HasTurns)
                 return null; // empty or aborted session: nothing to resume
 
@@ -384,8 +413,12 @@ namespace MultiTerminal.MCPServer.Services
             if (string.IsNullOrEmpty(cwd) || !DirectoryExists(cwd))
                 return null; // e.g. a deleted worktree: `claude --resume` could not start there
 
+            // Only now, for an entry that will be listed, the optional (budgeted) reads.
+            var isHelper = scan.SpawnedBy != null || scan.IsSpawnedAgent;
+            scan.ReadOptional(path, meter, isHelper);
+
             var sessionId = Path.GetFileNameWithoutExtension(path);
-            var spawnedBy = scan.SpawnedBy;
+            var spawnedBy = ToDisplayText(scan.SpawnedBy);
 
             return new SessionCatalogEntry
             {
@@ -393,12 +426,15 @@ namespace MultiTerminal.MCPServer.Services
                 Cwd = cwd,
                 TranscriptPath = path,
                 LastActivityUtc = lastWriteUtc,
-                AgentName = CleanLookup(_agentNameLookup, sessionId) ?? scan.AgentName,
-                IsHelper = spawnedBy != null || scan.IsSpawnedAgent,
+                // Names are transcript or DB text, sanitised like the summary (no control, bidi or
+                // zero-width characters). The name also prefills the launch name, which is wanted: a
+                // name that renders as something other than what it contains is not one to launch under.
+                AgentName = ToDisplayText(CleanLookup(_agentNameLookup, sessionId)) ?? ToDisplayText(scan.AgentName),
+                IsHelper = isHelper,
                 SpawnedBy = spawnedBy,
                 // A helper's first prompt is only its "collect your job" instruction; the job itself
                 // (the get_my_spawn_job result) says what the session was for.
-                Summary = (spawnedBy != null || scan.IsSpawnedAgent ? scan.SpawnJobSummary : null) ??
+                Summary = (isHelper ? scan.SpawnJobSummary : null) ??
                           ToSummaryLine(CleanLookup(_summaryLookup, sessionId)) ??
                           ToSummaryLine(scan.FirstPrompt),
                 WorktreeId = GetWorktreeId(root, cwd),
@@ -713,14 +749,25 @@ namespace MultiTerminal.MCPServer.Services
         /// bidi overrides and zero-width characters, which could make a line render as something other
         /// than what it contains), whitespace collapsed, capped at <see cref="SummaryMaxChars"/>.
         /// </summary>
-        internal static string ToSummaryLine(string text)
+        internal static string ToSummaryLine(string text) => ToDisplayText(text, SummaryMaxChars);
+
+        /// <summary>
+        /// Untrusted text (transcript- or database-derived) made safe to DISPLAY on one line: control
+        /// and format characters removed (bidi overrides and isolates, zero-width characters), all
+        /// whitespace collapsed to single spaces, trimmed, and, when <paramref name="maxChars"/> is
+        /// given, capped with an ellipsis. Null when nothing visible is left. For displayed copies only:
+        /// the cwd a resume starts in keeps its exact form.
+        /// </summary>
+        public static string ToDisplayText(string text, int? maxChars = null)
         {
             if (string.IsNullOrWhiteSpace(text))
                 return null;
             var line = WhitespacePattern.Replace(StripControlChars(text), " ").Trim();
             if (line.Length == 0)
                 return null;
-            return line.Length <= SummaryMaxChars ? line : line.Substring(0, SummaryMaxChars - 1).TrimEnd() + "\u2026";
+            if (!maxChars.HasValue || line.Length <= maxChars.Value)
+                return line;
+            return line.Substring(0, Math.Max(0, maxChars.Value - 1)).TrimEnd() + "\u2026";
         }
 
         /// <summary>Test seam: the helper-job search over already-split transcript lines.</summary>
@@ -764,6 +811,20 @@ namespace MultiTerminal.MCPServer.Services
             return null;
         }
 
+        /// <summary>The bytes one <see cref="List"/> call has read, against its <see cref="ReadByteBudget"/>.</summary>
+        private sealed class ReadMeter
+        {
+            private readonly long _budget;
+
+            public ReadMeter(long budget) => _budget = budget;
+
+            public long Used { get; private set; }
+
+            public bool CanAfford(long bytes) => Used + bytes <= _budget;
+
+            public void Charge(long bytes) => Used += Math.Max(0, bytes);
+        }
+
         /// <summary>
         /// What one bounded read of a transcript yields. Built only from the head (first
         /// <see cref="HeadMaxLines"/> lines within <see cref="HeadMaxBytes"/>) and the tail (last
@@ -793,20 +854,27 @@ namespace MultiTerminal.MCPServer.Services
 
             public string SpawnJobSummary { get; set; }
 
-            public static TranscriptScan Read(string path)
+            // The file length at the mandatory read, and the head bytes and complete head lines, kept
+            // so the optional spawn-job scan starts where the head ended instead of re-reading it.
+            private long _length;
+            private byte[] _headBytes;
+            private List<string> _headLines;
+
+            public static TranscriptScan Read(string path, ReadMeter meter)
             {
                 using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
                 var length = fs.Length;
                 if (length == 0)
                     return null;
-                var headText = ReadChunk(fs, 0, (int)Math.Min(length, HeadMaxBytes));
-                var tailText = ReadTail(fs, length, TailBytes);
+                var headBytes = ReadBytes(fs, 0, (int)Math.Min(length, HeadMaxBytes), meter);
+                var headText = Encoding.UTF8.GetString(headBytes);
+                var tailText = ReadTail(fs, length, TailBytes, meter);
 
                 var headLines = headText.Split('\n').ToList();
                 if (length > HeadMaxBytes && headLines.Count > 0)
                     headLines.RemoveAt(headLines.Count - 1); // partial line at the window edge
 
-                var scan = new TranscriptScan();
+                var scan = new TranscriptScan { _length = length, _headBytes = headBytes, _headLines = headLines };
                 var hookTexts = new List<string>();
                 string agentNameRecord = null;
 
@@ -818,13 +886,6 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     if (scan.ScanTailLine(raw))
                         parsedTailLine = true;
-                }
-                if (!scan.ContextTokens.HasValue && length > TailBytes)
-                {
-                    // No assistant turn with usage in the last TailBytes (one big tool result at the
-                    // end): look once more over a larger tail, for usage only.
-                    foreach (var raw in ReadTail(fs, length, ContextTailBytes).Split('\n'))
-                        scan.ScanUsageOnly(raw);
                 }
                 if (!parsedTailLine)
                 {
@@ -853,15 +914,46 @@ namespace MultiTerminal.MCPServer.Services
                     FirstCapture(SpawnedByPattern, hookTexts) ??
                     FirstCapture(SpawnerEnvPattern, hookTexts);
                 scan.IsSpawnedAgent = hookTexts.Any(t => t.Contains("isSpawnedAgent: true", StringComparison.Ordinal));
-                if (scan.SpawnedBy != null || scan.IsSpawnedAgent)
-                    scan.SpawnJobSummary = FindSpawnJobSummary(fs, length);
                 return scan;
             }
 
-            private static string ReadTail(FileStream fs, long length, int bytes)
+            /// <summary>
+            /// The reads made only for an entry that passed every cheap rejection check, each only when
+            /// it fits in <paramref name="meter"/>'s remaining budget: the larger usage tail when the
+            /// mandatory tail held no usage, and a helper's spawn-job scan.
+            /// </summary>
+            public void ReadOptional(string path, ReadMeter meter, bool isHelper)
+            {
+                var wantUsage = !ContextTokens.HasValue && _length > TailBytes;
+                if (isHelper)
+                {
+                    // The head is already in memory: a job found there costs no read at all.
+                    SpawnJobSummary = SpawnJobSummaryFromLines(_headLines.Take(SpawnJobScanMaxLines));
+                }
+                var wantJobScan = isHelper && SpawnJobSummary == null && _length > HeadMaxBytes;
+                if (!wantUsage && !wantJobScan)
+                    return;
+
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                if (wantUsage)
+                {
+                    // No assistant turn with usage in the last TailBytes (one big tool result at the
+                    // end): look once more over a larger tail, for usage only.
+                    var size = Math.Min(_length, ContextTailBytes);
+                    if (meter.CanAfford(size))
+                    {
+                        foreach (var raw in ReadTail(fs, _length, ContextTailBytes, meter).Split('\n'))
+                            ScanUsageOnly(raw);
+                    }
+                }
+                if (wantJobScan)
+                    SpawnJobSummary = FindSpawnJobSummaryBeyondHead(fs, meter);
+            }
+
+            private static string ReadTail(FileStream fs, long length, int bytes, ReadMeter meter)
             {
                 var tailStart = Math.Max(0, length - bytes);
-                var text = ReadChunk(fs, tailStart, (int)(length - tailStart));
+                var text = Encoding.UTF8.GetString(ReadBytes(fs, tailStart, (int)(length - tailStart), meter));
                 if (tailStart == 0)
                     return text;
                 // The first segment of the tail window is a partial line.
@@ -870,15 +962,26 @@ namespace MultiTerminal.MCPServer.Services
             }
 
             /// <summary>
-            /// A helper's job, from its transcript head: the get_my_spawn_job tool_use id, then the
-            /// tool_result carrying that id. Bounded by <see cref="SpawnJobScanMaxBytes"/> and
+            /// A helper's job when it is not in the head (measured: it usually is not): the bytes from
+            /// the end of the head read up to <see cref="SpawnJobScanMaxBytes"/> are appended to the head
+            /// bytes already in memory, so the head is never read twice and a line (or a UTF-8
+            /// character) straddling the head boundary is reassembled. Bounded by
             /// <see cref="SpawnJobScanMaxLines"/>; only lines naming the tool or a pending id are parsed.
+            /// Skipped (null) when the read does not fit the budget.
             /// </summary>
-            private static string FindSpawnJobSummary(FileStream fs, long length)
+            private string FindSpawnJobSummaryBeyondHead(FileStream fs, ReadMeter meter)
             {
-                var text = ReadChunk(fs, 0, (int)Math.Min(length, SpawnJobScanMaxBytes));
-                var lines = text.Split('\n').ToList();
-                if (length > SpawnJobScanMaxBytes && lines.Count > 0)
+                var start = _headBytes.Length;
+                var count = (int)(Math.Min(_length, SpawnJobScanMaxBytes) - start);
+                if (count <= 0 || !meter.CanAfford(count))
+                    return null;
+                var rest = ReadBytes(fs, start, count, meter);
+                var all = new byte[start + rest.Length];
+                Buffer.BlockCopy(_headBytes, 0, all, 0, start);
+                Buffer.BlockCopy(rest, 0, all, start, rest.Length);
+
+                var lines = Encoding.UTF8.GetString(all).Split('\n').ToList();
+                if (_length > SpawnJobScanMaxBytes && lines.Count > 0)
                     lines.RemoveAt(lines.Count - 1); // partial line at the window edge
                 return SpawnJobSummaryFromLines(lines.Take(SpawnJobScanMaxLines));
             }
@@ -960,7 +1063,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
             }
 
-            private static string ReadChunk(FileStream fs, long offset, int count)
+            private static byte[] ReadBytes(FileStream fs, long offset, int count, ReadMeter meter)
             {
                 var buffer = new byte[count];
                 fs.Seek(offset, SeekOrigin.Begin);
@@ -972,7 +1075,10 @@ namespace MultiTerminal.MCPServer.Services
                         break;
                     total += n;
                 }
-                return Encoding.UTF8.GetString(buffer, 0, total);
+                meter.Charge(total);
+                if (total < count)
+                    Array.Resize(ref buffer, total);
+                return buffer;
             }
 
             private static string DecodeJsonString(string escaped)

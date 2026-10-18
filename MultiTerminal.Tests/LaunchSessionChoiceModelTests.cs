@@ -417,5 +417,25 @@ namespace MultiTerminal.Tests
         {
             Assert.Equal(expected, LaunchSessionChoiceModel.FormatTokenCount(tokens));
         }
+
+        [Fact]
+        public void Tooltip_shows_a_sanitised_copy_of_the_cwd_and_leaves_the_launch_cwd_alone()
+        {
+            // U+202E would render the tail of the path reversed; U+200B is invisible.
+            const string cwd = "C:\\proj\\.claude\\worktrees\\ab\u202Ecd\u200B";
+            var entry = new SessionCatalogEntry
+            {
+                SessionId = "11111111-2222-3333-4444-555555555555",
+                Cwd = cwd,
+                LastActivityUtc = DateTime.UtcNow,
+            };
+
+            var tip = MultiTerminal.Dialogs.LaunchSessionDialog.FormatTooltip(new LaunchSessionCandidate(entry, null));
+
+            Assert.Contains("C:\\proj\\.claude\\worktrees\\abcd\n", tip, StringComparison.Ordinal);
+            Assert.DoesNotContain("\u202E", tip, StringComparison.Ordinal);
+            Assert.DoesNotContain("\u200B", tip, StringComparison.Ordinal);
+            Assert.Equal(cwd, entry.Cwd); // the value a resume launches from is untouched
+        }
     }
 }
