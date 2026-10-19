@@ -12,7 +12,12 @@ namespace MultiTerminal.Services
         /// <summary>Writes an open launch row; returns its id, or null when it could not be written.</summary>
         string BeginLaunch(string docId, string name, string projectId, string cwd, string kind, string resumedFromSessionId);
 
-        void AdoptSession(string launchId, string sessionId);
+        /// <summary>
+        /// Records the session a launch runs. <paramref name="sessionChangedInLaunch"/>: the pane moved from
+        /// one session to another inside this launch, which may continue the launch on a new row.
+        /// </summary>
+        /// <returns>The launch id now carrying the session (a continuation's id when one was made), or null.</returns>
+        string AdoptSession(string launchId, string sessionId, bool sessionChangedInLaunch);
 
         void LinkSpawner(string childLaunchId, string spawnerLaunchId);
 
@@ -50,7 +55,7 @@ namespace MultiTerminal.Services
         private readonly object _lock = new object();
 
         // DocIds and launch ids are GUID strings MT mints: exact by decision.
-        private readonly Dictionary<string, string> _currentLaunchByDoc = new Dictionary<string, string>(StringComparer.Ordinal);
+        private readonly Dictionary<string, CurrentLaunch> _currentLaunchByDoc = new Dictionary<string, CurrentLaunch>(StringComparer.Ordinal);
         private readonly Dictionary<string, string> _pendingSpawnerByDoc = new Dictionary<string, string>(StringComparer.Ordinal);
         private bool _shuttingDown;
 
@@ -71,7 +76,7 @@ namespace MultiTerminal.Services
             if (string.IsNullOrEmpty(docId)) return null;
             lock (_lock)
             {
-                return _currentLaunchByDoc.TryGetValue(docId, out var id) ? id : null;
+                return _currentLaunchByDoc.TryGetValue(docId, out var current) ? current.LaunchId : null;
             }
         }
 
@@ -80,12 +85,15 @@ namespace MultiTerminal.Services
         /// anyone saying so ("Launch as" stops the process directly), so it is ended <c>process_exit</c>
         /// first. A pending spawner link for this pane is applied to the new launch.
         /// </summary>
+        /// <param name="launchGeneration">The pane's Claude-session launch generation for this launch
+        /// (<c>ClaudeSessionTracker.Generation</c> right after <c>BeginLaunch</c>); an adoption carrying
+        /// another generation belongs to another launch and is ignored. Null = not known.</param>
         /// <returns>The new launch id, or null when the row could not be written.</returns>
-        public string OnLaunchBegan(string docId, string name, string projectId, string cwd, string kind, string resumedFromSessionId)
+        public string OnLaunchBegan(string docId, string name, string projectId, string cwd, string kind, string resumedFromSessionId, long? launchGeneration = null)
         {
             if (string.IsNullOrEmpty(docId)) return null;
 
-            string previous;
+            CurrentLaunch previous;
             bool shuttingDown;
             lock (_lock)
             {
@@ -95,7 +103,7 @@ namespace MultiTerminal.Services
             }
 
             if (previous != null && !shuttingDown)
-                _sink.End(previous, PaneLaunchEndReason.ProcessExit);
+                _sink.End(previous.LaunchId, PaneLaunchEndReason.ProcessExit);
 
             string launchId = _sink.BeginLaunch(docId, name, projectId, cwd, kind, resumedFromSessionId);
             if (launchId == null) return null;
@@ -103,7 +111,7 @@ namespace MultiTerminal.Services
             string pendingSpawner;
             lock (_lock)
             {
-                _currentLaunchByDoc[docId] = launchId;
+                _currentLaunchByDoc[docId] = new CurrentLaunch(launchId, launchGeneration);
                 if (_pendingSpawnerByDoc.TryGetValue(docId, out pendingSpawner))
                     _pendingSpawnerByDoc.Remove(docId);
             }
@@ -113,12 +121,40 @@ namespace MultiTerminal.Services
             return launchId;
         }
 
-        /// <summary>The pane's current launch learned (or changed) its Claude session id.</summary>
-        public void OnSessionAdopted(string docId, string sessionId)
+        /// <summary>
+        /// The pane's current launch learned (or changed) its Claude session id. The event is posted, so
+        /// it can arrive after the launch it belongs to was replaced (pipeline Run 1): it is ignored when
+        /// <paramref name="launchGeneration"/> and the current launch's generation are both known and
+        /// differ. A non-null <paramref name="previousSessionId"/> means the pane moved session within the
+        /// launch (<c>/clear</c>, a fork): the sink may then continue the launch on a new row, which
+        /// becomes the pane's current launch, so later spawns link to it. Writes nothing once MT is
+        /// shutting down: a continuation opened after the shutdown pass would stay open and read as a
+        /// crash.
+        /// </summary>
+        public void OnSessionAdopted(string docId, string sessionId, string previousSessionId = null, long? launchGeneration = null)
         {
-            string launchId = GetCurrentLaunchId(docId);
-            if (launchId == null || string.IsNullOrEmpty(sessionId)) return;
-            _sink.AdoptSession(launchId, sessionId);
+            if (string.IsNullOrEmpty(docId) || string.IsNullOrEmpty(sessionId)) return;
+
+            CurrentLaunch current;
+            lock (_lock)
+            {
+                if (_shuttingDown) return;
+                if (!_currentLaunchByDoc.TryGetValue(docId, out current)) return;
+            }
+
+            if (launchGeneration.HasValue && current.Generation.HasValue && launchGeneration.Value != current.Generation.Value)
+                return;
+
+            string carrying = _sink.AdoptSession(current.LaunchId, sessionId, !string.IsNullOrEmpty(previousSessionId));
+            if (carrying == null || string.Equals(carrying, current.LaunchId, StringComparison.Ordinal))
+                return;
+
+            lock (_lock)
+            {
+                // Only while the pane is still on the launch that was continued.
+                if (_currentLaunchByDoc.TryGetValue(docId, out var now) && ReferenceEquals(now, current))
+                    _currentLaunchByDoc[docId] = new CurrentLaunch(carrying, current.Generation);
+            }
         }
 
         /// <summary>
@@ -134,12 +170,15 @@ namespace MultiTerminal.Services
             string childLaunch;
             lock (_lock)
             {
-                if (!_currentLaunchByDoc.TryGetValue(spawnerDocId, out spawnerLaunch)) return;
-                if (!_currentLaunchByDoc.TryGetValue(childDocId, out childLaunch))
+                if (!_currentLaunchByDoc.TryGetValue(spawnerDocId, out var spawner)) return;
+                spawnerLaunch = spawner.LaunchId;
+                if (!_currentLaunchByDoc.TryGetValue(childDocId, out var child))
                 {
                     _pendingSpawnerByDoc[childDocId] = spawnerLaunch;
                     return;
                 }
+
+                childLaunch = child.LaunchId;
             }
 
             _sink.LinkSpawner(childLaunch, spawnerLaunch);
@@ -176,16 +215,30 @@ namespace MultiTerminal.Services
         private void EndCurrent(string docId, string reason, bool forgetPending)
         {
             if (string.IsNullOrEmpty(docId)) return;
-            string launchId;
+            CurrentLaunch current;
             lock (_lock)
             {
                 if (forgetPending) _pendingSpawnerByDoc.Remove(docId);
                 if (_shuttingDown) return;
-                if (!_currentLaunchByDoc.TryGetValue(docId, out launchId)) return;
+                if (!_currentLaunchByDoc.TryGetValue(docId, out current)) return;
                 _currentLaunchByDoc.Remove(docId);
             }
 
-            _sink.End(launchId, reason);
+            _sink.End(current.LaunchId, reason);
+        }
+
+        /// <summary>The launch a pane runs and its launch generation. Immutable: replaced, never mutated.</summary>
+        private sealed class CurrentLaunch
+        {
+            public CurrentLaunch(string launchId, long? generation)
+            {
+                LaunchId = launchId;
+                Generation = generation;
+            }
+
+            public string LaunchId { get; }
+
+            public long? Generation { get; }
         }
     }
 }

@@ -615,8 +615,10 @@ namespace MultiTerminal.Services
         /// processes OUTSIDE MT, so it is waived when the launch record shows the last process to run the
         /// session died with a previous MT run (<see cref="PriorLaunchState.DiedWithPreviousRun"/>):
         /// relaunching within two minutes of an exit or a crash would otherwise flag every session that
-        /// was working at the time. A launch of this run that has not ended is flagged as open. The
-        /// unknown-pane rule (this run's panes) is never waived.
+        /// was working at the time. Only a provably dead previous run waives it:
+        /// <see cref="PriorLaunchState.OpenElsewhere"/> (that MT not provably gone, pipeline Run 1) keeps
+        /// the flag exactly as <see cref="PriorLaunchState.NoRecord"/> does. A launch of this run that has
+        /// not ended is flagged as open. The unknown-pane rule (this run's panes) is never waived.
         /// </summary>
         private static string MayBeOpenReasonFor(SessionCatalogEntry entry, DateTime? earliestUnknownLaunch, PriorLaunchState prior)
         {

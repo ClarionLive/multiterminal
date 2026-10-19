@@ -2031,9 +2031,7 @@ namespace MultiTerminal
                             return;
                         }
 
-                        string gatewayProfile = null;
-                        if (project != null && _gatewayService != null && _gatewayService.IsGatewayInstalled())
-                            gatewayProfile = Services.GatewayIntegrationService.GetGatewayProfileName(project.Name);
+                        string gatewayProfile = ResolveGatewayProfile(project);
 
                         // Same guard as OnStartScreenProjectLaunched: only sync project-scoped MCP
                         // config when the cwd is a real project root, never the user-profile fallback.
@@ -2068,7 +2066,8 @@ namespace MultiTerminal
                             gatewayProfile: gatewayProfile,
                             atomicIdentityUniqueness: true,
                             inheritedClaudeProfileName: spawnerProfileName,
-                            onClaudeProfileRefused: refusal => profileRefusal = refusal);
+                            onClaudeProfileRefused: refusal => profileRefusal = refusal,
+                            launchKind: Services.PaneLaunchKind.From(kind));
 
                         // Task 7d20e94c: the helper's launch row points at the launch its PROVEN spawner
                         // pane is running (spawnerDocId comes from the caller's launch nonce, never from
@@ -2076,7 +2075,7 @@ namespace MultiTerminal
                         // failed spawn below. The helper's LaunchBegan already fired inside
                         // AddNewTerminal; LinkSpawner also copes with it arriving later.
                         if (!string.IsNullOrEmpty(resolvedDocId) && !string.IsNullOrEmpty(spawnerDocId)
-                            && !string.IsNullOrEmpty(resolvedName) && resolvedName.StartsWith(agentName, StringComparison.OrdinalIgnoreCase))
+                            && HelperResume.IsHelperName(agentName, resolvedName))
                         {
                             _paneLaunches?.LinkSpawner(resolvedDocId, spawnerDocId);
                         }
@@ -2092,7 +2091,7 @@ namespace MultiTerminal
                 if (string.IsNullOrEmpty(resolvedDocId))
                     return (false, null, "Terminal document was not created (see the MainForm debug log).", null);
 
-                if (string.IsNullOrEmpty(resolvedName) || !resolvedName.StartsWith(agentName, StringComparison.OrdinalIgnoreCase))
+                if (!HelperResume.IsHelperName(agentName, resolvedName))
                 {
                     // Both the requested name and its suffixed candidates were refused, so the pane came
                     // up as a pool placeholder. Say so — with the pane's actual name — rather than let
@@ -3744,9 +3743,11 @@ namespace MultiTerminal
         /// <para>Task 7d20e94c: <paramref name="resumeSessionId"/> is passed to StartTerminal, which
         /// reserves it as the pane's PendingResumeSessionId from the first instant (the command itself
         /// must carry the matching <c>--resume</c>); <paramref name="pinWorkingDirectory"/> keeps
-        /// <paramref name="workingDirectory"/> exactly, with no active-task repo-root or worktree move.</para>
+        /// <paramref name="workingDirectory"/> exactly, with no active-task repo-root or worktree move.
+        /// <paramref name="launchKind"/> (pipeline Run 1) is the <see cref="Services.PaneLaunchKind"/> for the
+        /// launch record when the caller knows it; null derives it from the command.</para>
         /// </summary>
-        public (string Name, string DocId) AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, bool atomicIdentityUniqueness = false, bool failClosedIdentity = false, Models.ClaudeProfile decidedClaudeProfile = null, string inheritedClaudeProfileName = null, Action<string> onClaudeProfileRefused = null, string resumeSessionId = null, bool pinWorkingDirectory = false)
+        public (string Name, string DocId) AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, bool atomicIdentityUniqueness = false, bool failClosedIdentity = false, Models.ClaudeProfile decidedClaudeProfile = null, string inheritedClaudeProfileName = null, Action<string> onClaudeProfileRefused = null, string resumeSessionId = null, bool pinWorkingDirectory = false, string launchKind = null)
         {
             _debugLogService?.Trace("AddNewTerminal", "===== START =====");
 
@@ -3951,7 +3952,7 @@ namespace MultiTerminal
 
                 if (claudeProfileRefusal == null)
                 {
-                    doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, claudeProfile: claudeProfile, resumeSessionId: resumeSessionId);
+                    doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, claudeProfile: claudeProfile, resumeSessionId: resumeSessionId, launchKind: launchKind);
                     _debugLogService?.Trace("AddNewTerminal", "doc.StartTerminal returned");
                 }
                 else
@@ -4278,16 +4279,7 @@ namespace MultiTerminal
                 // modal loops let other panes launch, report a session, or write in the meantime.
                 if (resumeSession != null)
                 {
-                    DateTime? transcriptWriteUtc = null;
-                    try
-                    {
-                        if (File.Exists(resumeSession.Entry.TranscriptPath))
-                            transcriptWriteUtc = File.GetLastWriteTimeUtc(resumeSession.Entry.TranscriptPath);
-                    }
-                    catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
-                    {
-                        _debugLogService?.Warning("LaunchSession", $"Cannot re-stat transcript of {resumeSession.Entry.SessionId}: {ex.Message}");
-                    }
+                    DateTime? transcriptWriteUtc = TryGetTranscriptWriteUtc(resumeSession.Entry.TranscriptPath);
 
                     string recheck = LaunchSessionChoiceModel.RecheckResume(resumeSession, CollectLiveSessionStates(doc), transcriptWriteUtc);
                     if (recheck != null)
@@ -4420,8 +4412,7 @@ namespace MultiTerminal
                         if (_mcpConfigService != null)
                         {
                             _mcpConfigService.EnsureMcpConfigsForProjectWithGateway(project.Id, mcpConfigDir, project.Name);
-                            if (_gatewayService != null && _gatewayService.IsGatewayInstalled())
-                                gatewayProfile = Services.GatewayIntegrationService.GetGatewayProfileName(project.Name);
+                            gatewayProfile = ResolveGatewayProfile(project);
                         }
                     }
                     catch (Exception ex) { _debugLogService?.Error("StartScreen", $"MCP config sync failed: {ex.Message}"); }
@@ -4443,7 +4434,7 @@ namespace MultiTerminal
                 _debugLogService?.Trace("StartScreen", $"Launching project '{project.Name}' in {launchDir}{(resumeSession == null ? string.Empty : $" resuming session {resumeSession.Entry.SessionId}")}");
                 _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] Calling doc.StartTerminal: doc.DocId='{doc.DocId}' launchDir='{launchDir}' terminalName='{terminalName}' projectId='{project.Id}' projectName='{project.Name}' isTeamLead={isTeamLead} taskWorktreePath='{taskWorktreePath ?? "null"}'");
                 doc.StartTerminal(launchDir, terminalName, autoRunCommand, projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile, taskWorktreePath: taskWorktreePath, claudeProfile: claudeProfile,
-                    resumeSessionId: resumeSession?.Entry.SessionId);
+                    resumeSessionId: resumeSession?.Entry.SessionId, launchKind: Services.PaneLaunchKind.From(kind));
                 _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] After StartTerminal: doc.CustomTitle='{doc.CustomTitle}' doc.TabText='{doc.TabText}' doc.Text='{doc.Text}'");
 
                 // Apply current font size
@@ -4702,11 +4693,7 @@ namespace MultiTerminal
                     var entry = catalog.TryGetEntry(projectRoot, helper?.SessionId, LaunchSessionChoiceModel.LiveSessionIdsOf(live), DateTime.UtcNow);
                     var check = HelperResume.Check(
                         helper, entry, live, projectRoot,
-                        path =>
-                        {
-                            try { return File.Exists(path) ? File.GetLastWriteTimeUtc(path) : (DateTime?)null; }
-                            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { return null; }
-                        },
+                        TryGetTranscriptWriteUtc,
                         Directory.Exists,
                         _paneLaunchRecorder?.GetPriorLaunchState(helper?.SessionId) ?? PriorLaunchState.NoRecord);
                     if (!check.CanResume)
@@ -4723,9 +4710,12 @@ namespace MultiTerminal
                         continue;
                     }
 
-                    string gatewayProfile = null;
-                    if (_gatewayService != null && _gatewayService.IsGatewayInstalled())
-                        gatewayProfile = Services.GatewayIntegrationService.GetGatewayProfileName(project.Name);
+                    // Gated like the PM's own resume, whose MCP config dir is the project ROOT (a resume's
+                    // cwd may be a worktree). No config sync here: that resume just synced the same root,
+                    // and syncing the helper's cwd would write a .mcp.json into its worktree.
+                    string gatewayProfile = Services.LaunchCommandBuilder.IsDistinctProjectRoot(project, projectRoot)
+                        ? ResolveGatewayProfile(project)
+                        : null;
 
                     string profileRefusal = null;
                     var (resolvedName, helperDocId) = AddNewTerminal(
@@ -4739,7 +4729,8 @@ namespace MultiTerminal
                         inheritedClaudeProfileName: pmDoc.LaunchClaudeProfileName,
                         onClaudeProfileRefused: refusal => profileRefusal = refusal,
                         resumeSessionId: entry.SessionId,
-                        pinWorkingDirectory: true);
+                        pinWorkingDirectory: true,
+                        launchKind: Services.PaneLaunchKind.Claude);
 
                     if (profileRefusal != null)
                     {
@@ -4753,7 +4744,7 @@ namespace MultiTerminal
                         continue;
                     }
 
-                    if (string.IsNullOrEmpty(resolvedName) || !resolvedName.StartsWith(helperName, StringComparison.OrdinalIgnoreCase))
+                    if (!HelperResume.IsHelperName(helperName, resolvedName))
                     {
                         // Same rule as the spawn path: a pool placeholder is not the helper, and is not
                         // made closable by the PM.
@@ -4919,7 +4910,7 @@ namespace MultiTerminal
                     _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, nonce: doc.LaunchNonce);
                 }
 
-                doc.StartTerminal(dir, terminalName, claudeProfile: claudeProfile);
+                doc.StartTerminal(dir, terminalName, claudeProfile: claudeProfile, launchKind: Services.PaneLaunchKind.PowerShell);
 
                 float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
                 doc.SetFontSize(terminalFontSize);
@@ -5004,7 +4995,8 @@ namespace MultiTerminal
                 // applies when the agent's active task lives in that repo (f1f74a8f).
                 workingDir = ResolveSpawnDir(terminalName, workingDir, out string taskWorktreePath, explicitTargetDir: workingDir);
 
-                doc.StartTerminal(workingDir, terminalName, launch.AutoRunCommand, isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath, claudeProfile: claudeProfile);
+                doc.StartTerminal(workingDir, terminalName, launch.AutoRunCommand, isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath, claudeProfile: claudeProfile,
+                    launchKind: Services.PaneLaunchKind.Claude);
 
                 float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
                 doc.SetFontSize(terminalFontSize);
@@ -5199,8 +5191,7 @@ namespace MultiTerminal
                         if (_mcpConfigService != null)
                         {
                             _mcpConfigService.EnsureMcpConfigsForProjectWithGateway(project.Id, launchDir, project.Name);
-                            if (_gatewayService != null && _gatewayService.IsGatewayInstalled())
-                                gatewayProfile2 = Services.GatewayIntegrationService.GetGatewayProfileName(project.Name);
+                            gatewayProfile2 = ResolveGatewayProfile(project);
                         }
                     }
                     catch (Exception ex) { _debugLogService?.Error("StartScreen", $"MCP config sync failed: {ex.Message}"); }
@@ -5217,7 +5208,7 @@ namespace MultiTerminal
                 _debugLogService?.Trace("StartScreen", $"Launching new project '{project.Name}' in {launchDir} (taskWorktreePath='{taskWorktreePath2 ?? "null"}')");
                 sourceDoc.StartTerminal(launchDir, terminalName, autoRunCommand,
                     projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile2, taskWorktreePath: taskWorktreePath2,
-                    claudeProfile: claudeProfile2);
+                    claudeProfile: claudeProfile2, launchKind: Services.PaneLaunchKind.From(terminalKind));
 
                 float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
                 sourceDoc.SetFontSize(terminalFontSize);
@@ -5701,7 +5692,7 @@ namespace MultiTerminal
                 return false;
             }
 
-            doc.StartTerminal(dir, register(), claudeProfile: claudeProfile);
+            doc.StartTerminal(dir, register(), claudeProfile: claudeProfile, launchKind: Services.PaneLaunchKind.PowerShell);
             return true;
         }
 
@@ -6407,7 +6398,7 @@ namespace MultiTerminal
 
                 // Pre-register with MessageBroker so the terminal is routable immediately
                 if (presetShellsAllowed)
-                    doc.StartTerminal(presetDir, PreRegisterTerminal(doc.DocId, doc.LaunchNonce), claudeProfile: presetClaudeProfile);
+                    doc.StartTerminal(presetDir, PreRegisterTerminal(doc.DocId, doc.LaunchNonce), claudeProfile: presetClaudeProfile, launchKind: Services.PaneLaunchKind.PowerShell);
                 else
                     doc.ShowStartScreen();
                 doc.SetFontSize(_settings?.GetTerminalFontSize() ?? 10f);
@@ -6512,13 +6503,54 @@ namespace MultiTerminal
         private void OnPaneLaunchBegan(object sender, PaneLaunchBeganEventArgs e)
         {
             if (e == null) return;
-            _paneLaunches?.OnLaunchBegan(e.DocId, e.TerminalName, e.ProjectId, e.WorkingDirectory, e.Kind, e.ResumeSessionId);
+            _paneLaunches?.OnLaunchBegan(e.DocId, e.TerminalName, e.ProjectId, e.WorkingDirectory, e.Kind, e.ResumeSessionId, e.LaunchGeneration);
         }
 
+        /// <summary>
+        /// The event is POSTED, so by delivery the pane may hold another session or another launch
+        /// (pipeline Run 1): it is dropped unless the pane still holds this session, and the tracker
+        /// drops it unless its launch generation is the pane's current launch's.
+        /// </summary>
         private void OnPaneClaudeSessionAdopted(object sender, ClaudeSessionAdoptedEventArgs e)
         {
             if (e == null) return;
-            _paneLaunches?.OnSessionAdopted(e.DocId, e.SessionId);
+            if (sender is TerminalDocument doc
+                && !string.Equals(doc.CurrentClaudeSessionId, e.SessionId, StringComparison.OrdinalIgnoreCase))
+            {
+                _debugLogService?.Info("LaunchSession", $"Late session adoption dropped for DocId={e.DocId}: '{e.SessionId}' is no longer the pane's session.");
+                return;
+            }
+
+            _paneLaunches?.OnSessionAdopted(e.DocId, e.SessionId, e.PreviousSessionId, e.LaunchGeneration);
+        }
+
+        /// <summary>
+        /// The MCP gateway profile a launch of <paramref name="project"/> uses: the project's when the
+        /// gateway is installed, else null. Callers keep their own conditions around it (a config sync,
+        /// a distinct project root); this is only the resolution they shared (pipeline Run 1).
+        /// </summary>
+        private string ResolveGatewayProfile(Models.Project project)
+        {
+            if (project == null || _gatewayService == null || !_gatewayService.IsGatewayInstalled())
+                return null;
+            return Services.GatewayIntegrationService.GetGatewayProfileName(project.Name);
+        }
+
+        /// <summary>
+        /// The transcript's last write time (UTC), or null when it is missing or cannot be read (logged).
+        /// The re-stat the PM resume and the helper resume make just before launching.
+        /// </summary>
+        private DateTime? TryGetTranscriptWriteUtc(string transcriptPath)
+        {
+            try
+            {
+                return File.Exists(transcriptPath) ? File.GetLastWriteTimeUtc(transcriptPath) : (DateTime?)null;
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                _debugLogService?.Warning("LaunchSession", $"Cannot re-stat transcript '{transcriptPath}': {ex.Message}");
+                return null;
+            }
         }
 
         private void OnTerminalExited(object sender, EventArgs e)
@@ -6702,8 +6734,12 @@ namespace MultiTerminal
                 && !TryGetLaunchClaudeProfile(null, launchFolder, launchAsLabel, out claudeProfile, inheritedProfileName: paneProfileName, requestedProfileName: pickedProfileName))
             {
                 ReleaseGhostRegistration(doc.DocId, "MainForm.OnLaunchAsIdentityRequested");
-                doc.Terminal.Stop();
-                doc.ShowStartScreen();
+
+                // ReturnToStartScreen, not Terminal.Stop() + ShowStartScreen() (pipeline Run 1, task
+                // 7d20e94c): the same visible result, but it also ends the pane's Claude session hold
+                // and raises TerminalExited, so OnTerminalExited ends the stopped launch's row
+                // (process_exit) instead of leaving it open until the pane's next launch or MT's exit.
+                doc.ReturnToStartScreen();
                 return;
             }
 
@@ -6725,7 +6761,7 @@ namespace MultiTerminal
             doc.Terminal.Stop();
             doc.CustomTitle = terminalName;
             doc.StartTerminal(workingDirectory, terminalName, autoRunCommand, taskWorktreePath: taskWorktreePath,
-                quietStartProjectId: quietStartProjectId, claudeProfile: claudeProfile);
+                quietStartProjectId: quietStartProjectId, claudeProfile: claudeProfile, launchKind: Services.PaneLaunchKind.Claude);
 
             // Auto-initialization is handled by OnClaudeCodeDetected when Claude Code's output is detected.
             // This ensures injection happens AFTER Claude Code is ready, not just after WebView2 loads.

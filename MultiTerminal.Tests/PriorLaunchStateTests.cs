@@ -38,8 +38,13 @@ namespace MultiTerminal.Tests
             Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_DB", null);
         }
 
+        // A previous run whose MT process is provably gone: the case the waiver is for (pipeline Run 1).
+        private static readonly Func<string, bool> Gone = _ => true;
+
+        // Seq follows the minute, so launch order and start order agree in these fixtures.
         private static PaneLaunchRecord Row(string run, int minute, string endReason = null, bool ended = false) => new PaneLaunchRecord
         {
+            Seq = minute + 1,
             MtRunId = run,
             SessionId = Sid,
             StartedAt = T0.AddMinutes(minute),
@@ -52,7 +57,7 @@ namespace MultiTerminal.Tests
         [Fact]
         public void No_row_is_no_record()
         {
-            Assert.Equal(PriorLaunchState.NoRecord, PaneLaunchRecorder.ClassifyPriorLaunch(Array.Empty<PaneLaunchRecord>(), "now"));
+            Assert.Equal(PriorLaunchState.NoRecord, PaneLaunchRecorder.ClassifyPriorLaunch(Array.Empty<PaneLaunchRecord>(), "now", Gone));
         }
 
         [Theory]
@@ -60,7 +65,7 @@ namespace MultiTerminal.Tests
         [InlineData(PaneLaunchEndReason.MtExit)]        // MT exited with it open
         public void A_previous_runs_open_or_mt_exit_launch_died_with_that_run(string reason)
         {
-            Assert.Equal(PriorLaunchState.DiedWithPreviousRun, PaneLaunchRecorder.ClassifyPriorLaunch(new[] { Row("old", 0, reason) }, "now"));
+            Assert.Equal(PriorLaunchState.DiedWithPreviousRun, PaneLaunchRecorder.ClassifyPriorLaunch(new[] { Row("old", 0, reason) }, "now", Gone));
         }
 
         [Theory]
@@ -69,14 +74,14 @@ namespace MultiTerminal.Tests
         [InlineData(PaneLaunchEndReason.ProcessExit)]
         public void A_previous_runs_closed_launch_is_ended(string reason)
         {
-            Assert.Equal(PriorLaunchState.Ended, PaneLaunchRecorder.ClassifyPriorLaunch(new[] { Row("old", 0, reason) }, "now"));
+            Assert.Equal(PriorLaunchState.Ended, PaneLaunchRecorder.ClassifyPriorLaunch(new[] { Row("old", 0, reason) }, "now", Gone));
         }
 
         [Fact]
         public void This_runs_launch_is_open_until_it_ends()
         {
-            Assert.Equal(PriorLaunchState.OpenInCurrentRun, PaneLaunchRecorder.ClassifyPriorLaunch(new[] { Row("now", 0) }, "now"));
-            Assert.Equal(PriorLaunchState.Ended, PaneLaunchRecorder.ClassifyPriorLaunch(new[] { Row("now", 0, PaneLaunchEndReason.ProcessExit) }, "now"));
+            Assert.Equal(PriorLaunchState.OpenInCurrentRun, PaneLaunchRecorder.ClassifyPriorLaunch(new[] { Row("now", 0) }, "now", Gone));
+            Assert.Equal(PriorLaunchState.Ended, PaneLaunchRecorder.ClassifyPriorLaunch(new[] { Row("now", 0, PaneLaunchEndReason.ProcessExit) }, "now", Gone));
         }
 
         [Fact]
@@ -84,21 +89,23 @@ namespace MultiTerminal.Tests
         {
             // An older crash row does not outvote a newer launch that ended this run, and vice versa.
             Assert.Equal(PriorLaunchState.Ended, PaneLaunchRecorder.ClassifyPriorLaunch(
-                new[] { Row("old", 0), Row("now", 5, PaneLaunchEndReason.PaneClosed) }, "now"));
+                new[] { Row("old", 0), Row("now", 5, PaneLaunchEndReason.PaneClosed) }, "now", Gone));
             Assert.Equal(PriorLaunchState.DiedWithPreviousRun, PaneLaunchRecorder.ClassifyPriorLaunch(
-                new[] { Row("older", 9, PaneLaunchEndReason.MtExit), Row("oldest", 0, PaneLaunchEndReason.PaneClosed) }, "now"));
+                new[] { Row("older", 9, PaneLaunchEndReason.MtExit), Row("oldest", 0, PaneLaunchEndReason.PaneClosed) }, "now", Gone));
         }
 
         [Fact]
         public void The_recorder_classifies_against_its_own_run_id()
         {
             using var db = new TaskDatabase();
-            var previous = new PaneLaunchRecorder(db, null, "run-old", () => T0);
+            var oldProcess = new MtProcessIdentity(4242, T0.AddHours(-1));
+            var previous = new PaneLaunchRecorder(db, null, "run-old", () => T0, oldProcess, null);
             var id = previous.BeginLaunch("doc", "Notes", "p", Root, "claude", null);
             previous.AdoptSession(id, Sid);
             previous.EndAllForShutdown();
 
-            var current = new PaneLaunchRecorder(db, null, "run-new", () => T0.AddMinutes(10));
+            var current = new PaneLaunchRecorder(db, null, "run-new", () => T0.AddMinutes(10), null,
+                p => p.ProcessId == oldProcess.ProcessId && p.StartedAtUtc == oldProcess.StartedAtUtc ? MtProcessLiveness.Gone : MtProcessLiveness.Unknown);
             Assert.Equal(PriorLaunchState.DiedWithPreviousRun, current.GetPriorLaunchState(Sid));
             Assert.Equal(PriorLaunchState.Ended, previous.GetPriorLaunchState(Sid)); // its own run: mt_exit is an end
             Assert.Equal(PriorLaunchState.NoRecord, current.GetPriorLaunchState("99999999-2222-3333-4444-555555555555"));

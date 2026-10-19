@@ -26,7 +26,12 @@ namespace MultiTerminal.Tests
                 return id;
             }
 
-            public void AdoptSession(string launchId, string sessionId) => Calls.Add($"adopt {launchId} {sessionId}");
+            public string AdoptSession(string launchId, string sessionId, bool sessionChangedInLaunch)
+            {
+                Calls.Add($"adopt {launchId} {sessionId}{(sessionChangedInLaunch ? " changed" : string.Empty)}");
+                return launchId;
+            }
+
             public void LinkSpawner(string childLaunchId, string spawnerLaunchId) => Calls.Add($"link {childLaunchId} <- {spawnerLaunchId}");
             public void End(string launchId, string reason) => Calls.Add($"end {launchId} {reason}");
             public void EndAllForShutdown() => Calls.Add("end-all");

@@ -42,6 +42,18 @@ namespace MultiTerminal.Services
     public static class HelperResume
     {
         /// <summary>
+        /// Whether a pane created for <paramref name="requestedName"/> came up as that helper:
+        /// <paramref name="resolvedName"/> is the name or a suffixed form of it (a held name),
+        /// ordinal-ignore-case. Anything else is a pool placeholder, which is not the helper and is not
+        /// made closable by its spawner. The one rule for the spawn path and the helper resume
+        /// (pipeline Run 1, task 7d20e94c).
+        /// </summary>
+        public static bool IsHelperName(string requestedName, string resolvedName)
+            => !string.IsNullOrEmpty(requestedName)
+               && !string.IsNullOrEmpty(resolvedName)
+               && resolvedName.StartsWith(requestedName, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
         /// Whether <paramref name="helper"/> may be resumed now, applying the same rules as the PM's own
         /// resume, in this order: it has a recorded name; it is a Claude session (only Claude has
         /// <c>--resume</c>); the catalog found it (<paramref name="entry"/> null means
@@ -51,7 +63,9 @@ namespace MultiTerminal.Services
         /// with, so a flagged helper is skipped). <paramref name="prior"/> is the launch record's word on
         /// its last process: <see cref="PriorLaunchState.DiedWithPreviousRun"/> waives the recent-write
         /// flag (that process died with the last MT, which is the restart this feature exists for), and
-        /// <see cref="PriorLaunchState.OpenInCurrentRun"/> skips it as already open; <see cref="LaunchSessionChoiceModel.RecheckResume"/> passes; and its cwd validates
+        /// <see cref="PriorLaunchState.OpenInCurrentRun"/> skips it as already open, and
+        /// <see cref="PriorLaunchState.OpenElsewhere"/> (a previous run left it open and that MT is not
+        /// provably gone) skips it as "may still be open elsewhere"; <see cref="LaunchSessionChoiceModel.RecheckResume"/> passes; and its cwd validates
         /// against the project root and still exists.
         /// </summary>
         public static HelperResumeCheck Check(
@@ -75,6 +89,12 @@ namespace MultiTerminal.Services
             var candidate = model.Candidates.FirstOrDefault();
             if (candidate == null || prior == PriorLaunchState.OpenInCurrentRun)
                 return HelperResumeCheck.Skip("its session is already open in another pane");
+
+            // Fail-closed (pipeline Run 1): the record says a previous MT run left it open and that MT
+            // cannot be shown to have exited. With no dialog to confirm in, that is a skip whatever the
+            // transcript's age.
+            if (prior == PriorLaunchState.OpenElsewhere)
+                return HelperResumeCheck.Skip("its session may still be open elsewhere (the MultiTerminal that last ran it cannot be shown to have exited)");
             if (candidate.MayBeOpenElsewhere)
                 return HelperResumeCheck.Skip($"its session may still be open elsewhere ({candidate.MayBeOpenReason.TrimEnd('.')})");
 

@@ -322,9 +322,9 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>Posts <see cref="ClaudeSessionAdopted"/> to the UI thread from the statusline poll.</summary>
-        private void PostClaudeSessionAdopted(string sessionId, string previousSessionId)
+        private void PostClaudeSessionAdopted(string sessionId, string previousSessionId, long launchGeneration)
         {
-            var args = new ClaudeSessionAdoptedEventArgs(_docId, sessionId, previousSessionId);
+            var args = new ClaudeSessionAdoptedEventArgs(_docId, sessionId, previousSessionId, launchGeneration);
             _debugLogService?.Info("TerminalDocument", $"DocId='{_docId}' Claude session '{previousSessionId ?? ""}' → '{sessionId}' (task 7d20e94c).");
             try
             {
@@ -1521,7 +1521,8 @@ namespace MultiTerminal.Docking
         /// <param name="quietStartProjectId">The project whose Quiet start setting applies when <paramref name="projectId"/> is null (GitHub #34). Used by "Launch as...", which is not a project launch and must not get a project's role or env, but still opens in a quiet project. Ignored when projectId is set.</param>
         /// <param name="claudeProfile">The Claude Code config profile this launch runs under (ticket c8ee0eec), already resolved with <see cref="ClaudeProfileResolver"/>. Null means Default.</param>
         /// <param name="resumeSessionId">The Claude session this launch resumes (task ec2ed636), reserved for the pane from the first instant; null for a new session.</param>
-        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string quietStartProjectId = null, MultiTerminal.Models.ClaudeProfile claudeProfile = null, string resumeSessionId = null)
+        /// <param name="launchKind">The <see cref="PaneLaunchKind"/> of this launch, for the launch record, when the caller knows it (pipeline Run 1, task 7d20e94c). Null derives it from <paramref name="autoRunCommand"/>.</param>
+        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string quietStartProjectId = null, MultiTerminal.Models.ClaudeProfile claudeProfile = null, string resumeSessionId = null, string launchKind = null)
         {
             // Per launch, like the role below: a reused pane must not keep the last launch's profile.
             _launchClaudeProfile = new MultiTerminal.Services.ClaudePaneProfile(
@@ -1572,6 +1573,10 @@ namespace MultiTerminal.Docking
             // The tracker's normalised form (trimmed, blank => null), captured before any statusline tick
             // could drop it, for LaunchBegan below (task 7d20e94c item 1).
             string launchResumeSessionId = _claudeSession.PendingResumeSessionId;
+            // This launch's generation (pipeline Run 1): BeginLaunch just set it, and only the next
+            // BeginLaunch/EndLaunch changes it. ClaudeSessionAdopted carries the generation it adopted
+            // under, so a late adoption of an earlier launch can be told apart.
+            long launchGeneration = _claudeSession.Generation;
 
             // Derive project name for tab title: use project lookup, or fall back to folder name
             if (!string.IsNullOrEmpty(projectId) && _messageBroker != null)
@@ -1660,9 +1665,9 @@ namespace MultiTerminal.Docking
                 _originalAgentName,
                 workingDirectory,
                 string.IsNullOrEmpty(projectId) ? null : projectId,
-                PaneLaunchKind.FromAutoRunCommand(autoRunCommand),
+                string.IsNullOrEmpty(launchKind) ? PaneLaunchKind.FromAutoRunCommand(autoRunCommand) : launchKind,
                 launchResumeSessionId,
-                string.IsNullOrEmpty(spawnerName) ? null : spawnerName);
+                launchGeneration);
             LastLaunchArgs = launchArgs;
             RaiseLaunchBegan(launchArgs);
 
@@ -3627,7 +3632,7 @@ namespace MultiTerminal.Docking
                         if (_claudeSession.TryAdopt(claudeLaunchGen, tokenSessionId, fileTimestampMs, ownPaneFile, out bool sessionChanged, out string previousSessionId)
                             && sessionChanged)
                         {
-                            PostClaudeSessionAdopted(tokenSessionId, previousSessionId);
+                            PostClaudeSessionAdopted(tokenSessionId, previousSessionId, claudeLaunchGen);
                         }
                     }
                     // Read account-level quota from the shared file so all terminals
@@ -4481,49 +4486,6 @@ namespace MultiTerminal.Docking
         }
     }
 
-    /// <summary>
-    /// The CLI a pane launch runs (task 7d20e94c item 1), derived from the launch's auto-run command
-    /// because StartTerminal receives no kind. Values: <see cref="Claude"/>, <see cref="Codex"/>,
-    /// <see cref="PowerShell"/> (no auto-run command: a plain shell), <see cref="Unknown"/>.
-    /// </summary>
-    public static class PaneLaunchKind
-    {
-        public const string Claude = "claude";
-        public const string Codex = "codex";
-        public const string PowerShell = "powershell";
-        public const string Unknown = "unknown";
-
-        /// <summary>
-        /// Classifies an auto-run command. Claude: the first token (quotes stripped) is <c>claude</c> or
-        /// <c>claude.exe</c>, bare or as a path's file name, which is how
-        /// <c>LaunchCommandBuilder.BuildClaudeCommand</c> starts its command. Codex: the command sets
-        /// <c>MULTITERMINAL_CODEX_BIN</c> (<c>BuildCodexCommand</c>'s launcher) or its first token is
-        /// <c>codex</c>/<c>codex.exe</c>. Null or blank: a plain shell. Anything else: unknown, never a
-        /// guess.
-        /// </summary>
-        public static string FromAutoRunCommand(string autoRunCommand)
-        {
-            if (string.IsNullOrWhiteSpace(autoRunCommand)) return PowerShell;
-            string trimmed = autoRunCommand.TrimStart();
-            if (trimmed.IndexOf("MULTITERMINAL_CODEX_BIN", StringComparison.OrdinalIgnoreCase) >= 0) return Codex;
-
-            int end = 0;
-            while (end < trimmed.Length && !char.IsWhiteSpace(trimmed[end]) && trimmed[end] != ';') end++;
-            string token = trimmed.Substring(0, end).Trim('"', '\'');
-            string name;
-            try { name = System.IO.Path.GetFileName(token); }
-            catch (ArgumentException) { return Unknown; }
-
-            if (string.Equals(name, "claude", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(name, "claude.exe", StringComparison.OrdinalIgnoreCase))
-                return Claude;
-            if (string.Equals(name, "codex", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(name, "codex.exe", StringComparison.OrdinalIgnoreCase))
-                return Codex;
-            return Unknown;
-        }
-    }
-
     /// <summary>Args of <see cref="TerminalDocument.LaunchBegan"/> (task 7d20e94c item 1). Immutable.</summary>
     public sealed class PaneLaunchBeganEventArgs : EventArgs
     {
@@ -4545,10 +4507,13 @@ namespace MultiTerminal.Docking
         /// <summary>The session this launch resumes (trimmed), or <c>null</c> for a new session.</summary>
         public string ResumeSessionId { get; }
 
-        /// <summary>The spawning agent's name for a helper pane, or <c>null</c>.</summary>
-        public string SpawnerName { get; }
+        /// <summary>
+        /// The pane's Claude-session launch generation for this launch (pipeline Run 1): a
+        /// <see cref="ClaudeSessionAdoptedEventArgs"/> carrying another generation belongs to another launch.
+        /// </summary>
+        public long LaunchGeneration { get; }
 
-        public PaneLaunchBeganEventArgs(string docId, string terminalName, string workingDirectory, string projectId, string kind, string resumeSessionId, string spawnerName)
+        public PaneLaunchBeganEventArgs(string docId, string terminalName, string workingDirectory, string projectId, string kind, string resumeSessionId, long launchGeneration)
         {
             DocId = docId;
             TerminalName = terminalName;
@@ -4556,7 +4521,7 @@ namespace MultiTerminal.Docking
             ProjectId = projectId;
             Kind = kind;
             ResumeSessionId = resumeSessionId;
-            SpawnerName = spawnerName;
+            LaunchGeneration = launchGeneration;
         }
     }
 
@@ -4572,11 +4537,18 @@ namespace MultiTerminal.Docking
         /// <summary>The id held just before within the same launch; <c>null</c> for a launch's first adoption.</summary>
         public string PreviousSessionId { get; }
 
-        public ClaudeSessionAdoptedEventArgs(string docId, string sessionId, string previousSessionId)
+        /// <summary>
+        /// The launch generation the adoption was made under (pipeline Run 1). The event is posted, so a
+        /// subscriber compares this with the launch it holds and drops an adoption of an earlier launch.
+        /// </summary>
+        public long LaunchGeneration { get; }
+
+        public ClaudeSessionAdoptedEventArgs(string docId, string sessionId, string previousSessionId, long launchGeneration)
         {
             DocId = docId;
             SessionId = sessionId;
             PreviousSessionId = previousSessionId;
+            LaunchGeneration = launchGeneration;
         }
     }
 

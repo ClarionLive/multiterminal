@@ -1,4 +1,5 @@
 using MultiTerminal.Docking;
+using MultiTerminal.Services;
 using Xunit;
 
 namespace MultiTerminal.Tests

@@ -118,8 +118,8 @@ and session ids. MainForm writes it only through `Services/PaneLaunchTracker`:
 
 | Event | Where | Write |
 |---|---|---|
-| `TerminalDocument.LaunchBegan` (every launch path, after `Start` returns) | `WirePaneLaunchRecording`, called at every `new TerminalDocument()` site next to `TerminalExited` | new row; a previous launch of the same pane still open is ended `process_exit` first ("Launch as" stops the process directly) |
-| `ClaudeSessionAdopted` | same | `session_id` of the pane's current launch |
+| `TerminalDocument.LaunchBegan` (every launch path, after `Start` returns) | `WirePaneLaunchRecording`, called at every `new TerminalDocument()` site next to `TerminalExited` | new row; a previous launch of the same pane still open is ended `process_exit` first ("Launch as" stops the process directly). A resume's row carries the resumed session id from the start, so a resumed pane closed before its first adoption is not left session-less (which let the older open row bring it back). `kind` is passed by the launch site where it knows it (`PaneLaunchKind.From(TerminalKind)`), else derived from the command |
+| `ClaudeSessionAdopted` | same | `session_id` of the pane's current launch; a session CHANGE inside the launch (`/clear`, a fork) continues it on a new row, see below. Dropped when stale: the event is posted, so MainForm drops it unless the pane still holds that session, and the tracker drops it unless its launch generation is the current launch's |
 | spawn | `OnSpawnRequested`, inside the Invoke after `AddNewTerminal` | `spawner_launch_id` = the PROVEN spawner pane's (nonce, never the typed name) current launch |
 | close_helper | `OnSpawnedPaneCloseRequested`, BEFORE `doc.Close()` | `close_helper`; the `pane_closed` that Close raises then finds no open launch |
 | pane removed from the dock | `OnDockContentRemoved` | `pane_closed` |
@@ -131,6 +131,22 @@ and session ids. MainForm writes it only through `Services/PaneLaunchTracker`:
 the caller knows the helper's DocId, so the link is normally made after the row exists. If it does
 not exist yet, the spawner's launch (resolved at link time) is held per DocId and applied once when
 the helper's launch begins; closing the pane first drops it.
+
+**Order is `seq`, never `started_at`** (pipeline Run 1). Each insert takes `MAX(seq) + 1` in the same
+statement, under the write gate. "Newest launch", "a LATER launch closed it" and the prior-launch
+state all compare `seq`; two launches in one clock tick used to be ordered by whatever SQLite returned.
+
+**`/clear` continues the launch on a new row** (pipeline Run 1, `TaskDatabase.AdoptPaneLaunchSession`,
+atomic). When a pane's session changes INSIDE one launch and its open row already carries another
+session, the row is ended `session_changed` and a continuation row (same pane, name, cwd, project,
+kind, spawner link and MT run; new session; next `seq`) becomes the pane's current launch. Helpers
+spawned before the change stay linked to the old row, so resuming the OLD session still offers
+them; helpers spawned after link to the continuation and belong to the new session. A launch's FIRST
+adoption never continues: it may simply replace the id a resume pre-filled. `session_changed` counts
+as closed for the old session, which is correct for both readers: `GetOpenHelpers` does not look at
+the PM rows' own state (only at their children), and for the prior-launch state no process runs the
+old session any more, so it is `Ended` (the recency flag applies normally, no waiver). Shutdown
+writes no adoption at all, so no continuation is opened after `mt_exit` was written.
 
 **Threading.** Every caller is on the UI thread today (LaunchBegan is raised there; the adopted and
 exited events are posted there; the spawn and close callbacks Invoke onto it). That is the callers'
@@ -187,9 +203,21 @@ recorder's `MtRunId`; pure rule `ClassifyPriorLaunch`):
 | Newest row | State | Effect on "may be open elsewhere" |
 |---|---|---|
 | none, or the read failed | `NoRecord` | recency flag applies as before |
-| previous run, still open (crash) or `mt_exit` | `DiedWithPreviousRun` | recency flag WAIVED: that process died with that MT |
+| previous run, still open (crash) or `mt_exit`, and that MT process provably gone | `DiedWithPreviousRun` | recency flag WAIVED: that process died with that MT |
+| previous run, still open or `mt_exit`, MT process NOT provably gone (alive, never recorded, unreadable) | `OpenElsewhere` | PM: recency flag applies as for `NoRecord`; helper: skipped as "may still be open elsewhere" whatever the transcript's age |
 | this run, not ended | `OpenInCurrentRun` | flagged open (PM: confirm; helper: skipped as already open) |
 | anything else (ended this run, or closed in an earlier run) | `Ended` | recency flag applies as before |
+
+**Fail-closed on the previous run** (pipeline Run 1). Each recorder writes its MT process id and
+process start time to `mt_runs` under its run id. A previous run's open row counts as dead only when
+`MtProcessProbe.Probe` says that process is gone: no process has the id, or one has it with another
+start time (the id was reused), or it has exited. Alive, unknown (access denied) or unrecorded (a run
+from before `mt_runs`) is `OpenElsewhere`. Today the waiver was already safe for two reasons the code
+states in `ClassifyPriorLaunch`: `SingleInstanceGuard` holds `Local\MultiTerminal.SingleInstance` for
+the whole process, so a new run cannot start while the old one lives; and every pane tree is in a
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` job (`ConPtyTerminal.CreateJobAndAssignProcess`), so the panes die
+with MT even on a crash. Neither is airtight (the guard fails open, `Local\` does not cover another
+Windows session, the job assignment is best-effort), which is why the probe decides.
 
 It applies to both the PM's offer (`LaunchSessionChoiceModel`'s `priorLaunch` argument, asked once per
 offered session in `LoadLaunchSessionChoices`) and each helper (`HelperResume.Check`'s `prior`). The
@@ -208,3 +236,5 @@ was always advisory and a quick relaunch after an exit is the case this feature 
 - A resumed helper is a spawned pane with no job: its SessionStart briefing asks it to collect one,
   and the collect answers `no_job`.
 - The resume happens on the UI thread, one helper after another (each a catalog lookup and a pane).
+- Launches recorded by a run before `mt_runs` existed read as `OpenElsewhere` to every later run (their
+  helpers are skipped once, as "may be open elsewhere").
