@@ -964,5 +964,159 @@ namespace MultiTerminal.Tests
             Assert.Equal(300, SessionCatalog.ToDisplayText(new string('a', 300)).Length);
             Assert.Equal(10, SessionCatalog.ToDisplayText(new string('a', 300), 10).Length);
         }
+
+        // ---- TryGetEntry (task 7d20e94c item 3): one session by id, the same answer as List ----
+
+        private SessionCatalogEntry Get(string id, SessionCatalog catalog = null, ISet<string> live = null)
+            => (catalog ?? Catalog()).TryGetEntry(_projectRoot, id, live ?? new HashSet<string>(), Now);
+
+        [Fact]
+        public void TryGetEntry_finds_a_session_in_the_root_folder()
+        {
+            var id = WriteSimple(_rootFolder, Now.AddHours(-1), "root work");
+            WriteSimple(_rootFolder, Now.AddHours(-2), "another");
+
+            var entry = Get(id);
+
+            Assert.NotNull(entry);
+            Assert.Equal(id, entry.SessionId);
+            Assert.Equal(_projectRoot, entry.Cwd);
+            Assert.Null(entry.WorktreeId);
+            Assert.Equal("root work", entry.Summary);
+        }
+
+        [Fact]
+        public void TryGetEntry_finds_a_session_in_a_worktree_folder()
+        {
+            var id = WriteSimple(_worktreeFolder, Now.AddHours(-1));
+
+            var entry = Get(id);
+
+            Assert.NotNull(entry);
+            Assert.Equal(_worktreeDir, entry.Cwd);
+            Assert.Equal(WorktreeId, entry.WorktreeId);
+            Assert.Equal(Path.Combine(_worktreeFolder, id + ".jsonl"), entry.TranscriptPath);
+        }
+
+        [Theory]
+        [InlineData("")]
+        [InlineData(null)]
+        [InlineData(@"..\x")]
+        [InlineData("a/b")]
+        [InlineData("TRAVERSAL")]
+        public void TryGetEntry_rejects_a_non_GUID_id_before_any_filesystem_call(string id)
+        {
+            // A real, resumable transcript that a path built from the id WOULD reach:
+            // <worktreeFolder>\..\<rootFolderName>\<guid>.jsonl is the root folder's transcript.
+            var guid = WriteSimple(_rootFolder, Now.AddHours(-1));
+            if (id == "TRAVERSAL")
+                id = @"..\" + Path.GetFileName(_rootFolder) + @"\" + guid;
+            Assert.NotNull(Get(guid)); // control: the transcript itself is offered
+
+            var probed = new List<string>();
+            var catalog = Catalog();
+            catalog.DirectoryExists = p => { probed.Add(p); return Directory.Exists(p); };
+
+            Assert.Null(catalog.TryGetEntry(_projectRoot, id, new HashSet<string>(), Now));
+            // GetCandidateFolders probes the existing worktree (abcd1234) through the seam, so an empty
+            // probe list means the id was refused before the folders were even listed.
+            Assert.Empty(probed);
+        }
+
+        [Fact]
+        public void TryGetEntry_returns_null_for_a_GUID_with_no_transcript()
+        {
+            WriteSimple(_rootFolder, Now.AddHours(-1));
+            Assert.Null(Get(Guid.NewGuid().ToString()));
+        }
+
+        [Fact]
+        public void TryGetEntry_returns_null_for_a_live_session_ignoring_case()
+        {
+            var id = WriteSimple(_rootFolder, Now.AddHours(-1));
+            Assert.NotNull(Get(id)); // control
+
+            Assert.Null(Get(id, live: new HashSet<string> { id.ToUpperInvariant() }));
+            Assert.Null(Get(id.ToUpperInvariant(), live: new HashSet<string> { id }));
+        }
+
+        [Fact]
+        public void TryGetEntry_refuses_every_transcript_List_rejects()
+        {
+            // UNC-only cwd in the worktree's folder: no root fallback there, so List drops it.
+            var unc = Write(_worktreeFolder, Now.AddHours(-1),
+                User("hi", @"\\evilhost\share"), Assistant("ok", @"\\evilhost\share"));
+            // A deleted worktree's folder.
+            var goneDir = Path.Combine(_projectRoot, ".claude", "worktrees", "deadbeef");
+            var goneFolder = Directory.CreateDirectory(
+                Path.Combine(_projectsRoot, SessionCatalog.EncodeProjectPath(goneDir))).FullName;
+            var gone = Write(goneFolder, Now.AddHours(-2), User("work", goneDir), Assistant("done", goneDir));
+            // Root cwds, stored in the worktree's folder: resuming from the root would not find it.
+            var mismatched = Write(_worktreeFolder, Now.AddHours(-3), User("x", _projectRoot), Assistant("y", _projectRoot));
+
+            var probed = new List<string>();
+            var catalog = Catalog();
+            catalog.DirectoryExists = p => { probed.Add(p); return Directory.Exists(p); };
+
+            Assert.Empty(List(catalog)); // the same three, as List sees them
+            Assert.Null(Get(unc, catalog));
+            Assert.Null(Get(gone, catalog));
+            Assert.Null(Get(mismatched, catalog));
+            Assert.DoesNotContain(probed, p => p.StartsWith(@"\\", StringComparison.Ordinal) || p.StartsWith("//", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void TryGetEntry_when_a_session_is_in_two_folders_the_newest_copy_decides()
+        {
+            // The same id in both folders. The newer copy is in the worktree folder and resumable.
+            var id = WriteSimple(_worktreeFolder, Now.AddHours(-1));
+            var older = Path.Combine(_rootFolder, id + ".jsonl");
+            File.WriteAllText(older, User("old", _projectRoot) + "\n" + Assistant("o", _projectRoot) + "\n");
+            File.SetLastWriteTimeUtc(older, Now.AddHours(-5));
+
+            var listed = Assert.Single(List());
+            var entry = Get(id);
+            Assert.Equal(_worktreeDir, listed.Cwd);
+            Assert.Equal(_worktreeDir, entry.Cwd);
+
+            // Now the newest copy is unresumable (root cwds in the worktree folder): List drops the id
+            // rather than offering the older copy, and so must TryGetEntry.
+            var newer = Path.Combine(_worktreeFolder, id + ".jsonl");
+            File.WriteAllText(newer, User("x", _projectRoot) + "\n" + Assistant("y", _projectRoot) + "\n");
+            File.SetLastWriteTimeUtc(newer, Now.AddHours(-1));
+
+            Assert.Empty(List());
+            Assert.Null(Get(id));
+        }
+
+        [Fact]
+        public void TryGetEntry_matches_Lists_entry_field_for_field()
+        {
+            // A helper with its job beyond the head and its usage behind a big final result: every
+            // optional read and every lookup is exercised.
+            var helper = WriteBudgetHelper(Now.AddHours(-1), usageBehindBigResult: true);
+            var plain = WriteSimple(_worktreeFolder, Now - TimeSpan.FromSeconds(30), "recent");
+            var catalog = Catalog(names: id => id == plain ? "Bo​b" : null, summaries: _ => null);
+
+            var listed = catalog.List(_projectRoot, new HashSet<string>(), Now).ToDictionary(e => e.SessionId);
+            var listBytes = catalog.BytesReadLastList;
+            var listReads = catalog.TranscriptsReadLastList;
+            Assert.Equal(2, listed.Count);
+
+            foreach (var id in new[] { helper, plain })
+            {
+                var got = catalog.TryGetEntry(_projectRoot, id, new HashSet<string>(), Now);
+                Assert.NotNull(got);
+                Assert.Equal(JsonSerializer.Serialize(listed[id]), JsonSerializer.Serialize(got));
+            }
+
+            Assert.Equal(Job, listed[helper].Summary);
+            Assert.Equal(300_002, listed[helper].ContextTokens);
+            Assert.Equal("Bob", listed[plain].AgentName);
+            Assert.Equal(SessionCatalogStatus.PossiblyOpenElsewhere, listed[plain].Status);
+            // TryGetEntry keeps its own meter: List's counters are untouched.
+            Assert.Equal(listBytes, catalog.BytesReadLastList);
+            Assert.Equal(listReads, catalog.TranscriptsReadLastList);
+        }
     }
 }
