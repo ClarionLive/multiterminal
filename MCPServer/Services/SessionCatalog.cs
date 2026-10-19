@@ -251,26 +251,16 @@ namespace MultiTerminal.MCPServer.Services
         public IReadOnlyList<SessionCatalogEntry> List(string projectRoot, ISet<string> liveSessionIds, DateTime utcNow, int max = 15)
         {
             var results = new List<SessionCatalogEntry>();
-            if (string.IsNullOrWhiteSpace(projectRoot) || max <= 0 ||
-                string.IsNullOrEmpty(_claudeProjectsRoot))
-            {
+            if (max <= 0)
                 return results;
-            }
 
             TranscriptsReadLastList = 0;
             BytesReadLastList = 0;
 
-            // Only a local drive root can produce a resumable cwd (ValidateResumeCwd), so a UNC or
-            // device-path project lists nothing, without reading a single transcript.
-            if (!TryCanonicalLocalPath(projectRoot, out var root))
-            {
-                Debug.WriteLine($"[SessionCatalog] project root '{projectRoot}' is not a local drive path; nothing to list");
+            if (!TryGetRoot(projectRoot, out var root))
                 return results;
-            }
 
-            // Copy into an ordinal-ignore-case set: the caller's set may use any comparer, and
-            // session ids are GUIDs whose case is not meaningful.
-            var live = new HashSet<string>(liveSessionIds ?? Enumerable.Empty<string>(), StringComparer.OrdinalIgnoreCase);
+            var live = ToLiveSet(liveSessionIds);
 
             var candidates = new List<(string Path, string FolderName, DateTime LastWriteUtc)>();
             foreach (var folder in GetCandidateFolders(root))
@@ -289,17 +279,8 @@ namespace MultiTerminal.MCPServer.Services
                 var folderName = Path.GetFileName(folder);
                 foreach (var file in files)
                 {
-                    var id = Path.GetFileNameWithoutExtension(file);
-                    if (!Guid.TryParseExact(id, "D", out _) || live.Contains(id))
-                        continue;
-                    try
-                    {
-                        candidates.Add((file, folderName, File.GetLastWriteTimeUtc(file)));
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.WriteLine($"[SessionCatalog] cannot stat {file}: {ex.Message}");
-                    }
+                    if (TryGetCandidate(file, live, out var lastWriteUtc))
+                        candidates.Add((file, folderName, lastWriteUtc));
                 }
             }
 
@@ -321,24 +302,134 @@ namespace MultiTerminal.MCPServer.Services
                     continue;
 
                 TranscriptsReadLastList++;
-                try
-                {
-                    var entry = BuildEntry(root, candidate.Path, candidate.FolderName, candidate.LastWriteUtc, utcNow, meter);
-                    if (entry != null)
-                        results.Add(entry);
-                }
-                catch (Exception ex)
-                {
-                    // Belt and braces: one bad transcript must never take down the whole list.
-                    Debug.WriteLine($"[SessionCatalog] skipped {candidate.Path}: {ex.Message}");
-                }
-                finally
-                {
-                    BytesReadLastList = meter.Used;
-                }
+                var entry = TryBuildEntry(root, candidate.Path, candidate.FolderName, candidate.LastWriteUtc, utcNow, meter);
+                BytesReadLastList = meter.Used;
+                if (entry != null)
+                    results.Add(entry);
             }
 
             return results;
+        }
+
+        /// <summary>
+        /// The one session <paramref name="sessionId"/> of <paramref name="projectRoot"/>, exactly as
+        /// <see cref="List"/> would describe it, or null when List would not offer it (task 7d20e94c,
+        /// resuming a PM together with its helpers). Never throws for a bad id, file or line.
+        ///
+        /// <para>The id is checked to be a GUID ("D" form) BEFORE any path is built from it or any
+        /// filesystem call is made, so an id such as <c>..\x</c> or <c>a/b</c> can never name a file
+        /// outside the project's transcript folders. Then the live-id check, then the same folders
+        /// <see cref="List"/> scans (a deleted worktree's folder is skipped). When the session is in
+        /// two folders, the newest copy decides, as in List: if that copy is rejected, the older one is
+        /// not offered instead. The entry goes through the same <see cref="BuildEntry"/> rejections
+        /// (cwd encoding and validation, directory existence, sanitising, context, helper summary).
+        /// Reads are metered against a fresh <see cref="ReadByteBudget"/>; List's counters are not
+        /// touched.</para>
+        /// </summary>
+        public SessionCatalogEntry TryGetEntry(string projectRoot, string sessionId, ISet<string> liveSessionIds, DateTime utcNow)
+        {
+            if (!Guid.TryParseExact(sessionId, "D", out _))
+                return null;
+            if (!TryGetRoot(projectRoot, out var root))
+                return null;
+            var live = ToLiveSet(liveSessionIds);
+            if (live.Contains(sessionId))
+                return null;
+
+            string newestPath = null;
+            string newestFolder = null;
+            var newestWriteUtc = DateTime.MinValue;
+            foreach (var folder in GetCandidateFolders(root))
+            {
+                List<string> files;
+                try
+                {
+                    // The id is a validated GUID, so it is a literal file name with no wildcard or
+                    // separator. Enumerating (rather than File.Exists on a built path) yields the name
+                    // as spelled on disk, which is what List reports.
+                    files = Directory.EnumerateFiles(folder, sessionId + ".jsonl", SearchOption.TopDirectoryOnly).ToList();
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[SessionCatalog] cannot enumerate {folder}: {ex.Message}");
+                    continue;
+                }
+
+                foreach (var file in files)
+                {
+                    if (!string.Equals(Path.GetFileNameWithoutExtension(file), sessionId, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (TryGetCandidate(file, live, out var lastWriteUtc) && (newestPath == null || lastWriteUtc > newestWriteUtc))
+                    {
+                        newestPath = file;
+                        newestFolder = Path.GetFileName(folder);
+                        newestWriteUtc = lastWriteUtc;
+                    }
+                }
+            }
+
+            if (newestPath == null)
+                return null;
+            return TryBuildEntry(root, newestPath, newestFolder, newestWriteUtc, utcNow, new ReadMeter(ReadByteBudget));
+        }
+
+        /// <summary>
+        /// The canonical project root, or false when nothing can be listed for it. Only a local drive
+        /// root can produce a resumable cwd (<see cref="ValidateResumeCwd"/>), so a UNC or device-path
+        /// project yields nothing, without reading a single transcript.
+        /// </summary>
+        private bool TryGetRoot(string projectRoot, out string root)
+        {
+            root = null;
+            if (string.IsNullOrWhiteSpace(projectRoot) || string.IsNullOrEmpty(_claudeProjectsRoot))
+                return false;
+            if (!TryCanonicalLocalPath(projectRoot, out root))
+            {
+                Debug.WriteLine($"[SessionCatalog] project root '{projectRoot}' is not a local drive path; nothing to list");
+                return false;
+            }
+            return true;
+        }
+
+        // Copy into an ordinal-ignore-case set: the caller's set may use any comparer, and session ids
+        // are GUIDs whose case is not meaningful.
+        private static HashSet<string> ToLiveSet(ISet<string> liveSessionIds) =>
+            new HashSet<string>(liveSessionIds ?? Enumerable.Empty<string>(), StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Whether <paramref name="file"/> is a session transcript that may be offered: its name is a
+        /// GUID that no live session holds, and its last-write time can be read.
+        /// </summary>
+        private static bool TryGetCandidate(string file, HashSet<string> live, out DateTime lastWriteUtc)
+        {
+            lastWriteUtc = default;
+            var id = Path.GetFileNameWithoutExtension(file);
+            if (!Guid.TryParseExact(id, "D", out _) || live.Contains(id))
+                return false;
+            try
+            {
+                lastWriteUtc = File.GetLastWriteTimeUtc(file);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[SessionCatalog] cannot stat {file}: {ex.Message}");
+                return false;
+            }
+        }
+
+        private SessionCatalogEntry TryBuildEntry(string root, string path, string folderName, DateTime lastWriteUtc, DateTime utcNow, ReadMeter meter)
+        {
+            try
+            {
+                return BuildEntry(root, path, folderName, lastWriteUtc, utcNow, meter);
+            }
+            catch (Exception ex)
+            {
+                // Belt and braces: one bad transcript must never take down the whole list.
+                Debug.WriteLine($"[SessionCatalog] skipped {path}: {ex.Message}");
+                return null;
+            }
         }
 
         private IEnumerable<string> GetCandidateFolders(string root)
