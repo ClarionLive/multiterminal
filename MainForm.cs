@@ -4564,7 +4564,15 @@ namespace MultiTerminal
 
                 var catalog = CreateSessionCatalog();
                 var entries = catalog.List(projectRoot, LaunchSessionChoiceModel.LiveSessionIdsOf(panes), DateTime.UtcNow);
-                return new LaunchSessionChoiceModel(entries, panes);
+
+                // Task 7d20e94c: which helpers each offered session left open, from the launch record.
+                // Looked up lazily per session and cached by the model (the dialog asks on a selection
+                // change; Continue mode asks once for the session it resumes).
+                var recorder = _paneLaunchRecorder;
+                return new LaunchSessionChoiceModel(entries, panes)
+                {
+                    HelperLookup = recorder == null ? null : sid => recorder.GetOpenHelpers(sid),
+                };
             }
             catch (Exception ex)
             {

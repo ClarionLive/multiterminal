@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
@@ -46,6 +47,8 @@ namespace MultiTerminal.Dialogs
         private Label _continueContext;
         private Label _continuePreview;
         private ListView _sessionList;
+        private Label _helperHeader;
+        private ListView _helperList;
         private Button _resumeSelectedButton;
         private CheckBox _dontAskCheckBox;
         private Button _cancelButton;
@@ -65,6 +68,11 @@ namespace MultiTerminal.Dialogs
         private bool _settingNameProgrammatically;
         private bool _nameEdited;
         private bool _fittingColumns;
+
+        // "Also resume helpers" (task 7d20e94c item 5): the ticks, and the session whose helpers the
+        // list shows now (the selected row, else the Continue last candidate).
+        private readonly HelperTickState _helperTicks = new HelperTickState();
+        private LaunchSessionCandidate _helperTarget;
 
         // Theme-derived colours for the owner-drawn list (system colours when no theme is given).
         private Color _listBack = SystemColors.Window;
@@ -114,20 +122,29 @@ namespace MultiTerminal.Dialogs
         /// <summary>The launch mode to persist for the project, or null for no change.</summary>
         public ProjectLaunchMode? ModeToPersist { get; private set; }
 
+        /// <summary>
+        /// The helpers to resume with the chosen session (task 7d20e94c item 5): the ticked helpers of
+        /// <see cref="SelectedCandidate"/>, all of them for a session whose list the user never changed.
+        /// Empty for a new session. Meaningful only after <see cref="DialogResult.OK"/>.
+        /// </summary>
+        public IReadOnlyList<OpenHelper> HelpersToResume { get; private set; } = Array.Empty<OpenHelper>();
+
         private void BuildLayout()
         {
             const int left = 16;
             const int width = 1040;
-            const int listHeight = 380;
+            const int listHeight = 300;
+            const int helperListHeight = 132;
+            const int helperSectionHeight = 24 + helperListHeight + 10;
             int y = 16;
             _toolTip = new ToolTip();
 
             // The final size is set BEFORE any control is added: anchors record their distance to the
             // edges at add time, so adding first and resizing after would move every anchored control.
             var listTop = y + 40 + 40 + 44 + 24;
-            var bottomRowTop = listTop + listHeight + 10;
+            var bottomRowTop = listTop + listHeight + 10 + helperSectionHeight;
             ClientSize = new Size(width + (2 * left), bottomRowTop + 46);
-            MinimumSize = new Size(760, 480);
+            MinimumSize = new Size(760, 560);
 
             Controls.Add(new Label
             {
@@ -289,6 +306,7 @@ namespace MultiTerminal.Dialogs
                 if (candidate != null && !_nameEdited)
                     SetNameProgrammatically(LaunchSessionChoiceModel.DefaultNameFor(LaunchSessionChoice.PickedSession, candidate, _newSessionName));
                 _sessionList.Invalidate(); // owner-drawn rows: repaint the old and new selection fully
+                RefreshHelperList();
             };
             // ONE path per gesture (review of 702e4fa): a double-click resumes through MouseDoubleClick,
             // and Enter through the AcceptButton swap below. ItemActivate is deliberately NOT handled:
@@ -309,6 +327,63 @@ namespace MultiTerminal.Dialogs
             };
             Controls.Add(_sessionList);
             y += listHeight + 10;
+
+            // --- Also resume helpers (task 7d20e94c item 5) ---
+            _helperHeader = new Label
+            {
+                Location = new Point(left, y),
+                Size = new Size(width, 20),
+                AutoEllipsis = true,
+                Font = new Font("Segoe UI", BaseFontSize, FontStyle.Bold),
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+            };
+            _toolTip.SetToolTip(_helperHeader,
+                "Helpers this session had open when it last ended (closed helpers are not listed).\n" +
+                "Ticked helpers reopen with it, each in its own folder under its own name.\n" +
+                "Click a row or press Space to tick or untick it. New session never reopens helpers.");
+            Controls.Add(_helperHeader);
+            y += 24;
+
+            _helperList = new ListView
+            {
+                Location = new Point(left, y),
+                Size = new Size(width, helperListHeight),
+                View = View.Details,
+                FullRowSelect = true,
+                MultiSelect = false,
+                HideSelection = true,
+                HeaderStyle = ColumnHeaderStyle.Nonclickable,
+                OwnerDraw = true,
+                ShowItemToolTips = true,
+                BorderStyle = BorderStyle.FixedSingle,
+                Font = _listFont,
+                SmallImageList = _rowHeightImages,
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+            };
+            _helperList.Columns.Add("Helper", 300);
+            _helperList.Columns.Add("Where", 260);
+            _helperList.Columns.Add("Started", 160);
+            _helperList.DrawColumnHeader += OnDrawColumnHeader;
+            _helperList.DrawItem += (s, e) => { /* every cell is drawn in DrawSubItem */ };
+            _helperList.DrawSubItem += OnDrawHelperSubItem;
+            _helperList.MouseClick += (s, e) =>
+            {
+                if (e.Button == MouseButtons.Left)
+                    ToggleHelper(_helperList.HitTest(e.Location).Item);
+            };
+            _helperList.KeyDown += (s, e) =>
+            {
+                if (e.KeyCode == Keys.Space && _helperList.SelectedItems.Count == 1)
+                {
+                    ToggleHelper(_helperList.SelectedItems[0]);
+                    e.Handled = true;
+                }
+            };
+            _helperList.SelectedIndexChanged += (s, e) => _helperList.Invalidate();
+            _helperList.Enter += (s, e) => _helperList.Invalidate();
+            _helperList.Leave += (s, e) => _helperList.Invalidate();
+            Controls.Add(_helperList);
+            y += helperListHeight + 10;
 
             // --- Bottom row ---
             _dontAskCheckBox = new CheckBox
@@ -352,6 +427,7 @@ namespace MultiTerminal.Dialogs
             AcceptButton = DefaultButton;
             CancelButton = _cancelButton;
             FitSummaryColumn();
+            RefreshHelperList();
 
             // The name box shows the name the default (Enter) action launches under: the continue
             // candidate's agent when Continue last is the default (pipeline Run 1), else the new name.
@@ -506,11 +582,112 @@ namespace MultiTerminal.Dialogs
 
             Choice = choice;
             SelectedCandidate = choice == LaunchSessionChoice.NewSession ? null : candidate;
+            HelpersToResume = _helperTicks.TickedFor(_model, SelectedCandidate);
             NameWasEdited = _nameEdited && !string.IsNullOrWhiteSpace(_nameTextBox.Text);
             ChosenName = LaunchSessionChoiceModel.ResolveName(
                 choice, SelectedCandidate, _newSessionName, NameWasEdited ? _nameTextBox.Text : null);
             ModeToPersist = LaunchSessionChoiceModel.ModeToPersist(choice, _dontAskCheckBox.Checked);
             DialogResult = DialogResult.OK;
+        }
+
+        // Shows the helpers of the selected row, else of the Continue last candidate. The lookup is the
+        // model's (cached per session), made here on a selection change, never while painting.
+        private void RefreshHelperList()
+        {
+            if (_helperList == null)
+                return;
+            var listSelected = SelectedListCandidate();
+            _helperTarget = listSelected ?? _model.ContinueCandidate;
+            var helpers = _model.HelpersFor(_helperTarget);
+
+            _helperHeader.Text = _helperTarget == null
+                ? "Also resume helpers: —"
+                : $"Also resume helpers of {AgentLabel(_helperTarget)} ({(listSelected != null ? "selected session" : "Continue last")}):";
+
+            _helperList.BeginUpdate();
+            try
+            {
+                _helperList.Items.Clear();
+                foreach (var h in helpers)
+                {
+                    var name = SessionCatalog.ToDisplayText(h.TerminalName);
+                    var item = new ListViewItem(string.IsNullOrEmpty(name) ? "(unnamed)" : name)
+                    {
+                        Tag = h,
+                        ToolTipText = $"{h.SessionId}\n{SessionCatalog.ToDisplayText(h.Cwd)}",
+                    };
+                    item.SubItems.Add(LaunchSessionChoiceModel.HelperWhere(h.Cwd));
+                    item.SubItems.Add(LaunchSessionChoiceModel.FormatRelativeAge(h.LastStartedAt, _nowUtc));
+                    _helperList.Items.Add(item);
+                }
+
+                if (helpers.Count == 0)
+                {
+                    // One inert row, drawn dimmed: the list reads as empty without being blank.
+                    var none = new ListViewItem("—") { Tag = null };
+                    none.SubItems.Add(string.Empty);
+                    none.SubItems.Add(string.Empty);
+                    _helperList.Items.Add(none);
+                }
+            }
+            finally
+            {
+                _helperList.EndUpdate();
+            }
+        }
+
+        private void ToggleHelper(ListViewItem item)
+        {
+            if (item?.Tag is not OpenHelper helper || _helperTarget == null)
+                return;
+            _helperTicks.Toggle(_helperTarget.Entry.SessionId, helper.SessionId);
+            _helperList.Invalidate();
+        }
+
+        private void OnDrawHelperSubItem(object sender, DrawListViewSubItemEventArgs e)
+        {
+            if (e.Item == null || e.SubItem == null)
+                return;
+            var helper = e.Item.Tag as OpenHelper;
+            var bounds = e.ColumnIndex == 0
+                ? new Rectangle(e.Bounds.X, e.Bounds.Y, _helperList.Columns[0].Width, e.Bounds.Height)
+                : e.Bounds;
+            var selected = helper != null && e.Item.Selected && _helperList.Focused;
+            using (var back = new SolidBrush(selected ? _selectionBack : _listBack))
+                e.Graphics.FillRectangle(back, bounds);
+
+            // The "—" row is the disabled state: dimmed like a disabled button, still readable.
+            var fore = helper == null ? Blend(_listFore, _listBack, 0.45) : selected ? _selectionFore : _listFore;
+            var textLeft = bounds.X + CellPadding;
+            if (e.ColumnIndex == 0 && helper != null)
+            {
+                var box = Math.Min(14, Math.Max(8, bounds.Height - 10));
+                var boxRect = new Rectangle(textLeft, bounds.Y + ((bounds.Height - box) / 2), box, box);
+                using (var pen = new Pen(selected ? _selectionFore : _gridLine))
+                    e.Graphics.DrawRectangle(pen, boxRect);
+                if (_helperTarget != null && _helperTicks.IsTicked(_helperTarget.Entry.SessionId, helper.SessionId))
+                {
+                    var smoothing = e.Graphics.SmoothingMode;
+                    e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                    using (var check = new Pen(fore, 2f))
+                    {
+                        e.Graphics.DrawLines(check, new[]
+                        {
+                            new PointF(boxRect.Left + (box * 0.2f), boxRect.Top + (box * 0.5f)),
+                            new PointF(boxRect.Left + (box * 0.42f), boxRect.Top + (box * 0.75f)),
+                            new PointF(boxRect.Left + (box * 0.82f), boxRect.Top + (box * 0.25f)),
+                        });
+                    }
+
+                    e.Graphics.SmoothingMode = smoothing;
+                }
+
+                textLeft = boxRect.Right + 8;
+            }
+
+            var textRect = new Rectangle(textLeft, bounds.Y, Math.Max(0, bounds.Right - CellPadding - textLeft), bounds.Height);
+            TextRenderer.DrawText(e.Graphics, e.SubItem.Text, _listFont, textRect, fore,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
         }
 
         private static string ContextText(LaunchSessionCandidate c) =>

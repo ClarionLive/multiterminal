@@ -156,6 +156,52 @@ namespace MultiTerminal.Services
         internal static LaunchSessionDecision LoadFailed(LaunchSessionChoiceModel model) => new LaunchSessionDecision(LaunchSessionAction.LoadFailed, null, model);
     }
 
+    /// <summary>
+    /// Which helpers the launch prompt's "Also resume helpers" list has ticked (task 7d20e94c item 5).
+    /// Everything starts ticked; an untick is remembered per (session, helper session), so switching
+    /// the selection away and back keeps it, and a session the Owner never looked at resumes all of
+    /// its helpers. Ids are GUIDs: compared ordinal-ignore-case, like the live set.
+    /// </summary>
+    public sealed class HelperTickState
+    {
+        private readonly HashSet<(string Session, string Helper)> _unticked =
+            new HashSet<(string, string)>(new PairComparer());
+
+        public bool IsTicked(string sessionId, string helperSessionId) =>
+            !_unticked.Contains((sessionId ?? string.Empty, helperSessionId ?? string.Empty));
+
+        /// <summary>Flips one helper of one session; returns its new state.</summary>
+        public bool Toggle(string sessionId, string helperSessionId)
+        {
+            var key = (sessionId ?? string.Empty, helperSessionId ?? string.Empty);
+            if (_unticked.Remove(key))
+                return true;
+            _unticked.Add(key);
+            return false;
+        }
+
+        /// <summary>The ticked helpers of <paramref name="candidate"/>, in the model's order.</summary>
+        public IReadOnlyList<OpenHelper> TickedFor(LaunchSessionChoiceModel model, LaunchSessionCandidate candidate)
+        {
+            if (model == null || candidate?.Entry == null)
+                return Array.Empty<OpenHelper>();
+            string sid = candidate.Entry.SessionId;
+            return model.HelpersFor(candidate).Where(h => IsTicked(sid, h.SessionId)).ToList();
+        }
+
+        private sealed class PairComparer : IEqualityComparer<(string Session, string Helper)>
+        {
+            public bool Equals((string Session, string Helper) x, (string Session, string Helper) y) =>
+                StringComparer.OrdinalIgnoreCase.Equals(x.Session, y.Session)
+                && StringComparer.OrdinalIgnoreCase.Equals(x.Helper, y.Helper);
+
+            public int GetHashCode((string Session, string Helper) obj) =>
+                HashCode.Combine(
+                    StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Session ?? string.Empty),
+                    StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Helper ?? string.Empty));
+        }
+    }
+
     /// <summary>How the name a launch prompt chose is registered (pipeline Run 1).</summary>
     public enum ChosenNameRegistration
     {
@@ -478,6 +524,65 @@ namespace MultiTerminal.Services
             return tenths % 10 == 0
                 ? (tenths / 10).ToString(System.Globalization.CultureInfo.InvariantCulture) + "M"
                 : (tenths / 10.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "M";
+        }
+
+        // ---- Helpers that resume with the PM (task 7d20e94c item 5) ----
+
+        private readonly Dictionary<string, IReadOnlyList<OpenHelper>> _helpersBySession =
+            new Dictionary<string, IReadOnlyList<OpenHelper>>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Which helpers a session left open: <c>PaneLaunchRecorder.GetOpenHelpers</c> in MT. Null means
+        /// helpers are never offered (a model built without the launch record, e.g. in older tests).
+        /// </summary>
+        public Func<string, IReadOnlyList<OpenHelper>> HelperLookup { get; init; }
+
+        /// <summary>
+        /// The helpers <paramref name="candidate"/>'s session left open, newest first, without any whose
+        /// session is live now (it is already open, so there is nothing to resume). Looked up once per
+        /// session and cached for the model's life, so the dialog can call this on every selection
+        /// change and never on the paint path. A throwing lookup counts as "none".
+        /// </summary>
+        public IReadOnlyList<OpenHelper> HelpersFor(LaunchSessionCandidate candidate)
+        {
+            string sessionId = candidate?.Entry?.SessionId;
+            if (HelperLookup == null || string.IsNullOrWhiteSpace(sessionId))
+                return Array.Empty<OpenHelper>();
+            if (_helpersBySession.TryGetValue(sessionId, out var cached))
+                return cached;
+
+            IReadOnlyList<OpenHelper> found;
+            try
+            {
+                found = (HelperLookup(sessionId) ?? Array.Empty<OpenHelper>())
+                    .Where(h => h != null && !string.IsNullOrWhiteSpace(h.SessionId) && !LiveSessionIds.Contains(h.SessionId))
+                    .ToList();
+            }
+            catch (Exception)
+            {
+                found = Array.Empty<OpenHelper>();
+            }
+
+            _helpersBySession[sessionId] = found;
+            return found;
+        }
+
+        /// <summary>
+        /// The "Where" text of a helper row: "project folder", "worktree &lt;id&gt;" (the segment after
+        /// <c>.claude\worktrees\</c>), or "—" with no folder. The id is display-sanitised: the cwd came from
+        /// the pane's launch and is shown, never launched from (the resume uses the transcript's own cwd).
+        /// </summary>
+        public static string HelperWhere(string cwd)
+        {
+            if (string.IsNullOrWhiteSpace(cwd))
+                return "—";
+            const string marker = @"\.claude\worktrees\";
+            var normalized = cwd.Replace('/', '\\');
+            int at = normalized.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (at < 0)
+                return "project folder";
+            var id = normalized.Substring(at + marker.Length).Split('\\')[0];
+            return id.Length == 0 ? "project folder" : $"worktree {SessionCatalog.ToDisplayText(id)}";
         }
 
         private static string MayBeOpenReasonFor(SessionCatalogEntry entry, DateTime? earliestUnknownLaunch)
