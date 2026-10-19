@@ -43,6 +43,29 @@ namespace MultiTerminal.Services
         public const string MtExit = "mt_exit";
     }
 
+    /// <summary>
+    /// What the launch record says about the process that last ran a session (task 7d20e94c), for the
+    /// "may be open elsewhere" rule. Decided from the session's NEWEST launch row only.
+    /// </summary>
+    public enum PriorLaunchState
+    {
+        /// <summary>No launch row (never run by an MT with the record), or the record could not be read.</summary>
+        NoRecord = 0,
+
+        /// <summary>
+        /// The newest launch belongs to a PREVIOUS MT run and is still open (that MT crashed) or ended
+        /// <c>mt_exit</c>: its process died with that MT, so a recent transcript write was that process,
+        /// not something outside MT.
+        /// </summary>
+        DiedWithPreviousRun = 1,
+
+        /// <summary>The newest launch belongs to THIS MT run and has not ended: a pane is running it.</summary>
+        OpenInCurrentRun = 2,
+
+        /// <summary>Any other newest launch: ended this run, or closed (not by an MT exit) in an earlier one.</summary>
+        Ended = 3,
+    }
+
     /// <summary>A helper session a PM session left open, as returned by <see cref="PaneLaunchRecorder.GetOpenHelpers"/>.</summary>
     public sealed class OpenHelper
     {
@@ -223,6 +246,41 @@ namespace MultiTerminal.Services
                 Log($"GetOpenHelpers failed for session {pmSessionId}: {ex.Message}");
                 return Array.Empty<OpenHelper>();
             }
+        }
+
+        /// <summary>
+        /// <see cref="PriorLaunchState"/> of <paramref name="sessionId"/>, from its newest launch row and
+        /// this recorder's <see cref="MtRunId"/>. A failed read is <see cref="PriorLaunchState.NoRecord"/>,
+        /// which keeps the recency rule in force (the safe direction).
+        /// </summary>
+        public PriorLaunchState GetPriorLaunchState(string sessionId)
+        {
+            if (string.IsNullOrEmpty(sessionId)) return PriorLaunchState.NoRecord;
+            try
+            {
+                return ClassifyPriorLaunch(_db.GetPaneLaunchesBySession(sessionId), MtRunId);
+            }
+            catch (Exception ex)
+            {
+                Log($"GetPriorLaunchState failed for session {sessionId}: {ex.Message}");
+                return PriorLaunchState.NoRecord;
+            }
+        }
+
+        /// <summary>The pure rule behind <see cref="GetPriorLaunchState"/>: only the newest row (by start time) counts.</summary>
+        public static PriorLaunchState ClassifyPriorLaunch(IEnumerable<PaneLaunchRecord> launches, string currentRunId)
+        {
+            var newest = (launches ?? Enumerable.Empty<PaneLaunchRecord>())
+                .Where(l => l != null)
+                .OrderByDescending(l => l.StartedAt)
+                .FirstOrDefault();
+            if (newest == null) return PriorLaunchState.NoRecord;
+
+            bool currentRun = !string.IsNullOrEmpty(currentRunId)
+                && string.Equals(newest.MtRunId, currentRunId, StringComparison.Ordinal);
+            if (currentRun)
+                return newest.EndedAt == null ? PriorLaunchState.OpenInCurrentRun : PriorLaunchState.Ended;
+            return IsOpen(newest) ? PriorLaunchState.DiedWithPreviousRun : PriorLaunchState.Ended;
         }
 
         /// <summary>Still open: never ended (MT crashed or it is running) or ended only because MT exited.</summary>

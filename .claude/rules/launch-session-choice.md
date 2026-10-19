@@ -162,8 +162,9 @@ run.
   session (a refused or replaced PM takes no helpers).
 - **Per helper**, the PM resume's own rules (`HelperResume.Check`): rebuild the live set (it includes
   the PM and the helpers already reopened), `SessionCatalog.TryGetEntry` by id, the model's "may be
-  open elsewhere" rule (SKIPPED, not confirmed: there is no one to confirm; so a helper written in the
-  last ~2 minutes is skipped), `RecheckResume`, `ValidateResumeCwd`, and the folder still existing.
+  open elsewhere" rule with the launch record's verdict (below; a flagged helper is SKIPPED, not
+  confirmed, since there is no one to confirm), `RecheckResume`, `ValidateResumeCwd`, and the folder
+  still existing.
   Then `BuildCommand(ClaudeCode, project, cwd, sessionId)` as for the PM, and `AddNewTerminal` with
   the original name (atomic: a held name comes back suffixed), the PM as spawner, the PM's profile
   inherited, unattended (a profile refusal is a skip), `resumeSessionId` (reserves
@@ -173,6 +174,31 @@ run.
   from the resumed PM, and the helper's launch row is linked to the PM's current launch.
 - **One summary**, and only if something was skipped or renamed ("Notes came back as Notes-2"; the PM's
   conversation still uses the old name).
+
+### Previous-run launches are not "open elsewhere"
+
+The recent-write flag (transcript written in the last ~2 minutes) exists for processes OUTSIDE MT.
+Applied blindly it defeats the main scenario: MT exits or crashes, the Owner relaunches within a
+minute, and every session that was working up to that moment is flagged, so the PM needs a confirm
+and every helper is skipped. So the flag consults the launch record
+(`PaneLaunchRecorder.GetPriorLaunchState`, the session's NEWEST `pane_launches` row against the
+recorder's `MtRunId`; pure rule `ClassifyPriorLaunch`):
+
+| Newest row | State | Effect on "may be open elsewhere" |
+|---|---|---|
+| none, or the read failed | `NoRecord` | recency flag applies as before |
+| previous run, still open (crash) or `mt_exit` | `DiedWithPreviousRun` | recency flag WAIVED: that process died with that MT |
+| this run, not ended | `OpenInCurrentRun` | flagged open (PM: confirm; helper: skipped as already open) |
+| anything else (ended this run, or closed in an earlier run) | `Ended` | recency flag applies as before |
+
+It applies to both the PM's offer (`LaunchSessionChoiceModel`'s `priorLaunch` argument, asked once per
+offered session in `LoadLaunchSessionChoices`) and each helper (`HelperResume.Check`'s `prior`). The
+waiver touches only the recency flag: this run's live set (`CurrentClaudeSessionId`,
+`PendingResumeSessionId`, `AgentProcess.SessionId`), the unknown-pane rule and the pre-launch
+`RecheckResume` all still apply. Deliberately narrow: a session ended in this run or closed in an
+earlier one keeps the recency flag. The record cannot see a process outside MT in any case, so a
+session resumed in a CA tab after an `mt_exit` is also unflagged; that is accepted, because the flag
+was always advisory and a quick relaunch after an exit is the case this feature exists for.
 
 ### Known gaps
 

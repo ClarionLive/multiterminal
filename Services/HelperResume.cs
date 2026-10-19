@@ -46,9 +46,12 @@ namespace MultiTerminal.Services
         /// resume, in this order: it has a recorded name; it is a Claude session (only Claude has
         /// <c>--resume</c>); the catalog found it (<paramref name="entry"/> null means
         /// <see cref="SessionCatalog.TryGetEntry"/> refused it: live, transcript gone, worktree pruned or
-        /// cwd invalid); the model built from <paramref name="livePanes"/> still offers it and does not
-        /// flag it "may be open elsewhere" (there is no dialog to confirm with, so a flagged helper is
-        /// skipped); <see cref="LaunchSessionChoiceModel.RecheckResume"/> passes; and its cwd validates
+        /// cwd invalid); the model built from <paramref name="livePanes"/> and <paramref name="prior"/>
+        /// still offers it and does not flag it "may be open elsewhere" (there is no dialog to confirm
+        /// with, so a flagged helper is skipped). <paramref name="prior"/> is the launch record's word on
+        /// its last process: <see cref="PriorLaunchState.DiedWithPreviousRun"/> waives the recent-write
+        /// flag (that process died with the last MT, which is the restart this feature exists for), and
+        /// <see cref="PriorLaunchState.OpenInCurrentRun"/> skips it as already open; <see cref="LaunchSessionChoiceModel.RecheckResume"/> passes; and its cwd validates
         /// against the project root and still exists.
         /// </summary>
         public static HelperResumeCheck Check(
@@ -57,7 +60,8 @@ namespace MultiTerminal.Services
             IEnumerable<PaneSessionState> livePanes,
             string projectRoot,
             Func<string, DateTime?> transcriptLastWriteUtc,
-            Func<string, bool> directoryExists)
+            Func<string, bool> directoryExists,
+            PriorLaunchState prior = PriorLaunchState.NoRecord)
         {
             if (helper == null) return HelperResumeCheck.Skip("nothing was recorded for it");
             if (string.IsNullOrWhiteSpace(helper.TerminalName)) return HelperResumeCheck.Skip("it has no recorded name");
@@ -67,9 +71,9 @@ namespace MultiTerminal.Services
                 return HelperResumeCheck.Skip("its session cannot be resumed: it is already open, or its folder or transcript is gone");
 
             var panes = (livePanes ?? Enumerable.Empty<PaneSessionState>()).ToList();
-            var model = new LaunchSessionChoiceModel(new[] { entry }, panes);
+            var model = new LaunchSessionChoiceModel(new[] { entry }, panes, _ => prior);
             var candidate = model.Candidates.FirstOrDefault();
-            if (candidate == null)
+            if (candidate == null || prior == PriorLaunchState.OpenInCurrentRun)
                 return HelperResumeCheck.Skip("its session is already open in another pane");
             if (candidate.MayBeOpenElsewhere)
                 return HelperResumeCheck.Skip($"its session may still be open elsewhere ({candidate.MayBeOpenReason.TrimEnd('.')})");

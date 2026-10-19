@@ -247,7 +247,15 @@ namespace MultiTerminal.Services
         /// <summary>Clock slack for the null-session pane rule (launch time vs transcript write time).</summary>
         public static readonly TimeSpan UnknownPaneSlack = TimeSpan.FromSeconds(5);
 
-        public LaunchSessionChoiceModel(IEnumerable<SessionCatalogEntry> catalog, IEnumerable<PaneSessionState> panes)
+        /// <param name="catalog">The resumable sessions.</param>
+        /// <param name="panes">The live set (panes, headless helpers, reservations).</param>
+        /// <param name="priorLaunch">
+        /// Task 7d20e94c: what the launch record says about the process that last ran each session
+        /// (<c>PaneLaunchRecorder.GetPriorLaunchState</c>), asked once per offered session. Null = no
+        /// record, which keeps the recency flag exactly as before.
+        /// </param>
+        public LaunchSessionChoiceModel(IEnumerable<SessionCatalogEntry> catalog, IEnumerable<PaneSessionState> panes,
+            Func<string, PriorLaunchState> priorLaunch = null)
         {
             var paneList = (panes ?? Enumerable.Empty<PaneSessionState>()).Where(p => p != null).ToList();
             LiveSessionIds = LiveSessionIdsOf(paneList);
@@ -264,7 +272,7 @@ namespace MultiTerminal.Services
             {
                 if (LiveSessionIds.Contains(entry.SessionId) || !seen.Add(entry.SessionId))
                     continue;
-                candidates.Add(new LaunchSessionCandidate(entry, MayBeOpenReasonFor(entry, earliestUnknown)));
+                candidates.Add(new LaunchSessionCandidate(entry, MayBeOpenReasonFor(entry, earliestUnknown, PriorLaunchOf(priorLaunch, entry.SessionId))));
             }
 
             Candidates = candidates;
@@ -585,9 +593,37 @@ namespace MultiTerminal.Services
             return id.Length == 0 ? "project folder" : $"worktree {SessionCatalog.ToDisplayText(id)}";
         }
 
-        private static string MayBeOpenReasonFor(SessionCatalogEntry entry, DateTime? earliestUnknownLaunch)
+        /// <summary>The reason a still-running launch of THIS MT run gives (task 7d20e94c).</summary>
+        public const string OpenInCurrentRunReason =
+            "A pane of this MultiTerminal launched this session and has not ended, so it is probably still running.";
+
+        private static PriorLaunchState PriorLaunchOf(Func<string, PriorLaunchState> lookup, string sessionId)
         {
-            if (entry.Status == SessionCatalogStatus.PossiblyOpenElsewhere)
+            if (lookup == null) return PriorLaunchState.NoRecord;
+            try
+            {
+                return lookup(sessionId);
+            }
+            catch (Exception)
+            {
+                return PriorLaunchState.NoRecord; // keeps the recency flag: the safe direction
+            }
+        }
+
+        /// <summary>
+        /// Why a session may still be open, or null. Task 7d20e94c: the recent-write flag exists for
+        /// processes OUTSIDE MT, so it is waived when the launch record shows the last process to run the
+        /// session died with a previous MT run (<see cref="PriorLaunchState.DiedWithPreviousRun"/>):
+        /// relaunching within two minutes of an exit or a crash would otherwise flag every session that
+        /// was working at the time. A launch of this run that has not ended is flagged as open. The
+        /// unknown-pane rule (this run's panes) is never waived.
+        /// </summary>
+        private static string MayBeOpenReasonFor(SessionCatalogEntry entry, DateTime? earliestUnknownLaunch, PriorLaunchState prior)
+        {
+            if (prior == PriorLaunchState.OpenInCurrentRun)
+                return OpenInCurrentRunReason;
+
+            if (entry.Status == SessionCatalogStatus.PossiblyOpenElsewhere && prior != PriorLaunchState.DiedWithPreviousRun)
                 return "Its transcript was written in the last few minutes, so it may still be open in another window (a ClarionAssistant tab or a plain terminal).";
 
             if (earliestUnknownLaunch.HasValue &&

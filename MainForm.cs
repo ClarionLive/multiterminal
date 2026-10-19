@@ -4616,8 +4616,12 @@ namespace MultiTerminal
                 // Task 7d20e94c: which helpers each offered session left open, from the launch record.
                 // Looked up lazily per session and cached by the model (the dialog asks on a selection
                 // change; Continue mode asks once for the session it resumes).
+                // The launch record also decides whether a recently written session is "may be open
+                // elsewhere": not when its last process died with a previous MT run (one query per
+                // offered session, at most 15).
                 var recorder = _paneLaunchRecorder;
-                return new LaunchSessionChoiceModel(entries, panes)
+                Func<string, PriorLaunchState> priorLaunch = recorder == null ? null : recorder.GetPriorLaunchState;
+                return new LaunchSessionChoiceModel(entries, panes, priorLaunch)
                 {
                     HelperLookup = recorder == null ? null : sid => recorder.GetOpenHelpers(sid),
                 };
@@ -4703,7 +4707,8 @@ namespace MultiTerminal
                             try { return File.Exists(path) ? File.GetLastWriteTimeUtc(path) : (DateTime?)null; }
                             catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { return null; }
                         },
-                        Directory.Exists);
+                        Directory.Exists,
+                        _paneLaunchRecorder?.GetPriorLaunchState(helper?.SessionId) ?? PriorLaunchState.NoRecord);
                     if (!check.CanResume)
                     {
                         _debugLogService?.Info("LaunchSession", $"Helper resume: '{helperName}' ({helper?.SessionId}) skipped: {check.SkipReason}");
