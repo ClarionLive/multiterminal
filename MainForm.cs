@@ -970,6 +970,12 @@ namespace MultiTerminal
                 _mcpServer.SpawnService.OnCloseRequested = OnSpawnedPaneCloseRequested;
                 _mcpServer.SpawnService.Jobs.Collected += OnSpawnJobCollected;
 
+                // The launch record (task 7d20e94c): one recorder per MT process, on the broker's
+                // database, which is open from here on. Panes are created after this (session restore
+                // runs later in the constructor), so no launch precedes it.
+                _paneLaunchRecorder = new PaneLaunchRecorder(_mcpServer.Broker.TaskDb, _debugLogService);
+                _paneLaunches = new PaneLaunchTracker(_paneLaunchRecorder);
+
                 // Gloss backfill writer (task a455e295). The broker decides WHETHER to run one and
                 // throttles them; MainForm owns process spawning, so it supplies the how.
                 _mcpServer.Broker.GlossWriterSpawner = SpawnGlossWriterAsync;
@@ -1872,6 +1878,10 @@ namespace MultiTerminal
 
                     found = true;
                     _debugLogService?.Info("MainForm", $"close_helper: closing pane docId={docId} name='{doc.CustomTitle}' (task 7f389704)");
+
+                    // BEFORE Close (task 7d20e94c): the launch ends close_helper, and the pane_closed
+                    // that Close raises through OnDockContentRemoved finds no open launch left.
+                    _paneLaunches?.OnHelperClosedBySpawner(docId);
                     doc.Close();
 
                     // Pipeline Run 1 (Codex adversary): do not report "closed" on the strength of Close()
@@ -2059,6 +2069,17 @@ namespace MultiTerminal
                             atomicIdentityUniqueness: true,
                             inheritedClaudeProfileName: spawnerProfileName,
                             onClaudeProfileRefused: refusal => profileRefusal = refusal);
+
+                        // Task 7d20e94c: the helper's launch row points at the launch its PROVEN spawner
+                        // pane is running (spawnerDocId comes from the caller's launch nonce, never from
+                        // the typed spawnerName). Not for a pool placeholder, which is reported as a
+                        // failed spawn below. The helper's LaunchBegan already fired inside
+                        // AddNewTerminal; LinkSpawner also copes with it arriving later.
+                        if (!string.IsNullOrEmpty(resolvedDocId) && !string.IsNullOrEmpty(spawnerDocId)
+                            && !string.IsNullOrEmpty(resolvedName) && resolvedName.StartsWith(agentName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            _paneLaunches?.LinkSpawner(resolvedDocId, spawnerDocId);
+                        }
                     }));
                 });
 
@@ -3769,6 +3790,7 @@ namespace MultiTerminal
             doc.SetTheme(_currentTheme);
             doc.SetMessageBroker(_mcpServer?.Broker); // Enable status bar updates
             doc.TerminalExited += OnTerminalExited;
+            WirePaneLaunchRecording(doc);
             doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
             doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
             doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
@@ -5524,6 +5546,7 @@ namespace MultiTerminal
             doc.SetTheme(_currentTheme);
             doc.SetMessageBroker(_mcpServer?.Broker); // Enable status bar updates
             doc.TerminalExited += OnTerminalExited;
+            WirePaneLaunchRecording(doc);
             doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
             doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
             doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
@@ -5606,6 +5629,7 @@ namespace MultiTerminal
             doc.SetTheme(_currentTheme);
             doc.SetMessageBroker(_mcpServer?.Broker); // Enable status bar updates
             doc.TerminalExited += OnTerminalExited;
+            WirePaneLaunchRecording(doc);
             doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
             doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
             doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
@@ -6145,6 +6169,7 @@ namespace MultiTerminal
                 doc.SetTheme(_currentTheme);
                 doc.SetMessageBroker(_mcpServer?.Broker); // Enable status bar updates
                 doc.TerminalExited += OnTerminalExited;
+                WirePaneLaunchRecording(doc);
                 doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
                 doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
                 doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
@@ -6258,6 +6283,28 @@ namespace MultiTerminal
             }
         }
 
+        /// <summary>
+        /// Subscribes the launch record (task 7d20e94c item 2) to a pane. Called at every
+        /// TerminalDocument creation site, next to its TerminalExited subscription.
+        /// </summary>
+        private void WirePaneLaunchRecording(TerminalDocument doc)
+        {
+            doc.LaunchBegan += OnPaneLaunchBegan;
+            doc.ClaudeSessionAdopted += OnPaneClaudeSessionAdopted;
+        }
+
+        private void OnPaneLaunchBegan(object sender, PaneLaunchBeganEventArgs e)
+        {
+            if (e == null) return;
+            _paneLaunches?.OnLaunchBegan(e.DocId, e.TerminalName, e.ProjectId, e.WorkingDirectory, e.Kind, e.ResumeSessionId);
+        }
+
+        private void OnPaneClaudeSessionAdopted(object sender, ClaudeSessionAdoptedEventArgs e)
+        {
+            if (e == null) return;
+            _paneLaunches?.OnSessionAdopted(e.DocId, e.SessionId);
+        }
+
         private void OnTerminalExited(object sender, EventArgs e)
         {
             // Terminal exited - could auto-close or prompt
@@ -6266,6 +6313,10 @@ namespace MultiTerminal
             // Remove from MCP terminal map and unregister terminal
             if (sender is TerminalDocument doc)
             {
+                // The pane stays open but its process is gone: the launch counts as closed (task
+                // 7d20e94c, Owner decision). Writes nothing once MT is shutting down.
+                _paneLaunches?.OnProcessExited(doc.DocId);
+
                 // Unregister terminal from broker (sets profile offline)
                 if (_mcpServer?.Broker != null && !string.IsNullOrEmpty(doc.DocId))
                 {
@@ -6310,6 +6361,10 @@ namespace MultiTerminal
             // SPAWNER keeps no power over the helpers it spawned (task 7f389704, pipeline Run 1).
             _mcpServer?.SpawnService?.Panes.Forget(doc.DocId);
             _mcpServer?.SpawnService?.Panes.ForgetSpawner(doc.DocId);
+
+            // The Owner closed the pane (task 7d20e94c). A close_helper close already ended the launch
+            // first, and nothing is written once MT is shutting down.
+            _paneLaunches?.OnPaneClosed(doc.DocId);
 
             // Drop it from the terminal -> doc map.
             lock (_terminalDocMapLock)
@@ -6465,6 +6520,12 @@ namespace MultiTerminal
         private bool _sessionSaveCompleted;
         private bool _exitConfirmDialogOpen;
 
+        // Task 7d20e94c: the pane launch record. Null when the MCP server did not start (no database);
+        // every use is null-conditional. _paneLaunches holds the docId -> current launch map and the
+        // shutdown guard; see PaneLaunchTracker for its threading.
+        private PaneLaunchRecorder _paneLaunchRecorder;
+        private PaneLaunchTracker _paneLaunches;
+
         private async void OnFormClosing(object sender, FormClosingEventArgs e)
         {
             // Confirm a genuine user-initiated close (title-bar X, Alt+F4, or the window's
@@ -6511,6 +6572,13 @@ namespace MultiTerminal
                     return;
                 }
             }
+
+            // Task 7d20e94c shutdown guard: from here MT is really exiting (a declined confirmation
+            // returned above), and the panes are stopped further down. Every open launch of this run is
+            // marked mt_exit NOW and the close handlers stop writing, because MT stopping a pane is not
+            // the Owner closing it; without this every clean exit would mark every helper closed.
+            // Idempotent, so the session-save pass's re-triggered Close() does nothing twice.
+            _paneLaunches?.BeginShutdown();
 
             // Stop the worktree janitor before any other shutdown work \u2014 its
             // timer thread should not fire mid-shutdown.
@@ -7457,6 +7525,7 @@ namespace MultiTerminal
             doc.SetTheme(_currentTheme);
             doc.SetMessageBroker(_mcpServer?.Broker); // Enable status bar updates
             doc.TerminalExited += OnTerminalExited;
+            WirePaneLaunchRecording(doc);
             doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
             doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
             doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
@@ -9007,6 +9076,7 @@ namespace MultiTerminal
             doc.SetTheme(_currentTheme);
             doc.SetMessageBroker(_mcpServer?.Broker); // Enable status bar updates
             doc.TerminalExited += OnTerminalExited;
+            WirePaneLaunchRecording(doc);
             doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
             doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
             doc.HudSplitRatioChanged += OnHudSplitRatioChanged;

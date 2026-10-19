@@ -59,7 +59,7 @@ namespace MultiTerminal.Services
     /// leave open" (task 7d20e94c). Never throws: every failure is logged and turned into a null,
     /// false or empty result, because every caller is on a UI or launch path.
     /// </summary>
-    public sealed class PaneLaunchRecorder
+    public sealed class PaneLaunchRecorder : IPaneLaunchSink
     {
         private const string LogSource = "PaneLaunchRecorder";
 
