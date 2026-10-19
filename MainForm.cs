@@ -3741,8 +3741,12 @@ namespace MultiTerminal
         /// placeholder — callers that bind later work to "the terminal I just made" (the spawn path's
         /// registration wait and initial-prompt delivery) must key on this, not on the name they asked
         /// for. Existing callers ignore the value.
+        /// <para>Task 7d20e94c: <paramref name="resumeSessionId"/> is passed to StartTerminal, which
+        /// reserves it as the pane's PendingResumeSessionId from the first instant (the command itself
+        /// must carry the matching <c>--resume</c>); <paramref name="pinWorkingDirectory"/> keeps
+        /// <paramref name="workingDirectory"/> exactly, with no active-task repo-root or worktree move.</para>
         /// </summary>
-        public (string Name, string DocId) AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, bool atomicIdentityUniqueness = false, bool failClosedIdentity = false, Models.ClaudeProfile decidedClaudeProfile = null, string inheritedClaudeProfileName = null, Action<string> onClaudeProfileRefused = null)
+        public (string Name, string DocId) AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, bool atomicIdentityUniqueness = false, bool failClosedIdentity = false, Models.ClaudeProfile decidedClaudeProfile = null, string inheritedClaudeProfileName = null, Action<string> onClaudeProfileRefused = null, string resumeSessionId = null, bool pinWorkingDirectory = false)
         {
             _debugLogService?.Trace("AddNewTerminal", "===== START =====");
 
@@ -3916,7 +3920,14 @@ namespace MultiTerminal
                 // cwd-pin cover the entire repo (worktrees live inside as descendants).
                 // ConPtyTerminal's in-shell cd then narrows to taskWorktreePath before
                 // claude starts. Falls through to `dir` when no worktree is in play.
-                dir = ResolveSpawnDir(terminalName, dir, out string taskWorktreePath);
+                //
+                // pinWorkingDirectory (task 7d20e94c): a resumed helper must start in its session's own
+                // folder, often a worktree, because Claude finds a session only from the directory it
+                // ran in. ResolveSpawnDir would move it to the repo root ("No conversation found"), and
+                // its task-worktree cd could move it again, so neither applies.
+                string taskWorktreePath = null;
+                if (!pinWorkingDirectory)
+                    dir = ResolveSpawnDir(terminalName, dir, out taskWorktreePath);
 
                 _debugLogService?.Trace("AddNewTerminal", $"Starting terminal...");
                 _debugLogService?.Trace("AddNewTerminal", $"dir: '{dir}'");
@@ -3940,7 +3951,7 @@ namespace MultiTerminal
 
                 if (claudeProfileRefusal == null)
                 {
-                    doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, claudeProfile: claudeProfile);
+                    doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, claudeProfile: claudeProfile, resumeSessionId: resumeSessionId);
                     _debugLogService?.Trace("AddNewTerminal", "doc.StartTerminal returned");
                 }
                 else
@@ -4551,12 +4562,7 @@ namespace MultiTerminal
                 if (projectRoot == null)
                     return new LaunchSessionChoiceModel(null, panes);
 
-                var taskDb = _mcpServer?.Broker?.TaskDb;
-                var agentMap = taskDb?.GetAllSessionAgentNames();
-                var catalog = new SessionCatalog(
-                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "projects"),
-                    sid => agentMap != null && agentMap.TryGetValue(sid, out var agent) ? agent : null,
-                    sid => taskDb?.GetSessionById(sid)?.Summary);
+                var catalog = CreateSessionCatalog();
                 var entries = catalog.List(projectRoot, LaunchSessionChoiceModel.LiveSessionIdsOf(panes), DateTime.UtcNow);
                 return new LaunchSessionChoiceModel(entries, panes);
             }
@@ -4569,6 +4575,155 @@ namespace MultiTerminal
             {
                 Cursor.Current = previousCursor;
             }
+        }
+
+        /// <summary>
+        /// The session catalog the launch prompt and the helper resume read (task ec2ed636; shared since
+        /// 7d20e94c). Agent names come from session_agent_map (one snapshot query), summaries from
+        /// session_lineage.
+        /// </summary>
+        private SessionCatalog CreateSessionCatalog()
+        {
+            var taskDb = _mcpServer?.Broker?.TaskDb;
+            var agentMap = taskDb?.GetAllSessionAgentNames();
+            return new SessionCatalog(
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "projects"),
+                sid => agentMap != null && agentMap.TryGetValue(sid, out var agent) ? agent : null,
+                sid => taskDb?.GetSessionById(sid)?.Summary);
+        }
+
+        /// <summary>
+        /// Reopens the helpers a resumed PM session left open (task 7d20e94c item 4), in order, each in
+        /// its own session folder under its original name, spawned by <paramref name="pmDoc"/>. Runs on
+        /// the UI thread after the PM's StartTerminal; never throws (a failure is a skipped helper).
+        ///
+        /// <para>Per helper, the PM resume's own rules: the live set is rebuilt NOW (it includes the PM
+        /// and every helper reopened before this one), the catalog looks the session up by id
+        /// (<see cref="SessionCatalog.TryGetEntry"/>), and <see cref="HelperResume.Check"/> applies the
+        /// model's "may be open elsewhere" rule, <see cref="LaunchSessionChoiceModel.RecheckResume"/> and
+        /// <see cref="SessionCatalog.ValidateResumeCwd"/>. The command is built exactly as the PM's
+        /// resume builds it. The pane is created like a spawned helper: atomic name (a held name comes
+        /// back suffixed), the PM as spawner, the PM's Claude profile inherited (the project's row still
+        /// decides, as for any launch naming a project), unattended (a profile refusal is a skip, not a
+        /// message box per helper). Then close_helper is re-armed for the PM
+        /// (<c>SpawnedPaneRegistry.Record</c> with the PM's DocId and launch nonce) and the helper's
+        /// launch row is linked to the PM's current launch.</para>
+        /// </summary>
+        private HelperResumeReport ResumeHelpersFor(TerminalDocument pmDoc, Models.Project project, IReadOnlyList<OpenHelper> helpers)
+        {
+            var report = new HelperResumeReport();
+            if (pmDoc == null || pmDoc.IsDisposed || project == null || helpers == null || helpers.Count == 0)
+                return report;
+
+            string pmName = pmDoc.OriginalAgentName ?? pmDoc.CustomTitle;
+            string projectRoot = GetLaunchableProjectRoot(project);
+            SessionCatalog catalog = null;
+            try
+            {
+                catalog = projectRoot == null ? null : CreateSessionCatalog();
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("LaunchSession", $"Helper resume: cannot read the session catalog: {ex.Message}");
+            }
+
+            foreach (var helper in helpers)
+            {
+                string helperName = helper?.TerminalName;
+                try
+                {
+                    if (catalog == null)
+                    {
+                        report.AddSkipped(helperName, "the project's session history could not be read");
+                        continue;
+                    }
+
+                    var live = CollectLiveSessionStates(null);
+                    var entry = catalog.TryGetEntry(projectRoot, helper?.SessionId, LaunchSessionChoiceModel.LiveSessionIdsOf(live), DateTime.UtcNow);
+                    var check = HelperResume.Check(
+                        helper, entry, live, projectRoot,
+                        path =>
+                        {
+                            try { return File.Exists(path) ? File.GetLastWriteTimeUtc(path) : (DateTime?)null; }
+                            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { return null; }
+                        },
+                        Directory.Exists);
+                    if (!check.CanResume)
+                    {
+                        _debugLogService?.Info("LaunchSession", $"Helper resume: '{helperName}' ({helper?.SessionId}) skipped: {check.SkipReason}");
+                        report.AddSkipped(helperName, check.SkipReason);
+                        continue;
+                    }
+
+                    var launchCmd = Services.LaunchCommandBuilder.BuildCommand(TerminalKind.ClaudeCode, project, check.Cwd, entry.SessionId);
+                    if (!string.IsNullOrEmpty(launchCmd.BootstrapError))
+                    {
+                        report.AddSkipped(helperName, $"its launch command could not be built ({launchCmd.BootstrapError.TrimEnd('.')})");
+                        continue;
+                    }
+
+                    string gatewayProfile = null;
+                    if (_gatewayService != null && _gatewayService.IsGatewayInstalled())
+                        gatewayProfile = Services.GatewayIntegrationService.GetGatewayProfileName(project.Name);
+
+                    string profileRefusal = null;
+                    var (resolvedName, helperDocId) = AddNewTerminal(
+                        workingDirectory: check.Cwd,
+                        identityName: helperName,
+                        autoRunCommand: launchCmd.AutoRunCommand,
+                        spawnerName: pmName,
+                        projectId: project.Id,
+                        gatewayProfile: gatewayProfile,
+                        atomicIdentityUniqueness: true,
+                        inheritedClaudeProfileName: pmDoc.LaunchClaudeProfileName,
+                        onClaudeProfileRefused: refusal => profileRefusal = refusal,
+                        resumeSessionId: entry.SessionId,
+                        pinWorkingDirectory: true);
+
+                    if (profileRefusal != null)
+                    {
+                        report.AddSkipped(helperName, profileRefusal.TrimEnd('.'));
+                        continue;
+                    }
+
+                    if (string.IsNullOrEmpty(helperDocId))
+                    {
+                        report.AddSkipped(helperName, "its pane was not created (see the debug log)");
+                        continue;
+                    }
+
+                    if (string.IsNullOrEmpty(resolvedName) || !resolvedName.StartsWith(helperName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Same rule as the spawn path: a pool placeholder is not the helper, and is not
+                        // made closable by the PM.
+                        report.AddSkipped(helperName, $"its name was refused, and the pane came up as '{resolvedName ?? "(unnamed)"}'");
+                        continue;
+                    }
+
+                    bool closable = _mcpServer?.SpawnService?.Panes.Record(helperDocId, resolvedName, pmDoc.DocId, pmDoc.LaunchNonce) == true;
+                    _paneLaunches?.LinkSpawner(helperDocId, pmDoc.DocId);
+                    _debugLogService?.Info("LaunchSession", $"Helper resume: '{resolvedName}' resumed session {entry.SessionId} in '{check.Cwd}' for {pmName} (DocId {helperDocId}, closable by the PM: {closable})");
+
+                    report.AddResumed(resolvedName);
+                    if (!string.Equals(resolvedName, helperName, StringComparison.OrdinalIgnoreCase))
+                        report.AddRenamed(helperName, resolvedName);
+                }
+                catch (Exception ex)
+                {
+                    _debugLogService?.Error("LaunchSession", $"Helper resume: '{helperName}' failed: {ex.Message}");
+                    report.AddSkipped(helperName, $"resuming it failed ({ex.Message.TrimEnd('.')})");
+                }
+            }
+
+            // The PM pane was focused by its own launch; AddNewTerminal focused each helper in turn.
+            if (!pmDoc.IsDisposed && report.Resumed.Count > 0)
+            {
+                pmDoc.Activate();
+                pmDoc.FocusTerminal();
+                _lastActiveTerminal = pmDoc;
+            }
+
+            return report;
         }
 
         /// <summary>
