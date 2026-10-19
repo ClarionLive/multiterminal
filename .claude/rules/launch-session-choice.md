@@ -2,7 +2,9 @@
 
 Task **ec2ed636** (2026-10-17). Read this before changing `MainForm.OnStartScreenProjectLaunched`,
 `SessionCatalog`, `LaunchSessionChoiceModel`, `ClaudeSessionTracker` or the `--resume` argument in
-`LaunchCommandBuilder`.
+`LaunchCommandBuilder`. Task **7d20e94c** added helpers resuming with their PM (last section); read
+that before changing a pane close path, `MainForm.OnFormClosing`, `AddNewTerminal`'s resume/pin
+parameters or `pane_launches`.
 
 ## What the Owner sees
 
@@ -99,3 +101,84 @@ fallback.
   `StartTerminal`. A held name comes back suffixed, and the pane shows the actual name.
 - **`--resume`, never `--continue`.** `--continue` picks the newest session in the cwd, which may be
   live, and cannot reach worktree sessions.
+
+## Helpers resume with their PM (task 7d20e94c)
+
+Resuming a PM session also reopens the helper panes it had open when it last ended. Owner decisions:
+Continue mode (no dialog) resumes all of them and reports what it skipped; a helper whose Claude
+process exited while its pane stayed open counts as CLOSED; one level only (no helpers of helpers),
+at most 6. A new session never resumes helpers.
+
+### The launch record
+
+Nothing durable linked a PM session to its helpers: `SpawnedPaneRegistry` and `SpawnJobStore` are in
+memory, `MULTITERMINAL_SPAWNER` is a name, and names repeat across days. So every pane launch is a row
+in `pane_launches` (`Services/PaneLaunchRecorder`; schema in `database-tables.md`), keyed by launch
+and session ids. MainForm writes it only through `Services/PaneLaunchTracker`:
+
+| Event | Where | Write |
+|---|---|---|
+| `TerminalDocument.LaunchBegan` (every launch path, after `Start` returns) | `WirePaneLaunchRecording`, called at every `new TerminalDocument()` site next to `TerminalExited` | new row; a previous launch of the same pane still open is ended `process_exit` first ("Launch as" stops the process directly) |
+| `ClaudeSessionAdopted` | same | `session_id` of the pane's current launch |
+| spawn | `OnSpawnRequested`, inside the Invoke after `AddNewTerminal` | `spawner_launch_id` = the PROVEN spawner pane's (nonce, never the typed name) current launch |
+| close_helper | `OnSpawnedPaneCloseRequested`, BEFORE `doc.Close()` | `close_helper`; the `pane_closed` that Close raises then finds no open launch |
+| pane removed from the dock | `OnDockContentRemoved` | `pane_closed` |
+| process exit, pane left open | `OnTerminalExited` | `process_exit` |
+| MT exits | `OnFormClosing`, right after the exit confirmation | every open row of this run `mt_exit`; see the guard below |
+| MT crashes | nothing | rows stay open, which also reads as open |
+
+**Spawner link in either order.** The helper's `LaunchBegan` fires inside `AddNewTerminal`, before
+the caller knows the helper's DocId, so the link is normally made after the row exists. If it does
+not exist yet, the spawner's launch (resolved at link time) is held per DocId and applied once when
+the helper's launch begins; closing the pane first drops it.
+
+**Threading.** Every caller is on the UI thread today (LaunchBegan is raised there; the adopted and
+exited events are posted there; the spawn and close callbacks Invoke onto it). That is the callers'
+accident, not the class's property, so the tracker's two maps are under a lock; the SQLite writes
+happen outside it.
+
+### The shutdown guard, and why it is first
+
+`OnFormClosing` stops every pane, and a stopped pane looks exactly like the Owner closing it (exit
+and removal events). Without a guard every clean exit would mark every helper closed and nothing
+could ever be resumed. So `PaneLaunchTracker.BeginShutdown` runs at the start of the REAL close path:
+after the exit confirmation (a declined one returns before it and changes nothing) and before the
+session save and the pane teardown. It marks every open launch of this run `mt_exit`
+(`EndAllForShutdown`), and from then on the three close handlers write nothing. It is idempotent, so
+the session-save pass's re-triggered `Close()` does nothing twice. A second close that is cancelled
+after the confirmation (nothing does that today) would leave the tracker silent for the rest of the
+run.
+
+### Choosing and resuming
+
+- **Dialog.** "Also resume helpers" lists `GetOpenHelpers` for the selected row, else the Continue
+  last candidate (name, where, started), all ticked; click or Space toggles. An untick is remembered
+  per (session, helper) in `HelperTickState`, so a session the Owner never looked at resumes all its
+  helpers. Helpers whose session is live now are not listed. The lookup is
+  `LaunchSessionChoiceModel.HelpersFor`, cached per session and called on selection change, never
+  while painting. No helpers: one dimmed "—" row.
+- **Wiring.** After the PM's `StartTerminal` on a resume, `QueueHelperResume` posts
+  `ResumeHelpersFor`, which runs only while the PM pane is still running the launch that resumed that
+  session (a refused or replaced PM takes no helpers).
+- **Per helper**, the PM resume's own rules (`HelperResume.Check`): rebuild the live set (it includes
+  the PM and the helpers already reopened), `SessionCatalog.TryGetEntry` by id, the model's "may be
+  open elsewhere" rule (SKIPPED, not confirmed: there is no one to confirm; so a helper written in the
+  last ~2 minutes is skipped), `RecheckResume`, `ValidateResumeCwd`, and the folder still existing.
+  Then `BuildCommand(ClaudeCode, project, cwd, sessionId)` as for the PM, and `AddNewTerminal` with
+  the original name (atomic: a held name comes back suffixed), the PM as spawner, the PM's profile
+  inherited, unattended (a profile refusal is a skip), `resumeSessionId` (reserves
+  `PendingResumeSessionId`) and `pinWorkingDirectory` (no `ResolveSpawnDir`: the repo-root move and the
+  task-worktree cd would both cause "No conversation found").
+- **Re-link.** `SpawnService.Panes.Record(helper, name, pm DocId, pm nonce)`, so `close_helper` works
+  from the resumed PM, and the helper's launch row is linked to the PM's current launch.
+- **One summary**, and only if something was skipped or renamed ("Notes came back as Notes-2"; the PM's
+  conversation still uses the old name).
+
+### Known gaps
+
+- Only sessions launched after this shipped have rows; older helpers are never offered.
+- A pane whose session id MT never learns (a project statusLine that bypasses MT's) has no
+  `session_id`, so it is never offered as a helper.
+- A resumed helper is a spawned pane with no job: its SessionStart briefing asks it to collect one,
+  and the collect answers `no_job`.
+- The resume happens on the UI thread, one helper after another (each a catalog lookup and a pane).
