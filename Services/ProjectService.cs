@@ -459,6 +459,87 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Rewrites the Claude profile name in a folder's .claude/project.json, and nothing else
+        /// (ticket c8ee0eec). File only, like <see cref="UpdateProjectJsonNameAndDescription"/>: the
+        /// database value is set by ProjectDatabase.SetClaudeProfile. Returns false, writing nothing,
+        /// when the folder has no project.json or the file answers to a different id.
+        /// </summary>
+        public bool UpdateProjectJsonClaudeProfile(string projectPath, string projectId, string profileName)
+        {
+            var fileProject = LoadProject(projectPath);
+            if (fileProject == null || !string.Equals(fileProject.Id, projectId, StringComparison.Ordinal))
+                return false;
+
+            fileProject.ClaudeProfile = profileName;
+
+            // CA3003: projectPath is an app-managed project root from the database, not web input.
+#pragma warning disable CA3003
+            File.WriteAllText(GetProjectConfigPath(projectPath), SerializeProjectJson(fileProject));
+#pragma warning restore CA3003
+            return true;
+        }
+
+        /// <summary>
+        /// Applies <paramref name="mutate"/> to a folder's .claude/project.json and writes it back, touching
+        /// nothing else (ticket e20e2ce0: the project settings form's file sync). File only, like
+        /// <see cref="UpdateProjectJsonClaudeProfile"/>, and for the same reason: going through
+        /// <see cref="SaveProject"/> would push the file's values, including its unserialized gitAutoCommit,
+        /// back over the database row the form just wrote.
+        /// </summary>
+        /// <returns>False, writing nothing, when the folder has no project.json or the file answers to a
+        /// different id.</returns>
+        public bool UpdateProjectJson(string projectPath, string projectId, Action<Project> mutate)
+        {
+            if (mutate == null || string.IsNullOrWhiteSpace(projectPath) || !IsProjectDirectory(projectPath))
+                return false;
+
+            var fileProject = LoadProject(projectPath);
+            if (fileProject == null || !string.Equals(fileProject.Id, projectId, StringComparison.Ordinal))
+                return false;
+
+            mutate(fileProject);
+
+            // CA3003: projectPath is an app-managed project root from the database, not web input.
+#pragma warning disable CA3003
+            File.WriteAllText(GetProjectConfigPath(projectPath), SerializeProjectJson(fileProject));
+#pragma warning restore CA3003
+            return true;
+        }
+
+        /// <summary>
+        /// Brings a folder's project.json copy of the Claude profile name into line with the database
+        /// value (ticket c8ee0eec), and says so when it cannot. The database is the authority and is NOT
+        /// touched here; this only stops the portable copy going stale, which matters when the folder is
+        /// imported again or carried to another machine.
+        /// </summary>
+        /// <returns>Null when the copy now matches, or there is no project.json to be stale. Otherwise
+        /// one sentence saying why the file still disagrees.</returns>
+        public string SyncProjectJsonClaudeProfile(string projectPath, string projectId, string profileName)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(projectPath) || !IsProjectDirectory(projectPath))
+                    return null;
+
+                var fileProject = LoadProject(projectPath);
+                if (fileProject == null)
+                    return $"the file in '{projectPath}' could not be read";
+                if (!string.Equals(fileProject.Id, projectId, StringComparison.Ordinal))
+                    return $"the file in '{projectPath}' belongs to a different project id ('{fileProject.Id}')";
+                if (string.Equals(Models.ClaudeProfile.NormalizeName(fileProject.ClaudeProfile), Models.ClaudeProfile.NormalizeName(profileName), StringComparison.OrdinalIgnoreCase))
+                    return null;
+
+                return UpdateProjectJsonClaudeProfile(projectPath, projectId, profileName)
+                    ? null
+                    : $"the file in '{projectPath}' could not be updated";
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException || ex is NotSupportedException || ex is System.Security.SecurityException)
+            {
+                return $"writing the file in '{projectPath}' failed: {ex.Message}";
+            }
+        }
+
+        /// <summary>
         /// Sets a project's default terminal CLI. Writes SQLite AND the portable
         /// project.json, mirroring <see cref="ToggleProjectPinned"/>. DefaultTerminal is
         /// serialized to project.json (unlike Status), so a DB-only write would be silently
@@ -662,6 +743,13 @@ namespace MultiTerminal.Services
             // gitDefaultBranch / gitAutoCommit). Serializing it here let a stale on-disk value
             // re-assert itself through LoadProject -> SaveProject -> SaveRichProject (COALESCE),
             // silently reverting account changes/clears made via the edit dialog.
+            // claudeProfile (ticket c8ee0eec) IS written, as a NAME, so a project carried to another
+            // machine or re-imported keeps its profile. The key is omitted for Default, and an absent
+            // key reads as Default. The stale-value problem above cannot recur: SaveRichProject uses
+            // the file's value only when it inserts a new row.
+            string claudeProfile = Models.ClaudeProfile.NormalizeName(project.ClaudeProfile);
+            if (claudeProfile != null)
+                sb.AppendLine($"  \"claudeProfile\": {JsonEscape(claudeProfile)},");
             sb.AppendLine("  \"prompts\": [");
 
             for (int i = 0; i < project.Prompts.Count; i++)
@@ -817,6 +905,9 @@ namespace MultiTerminal.Services
                             break;
                         case "defaultterminal":
                             project.DefaultTerminal = TerminalKindHelper.Normalize(ParseJsonString(json, ref pos));
+                            break;
+                        case "claudeprofile":
+                            project.ClaudeProfile = Models.ClaudeProfile.NormalizeName(ParseJsonString(json, ref pos));
                             break;
                         case "sourcecontrolaccountid":
                             // Consume-and-discard: SQLite is the source of truth for this field

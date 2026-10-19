@@ -43,7 +43,7 @@ namespace MultiTerminal.Tests
             string seen = null;
             var service = new SpawnService
             {
-                OnSpawnRequested = (name, _, _, _, _) =>
+                OnSpawnRequested = (name, _, _, _, _, _) =>
                 {
                     seen = name;
                     return Task.FromResult((true, "DOC", (string)null, name));
@@ -90,7 +90,7 @@ namespace MultiTerminal.Tests
             bool called = false;
             var service = new SpawnService
             {
-                OnSpawnRequested = (name, _, _, _, _) =>
+                OnSpawnRequested = (name, _, _, _, _, _) =>
                 {
                     called = true;
                     return Task.FromResult((true, "DOC", (string)null, name));

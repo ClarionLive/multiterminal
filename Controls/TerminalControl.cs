@@ -42,6 +42,7 @@ namespace MultiTerminal.Controls
         private string _pendingGatewayProfile;
         private string _pendingTaskWorktreePath;
         private string _pendingLaunchNonce;
+        private Models.ClaudeProfile _pendingClaudeProfile;
         private TerminalTheme _pendingTheme = TerminalTheme.Dark;
         private string _terminalTitle = "PowerShell";
         private DebugLogService _debugLogService;
@@ -100,6 +101,15 @@ namespace MultiTerminal.Controls
         /// Event fired when the terminal is fully initialized and ready.
         /// </summary>
         public event EventHandler Ready;
+
+        /// <summary>
+        /// Event fired when a start was refused over its Claude profile (ticket c8ee0eec): no process
+        /// exists and <see cref="Ready"/> is not raised. The owner returns the pane to its start screen
+        /// and releases whatever it registered for the launch. Raised after the refusal has been shown,
+        /// and posted to the message loop, so a caller still inside its own start sequence finishes
+        /// first. NOT raised for any other start failure.
+        /// </summary>
+        public event EventHandler StartFailed;
 
         /// <summary>
         /// Event fired when the WebView2/xterm.js renderer is initialized (before shell starts).
@@ -177,7 +187,7 @@ namespace MultiTerminal.Controls
             if (_pendingStart)
             {
                 _pendingStart = false;
-                DoStart(_pendingWorkingDir, _pendingDocId, _pendingTerminalName, _pendingAutoRunCommand, _pendingSpawnerName, _pendingProjectId, _pendingIsTeamLead, _pendingGatewayProfile, _pendingTaskWorktreePath, _pendingLaunchNonce);
+                DoStart(_pendingWorkingDir, _pendingDocId, _pendingTerminalName, _pendingAutoRunCommand, _pendingSpawnerName, _pendingProjectId, _pendingIsTeamLead, _pendingGatewayProfile, _pendingTaskWorktreePath, _pendingLaunchNonce, _pendingClaudeProfile);
             }
         }
 
@@ -190,7 +200,8 @@ namespace MultiTerminal.Controls
         /// <param name="autoRunCommand">Command to run automatically after shell starts (e.g., "claude -r session_id")</param>
         /// <param name="projectId">Project ID for context injection (sets MULTITERMINAL_PROJECT_ID env var)</param>
         /// <param name="isTeamLead">Whether this terminal is a team lead (sets MULTITERMINAL_TEAM_LEAD env var)</param>
-        public void Start(string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string launchNonce = null)
+        /// <param name="claudeProfile">The resolved Claude Code config profile for this launch (ticket c8ee0eec). Null means Default.</param>
+        public void Start(string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string launchNonce = null, Models.ClaudeProfile claudeProfile = null)
         {
             if (_terminal != null && _terminal.IsRunning)
             {
@@ -200,7 +211,7 @@ namespace MultiTerminal.Controls
             // If renderer is initialized, start immediately
             if (_renderer.IsInitialized)
             {
-                DoStart(workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, launchNonce);
+                DoStart(workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, launchNonce, claudeProfile);
             }
             else
             {
@@ -216,6 +227,7 @@ namespace MultiTerminal.Controls
                 _pendingGatewayProfile = gatewayProfile;
                 _pendingTaskWorktreePath = taskWorktreePath;
                 _pendingLaunchNonce = launchNonce;
+                _pendingClaudeProfile = claudeProfile;
             }
         }
 
@@ -224,7 +236,7 @@ namespace MultiTerminal.Controls
             FontSizeChanged?.Invoke(this, e);
         }
 
-        private void DoStart(string workingDirectory, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string launchNonce = null)
+        private void DoStart(string workingDirectory, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string launchNonce = null, Models.ClaudeProfile claudeProfile = null)
         {
             // Reset Claude Code detection so the event fires again for this new session. Only a pane
             // whose launch command starts Claude is armed now; a plain shell arms when `claude` is typed.
@@ -251,16 +263,30 @@ namespace MultiTerminal.Controls
 
             try
             {
-                _terminal.Start(_cols, _rows, null, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, launchNonce);
+                _terminal.Start(_cols, _rows, null, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, launchNonce, claudeProfile);
             }
             catch (Exception ex)
             {
-                MessageBox.Show(
-                    "Failed to start terminal: " + ex.Message + "\r\n\r\n" +
-                    "Make sure you're running Windows 10 version 1809 or later.",
-                    "Terminal Error",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                var failure = TerminalStartFailure.Describe(ex);
+                if (failure.IsClaudeProfileRefusal)
+                {
+                    // Nothing was started. Drop the half-built terminal so it cannot be written to.
+                    try { Stop(); }
+                    catch (Exception stopEx) { _debugLogService?.Error("TerminalControl", $"Cleanup after a refused start failed: {stopEx.Message}"); }
+                }
+
+                MessageBox.Show(failure.Message, failure.Title, MessageBoxButtons.OK, failure.IsClaudeProfileRefusal ? MessageBoxIcon.Warning : MessageBoxIcon.Error);
+
+                if (!failure.RaisesReady)
+                {
+                    // Posted, not raised inline: DoStart can run inside the owner's own StartTerminal,
+                    // which must finish before the pane is taken back to its start screen.
+                    if (IsHandleCreated && !IsDisposed)
+                        BeginInvoke(new Action(() => StartFailed?.Invoke(this, EventArgs.Empty)));
+                    else
+                        StartFailed?.Invoke(this, EventArgs.Empty);
+                    return;
+                }
             }
 
             _renderer.Focus();
@@ -1089,5 +1115,26 @@ namespace MultiTerminal.Controls
         {
             get { return _renderer?.Theme ?? TerminalTheme.Dark; }
         }
+    }
+
+    /// <summary>
+    /// What a failed terminal start tells the user and whether the pane still counts as started
+    /// (ticket c8ee0eec). A Claude profile refusal (<see cref="Services.ClaudeProfileRefusedException"/>)
+    /// shows its own message and nothing else, and the pane is NOT ready. Every other failure keeps the
+    /// pseudo-console text with its Windows-version hint and, as before, still raises Ready.
+    /// </summary>
+    internal sealed record TerminalStartFailure(string Message, string Title, bool IsClaudeProfileRefusal)
+    {
+        /// <summary>Whether <c>TerminalControl.Ready</c> is still raised after this failure.</summary>
+        public bool RaisesReady => !IsClaudeProfileRefusal;
+
+        internal static TerminalStartFailure Describe(Exception ex) =>
+            ex is Services.ClaudeProfileRefusedException
+                ? new TerminalStartFailure(ex.Message, "Claude Profile", true)
+                : new TerminalStartFailure(
+                    "Failed to start terminal: " + ex?.Message + "\r\n\r\n" +
+                    "Make sure you're running Windows 10 version 1809 or later.",
+                    "Terminal Error",
+                    false);
     }
 }

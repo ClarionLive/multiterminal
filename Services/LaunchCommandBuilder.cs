@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 
@@ -28,15 +29,26 @@ namespace MultiTerminal.Services
         /// <c>--dangerously-skip-permissions</c> with that project's local hooks/deny silently
         /// stripped (task 77d1182f).
         /// </param>
+        /// <param name="resumeSessionId">
+        /// Claude Code session id to resume (<c>--resume &lt;id&gt;</c>), or null/whitespace for a fresh
+        /// session. Must be a GUID; anything else throws <see cref="ArgumentException"/> (task ec2ed636).
+        /// </param>
         /// <returns>LaunchCommand with WorkingDirectory and AutoRunCommand ready for ConPtyTerminal.Start().</returns>
-        public static LaunchCommand BuildClaudeCommand(Models.Project project, string workingDirectory = null)
+        public static LaunchCommand BuildClaudeCommand(Models.Project project, string workingDirectory = null, string resumeSessionId = null)
         {
+            // Validate first: a bad id must fail before BuildFlags writes the settings file.
+            string resumeId = NormalizeResumeSessionId(resumeSessionId);
+
             string workingDir = workingDirectory ?? ResolveWorkingDirectory(project);
 
             // Build the claude CLI flags (just --mcp-config now — plugin handles hooks, CLAUDE.md, agents, skills)
             string flags = BuildFlags(workingDir);
 
-            string autoRunCommand = $"claude{flags} --dangerously-skip-permissions; exit";
+            // --resume goes after the flags so the command still starts with the bare `claude` token,
+            // which ConPtyTerminal.ApplySessionName needs to splice `-n '<name>'` in after.
+            string resumeFlag = resumeId == null ? string.Empty : $" --resume {resumeId}";
+
+            string autoRunCommand = $"claude{flags}{resumeFlag} --dangerously-skip-permissions; exit";
 
             return new LaunchCommand
             {
@@ -266,18 +278,45 @@ namespace MultiTerminal.Services
         /// card split button) should use this instead of calling the per-kind
         /// builder directly.
         /// </summary>
-        public static LaunchCommand BuildCommand(Models.TerminalKind kind, Models.Project project, string workingDirectory = null)
+        public static LaunchCommand BuildCommand(Models.TerminalKind kind, Models.Project project, string workingDirectory = null, string resumeSessionId = null)
         {
             // workingDirectory: explicit cwd for callers that know it (API-driven spawn); null
             // resolves from the project. See BuildClaudeCommand for why this is load-bearing.
             switch (kind)
             {
                 case Models.TerminalKind.Codex:
+                    // Codex resume is out of scope. Refuse rather than drop the id: a silently fresh
+                    // session looks like a resumed one until the conversation is missing. Checked
+                    // before BuildCodexCommand so its config/broker side effects never run.
+                    if (!string.IsNullOrWhiteSpace(resumeSessionId))
+                        throw new ArgumentException("Resuming a session is not supported for Codex terminals.", nameof(resumeSessionId));
                     return BuildCodexCommand(project, workingDirectory);
                 case Models.TerminalKind.ClaudeCode:
                 default:
-                    return BuildClaudeCommand(project, workingDirectory);
+                    return BuildClaudeCommand(project, workingDirectory, resumeSessionId);
             }
+        }
+
+        /// <summary>
+        /// Validates a resume session id and returns it in canonical lowercase "D" form
+        /// (<c>xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx</c>), or null when none was given (null/whitespace).
+        /// Uppercase hex is accepted and lowercased; braced, parenthesised and hyphenless forms are rejected.
+        /// <para>WHY A GUID AND NOT JUST QUOTED. The id is spliced unquoted into a PowerShell command line,
+        /// and every caller is MT code holding an id it read from Claude Code — so a non-GUID is a bug, and
+        /// throwing surfaces it where launching fresh would hide it. The canonical re-format means only
+        /// hex and hyphens ever reach the shell.</para>
+        /// <para>WHY NOT <c>--continue</c>. It picks the newest session in the cwd, which may be live in
+        /// another pane, and cannot reach a session recorded under a worktree's directory.</para>
+        /// </summary>
+        internal static string NormalizeResumeSessionId(string resumeSessionId)
+        {
+            if (string.IsNullOrWhiteSpace(resumeSessionId))
+                return null;
+
+            if (!Guid.TryParseExact(resumeSessionId, "D", out Guid id))
+                throw new ArgumentException($"Resume session id is not a GUID: '{resumeSessionId}'.", nameof(resumeSessionId));
+
+            return id.ToString("D"); // Guid.ToString is always lowercase.
         }
 
         /// <summary>
@@ -577,22 +616,128 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Returns the path to the MultiTerminal plugin directory if it exists.
-        /// Location: ~/.claude/plugins/marketplaces/multiterminal-marketplace/plugins/multiterminal
+        /// The HKCU key the installer writes the shared plugin location under (ticket c8ee0eec, GitHub #23).
         /// </summary>
-        public static string GetMtPluginPath()
+        internal const string InstallerRegistryKey = @"Software\MultiTerminal";
+
+        /// <summary>
+        /// REG_SZ under <see cref="InstallerRegistryKey"/>: the shared MARKETPLACE ROOT the installer put the
+        /// plugin in (the folder equivalent to <c>~\.claude\plugins\marketplaces\multiterminal-marketplace</c>).
+        /// Absent or empty means the user chose the default-profile location.
+        /// </summary>
+        internal const string PluginMarketplacePathValueName = "PluginMarketplacePath";
+
+        /// <summary>
+        /// Returns the first MultiTerminal plugin directory that exists, in the order of
+        /// <see cref="ExpectedMtPluginPaths"/>, or null when none does.
+        /// </summary>
+        public static string GetMtPluginPath() =>
+            ResolveMtPluginPath(ExpectedMtPluginPaths, Directory.Exists);
+
+        /// <summary>
+        /// Every place <see cref="GetMtPluginPath"/> looks, in lookup order, whether or not anything is
+        /// there. <see cref="ClaudeIntegrationCheck"/> names all of them in its startup warning.
+        /// </summary>
+        internal static IReadOnlyList<string> ExpectedMtPluginPaths =>
+            MtPluginPathCandidates(
+                ReadInstallerPluginMarketplacePath(),
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+
+        /// <summary>
+        /// Pure: the plugin-directory candidates, in lookup order.
+        /// <list type="number">
+        /// <item>The installer's shared location, <c>&lt;PluginMarketplacePath&gt;\plugins\multiterminal</c>,
+        /// only when the registry value is a usable absolute path. Anything else (null, blank, relative,
+        /// malformed) is ignored, so the lookup falls through to the default rather than throwing or
+        /// resolving against MT's current directory.</item>
+        /// <item>The default profile's marketplace checkout under <paramref name="userProfile"/>.
+        /// CLAUDE_CONFIG_DIR is deliberately NOT honoured, and neither is a pane's Claude profile
+        /// (ticket c8ee0eec): the plugin is installed once, at the installer's shared location or in
+        /// <c>%USERPROFILE%\.claude</c>, and handed to every terminal with <c>--plugin-dir</c>
+        /// whichever profile that terminal runs under.</item>
+        /// </list>
+        /// The default profile's plugin CACHE (<c>~\.claude\plugins\cache\...</c>) is deliberately not a
+        /// candidate: Claude Code copies it once at <c>/plugin install</c> time and MultiTerminal's updater
+        /// never refreshes it, so it can be months stale, and finding it would also silence the
+        /// missing-plugin warning while launching agents with an outdated plugin.
+        /// </summary>
+        internal static IReadOnlyList<string> MtPluginPathCandidates(string registryMarketplacePath, string userProfile)
         {
-            string pluginDir = ExpectedMtPluginPath;
-            return Directory.Exists(pluginDir) ? pluginDir : null;
+            var candidates = new List<string>(2);
+
+            string shared = SharedPluginDirFromRegistryValue(registryMarketplacePath);
+            if (shared != null)
+                candidates.Add(shared);
+
+            if (!string.IsNullOrWhiteSpace(userProfile))
+            {
+                candidates.Add(Path.Combine(userProfile, ".claude", "plugins",
+                    "marketplaces", "multiterminal-marketplace", "plugins", "multiterminal"));
+            }
+
+            return candidates;
         }
 
         /// <summary>
-        /// Where the plugin must be for <see cref="GetMtPluginPath"/> to find it, whether or not it is
-        /// there. <see cref="ClaudeIntegrationCheck"/> names this path in its startup warning.
+        /// Pure: the first candidate <paramref name="directoryExists"/> accepts, or null. A probe that
+        /// throws counts as "not there" for that candidate only.
         /// </summary>
-        internal static string ExpectedMtPluginPath =>
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "plugins",
-                "marketplaces", "multiterminal-marketplace", "plugins", "multiterminal");
+        internal static string ResolveMtPluginPath(IEnumerable<string> candidates, Func<string, bool> directoryExists)
+        {
+            foreach (string candidate in candidates)
+            {
+                try
+                {
+                    if (directoryExists(candidate))
+                        return candidate;
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException)
+                {
+                    // Unreadable candidate: try the next one.
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// <c>&lt;value&gt;\plugins\multiterminal</c> when <paramref name="registryMarketplacePath"/> is a
+        /// fully qualified path; otherwise null.
+        /// </summary>
+        private static string SharedPluginDirFromRegistryValue(string registryMarketplacePath)
+        {
+            if (string.IsNullOrWhiteSpace(registryMarketplacePath))
+                return null;
+
+            string root = registryMarketplacePath.Trim().Trim('"');
+            try
+            {
+                if (!Path.IsPathFullyQualified(root))
+                    return null;
+                return Path.Combine(root, "plugins", "multiterminal");
+            }
+            catch (ArgumentException)
+            {
+                return null; // Illegal characters: treat as absent.
+            }
+        }
+
+        /// <summary>
+        /// HKCU\Software\MultiTerminal\PluginMarketplacePath, or null when absent, not a string, or
+        /// unreadable. Never throws: a broken registry must not stop a terminal launching.
+        /// </summary>
+        private static string ReadInstallerPluginMarketplacePath()
+        {
+            try
+            {
+                using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(InstallerRegistryKey);
+                return key?.GetValue(PluginMarketplacePathValueName) as string;
+            }
+            catch (Exception ex) when (ex is System.Security.SecurityException || ex is IOException || ex is UnauthorizedAccessException)
+            {
+                return null;
+            }
+        }
 
         /// <summary>
         /// Returns the path to the centralized MCP config file, healing it first if it has gone

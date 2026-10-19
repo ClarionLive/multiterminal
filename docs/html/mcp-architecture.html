@@ -39,6 +39,7 @@
         <div class="nav-section-title">Features</div>
         <a href="features.html" class="nav-link">Features</a>
         <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="claude-profiles.html" class="nav-link">Claude Profiles</a>
         <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
         <a href="presence.html" class="nav-link">Presence Sensors</a>
         <a href="code-graph.html" class="nav-link">Code Graph</a>
@@ -454,7 +455,6 @@
       <h3>Post-install configuration</h3>
       <p>The <code>post-install.js</code> script runs after file installation and:</p>
       <ol>
-        <li>Sets <code>CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1</code> in Claude Code's global <code>settings.json</code> (required for Team Agents)</li>
         <li><em>Opt-in only</em> ("Register MCP servers globally" component, unchecked by default): registers <code>multiterminal</code> + <code>mcp-gateway</code> in <code>~/.claude.json</code> for Claude Code sessions started outside MultiTerminal. MT-spawned terminals don't need this — the app regenerates <code>%APPDATA%\multiterminal\.mcp.json</code> at startup and passes it per-launch via <code>--mcp-config</code></li>
         <li>Writes <code>gateway-defaults.json</code> for the optional MCP servers selected in the wizard (the gateway auto-seeds on startup)</li>
         <li>Patches <code>runtimeconfig.json</code> for framework-dependent mode when .NET 8 is already installed</li>

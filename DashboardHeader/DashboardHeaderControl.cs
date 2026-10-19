@@ -290,7 +290,6 @@ namespace MultiTerminal.DashboardHeader
                 case "toggle_attention": TogglePanelRequested?.Invoke("attention"); break;
                 case "toggle_debug": TogglePanelRequested?.Invoke("debug"); break;
                 case "toggle_preview": TogglePanelRequested?.Invoke("preview"); break;
-                case "toggle_projects": TogglePanelRequested?.Invoke("projects"); break;
 
                 // Grid layouts
                 case "grid_2x2": GridLayoutRequested?.Invoke("2x2"); break;

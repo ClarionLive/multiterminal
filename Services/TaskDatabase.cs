@@ -248,6 +248,8 @@ namespace MultiTerminal.Services
             RunMigration(nameof(MigrateAddBranchMetadata), MigrateAddBranchMetadata);
             RunMigration(nameof(MigrateAddAgentToTaskWorktrees), MigrateAddAgentToTaskWorktrees);
             RunMigration(nameof(MigrateNormalizeNoteTabPaths), MigrateNormalizeNoteTabPaths);
+            RunMigration(nameof(MigrateAddNoteTabAuthorship), MigrateAddNoteTabAuthorship);
+            RunMigration(nameof(MigrateAddNoteTabReadState), MigrateAddNoteTabReadState);
 
             // Seed default agent profiles on first run
             SeedDefaultProfiles();
@@ -591,6 +593,10 @@ namespace MultiTerminal.Services
                     is_default INTEGER NOT NULL DEFAULT 0,
                     created_at DATETIME DEFAULT (datetime('now')),
                     updated_at DATETIME DEFAULT (datetime('now')),
+                    created_by TEXT,
+                    updated_by TEXT,
+                    agent_rev INTEGER NOT NULL DEFAULT 0,
+                    owner_read_rev INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(project_path, tab_name)
                 );
             ";
@@ -6455,13 +6461,20 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Save/upsert a single note tab.
+        /// Save/upsert a single note tab. This is the OWNER's write path (the Notes pane): an update
+        /// clears <c>updated_by</c>, recording that the Owner saved the tab last, which is what stops an
+        /// agent's later <see cref="AgentNoteWriteMode.Replace"/> from discarding the Owner's edit.
+        /// <c>created_by</c> is never touched, so an agent's tab stays marked as the agent's.
+        /// Clearing <c>updated_by</c> also marks the tab read (task c133b27d), and <c>owner_read_rev</c> is
+        /// caught up so the row says so explicitly.
         /// </summary>
-        public void SaveNoteTab(string projectPath, string tabName, string content, int? tabOrder = null, bool? isDefault = null)
+        /// <returns>True when the tab was unread before this save, so the caller can announce the change.</returns>
+        public bool SaveNoteTab(string projectPath, string tabName, string content, int? tabOrder = null, bool? isDefault = null)
         {
             using var gate = LockConn();
-            if (string.IsNullOrEmpty(projectPath) || string.IsNullOrEmpty(tabName)) return;
+            if (string.IsNullOrEmpty(projectPath) || string.IsNullOrEmpty(tabName)) return false;
             projectPath = NormalizeNoteTabPath(projectPath); // canonical key — stable across path-spelling
+            bool wasUnread = FindNoteTabExact(projectPath, tabName)?.IsUnread == true;
 
             // Get current max tab_order if not specified
             if (!tabOrder.HasValue)
@@ -6477,6 +6490,8 @@ namespace MultiTerminal.Services
                 VALUES (@id, @path, @name, @content, @order, @isDefault, datetime('now'), datetime('now'))
                 ON CONFLICT(project_path, tab_name) DO UPDATE SET
                     content = @content,
+                    updated_by = NULL,
+                    owner_read_rev = agent_rev,
                     updated_at = datetime('now')";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@id", Guid.NewGuid().ToString("N").Substring(0, 8));
@@ -6486,7 +6501,281 @@ namespace MultiTerminal.Services
             cmd.Parameters.AddWithValue("@order", tabOrder.Value);
             cmd.Parameters.AddWithValue("@isDefault", (isDefault ?? false) ? 1 : 0);
             cmd.ExecuteNonQuery();
+            return wasUnread;
         }
+
+        /// <summary>
+        /// Every note tab of a project with its authorship, in tab order (task 5d94ac91). Goes through
+        /// <see cref="GetProjectNoteTabs"/> first so a project read here self-heals and migrates exactly
+        /// as it would when the Notes pane opens it.
+        /// </summary>
+        public List<ProjectNoteTab> GetProjectNoteTabDetails(string projectPath)
+        {
+            using var gate = LockConn();
+            var result = new List<ProjectNoteTab>();
+            if (string.IsNullOrEmpty(projectPath)) return result;
+            GetProjectNoteTabs(projectPath); // reentrant under the same lock
+            projectPath = NormalizeNoteTabPath(projectPath);
+
+            const string sql = @"SELECT tab_name, content, is_default, tab_order, created_by, updated_by, updated_at, agent_rev, owner_read_rev
+                                 FROM project_note_tabs WHERE project_path = @path ORDER BY tab_order";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@path", projectPath);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                result.Add(ReadNoteTab(reader));
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// The unread rule (task c133b27d), the SQL twin of <see cref="ProjectNoteTab.IsUnread"/>: an agent
+        /// wrote the tab after the Owner last saw it. Rows that predate the read-state columns have
+        /// <c>agent_rev = owner_read_rev = 0</c> and so never count.
+        /// </summary>
+        internal const string NoteTabUnreadSql = "updated_by IS NOT NULL AND agent_rev > owner_read_rev";
+
+        /// <summary>How many of a project's note tabs are unread (task c133b27d). Drives the HUD badge.</summary>
+        public int CountUnreadNoteTabs(string projectPath)
+        {
+            using var gate = LockConn();
+            if (string.IsNullOrEmpty(projectPath)) return 0;
+            projectPath = NormalizeNoteTabPath(projectPath);
+            const string sql = "SELECT COUNT(*) FROM project_note_tabs WHERE project_path = @path AND " + NoteTabUnreadSql;
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@path", projectPath);
+            return Convert.ToInt32(cmd.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>
+        /// The Owner saw <paramref name="tabName"/> as of agent revision <paramref name="seenRev"/>
+        /// (task c133b27d). Takes the revision the pane actually DISPLAYED, never the stored one, so an
+        /// agent write that lands between the pane rendering the tab and this call stays unread.
+        /// <c>MAX</c> keeps a late, stale call from un-reading a newer one.
+        /// </summary>
+        /// <returns>True when the tab went from unread to read.</returns>
+        public bool MarkNoteTabRead(string projectPath, string tabName, long seenRev)
+        {
+            using var gate = LockConn();
+            if (string.IsNullOrEmpty(projectPath) || string.IsNullOrEmpty(tabName) || seenRev <= 0) return false;
+            projectPath = NormalizeNoteTabPath(projectPath);
+            const string sql = @"UPDATE project_note_tabs SET owner_read_rev = MIN(agent_rev, MAX(owner_read_rev, @rev))
+                                 WHERE project_path = @path AND tab_name = @name AND " + NoteTabUnreadSql + @"
+                                   AND MIN(agent_rev, @rev) > owner_read_rev";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@path", projectPath);
+            cmd.Parameters.AddWithValue("@name", tabName);
+            cmd.Parameters.AddWithValue("@rev", seenRev);
+            if (cmd.ExecuteNonQuery() == 0) return false;
+            var after = FindNoteTabExact(projectPath, tabName);
+            return after != null && !after.IsUnread;
+        }
+
+        // Exact-name lookup for the Owner's paths (the pane addresses tabs by their stored name).
+        private ProjectNoteTab FindNoteTabExact(string canonicalPath, string tabName)
+        {
+            using var gate = LockConn();
+            const string sql = @"SELECT tab_name, content, is_default, tab_order, created_by, updated_by, updated_at, agent_rev, owner_read_rev
+                                 FROM project_note_tabs WHERE project_path = @path AND tab_name = @name";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@path", canonicalPath);
+            cmd.Parameters.AddWithValue("@name", tabName);
+            using var reader = cmd.ExecuteReader();
+            return reader.Read() ? ReadNoteTab(reader) : null;
+        }
+
+        /// <summary>
+        /// Largest note an agent may leave in one tab, measured on the STORED text. Checked in
+        /// <see cref="WriteAgentNoteTab"/> rather than only on the incoming request, because repeated
+        /// appends would otherwise grow a tab without bound (and every write re-sends every tab to each
+        /// open Notes pane).
+        /// </summary>
+        public const int AgentNoteMaxChars = 100_000;
+
+        /// <summary>
+        /// An agent's note write (task 5d94ac91). The one rule that matters: <b>an agent never modifies a
+        /// tab the Owner created</b>. It may only add tabs, and change its OWN tabs:
+        /// <list type="bullet">
+        /// <item><see cref="AgentNoteWriteMode.New"/>: a free name is created. A name the agent already
+        /// owns is refused (so repeated calls update one note rather than piling up copies). A name held
+        /// by the Owner or another agent gets the first free "Name (n)".</item>
+        /// <item><see cref="AgentNoteWriteMode.Append"/>: adds to the agent's own tab, creating it when
+        /// missing. Allowed even after the Owner edited it, because appending removes nothing.</item>
+        /// <item><see cref="AgentNoteWriteMode.Replace"/>: rewrites the agent's own tab, creating it when
+        /// missing, but only while the agent was the last to write it; once the Owner saves it, replace
+        /// is refused and append is the remaining option.</item>
+        /// </list>
+        /// Ownership compares agent names ordinal-ignore-case, the comparison MT routes names with.
+        /// Read, decide and write all happen under one <c>LockConn</c>, which also serializes the
+        /// Notes pane's <see cref="SaveNoteTab"/>, so an Owner save cannot land between the check and
+        /// the write. Every mode is refused when the STORED text would exceed <see cref="AgentNoteMaxChars"/>.
+        /// </summary>
+        public AgentNoteWriteResult WriteAgentNoteTab(string projectPath, string tabName, string content, string agentName, AgentNoteWriteMode mode)
+        {
+            using var gate = LockConn();
+            tabName = tabName?.Trim();
+            agentName = agentName?.Trim();
+            if (string.IsNullOrEmpty(projectPath)) return AgentNoteWriteResult.Refused(tabName, "A project is required.");
+            if (string.IsNullOrEmpty(tabName)) return AgentNoteWriteResult.Refused(tabName, "A tab name is required.");
+            if (string.IsNullOrEmpty(agentName)) return AgentNoteWriteResult.Refused(tabName, "The writing agent's name is required.");
+            content ??= "";
+            if (content.Length > AgentNoteMaxChars)
+                return AgentNoteWriteResult.Refused(tabName, $"A note is limited to {AgentNoteMaxChars} characters.");
+
+            GetProjectNoteTabs(projectPath); // heal/migrate first so ownership is read off canonical rows
+            projectPath = NormalizeNoteTabPath(projectPath);
+
+            var existing = FindNoteTab(projectPath, tabName);
+            if (existing == null)
+            {
+                InsertAgentNoteTab(projectPath, tabName, content, agentName);
+                return new AgentNoteWriteResult { Outcome = AgentNoteWriteOutcome.Created, TabName = tabName };
+            }
+
+            bool own = string.Equals(existing.CreatedBy, agentName, StringComparison.OrdinalIgnoreCase);
+            string holder = existing.CreatedBy == null ? "the Owner" : $"agent {existing.CreatedBy}";
+
+            switch (mode)
+            {
+                case AgentNoteWriteMode.New:
+                    if (own)
+                    {
+                        return AgentNoteWriteResult.Refused(existing.Name,
+                            $"You already have a note named '{existing.Name}'. Use mode 'append' to add to it or 'replace' to rewrite it.");
+                    }
+                    string free = FreeNoteTabName(projectPath, tabName);
+                    InsertAgentNoteTab(projectPath, free, content, agentName);
+                    return new AgentNoteWriteResult { Outcome = AgentNoteWriteOutcome.Created, TabName = free };
+
+                case AgentNoteWriteMode.Append:
+                    if (!own)
+                    {
+                        return AgentNoteWriteResult.Refused(existing.Name,
+                            $"'{existing.Name}' was written by {holder}; agents may only append to their own notes. Use mode 'new' to add a separate note.");
+                    }
+                    string current = existing.Content ?? "";
+                    string appended = current.Length == 0 ? content : current.TrimEnd() + "\n\n" + content;
+                    if (appended.Length > AgentNoteMaxChars)
+                    {
+                        return AgentNoteWriteResult.Refused(existing.Name,
+                            $"Appending would make '{existing.Name}' {appended.Length} characters, over the {AgentNoteMaxChars}-character limit. Use mode 'replace' with a shorter note, or 'new'.");
+                    }
+                    UpdateAgentNoteTab(projectPath, existing.Name, appended, agentName);
+                    return new AgentNoteWriteResult { Outcome = AgentNoteWriteOutcome.Appended, TabName = existing.Name };
+
+                case AgentNoteWriteMode.Replace:
+                    if (!own)
+                    {
+                        return AgentNoteWriteResult.Refused(existing.Name,
+                            $"'{existing.Name}' was written by {holder}; agents may only replace their own notes. Use mode 'new' to add a separate note.");
+                    }
+                    if (!string.Equals(existing.UpdatedBy, agentName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        string editor = existing.UpdatedBy == null ? "the Owner" : $"agent {existing.UpdatedBy}";
+                        return AgentNoteWriteResult.Refused(existing.Name,
+                            $"'{existing.Name}' was edited by {editor} since you wrote it, so replacing it would discard their changes. Use mode 'append' instead.");
+                    }
+                    UpdateAgentNoteTab(projectPath, existing.Name, content, agentName);
+                    return new AgentNoteWriteResult { Outcome = AgentNoteWriteOutcome.Replaced, TabName = existing.Name };
+
+                default:
+                    return AgentNoteWriteResult.Refused(tabName, $"Unknown write mode '{mode}'.");
+            }
+        }
+
+        // Called only from WriteAgentNoteTab, which already holds LockConn; each re-enters the
+        // (reentrant) lock so the gate census sees every _connection method gated.
+        private ProjectNoteTab FindNoteTab(string canonicalPath, string tabName)
+        {
+            using var gate = LockConn();
+            // tab_name's UNIQUE constraint is case-sensitive (SQLite BINARY), but the Notes pane refuses
+            // a rename that differs only by case; matching NOCASE here keeps an agent from creating
+            // "todo" next to the Owner's "Todo", which the Owner would read as the same tab.
+            const string sql = @"SELECT tab_name, content, is_default, tab_order, created_by, updated_by, updated_at, agent_rev, owner_read_rev
+                                 FROM project_note_tabs WHERE project_path = @path AND tab_name = @name COLLATE NOCASE
+                                 ORDER BY (tab_name = @name) DESC LIMIT 1";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@path", canonicalPath);
+            cmd.Parameters.AddWithValue("@name", tabName);
+            using var reader = cmd.ExecuteReader();
+            return reader.Read() ? ReadNoteTab(reader) : null;
+        }
+
+        private string FreeNoteTabName(string canonicalPath, string baseName)
+        {
+            using var gate = LockConn();
+            for (int n = 2; n < 1000; n++)
+            {
+                string candidate = $"{baseName} ({n})";
+                if (FindNoteTab(canonicalPath, candidate) == null) return candidate;
+            }
+            return $"{baseName} ({Guid.NewGuid().ToString("N").Substring(0, 6)})";
+        }
+
+        private void InsertAgentNoteTab(string canonicalPath, string tabName, string content, string agentName)
+        {
+            using var gate = LockConn();
+            const string sql = @"
+                INSERT INTO project_note_tabs (id, project_path, tab_name, content, tab_order, is_default, created_at, updated_at, created_by, updated_by, agent_rev)
+                VALUES (@id, @path, @name, @content,
+                        (SELECT COALESCE(MAX(tab_order), -1) + 1 FROM project_note_tabs WHERE project_path = @path),
+                        0, datetime('now'), datetime('now'), @agent, @agent, 1)";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@id", Guid.NewGuid().ToString("N").Substring(0, 8));
+            cmd.Parameters.AddWithValue("@path", canonicalPath);
+            cmd.Parameters.AddWithValue("@name", tabName);
+            cmd.Parameters.AddWithValue("@content", content);
+            cmd.Parameters.AddWithValue("@agent", agentName);
+            cmd.ExecuteNonQuery();
+        }
+
+        private void UpdateAgentNoteTab(string canonicalPath, string tabName, string content, string agentName)
+        {
+            using var gate = LockConn();
+            const string sql = @"UPDATE project_note_tabs SET content = @content, updated_by = @agent, updated_at = datetime('now'),
+                                     agent_rev = agent_rev + 1
+                                 WHERE project_path = @path AND tab_name = @name";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@path", canonicalPath);
+            cmd.Parameters.AddWithValue("@name", tabName);
+            cmd.Parameters.AddWithValue("@content", content);
+            cmd.Parameters.AddWithValue("@agent", agentName);
+            cmd.ExecuteNonQuery();
+        }
+
+        private static ProjectNoteTab ReadNoteTab(SQLiteDataReader reader)
+        {
+            DateTime? updatedAt = null;
+            if (!reader.IsDBNull(6) &&
+                DateTime.TryParse(Convert.ToString(reader.GetValue(6), System.Globalization.CultureInfo.InvariantCulture),
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                    out var parsed))
+            {
+                updatedAt = parsed;
+            }
+
+            return new ProjectNoteTab
+            {
+                Name = reader.GetString(0),
+                Content = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                IsDefault = reader.GetInt32(2) == 1,
+                Order = reader.GetInt32(3),
+                CreatedBy = reader.IsDBNull(4) ? null : reader.GetString(4),
+                UpdatedBy = reader.IsDBNull(5) ? null : reader.GetString(5),
+                UpdatedAt = updatedAt,
+                AgentRev = reader.GetInt64(7),
+                OwnerReadRev = reader.GetInt64(8),
+            };
+        }
+
+        /// <summary>
+        /// The canonical note-tab key for a path, the same form every project_note_tabs read and write
+        /// stores (see <see cref="NormalizeNoteTabPath"/>). Public so a listener can tell whether a
+        /// change announced for one spelling of a project is the project it is showing.
+        /// </summary>
+        public static string CanonicalNoteTabKey(string path) => NormalizeNoteTabPath(path);
 
         /// <summary>
         /// Delete a note tab (cannot delete default tab).
@@ -6659,6 +6948,58 @@ namespace MultiTerminal.Services
         /// </summary>
         private static bool LooksLikeWorktreePath(string path)
             => WorktreeLayout.LooksLikeWorktreePath(path);
+
+        /// <summary>
+        /// Adds note-tab authorship (task 5d94ac91): <c>created_by</c> / <c>updated_by</c>, both NULL for
+        /// every existing row, because before this column existed only the Owner could write a note.
+        /// Guarded per column so a fresh database (whose CREATE TABLE already has them) is a no-op.
+        /// </summary>
+        private void MigrateAddNoteTabAuthorship()
+        {
+            var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using (var info = new SQLiteCommand("PRAGMA table_info(project_note_tabs)", _connection))
+            using (var reader = info.ExecuteReader())
+            {
+                while (reader.Read()) columns.Add(reader.GetString(1));
+            }
+
+            if (!columns.Contains("created_by"))
+            {
+                using var alter = new SQLiteCommand("ALTER TABLE project_note_tabs ADD COLUMN created_by TEXT", _connection);
+                alter.ExecuteNonQuery();
+            }
+            if (!columns.Contains("updated_by"))
+            {
+                using var alter = new SQLiteCommand("ALTER TABLE project_note_tabs ADD COLUMN updated_by TEXT", _connection);
+                alter.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// Adds note-tab read state (task c133b27d): <c>agent_rev</c> / <c>owner_read_rev</c>. Both default
+        /// to 0 on every existing row, so nothing already in the database counts as unread after the
+        /// upgrade: the rule needs <c>agent_rev &gt; owner_read_rev</c>. Guarded per column.
+        /// </summary>
+        private void MigrateAddNoteTabReadState()
+        {
+            var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using (var info = new SQLiteCommand("PRAGMA table_info(project_note_tabs)", _connection))
+            using (var reader = info.ExecuteReader())
+            {
+                while (reader.Read()) columns.Add(reader.GetString(1));
+            }
+
+            if (!columns.Contains("agent_rev"))
+            {
+                using var alter = new SQLiteCommand("ALTER TABLE project_note_tabs ADD COLUMN agent_rev INTEGER NOT NULL DEFAULT 0", _connection);
+                alter.ExecuteNonQuery();
+            }
+            if (!columns.Contains("owner_read_rev"))
+            {
+                using var alter = new SQLiteCommand("ALTER TABLE project_note_tabs ADD COLUMN owner_read_rev INTEGER NOT NULL DEFAULT 0", _connection);
+                alter.ExecuteNonQuery();
+            }
+        }
 
         /// <summary>
         /// One-time migration: rewrite every project_note_tabs.project_path to its
@@ -7204,7 +7545,6 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Returns sessions whose file path starts with the given Claude project folder prefix.
-        /// Used by ProjectPanel to show sessions for a specific project.
         /// </summary>
         public List<SessionLineageRecord> GetSessionsByFolder(string claudeProjectFolder, int limit = 20)
         {

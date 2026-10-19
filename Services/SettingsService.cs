@@ -132,10 +132,6 @@ namespace MultiTerminal.Services
         private const float MinTerminalFontSize = 6f;
         private const float MaxTerminalFontSize = 32f;
 
-        // Prompts panel font size settings
-        private const string PromptsFontSizeKey = "PromptsFontSize";
-        private const float DefaultPromptsFontSize = 9f;
-
         // Chat panel font size settings
         private const string ChatFontSizeKey = "ChatFontSize";
         private const float DefaultChatFontSize = 13f;
@@ -257,6 +253,144 @@ namespace MultiTerminal.Services
                 ? WorktreeModeOn
                 : WorktreeModeOff;
             Set(WorktreeModeKey, normalized);
+        }
+
+        // ── Start screen (Home) preferences (ticket e20e2ce0 item 8) ──────────────
+        private const string StartScreenHomeViewKey = "StartScreenHomeView";
+        private const string StartScreenSortKey = "StartScreenSort";
+
+        public const string StartScreenHomeViewList = "list";
+        public const string StartScreenHomeViewCards = "cards";
+
+        /// <summary>The Browse All sort when nothing (or nothing valid) is stored: pinned first, then by name.</summary>
+        public const string DefaultStartScreenSort = "pin:asc,name:asc";
+
+        /// <summary>The Browse All columns a stored sort may name (the page's sortable headers).</summary>
+        internal static readonly HashSet<string> StartScreenSortColumns = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "pin", "name", "type", "version", "status", "lead", "created", "opened",
+        };
+
+        /// <summary>At most this many sort keys are kept (primary plus Shift-click additions).</summary>
+        internal const int MaxStartScreenSortKeys = 3;
+
+        /// <summary>Which view the start screen opens on: "list" (Browse All, the default) or "cards".</summary>
+        public string GetStartScreenHomeView() => NormalizeStartScreenHomeView(Get(StartScreenHomeViewKey));
+
+        public void SetStartScreenHomeView(string view) => Set(StartScreenHomeViewKey, NormalizeStartScreenHomeView(view));
+
+        /// <summary>"cards" only when asked for exactly (any case); everything else, blank included, is "list".</summary>
+        internal static string NormalizeStartScreenHomeView(string raw) =>
+            string.Equals(raw?.Trim(), StartScreenHomeViewCards, StringComparison.OrdinalIgnoreCase)
+                ? StartScreenHomeViewCards
+                : StartScreenHomeViewList;
+
+        /// <summary>The remembered Browse All sort, as "column:dir" keys joined by commas, primary first.</summary>
+        public string GetStartScreenSort() => NormalizeStartScreenSort(Get(StartScreenSortKey));
+
+        public void SetStartScreenSort(string spec) => Set(StartScreenSortKey, NormalizeStartScreenSort(spec));
+
+        /// <summary>
+        /// Cleans a sort spec sent by the page: keeps known columns only, the first occurrence of each,
+        /// direction "asc" or "desc" (anything else is "asc"), at most <see cref="MaxStartScreenSortKeys"/>
+        /// keys. A spec with nothing valid left is <see cref="DefaultStartScreenSort"/>.
+        /// </summary>
+        internal static string NormalizeStartScreenSort(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return DefaultStartScreenSort;
+            var keys = new List<string>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var part in raw.Split(','))
+            {
+                var pieces = part.Split(':');
+                string column = pieces[0].Trim().ToLowerInvariant();
+                if (!StartScreenSortColumns.Contains(column) || !seen.Add(column)) continue;
+                string dir = pieces.Length > 1 && string.Equals(pieces[1].Trim(), "desc", StringComparison.OrdinalIgnoreCase) ? "desc" : "asc";
+                keys.Add(column + ":" + dir);
+                if (keys.Count == MaxStartScreenSortKeys) break;
+            }
+            return keys.Count == 0 ? DefaultStartScreenSort : string.Join(",", keys);
+        }
+
+        // Claude Code config profiles (ticket c8ee0eec, GitHub #21). One line of JSON:
+        // [{"name":"Work","configDir":"C:\\Users\\me\\.claude-work"}, ...]. The implicit Default profile
+        // is never stored (ClaudeProfileResolver supplies it).
+        private const string ClaudeProfilesKey = "ClaudeProfiles";
+
+        private static readonly System.Text.Json.JsonSerializerOptions ClaudeProfilesJsonOptions = new System.Text.Json.JsonSerializerOptions
+        {
+            PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+            PropertyNameCaseInsensitive = true,
+            WriteIndented = false, // settings.txt is one key=value per line
+        };
+
+        /// <summary>
+        /// The stored Claude Code config profiles (never includes Default), in stored order. Entries that
+        /// break the structural rules (blank or reserved name, later duplicate name, non-absolute folder)
+        /// are skipped; unreadable JSON reads as no profiles. Does not check that folders exist.
+        /// </summary>
+        public List<ClaudeProfile> GetClaudeProfiles() => ParseClaudeProfiles(Get(ClaudeProfilesKey));
+
+        /// <summary>
+        /// Replaces the stored profile list. Run <see cref="ClaudeProfileResolver.Validate(IReadOnlyList{ClaudeProfile})"/>
+        /// first to show the user what is wrong; this method only refuses entries that could never be read
+        /// back (blank or reserved name, duplicate name, non-absolute folder). Null or empty clears the list.
+        /// </summary>
+        /// <exception cref="ArgumentException">An entry breaks a structural rule; nothing is written.</exception>
+        public void SetClaudeProfiles(IEnumerable<ClaudeProfile> profiles)
+        {
+            string json = SerializeClaudeProfiles(profiles);
+            if (json == null)
+                Remove(ClaudeProfilesKey);
+            else
+                Set(ClaudeProfilesKey, json);
+        }
+
+        /// <summary>Pure: settings value → profiles. See <see cref="GetClaudeProfiles"/>.</summary>
+        internal static List<ClaudeProfile> ParseClaudeProfiles(string json)
+        {
+            var result = new List<ClaudeProfile>();
+            if (string.IsNullOrWhiteSpace(json))
+                return result;
+
+            List<ClaudeProfile> parsed;
+            try
+            {
+                parsed = System.Text.Json.JsonSerializer.Deserialize<List<ClaudeProfile>>(json, ClaudeProfilesJsonOptions);
+            }
+            catch (System.Text.Json.JsonException ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Unreadable {ClaudeProfilesKey} setting: {ex.Message}");
+                return result;
+            }
+
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var p in parsed ?? new List<ClaudeProfile>())
+            {
+                if (!ClaudeProfileResolver.IsStorable(p) || !names.Add(p.Name.Trim()))
+                    continue;
+                result.Add(new ClaudeProfile(p.Name.Trim(), p.ConfigDir.Trim()));
+            }
+
+            return result;
+        }
+
+        /// <summary>Pure: profiles → settings value (null for an empty list). See <see cref="SetClaudeProfiles"/>.</summary>
+        internal static string SerializeClaudeProfiles(IEnumerable<ClaudeProfile> profiles)
+        {
+            var list = new List<ClaudeProfile>();
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var p in profiles ?? Array.Empty<ClaudeProfile>())
+            {
+                if (!ClaudeProfileResolver.IsStorable(p))
+                    throw new ArgumentException($"Claude profile '{p?.Name}' needs a name other than '{ClaudeProfile.DefaultName}' and an absolute folder.", nameof(profiles));
+                if (!names.Add(p.Name.Trim()))
+                    throw new ArgumentException($"More than one Claude profile is named '{p.Name.Trim()}'.", nameof(profiles));
+                // The canonical folder, which is what Validate judged. IsStorable guarantees it is not null.
+                list.Add(new ClaudeProfile(p.Name.Trim(), ClaudeProfileResolver.Canonicalize(p.ConfigDir)));
+            }
+
+            return list.Count == 0 ? null : System.Text.Json.JsonSerializer.Serialize(list, ClaudeProfilesJsonOptions);
         }
 
         // Codex CLI settings (Phase 1 Codex integration).
@@ -469,28 +603,6 @@ namespace MultiTerminal.Services
         /// <summary>Sets the attention panel's alarm treatment. Unknown values store the default.</summary>
         public void SetAttentionPanelAlarm(string alarm)
             => Set(AttentionPanelAlarmKey, NormalizeFrom(AttentionAlarms, alarm));
-
-        /// <summary>
-        /// Gets the prompts panel font size (8-14pt range).
-        /// </summary>
-        public float GetPromptsFontSize()
-        {
-            string value = Get(PromptsFontSizeKey);
-            if (!string.IsNullOrEmpty(value) && float.TryParse(value, out float size))
-            {
-                return Math.Max(MinUIFontSize, Math.Min(MaxUIFontSize, size));
-            }
-            return DefaultPromptsFontSize;
-        }
-
-        /// <summary>
-        /// Sets the prompts panel font size.
-        /// </summary>
-        public void SetPromptsFontSize(float size)
-        {
-            size = Math.Max(MinUIFontSize, Math.Min(MaxUIFontSize, size));
-            Set(PromptsFontSizeKey, size.ToString("F1"));
-        }
 
         /// <summary>
         /// Gets the chat panel font size (8-14pt range).

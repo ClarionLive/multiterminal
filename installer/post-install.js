@@ -2,7 +2,8 @@
  * MultiTerminal Post-Install Script
  *
  * Runs after Inno Setup copies files. Handles:
- * 1. Setting CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS env in ~/.claude/settings.json
+ * 1. (Retired, Owner decision Q5 2026-10-09: ~/.claude/settings.json is no longer written.
+ *    The numbers below are kept because other comments refer to them.)
  * 2. OPT-IN (--global-reg=yes, GH#2): registering MCP servers in ~/.claude.json so
  *    Claude Code sessions started OUTSIDE MultiTerminal see them. MT-spawned terminals
  *    never need this — the app creates %APPDATA%\multiterminal\.mcp.json at startup if it is
@@ -11,6 +12,11 @@
  *    (LaunchCommandBuilder), along with the plugin via --plugin-dir.
  * 3. Writing gateway-defaults.json for optional MCP servers (gateway auto-seeds on startup)
  * 4. Patching runtimeconfig.json for framework-dependent mode (if .NET 8 detected)
+ * 5. Shared plugin location only (ticket c8ee0eec, GH#23): registering the shared marketplace
+ *    into each extra Claude Code config dir the user listed, with CLAUDE_CONFIG_DIR set in the
+ *    CHILD process env only, and recording the dirs that succeeded in
+ *    HKCU\Software\MultiTerminal\PluginRegisteredProfiles. ADD ONLY: the plugin is never
+ *    installed/enabled (MT loads it via --plugin-dir; enabling it too would load it twice).
  *
  * Note: hooks, agents, skills, and CLAUDE.md live in the Claude Code plugin at
  *   %USERPROFILE%\.claude\plugins\marketplaces\multiterminal-marketplace\plugins\multiterminal\
@@ -20,6 +26,8 @@
  * or --plugin-dir).
  *
  * Usage: node post-install.js <installDir> <appDataDir> <userProfileDir> [--framework-dependent|--self-contained] [--mcps=name1,name2,...] [--global-reg=yes|no]
+ *          [--plugin-mode=default|shared|skip] [--plugin-root=<marketplace root>] [--plugin-profiles=<dir1;dir2>]
+ * The --plugin-* flags are optional and matched by name (absent = skip step 5).
  */
 
 const fs = require('fs');
@@ -40,7 +48,17 @@ if (!installDir || !appDataDir || !userProfileDir) {
 const isFrameworkDependent = (dotnetFlag === '--framework-dependent');
 const selectedMcps = mcpsFlag.replace('--mcps=', '').split(',').filter(m => m && m !== 'none');
 const globalRegistration = (globalRegFlag === '--global-reg=yes');
-const claudeGlobalDir = path.join(userProfileDir, '.claude');
+
+// Named --plugin-* flags (ticket c8ee0eec). Read by prefix so the positional args above keep
+// their meaning; an older .iss that passes none of them leaves step 5 a no-op.
+function namedFlag(name) {
+    const prefix = `--${name}=`;
+    const hit = process.argv.slice(5).find(a => a.startsWith(prefix));
+    return hit === undefined ? null : hit.slice(prefix.length);
+}
+const pluginMode = namedFlag('plugin-mode') || 'skip';
+const pluginRoot = namedFlag('plugin-root') || '';
+const pluginProfiles = namedFlag('plugin-profiles') || '';
 
 function ensureDir(dir) {
     if (!fs.existsSync(dir)) {
@@ -48,34 +66,11 @@ function ensureDir(dir) {
     }
 }
 
-// ============================================================
-// 1. Enable experimental agent teams via ~/.claude/settings.json
-//    Required for Team Agents / AgentPanel.
-// ============================================================
-function setExperimentalAgentTeamsEnv() {
-    const settingsPath = path.join(claudeGlobalDir, 'settings.json');
-
-    let settings = {};
-    if (fs.existsSync(settingsPath)) {
-        try {
-            const backupPath = settingsPath + '.pre-multiterminal.bak';
-            fs.copyFileSync(settingsPath, backupPath);
-            settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-        } catch (e) {
-            console.warn('Warning: Could not parse existing settings.json, creating new one');
-            settings = {};
-        }
-    }
-
-    if (!settings.env) {
-        settings.env = {};
-    }
-    settings.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
-
-    ensureDir(claudeGlobalDir);
-    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
-    console.log(`Set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 in: ${settingsPath}`);
-}
+// 1. (Retired.) The installer used to write CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 into
+//    ~/.claude/settings.json. MultiTerminal now sets it on every Claude launch it makes
+//    (ClaudeProfileResolver), which covers every Claude profile rather than only the default
+//    one and leaves the user's own settings alone. A value an older install wrote is NOT
+//    removed on upgrade: sessions started outside MultiTerminal may rely on it.
 
 // ============================================================
 // 2. Register MCP servers in ~/.claude.json (user-level config)
@@ -265,6 +260,81 @@ function patchRuntimeConfig() {
 }
 
 // ============================================================
+// 5. Register the SHARED plugin marketplace into extra Claude Code
+//    config profiles (ticket c8ee0eec, GH#23).
+//    The default profile needs nothing here: its copy lives where it
+//    always did. Never fails the install — every failure is logged.
+// ============================================================
+function registerPluginProfiles() {
+    if (pluginMode === 'skip') {
+        console.log('Plugin profile registration: skipped (plugin component not selected).');
+        return;
+    }
+
+    let reg;
+    try {
+        reg = require('./plugin-registration');
+    } catch (e) {
+        console.warn(`Warning: plugin-registration.js not found next to post-install.js (${e.message}); profile registration skipped.`);
+        return;
+    }
+
+    const prevText = reg.readReg(reg.REG_PROFILES);
+    const previous = reg.parseProfileList(prevText || '', {});
+    const requested = reg.parseProfileList(pluginProfiles, process.env);
+    const plan = reg.planPostInstall({ mode: pluginMode, requested, previous, userProfileDir });
+
+    console.log(`Plugin location: ${pluginMode}${pluginMode === 'shared' ? ` (${pluginRoot})` : ''}`);
+    for (const dir of plan.skippedDefault) {
+        console.log(`  Skipped ${dir}: that is the default Claude Code profile, which gets the plugin via MultiTerminal's --plugin-dir (not registered there).`);
+    }
+    if (plan.add.length === 0 && plan.remove.length === 0) {
+        console.log('  No Claude Code profiles to register or de-register.');
+    }
+
+    const results = {};
+    const rootProblem = reg.unsafeDirReason(pluginRoot);
+
+    for (const dir of plan.add) {
+        // A missing dir is never run: CLAUDE_CONFIG_DIR at a mistyped path would create a new profile.
+        const skip = reg.profileDirPreflight({ action: 'add', dir, exists: fs.existsSync(dir), rootProblem });
+        if (skip) {
+            console.warn(`  Skipped ${dir}: ${skip.message}`);
+            results[reg.dirKey(dir)] = { ok: false, failureCode: skip.failureCode };
+            continue;
+        }
+        const r = reg.runMarketplace('add', { configDir: dir, sharedRoot: pluginRoot, userProfileDir });
+        results[reg.dirKey(dir)] = r;
+        console.log(`  ${r.ok ? 'Registered' : 'FAILED to register'} marketplace in ${dir}${r.message ? `: ${r.message}` : ''}`);
+    }
+
+    for (const dir of plan.remove) {
+        // Same rule for a remove: a stored dir that no longer exists is treated as already clean
+        // (not_configured, dropped from the recorded list) and claude is never run against it.
+        const skip = reg.profileDirPreflight({ action: 'remove', dir, exists: fs.existsSync(dir) });
+        if (skip) {
+            console.warn(`  Not de-registering ${dir}: ${skip.message}`);
+            results[reg.dirKey(dir)] = { ok: false, failureCode: skip.failureCode };
+            continue;
+        }
+        const r = reg.runMarketplace('remove', { configDir: dir, userProfileDir });
+        results[reg.dirKey(dir)] = r;
+        const clean = r.ok || r.failureCode === 'not_configured';
+        console.log(`  ${clean ? 'De-registered' : 'FAILED to de-register'} marketplace from ${dir}${r.message ? `: ${r.message}` : ''}`);
+    }
+
+    const registered = reg.registeredAfterInstall({ plan, previous, results });
+    const ok = registered.length > 0
+        ? reg.writeRegString(reg.REG_PROFILES, registered.join(';'))
+        : (prevText === undefined || reg.deleteRegValue(reg.REG_PROFILES));
+    if (!ok) {
+        console.warn(`  Warning: could not record ${reg.REG_PROFILES} in ${reg.REG_KEY}; uninstall will not de-register these profiles.`);
+    } else if (registered.length > 0) {
+        console.log(`  Recorded ${registered.length} registered profile(s) in ${reg.REG_KEY}\\${reg.REG_PROFILES}`);
+    }
+}
+
+// ============================================================
 // Run all steps
 // ============================================================
 try {
@@ -276,10 +346,14 @@ try {
     console.log(`  Global MCP reg: ${globalRegistration ? 'yes (opt-in selected)' : 'no (default — MT terminals use --mcp-config)'}`);
     console.log('');
 
-    setExperimentalAgentTeamsEnv();
     registerMcpServers();
     registerOptionalMcps();
     patchRuntimeConfig();
+    try {
+        registerPluginProfiles();
+    } catch (e) {
+        console.warn(`Warning: plugin profile registration failed: ${e.message}`);
+    }
 
     console.log('');
     console.log('Claude Code integration configured successfully.');

@@ -1,7 +1,6 @@
 using System;
 using System.Data.SQLite;
 using System.IO;
-using MultiTerminal.Dialogs;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Models;
 using MultiTerminal.Services;
@@ -10,7 +9,7 @@ using Xunit;
 namespace MultiTerminal.Tests
 {
     /// <summary>
-    /// Task 9f95ab0c, pipeline Run 4: the undo/retry path never throws out of the dialog, deletes
+    /// Task 9f95ab0c, pipeline Run 4: the undo never throws, deletes
     /// project.json only after the row delete is confirmed, and raises the removal notifications; and
     /// ProjectDatabase.DeleteProject removes child rows itself, because SQLite foreign keys are off and
     /// ON DELETE CASCADE never runs. Real broker / database on temp files.
@@ -80,7 +79,7 @@ namespace MultiTerminal.Tests
             Assert.NotNull(db.GetRichProject(created.ProjectId));
         }
 
-        // ---- No throw out of the dialog ----
+        // ---- The undo reports, never throws ----
 
         [Fact]
         public void Undo_returns_an_error_instead_of_throwing_and_stays_recoverable()
@@ -102,35 +101,6 @@ namespace MultiTerminal.Tests
             Assert.Null(broker.UndoProjectCreate(created.ProjectId));
             Assert.Empty(db.GetAllProjects());
             Assert.False(File.Exists(JsonPath));
-        }
-
-        [Fact]
-        public void A_throwing_rollback_delegate_is_reported_not_thrown()
-        {
-            using var db = new ProjectDatabase();
-            using var service = new ProjectService(db);
-            using var broker = NewBroker(service);
-            var project = new Project { Id = "dialog-guid", Name = "Fresh", Path = _folder };
-            string uncommitted = null;
-
-            string message = EditProjectDialog.CommitNewProject(project,
-                p => ProjectManagerDialog.CreateThroughBroker(broker, p),
-                _ => throw new IOException("disk full"),
-                _ => throw new InvalidOperationException("rollback blew up"),
-                ref uncommitted);
-
-            Assert.Contains("could not be removed", message);
-            Assert.Contains("rollback blew up", message);
-            Assert.NotNull(uncommitted);
-
-            // Recoverable: the next attempt re-runs the (now working) undo, then creates afresh.
-            string retry = EditProjectDialog.CommitNewProject(project,
-                p => ProjectManagerDialog.CreateThroughBroker(broker, p),
-                p => db.SaveRichProject(p),
-                p => ProjectManagerDialog.RollBackThroughBroker(broker, p),
-                ref uncommitted);
-            Assert.Null(retry);
-            Assert.Single(db.GetAllProjects());
         }
 
         // ---- Removal notifications after an undo ----
@@ -179,8 +149,8 @@ namespace MultiTerminal.Tests
         }
 
         // Run 5: the first undo deletes the row but cannot delete project.json (held open without
-        // FILE_SHARE_DELETE). The retry, with the row gone, must still finish that delete through the
-        // folder the dialog passes, not report success over a project.json naming a nonexistent project.
+        // FILE_SHARE_DELETE). The retry, with the row gone, must still finish that delete, not report
+        // success over a project.json naming a nonexistent project.
         [Fact]
         public void Retry_finishes_a_project_json_delete_that_failed_after_the_row_was_removed()
         {
@@ -189,11 +159,10 @@ namespace MultiTerminal.Tests
             using var broker = NewBroker(service);
             var created = broker.CreateProject("A", null, "test", _folder);
             Assert.True(created.Success, created.Error);
-            var dialogProject = new Project { Id = created.ProjectId, Name = "A", Path = _folder };
 
             using (new FileStream(JsonPath, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
-                string first = ProjectManagerDialog.RollBackThroughBroker(broker, dialogProject);
+                string first = broker.UndoProjectCreate(created.ProjectId);
 
                 Assert.NotNull(first);
                 Assert.Contains("project.json", first);
@@ -201,28 +170,28 @@ namespace MultiTerminal.Tests
                 Assert.True(File.Exists(JsonPath));
             }
 
-            string retry = ProjectManagerDialog.RollBackThroughBroker(broker, dialogProject);
+            string retry = broker.UndoProjectCreate(created.ProjectId);
 
             Assert.Null(retry);
             Assert.False(File.Exists(JsonPath));
         }
 
-        // Run 6: after a partial undo the dialog's folder field is still editable. The user points it at a
-        // second folder holding a COPY of the project.json (same id). The retry must finish the delete in the
-        // folder the create wrote, and must not touch the second folder.
+        // Run 6: after a partial undo, a second folder holds a COPY of the project.json (same id). The retry
+        // must finish the delete in the folder the create wrote, and must not touch the second folder.
+        // (Written for the retired Project Manager, whose folder field stayed editable; ticket e20e2ce0 kept
+        // the fact because the undo is still the broker's.)
         [Fact]
-        public void Retry_deletes_only_the_folder_the_create_wrote_not_the_dialogs_current_folder()
+        public void Retry_deletes_only_the_folder_the_create_wrote_not_a_copy_elsewhere()
         {
             using var db = new ProjectDatabase();
             using var service = new ProjectService(db);
             using var broker = NewBroker(service);
             var created = broker.CreateProject("A", null, "test", _folder);
             Assert.True(created.Success, created.Error);
-            var dialogProject = new Project { Id = created.ProjectId, Name = "A", Path = _folder };
 
             using (new FileStream(JsonPath, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
-                Assert.NotNull(ProjectManagerDialog.RollBackThroughBroker(broker, dialogProject));
+                Assert.NotNull(broker.UndoProjectCreate(created.ProjectId));
             }
 
             string second = Path.Combine(_root, "Second");
@@ -230,9 +199,8 @@ namespace MultiTerminal.Tests
             Directory.CreateDirectory(Path.GetDirectoryName(secondJson));
             File.Copy(JsonPath, secondJson);
             byte[] secondBefore = File.ReadAllBytes(secondJson);
-            dialogProject.Path = second; // the user edited the folder field before retrying
 
-            string retry = ProjectManagerDialog.RollBackThroughBroker(broker, dialogProject);
+            string retry = broker.UndoProjectCreate(created.ProjectId);
 
             Assert.Null(retry);
             Assert.False(File.Exists(JsonPath), "the folder the create wrote still has its project.json");

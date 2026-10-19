@@ -8,7 +8,6 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
-using MultiTerminal.Dialogs;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
 using Xunit;
@@ -75,10 +74,12 @@ namespace MultiTerminal.Tests
                 .GetField("_projects", BindingFlags.NonPublic | BindingFlags.Instance)
                 .GetValue(broker);
 
-        // ---- Project Manager door (2e297688) ----
+        // ---- The guarded create (2e297688) ----
+        // Written for the Project Manager's New Project, which reached it through a dialog wrapper. The
+        // dialog was retired in ticket e20e2ce0; the facts now call the broker the wrapper called.
 
         [Fact]
-        public void Project_manager_create_on_an_occupied_folder_is_refused_and_writes_nothing()
+        public void Create_on_an_occupied_folder_is_refused_and_writes_nothing()
         {
             using var db = new ProjectDatabase();
             using var service = new ProjectService(db);
@@ -86,41 +87,28 @@ namespace MultiTerminal.Tests
             string jsonPath = Path.Combine(_folder, ".claude", "project.json");
             byte[] before = File.ReadAllBytes(jsonPath);
             using var broker = new MessageBroker { ProjectService = service };
-            var dialogProject = new FileProject { Id = "dialog-guid", Name = "TestC", Path = _folder };
 
-            string refusal = ProjectManagerDialog.CreateThroughBroker(broker, dialogProject);
+            var result = broker.CreateProject("TestC", null, "test", _folder);
 
-            Assert.NotNull(refusal);
-            Assert.Contains("ac8a793b", refusal);
-            Assert.Equal("dialog-guid", dialogProject.Id);
+            Assert.False(result.Success);
+            Assert.Contains("ac8a793b", result.Error);
             Assert.Equal(before, File.ReadAllBytes(jsonPath));
             Assert.Single(db.GetAllProjects());
             Assert.Equal("TestB", db.GetRichProject("ac8a793b").Name);
         }
 
         [Fact]
-        public void Project_manager_create_on_a_free_folder_creates_one_project_with_the_brokers_id()
+        public void Create_on_a_free_folder_creates_one_project_with_the_brokers_id()
         {
             using var db = new ProjectDatabase();
             using var service = new ProjectService(db);
             using var broker = new MessageBroker { ProjectService = service };
-            var dialogProject = new FileProject { Id = "dialog-guid", Name = "Fresh", Path = _folder };
 
-            string refusal = ProjectManagerDialog.CreateThroughBroker(broker, dialogProject);
+            var result = broker.CreateProject("Fresh", null, "test", _folder);
 
-            Assert.Null(refusal);
-            Assert.NotEqual("dialog-guid", dialogProject.Id);
-            Assert.Equal(dialogProject.Id, service.LoadProject(_folder).Id);
+            Assert.True(result.Success, result.Error);
+            Assert.Equal(result.ProjectId, service.LoadProject(_folder).Id);
             Assert.Single(db.GetAllProjects());
-        }
-
-        [Fact]
-        public void Project_manager_create_without_a_broker_refuses()
-        {
-            var dialogProject = new FileProject { Id = "dialog-guid", Name = "Fresh", Path = _folder };
-
-            Assert.NotNull(ProjectManagerDialog.CreateThroughBroker(null, dialogProject));
-            Assert.False(File.Exists(Path.Combine(_folder, ".claude", "project.json")));
         }
 
         // ---- Indeterminate occupancy ----
@@ -221,7 +209,7 @@ namespace MultiTerminal.Tests
             using var db = new ProjectDatabase();
             using var service = new ProjectService(db);
             using var broker = new MessageBroker { ProjectService = service };
-            // Written behind the broker (as the start screen or EditProjectDialog do): DB row only.
+            // Written behind the broker (as the start screen does): DB row only.
             var row = FileProject.Create("Behind", _folder);
             row.Id = "b0b0b0b0";
             db.SaveRichProject(row);

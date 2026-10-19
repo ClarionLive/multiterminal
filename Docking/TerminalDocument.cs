@@ -104,6 +104,48 @@ namespace MultiTerminal.Docking
         // can drop the session's accumulated state (accumulator + all file-tail offsets) on close.
         private string _lastTokenSessionId;
 
+        // The Claude session running in this pane NOW (task ec2ed636). Deliberately separate from
+        // _lastTokenSessionId, which outlives the process on purpose (it is the key the token meter
+        // forgets on rollover/close). This one is cleared at every launch boundary; see
+        // ClaudeSessionTracker for the fencing that keeps a late poll tick from resurrecting it.
+        private readonly ClaudeSessionTracker _claudeSession = new ClaudeSessionTracker();
+
+        /// <summary>
+        /// The session id of the Claude process currently running in this pane, or <c>null</c> when
+        /// none is (start screen, stopped, exited) or the id has not been learned yet (task ec2ed636).
+        /// Learned from this pane's own statusline file, written by the CURRENT launch; cleared when a
+        /// launch starts, when the process exits, on Home, and on dispose.
+        ///
+        /// <para>Gaps, both in the "not learned" direction: the first ~1-3s after launch, and a Claude
+        /// whose project-level statusLine setting bypasses MT's statusline script, which then never
+        /// reports a session id at all. A caller using this to avoid offering a running session must
+        /// treat <c>null</c> on a started pane (<see cref="IsTerminalStarted"/>) as "unknown", not
+        /// "no session". In the other direction, a plain shell (no launch command) where the user ran
+        /// and then quit <c>claude</c> keeps the id until the shell itself exits.</para>
+        ///
+        /// <para>Safe to read from any thread; MainForm reads it on the UI thread.</para>
+        /// </summary>
+        public string CurrentClaudeSessionId => _claudeSession.SessionId;
+
+        /// <summary>
+        /// The session this pane's current launch was started to resume (<c>--resume</c>), until the
+        /// launch ends or the pane reports a different session (pipeline Run 1). The launch prompt
+        /// treats it as live, so a second resume of the same old session cannot be offered in the
+        /// seconds before <see cref="CurrentClaudeSessionId"/> is learned.
+        /// </summary>
+        public string PendingResumeSessionId => _claudeSession.PendingResumeSessionId;
+
+        /// <summary>
+        /// When this pane's current launch started (UTC), or <c>null</c> when no launch is running
+        /// (task ec2ed636). The launch prompt uses it for a started pane whose
+        /// <see cref="CurrentClaudeSessionId"/> is still null: only a session written since this time
+        /// can be the one that pane holds.
+        /// </summary>
+        public DateTime? ClaudeLaunchStartedUtc =>
+            _claudeSession.ActiveLaunchStartedMs is long ms
+                ? DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime
+                : (DateTime?)null;
+
         // Diff popup saved bounds and zoom (persisted across sessions)
         private static Rectangle? _diffPopupBounds;
         private static double _diffPopupZoom = 1.0;
@@ -191,6 +233,24 @@ namespace MultiTerminal.Docking
         /// Read by "Launch as..." to keep the pane's Quiet start setting (GitHub #34).</summary>
         public string LaunchProjectId => _launchProjectId;
 
+        /// <summary>The name of the Claude profile this pane was last launched under (ticket c8ee0eec);
+        /// null for Default or a pane that has not launched. Read when a launch lands in a folder no
+        /// project owns: by "Launch as..." (the pane keeps its profile) and for a helper this pane spawns
+        /// (the helper inherits it). A folder that belongs to a project always takes that project's
+        /// profile instead. Held in memory only: a restored pane comes back on the start screen.</summary>
+        public string LaunchClaudeProfileName => _launchClaudeProfile?.ProfileName;
+
+        /// <summary>
+        /// The same fact as <see cref="LaunchClaudeProfileName"/>, able to tell "launched under Default"
+        /// (an instance whose name is null) from "has not launched, or its launch was refused" (null).
+        /// Session-data readers and writers need that difference (ticket c8ee0eec item 33): a launched
+        /// pane's data is under ITS profile, and only a pane with no launch is decided by folder.
+        /// One immutable reference replaced whole, so it can be read from any thread.
+        /// </summary>
+        internal MultiTerminal.Services.ClaudePaneProfile LaunchClaudeProfile => _launchClaudeProfile;
+
+        private volatile MultiTerminal.Services.ClaudePaneProfile _launchClaudeProfile;
+
         /// <summary>
         /// Event fired when the terminal process exits.
         /// </summary>
@@ -210,6 +270,14 @@ namespace MultiTerminal.Docking
         /// Event fired when the terminal is fully initialized and ready.
         /// </summary>
         public event EventHandler TerminalReady;
+
+        /// <summary>
+        /// Event fired when a launch was refused over its Claude profile after <see cref="StartTerminal"/>
+        /// was called (ticket c8ee0eec). <see cref="TerminalReady"/> is not raised for that launch. By
+        /// the time this fires the pane is back on its start screen and <see cref="TerminalExited"/> has
+        /// been raised, which is what makes MainForm release the launch's registration.
+        /// </summary>
+        public event EventHandler TerminalStartFailed;
 
         /// <summary>
         /// Event fired when project.json is created or modified in the terminal's working directory.
@@ -250,7 +318,7 @@ namespace MultiTerminal.Docking
 
         /// <summary>
         /// Forwarded from StartScreenControl: user clicked "New Project".
-        /// MainForm opens the EditProjectDialog.
+        /// MainForm opens the New Project dialog (NewProjectWpfDialog).
         /// </summary>
         public event EventHandler StartScreenNewProjectRequested;
 
@@ -266,6 +334,18 @@ namespace MultiTerminal.Docking
         /// then calls <see cref="RefreshStartScreenProjects"/> to update the card grid.
         /// </summary>
         public event EventHandler<string> StartScreenProjectDeleteRequested;
+
+        /// <summary>
+        /// The project settings gear was clicked (ticket e20e2ce0), on this pane's status bar or on a Home
+        /// card / Browse All row of its start screen. Carries the project id; MainForm opens the form.
+        /// </summary>
+        public event EventHandler<string> ProjectSettingsRequested;
+
+        /// <summary>
+        /// The project the status bar's gear opens: the registered project containing the pane's folder,
+        /// else the project it was launched for. Null when neither exists, and the gear is then disabled.
+        /// </summary>
+        public string SettingsProjectId { get; private set; }
 
         /// <summary>
         /// Function to retrieve available identity names for the "Launch as..." menu.
@@ -718,6 +798,11 @@ namespace MultiTerminal.Docking
                 }
             };
             _statusBar.HomeRequested += (s, e) => ReturnToStartScreen();
+            _statusBar.ProjectSettingsRequested += (s, e) =>
+            {
+                if (!string.IsNullOrEmpty(SettingsProjectId))
+                    ProjectSettingsRequested?.Invoke(this, SettingsProjectId);
+            };
             _statusBar.OpenFolderRequested += OnOpenFolderRequested;
             _statusBar.HudToggleRequested += (s, e) =>
             {
@@ -737,6 +822,7 @@ namespace MultiTerminal.Docking
             _terminal.ContextMenuRequested += OnTerminalContextMenuRequested;
             _terminal.ContextMenuDismissRequested += OnTerminalContextMenuDismissRequested;
             _terminal.Ready += (s, e) => TerminalReady?.Invoke(this, EventArgs.Empty);
+            _terminal.StartFailed += OnTerminalStartFailed;
             _terminal.RendererReady += (s, e) => RendererReady?.Invoke(this, EventArgs.Empty);
             _terminal.ClaudeCodeDetected += (s, e) => ClaudeCodeDetected?.Invoke(this, EventArgs.Empty);
             _terminal.TerminalClicked += (s, args) =>
@@ -792,7 +878,11 @@ namespace MultiTerminal.Docking
             // Add permanent HUD tabs (Tasks is already tab 0). The dashboard pane is
             // titled "Activities" (Owner request d788da4b) - its tab ID stays
             // "__dashboard__" so SwitchToTabById deep-links keep working.
+            // Both session-reading tabs belong to THIS terminal, so they read under the profile this
+            // pane was launched under (ticket c8ee0eec item 33). A live closure, not a value: the
+            // profile is set at each launch, long after these tabs are built.
             _hudDashboard = new HudDashboardRenderer();
+            _hudDashboard.SetPaneProfileSource(() => LaunchClaudeProfile);
             _hudTabContainer.AddPermanentTab("__dashboard__", "\u26a1 Activities", _hudDashboard);
 
             _hudNotes = new HudNotesRenderer();
@@ -802,6 +892,7 @@ namespace MultiTerminal.Docking
             _hudTabContainer.AddPermanentTab("__knowledge__", "\ud83d\udcda Knowledge", _hudKnowledge);
 
             _hudSessions = new HudSessionsRenderer();
+            _hudSessions.SetPaneProfileSource(() => LaunchClaudeProfile);
             _hudTabContainer.AddPermanentTab("__sessions__", "\ud83d\udd52 Sessions", _hudSessions);
 
             // \ud83d\udd00 Git \u2014 per-project read-only git tab. Lives after Tasks per the
@@ -1048,6 +1139,7 @@ namespace MultiTerminal.Docking
             _startScreen.NewProjectRequested += (s, e) => StartScreenNewProjectRequested?.Invoke(this, e);
             _startScreen.JustClaudeRequested += (s, e) => StartScreenJustClaudeRequested?.Invoke(this, e);
             _startScreen.ProjectDeleteRequested += (s, id) => StartScreenProjectDeleteRequested?.Invoke(this, id);
+            _startScreen.ProjectSettingsRequested += (s, id) => ProjectSettingsRequested?.Invoke(this, id);
             Controls.Add(_startScreen);
             _startScreen.BringToFront();
             _isStartScreenVisible = true;
@@ -1357,8 +1449,13 @@ namespace MultiTerminal.Docking
         /// <param name="gatewayProfile">MCP Gateway profile name (sets MCP_GATEWAY_PROFILE env var)</param>
         /// <param name="taskWorktreePath">Per-task worktree path resolved from the active task (sets MULTITERMINAL_TASK_WORKTREE env var). Empty when no task worktree is in play.</param>
         /// <param name="quietStartProjectId">The project whose Quiet start setting applies when <paramref name="projectId"/> is null (GitHub #34). Used by "Launch as...", which is not a project launch and must not get a project's role or env, but still opens in a quiet project. Ignored when projectId is set.</param>
-        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string quietStartProjectId = null)
+        /// <param name="claudeProfile">The Claude Code config profile this launch runs under (ticket c8ee0eec), already resolved with <see cref="ClaudeProfileResolver"/>. Null means Default.</param>
+        /// <param name="resumeSessionId">The Claude session this launch resumes (task ec2ed636), reserved for the pane from the first instant; null for a new session.</param>
+        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string quietStartProjectId = null, MultiTerminal.Models.ClaudeProfile claudeProfile = null, string resumeSessionId = null)
         {
+            // Per launch, like the role below: a reused pane must not keep the last launch's profile.
+            _launchClaudeProfile = new MultiTerminal.Services.ClaudePaneProfile(
+                claudeProfile == null || claudeProfile.IsDefault ? null : claudeProfile.Name);
             _debugLogService?.Info("TerminalDocument.StartTerminal", $"===== START =====");
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"workingDirectory: '{workingDirectory ?? "null"}'");
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"terminalName: '{terminalName ?? "null"}'");
@@ -1367,6 +1464,7 @@ namespace MultiTerminal.Docking
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"projectId: '{projectId ?? "null"}'");
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"isTeamLead: '{isTeamLead}'");
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"_docId: '{_docId}'");
+            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"claudeProfile: '{claudeProfile?.Name ?? MultiTerminal.Models.ClaudeProfile.DefaultName}'");
 
             // The tab's role label, from the SAME resolver that decides MULTITERMINAL_PROJECT_PM for this
             // launch (task ad7f6721) — so a tab can never advertise a role the session-start hook withheld.
@@ -1392,6 +1490,15 @@ namespace MultiTerminal.Docking
             _startingWorkingDirectory = workingDirectory;
             ToolTipText = workingDirectory;
             _isTerminalStarted = true;
+
+            // A new launch: whatever Claude ran here before has been stopped ("Launch as..." stops it
+            // first; every other caller starts from the start screen). Forget its session id, and
+            // stamp the launch time so a statusline file the previous process wrote is not adopted
+            // as this launch's (task ec2ed636). Before WriteFallbackStatusline below, which carries
+            // no session id and so cannot be adopted anyway.
+            // A resume reserves its session id in the same step (pipeline Run 1), so the pane counts as
+            // holding it from the first instant (see PendingResumeSessionId).
+            _claudeSession.BeginLaunch(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), resumeSessionId);
 
             // Derive project name for tab title: use project lookup, or fall back to folder name
             if (!string.IsNullOrEmpty(projectId) && _messageBroker != null)
@@ -1458,7 +1565,18 @@ namespace MultiTerminal.Docking
             WriteFallbackStatusline(terminalName, workingDirectory);
 
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"Calling _terminal.Start...");
-            _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, _launch.LaunchNonce);
+            try
+            {
+                _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, _launch.LaunchNonce, claudeProfile);
+            }
+            catch
+            {
+                // Nothing started, so release the resume reservation and the started flag
+                // (task ec2ed636); otherwise a failed launch holds the session id forever.
+                _isTerminalStarted = false;
+                _claudeSession.EndLaunch();
+                throw;
+            }
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"_terminal.Start returned");
 
             // Update status bar after terminal starts
@@ -2231,8 +2349,8 @@ namespace MultiTerminal.Docking
             // Claude Code rewrites the terminal title ~1×/sec (spinner/status), but the
             // extracted directory is almost always unchanged. Only fire DirectoryChanged
             // (and re-arm the file watcher) when the directory ACTUALLY changed — otherwise
-            // MainForm.OnTerminalDirectoryChanged re-renders the whole Project panel every
-            // title tick, which the user sees as a per-second flash (task 5e36e90b).
+            // MainForm.OnTerminalDirectoryChanged re-renders project state every title tick
+            // (it used to redraw the whole Project panel: a per-second flash, task 5e36e90b).
             string directory = ExtractDirectoryFromTitle(e.Title);
             if (!string.IsNullOrEmpty(directory))
             {
@@ -2402,6 +2520,28 @@ namespace MultiTerminal.Docking
             }
         }
 
+        /// <summary>
+        /// A launch refused over its Claude profile (ticket c8ee0eec). Nothing is running, so the pane
+        /// is treated exactly like one whose process has exited: back to the start screen, launch nonce
+        /// rotated, and <see cref="TerminalExited"/> raised so MainForm unregisters the launch (the same
+        /// release as its ReleaseGhostRegistration). Then <see cref="TerminalStartFailed"/>, for a caller
+        /// that is waiting on <see cref="TerminalReady"/>.
+        /// </summary>
+        private void OnTerminalStartFailed(object sender, EventArgs e)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => OnTerminalStartFailed(sender, e)));
+                return;
+            }
+
+            _debugLogService?.Warning("TerminalDocument", $"Launch refused over its Claude profile; returning pane '{_docId}' to its start screen.");
+            _launchClaudeProfile = null;
+            StopStatusLinePolling();
+            OnTerminalProcessExited(sender, e);
+            TerminalStartFailed?.Invoke(this, EventArgs.Empty);
+        }
+
         private void OnTerminalProcessExited(object sender, EventArgs e)
         {
             if (InvokeRequired)
@@ -2412,6 +2552,7 @@ namespace MultiTerminal.Docking
 
             // Reset terminal state so the tab can be reused for a new session
             _isTerminalStarted = false;
+            _claudeSession.EndLaunch();   // the process is gone (task ec2ed636)
 
             // The launch is over: its nonce must not prove anything about the next one.
             RotateLaunchNonce();
@@ -2558,6 +2699,7 @@ namespace MultiTerminal.Docking
             {
                 _terminal.Stop();
                 _isTerminalStarted = false;
+                _claudeSession.EndLaunch();   // Stop() raises no ProcessExited (task ec2ed636)
                 RotateLaunchNonce();   // the launch is over (task 19a26090)
 
                 // Notify MainForm — OnTerminalExited handles UnregisterTerminal + doc map cleanup
@@ -2588,6 +2730,8 @@ namespace MultiTerminal.Docking
             _startScreen.BringToFront();
             _startScreen.Visible = true;
             _startScreen.RefreshProjects();
+            // Back on the Home view the preference names, not wherever the page was left (ticket e20e2ce0 item 8).
+            _startScreen.ShowHome();
 
             // Update tab title
             Text = "Home";
@@ -2618,6 +2762,13 @@ namespace MultiTerminal.Docking
         /// Whether the start screen is currently visible (shell not yet started / has exited).
         /// </summary>
         public bool IsStartScreenVisible => _isStartScreenVisible;
+
+        /// <summary>Puts a visible start screen on its preferred Home view (cards or list; ticket e20e2ce0 item 8).</summary>
+        public void ShowStartScreenHome()
+        {
+            if (!_isStartScreenVisible || _startScreen == null) return;
+            _startScreen.ShowHome();
+        }
 
         /// <summary>
         /// Switches a visible start screen to its Browse All view (the header's Browse All Projects
@@ -2989,6 +3140,8 @@ namespace MultiTerminal.Docking
             }
             HeaderProjectName = projectName;
             HeaderWorkingOnProject = workingOn;
+            SettingsProjectId = projectId ?? _launchProjectId;
+            _statusBar.SetProjectSettingsAvailable(!string.IsNullOrEmpty(SettingsProjectId));
 
             _debugLogService?.Trace("TerminalDocument", $"UpdateStatusBar: Calling _statusBar.UpdateStatus with:");
             _debugLogService?.Trace("TerminalDocument", $"  - terminalName: '{terminalName}'");
@@ -3249,124 +3402,14 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
-        /// Resolves the canonical, registered project path for the Notes/Sessions
-        /// HUD panes (which are keyed per-project, not per-folder). Prefers a lookup
-        /// by projectId; falls back to matching the folder against the registered
-        /// project list. Returns null when the project can't be resolved to a
-        /// registered entry (caller decides the fallback). Never returns a raw
-        /// worktree path — that's the whole point: worktree paths have no notes and
-        /// cause an empty pane plus an orphan auto-created note-tab row.
-        ///
-        /// The canonical key is <c>SourcePath ?? Path</c> — the SAME precedence the
-        /// launcher uses to pick a terminal's working directory (LaunchCommandBuilder
-        /// "SourcePath → Path", Project.cs "Use SourcePath as the canonical field").
-        /// Historical note tabs were keyed by that working directory, so resolving by
-        /// Path alone would re-key Notes to a different path than the data lives under
-        /// for any project whose SourcePath and Path diverge — re-introducing the
-        /// empty pane this fix is meant to eliminate. We also match the folder against
-        /// BOTH identity fields so either one locates the project.
+        /// The canonical registered project path the Notes/Sessions HUD panes key on, or null when
+        /// the project can't be resolved (caller decides the fallback). The logic lives in
+        /// <see cref="ProjectNoteKeys.TryResolve"/>, shared with the agent-notes REST endpoint so
+        /// both resolve a project to the same note-tab key (task 5d94ac91).
         /// </summary>
         private string TryResolveCanonicalProjectPath(string projectId, string folder)
-        {
-            try
-            {
-                if (!string.IsNullOrEmpty(projectId))
-                {
-                    // GetRichProject (not GetProject): only the rich Models.Project
-                    // carries SourcePath; the lightweight MCPServer.Models.Project doesn't.
-                    string canon = CanonicalProjectKey(_messageBroker?.ProjectDatabase?.GetRichProject(projectId));
-                    if (!string.IsNullOrEmpty(canon)) return canon;
-                }
-
-                if (!string.IsNullOrEmpty(folder))
-                {
-                    string normFolder = NormalizeProjectPath(folder);
-                    // Use the rich project list (carries SourcePath) so the folder
-                    // match can consider both identity fields. Ambiguity guard: if the
-                    // folder matches more than one DISTINCT project key (e.g. project
-                    // A's SourcePath == project B's Path, since the schema enforces no
-                    // uniqueness on those fields), DON'T remap — picking the first row
-                    // would silently bind Notes/Sessions to the wrong project's notes.
-                    var projects = _messageBroker?.ProjectDatabase?.GetAllRichProjects();
-                    if (projects != null)
-                    {
-                        string firstMatch = null;
-                        foreach (var p in projects)
-                        {
-                            if (ProjectFieldMatchesFolder(p?.SourcePath, normFolder) ||
-                                ProjectFieldMatchesFolder(p?.Path, normFolder))
-                            {
-                                string canon = CanonicalProjectKey(p);
-                                if (string.IsNullOrEmpty(canon)) continue;
-                                if (firstMatch == null)
-                                {
-                                    firstMatch = canon;
-                                }
-                                // Compare distinctness on the NORMALIZED key so two registry
-                                // rows for the SAME folder that differ only by formatting
-                                // (trailing slash, slash style, case) don't read as an
-                                // ambiguous multi-project match. Only a genuinely different
-                                // folder trips the guard. We still RETURN the raw firstMatch.
-                                else if (!string.Equals(NormalizeProjectPath(firstMatch), NormalizeProjectPath(canon),
-                                                        StringComparison.OrdinalIgnoreCase))
-                                {
-                                    _debugLogService?.Trace("TerminalDocument",
-                                        $"Notes key: folder '{folder}' matches multiple projects — not remapping to avoid cross-project notes");
-                                    return null;
-                                }
-                            }
-                        }
-                        if (!string.IsNullOrEmpty(firstMatch)) return firstMatch;
-                    }
-                }
-            }
-            catch { /* non-critical — caller falls back */ }
-
-            return null;
-        }
-
-        /// <summary>
-        /// The note-tab key for a project: the RAW <c>SourcePath ?? Path</c>, matching the
-        /// launcher's working-dir precedence; null when the project is null or has neither
-        /// field.
-        ///
-        /// Kept raw here for symmetry with launch/folder resolution — the same
-        /// <c>SourcePath ?? Path</c> identity is also matched against both fields during
-        /// folder lookup, where the original spelling matters. Canonicalization of the
-        /// stored key is owned by the persistence layer: <c>TaskDatabase.NormalizeNoteTabPath</c>
-        /// (full path + trailing-separator trim) runs on every note-tab read/write and a
-        /// one-time migration rewrites pre-existing rows, so trailing-slash / slash-style
-        /// spelling differences in the key handed down from here are absorbed downstream —
-        /// this method need not (and must not, to stay symmetric with folder matching)
-        /// normalize. Case-insensitive needs are applied at each comparison site
-        /// (OrdinalIgnoreCase), not baked into the stored key.
-        /// </summary>
-        private static string CanonicalProjectKey(MultiTerminal.Models.Project project)
-        {
-            if (project == null) return null;
-            string raw = !string.IsNullOrEmpty(project.SourcePath) ? project.SourcePath : project.Path;
-            return string.IsNullOrEmpty(raw) ? null : raw;
-        }
-
-        /// <summary>True when a project identity field normalizes to the given folder.</summary>
-        private static bool ProjectFieldMatchesFolder(string projectField, string normalizedFolder)
-        {
-            if (string.IsNullOrEmpty(projectField)) return false;
-            return string.Equals(NormalizeProjectPath(projectField), normalizedFolder,
-                                 StringComparison.OrdinalIgnoreCase);
-        }
-
-        /// <summary>
-        /// Canonicalizes a project path so the same project always maps to one
-        /// note-tab key: full path with trailing separators trimmed. Guards against
-        /// GetFullPath throwing on malformed input by falling back to a simple trim.
-        /// </summary>
-        private static string NormalizeProjectPath(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return path;
-            try { return Path.GetFullPath(path).TrimEnd('\\', '/'); }
-            catch { return path.TrimEnd('\\', '/'); }
-        }
+            => ProjectNoteKeys.TryResolve(_messageBroker?.ProjectDatabase, projectId, folder,
+                message => _debugLogService?.Trace("TerminalDocument", message));
 
         /// <summary>
         /// Starts polling the status line temp file for Claude Code session data.
@@ -3391,6 +3434,9 @@ namespace MultiTerminal.Docking
                     // lookup. The captured generation fences this tick: if the identity
                     // changes mid-tick, the payload is dropped instead of delivered/cached.
                     int identityGen = System.Threading.Volatile.Read(ref _statusLineIdentityGen);
+                    // Launch fence for CurrentClaudeSessionId (task ec2ed636), captured BEFORE the
+                    // file is read so a launch boundary during this tick rejects the adoption.
+                    long claudeLaunchGen = _claudeSession.Generation;
                     string terminalName = StatusLineIdentity;
                     if (string.IsNullOrEmpty(terminalName)) return;
 
@@ -3480,6 +3526,19 @@ namespace MultiTerminal.Docking
                         ? sidEl.GetString() : null;
                     string transcriptPath = root.TryGetProperty("transcriptPath", out var tpEl) && tpEl.ValueKind == JsonValueKind.String
                         ? tpEl.GetString() : null;
+
+                    // CurrentClaudeSessionId (task ec2ed636): only from this pane's OWN file (never the
+                    // same-name fallback, which is another pane's), only a strict identifier, and only
+                    // if the tracker confirms the file was written during the launch still running.
+                    if (!string.IsNullOrEmpty(tokenSessionId) && IsSafeStatusLineSegment(tokenSessionId))
+                    {
+                        long? fileTimestampMs = root.TryGetProperty("timestamp", out var tsEl)
+                            && tsEl.ValueKind == JsonValueKind.Number && tsEl.TryGetInt64(out long tsVal)
+                            ? tsVal : (long?)null;
+                        bool ownPaneFile = !string.IsNullOrEmpty(_docId)
+                            && Path.GetFileName(filePath).EndsWith("-" + _docId + ".json", StringComparison.OrdinalIgnoreCase);
+                        _claudeSession.TryAdopt(claudeLaunchGen, tokenSessionId, fileTimestampMs, ownPaneFile);
+                    }
                     // Read account-level quota from the shared file so all terminals
                     // show identical 5h/7d stats regardless of which one was updated last.
                     int? quota5h = null, quota7d = null, pace5h = null, pace7d = null;
@@ -3552,10 +3611,12 @@ namespace MultiTerminal.Docking
                             tokenMeter.ProcessTranscriptFile(tokenSessionId, transcriptPath, false);
 
                             // Subagent rollup: tail {claudeProjectFolder}/{sessionId}/subagents/agent-*.jsonl.
+                            // Looked for only under the profile THIS pane was launched under (ticket
+                            // c8ee0eec): the pane knows its profile, so no other profile's folder is read.
                             try
                             {
-                                string claudeFolder = MultiTerminal.Services.SessionLineageService.GetClaudeProjectFolder(
-                                    folder ?? _startingWorkingDirectory);
+                                string claudeFolder = MultiTerminal.Services.SessionLineageService.GetClaudeProjectFolderForProfile(
+                                    folder ?? _startingWorkingDirectory, LaunchClaudeProfileName);
                                 if (!string.IsNullOrEmpty(claudeFolder))
                                 {
                                     string subDir = Path.Combine(claudeFolder, tokenSessionId, "subagents");
@@ -3775,8 +3836,12 @@ namespace MultiTerminal.Docking
                     // suppressing recovery (pipeline Run-1 debugger HIGH-2). The identity-generation
                     // re-check keeps a stale tick from writing the PRIOR identity's content back over
                     // the cache a rename/promotion just cleared (ab50355f codex-security HIGH).
+                    // Nor across a launch boundary (task ec2ed636): a tick that straddled one had its
+                    // session-id adoption refused, and caching its content would stop the next tick
+                    // re-reading the file, so an idle new session would never be learned.
                     if (perTerminalChanged
-                        && System.Threading.Volatile.Read(ref _statusLineIdentityGen) == identityGen)
+                        && System.Threading.Volatile.Read(ref _statusLineIdentityGen) == identityGen
+                        && _claudeSession.Generation == claudeLaunchGen)
                     {
                         _lastStatusLineContent = content;
                     }
@@ -4194,6 +4259,8 @@ namespace MultiTerminal.Docking
                     _terminal.Dispose();
                     _terminal = null;
                 }
+
+                _claudeSession.EndLaunch();   // task ec2ed636
             }
             base.Dispose(disposing);
         }
@@ -4204,6 +4271,104 @@ namespace MultiTerminal.Docking
         protected override string GetPersistString()
         {
             return typeof(TerminalDocument).FullName;
+        }
+    }
+
+    /// <summary>
+    /// Which Claude session is running in one pane right now (task ec2ed636), behind
+    /// <see cref="TerminalDocument.CurrentClaudeSessionId"/>. Pure, so the launch fencing is testable
+    /// without a WebView2-backed document.
+    ///
+    /// <para>The statusline poll runs on a thread-pool timer while launches begin and end on the UI
+    /// thread, and the previous process's statusline file stays on disk after it exits. Three
+    /// fences keep a dead session from being reported as running:</para>
+    /// <list type="bullet">
+    /// <item>a generation bumped at every launch boundary, which the poll captures before reading the
+    /// file, so a tick that straddles a boundary adopts nothing;</item>
+    /// <item>an active flag, so a tick that starts after an exit cannot adopt from the leftover file;</item>
+    /// <item>the launch start time, so a new launch cannot adopt the previous process's file before
+    /// its own Claude has written one.</item>
+    /// </list>
+    /// <para>Writes are under one lock; <see cref="SessionId"/> is a volatile read.</para>
+    /// </summary>
+    internal sealed class ClaudeSessionTracker
+    {
+        private readonly object _gate = new object();
+        private long _generation;
+        private bool _launchActive;
+        private long _launchStartedMs;
+        private volatile string _sessionId;
+        private volatile string _pendingResumeId;
+
+        /// <summary>The adopted session id of the running launch, or <c>null</c>.</summary>
+        public string SessionId => _sessionId;
+
+        /// <summary>
+        /// The session the running launch was started to resume (<c>--resume &lt;id&gt;</c>), recorded at
+        /// <see cref="BeginLaunch"/> so the launch prompt treats it as live BEFORE the statusline has
+        /// reported anything (pipeline Run 1: two quick resumes of one old session). Cleared when the
+        /// launch ends, and when a DIFFERENT session id is adopted (the resume forked or the user
+        /// switched session); kept when the same id is adopted.
+        /// </summary>
+        public string PendingResumeSessionId => _pendingResumeId;
+
+        /// <summary>The running launch's start time (Unix ms), or <c>null</c> when no launch is active.</summary>
+        public long? ActiveLaunchStartedMs
+        {
+            get { lock (_gate) { return _launchActive ? _launchStartedMs : (long?)null; } }
+        }
+
+        /// <summary>Changes at every <see cref="BeginLaunch"/> and <see cref="EndLaunch"/>.</summary>
+        public long Generation
+        {
+            get { lock (_gate) { return _generation; } }
+        }
+
+        /// <summary>
+        /// A launch has started at <paramref name="nowMs"/> (Unix ms); no session is known yet. A launch
+        /// that resumes a session passes its id as <paramref name="resumeSessionId"/>.
+        /// </summary>
+        public void BeginLaunch(long nowMs, string resumeSessionId = null)
+        {
+            lock (_gate)
+            {
+                _generation++;
+                _launchActive = true;
+                _launchStartedMs = nowMs;
+                _sessionId = null;
+                _pendingResumeId = string.IsNullOrWhiteSpace(resumeSessionId) ? null : resumeSessionId.Trim();
+            }
+        }
+
+        /// <summary>The launch's process has ended (or is being stopped); no session is running.</summary>
+        public void EndLaunch()
+        {
+            lock (_gate)
+            {
+                _generation++;
+                _launchActive = false;
+                _sessionId = null;
+                _pendingResumeId = null;
+            }
+        }
+
+        /// <summary>
+        /// Adopts <paramref name="sessionId"/> as the running session if, and only if, the generation
+        /// is still <paramref name="observedGeneration"/>, a launch is active, the file is this pane's
+        /// own, and it was written no earlier than the launch started. Returns whether it adopted.
+        /// </summary>
+        public bool TryAdopt(long observedGeneration, string sessionId, long? fileTimestampMs, bool ownPaneFile)
+        {
+            if (string.IsNullOrEmpty(sessionId) || !ownPaneFile || fileTimestampMs == null) return false;
+            lock (_gate)
+            {
+                if (observedGeneration != _generation || !_launchActive || fileTimestampMs.Value < _launchStartedMs)
+                    return false;
+                _sessionId = sessionId;
+                if (_pendingResumeId != null && !string.Equals(_pendingResumeId, sessionId, StringComparison.OrdinalIgnoreCase))
+                    _pendingResumeId = null;
+                return true;
+            }
         }
     }
 

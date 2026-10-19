@@ -20,12 +20,12 @@ A multi-agent coordination system for Claude Code. WinForms desktop app (C#/.NET
 ## Architecture
 
 ```
-MainForm.cs (8.4K LOC) - UI Host, 11 WebView2 panels
+MainForm.cs (8.4K LOC) - UI Host, WebView2 panels
   REST API (port 5050) - 24 controllers in API/Controllers/
   MessageBroker.cs (8.0K LOC) - Central hub, routes messages, fires events
   SQLite (TaskDatabase.cs 7.3K LOC) - 21+ tables: tasks, sessions, knowledge, profiles
   CodeGraph (Roslyn) - CodeGraphDatabase + CSharpCodeGraphIndexer, cg_ tables in same SQLite
-  MCP Server (Node.js) - 108 tools at %APPDATA%/multiterminal/mcp (counted 2026-09-23: `name: "` lines in mcp/index.js)
+  MCP Server (Node.js) - 110 tools at %APPDATA%/multiterminal/mcp (counted 2026-10-16: `name: "` lines in mcp/index.js)
 ```
 
 ## Code Graph Auto-Indexing

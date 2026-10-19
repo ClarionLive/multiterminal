@@ -93,7 +93,8 @@ namespace MultiTerminal.Terminal
         /// <param name="gatewayProfile">MCP Gateway profile name (sets MCP_GATEWAY_PROFILE env var)</param>
         /// <param name="taskWorktreePath">Per-task worktree path resolved from the active task (sets MULTITERMINAL_TASK_WORKTREE env var). Empty when no task worktree is in play.</param>
         /// <param name="launchNonce">Per-launch proof-of-origin nonce (sets MULTITERMINAL_LAUNCH_NONCE env var). The child echoes it back through register_terminal so the broker/MainForm can verify a placeholder adoption comes from the terminal MT actually launched, not a foreign process that leaked the docId (task fd3437e6).</param>
-        public void Start(int cols, int rows, string shellPath = null, string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string launchNonce = null)
+        /// <param name="claudeProfile">The Claude Code config profile this launch runs under (sets or removes CLAUDE_CONFIG_DIR; ticket c8ee0eec). Null means the Default profile. Already resolved by the caller with <see cref="Services.ClaudeProfileResolver"/>.</param>
+        public void Start(int cols, int rows, string shellPath = null, string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string launchNonce = null, Models.ClaudeProfile claudeProfile = null)
         {
             if (_isRunning)
                 throw new InvalidOperationException("Terminal is already running");
@@ -125,7 +126,7 @@ namespace MultiTerminal.Terminal
                 CreatePseudoConsole(cols, rows);
 
                 // Start the shell process
-                StartProcess(shellPath, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, launchNonce);
+                StartProcess(shellPath, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, launchNonce, claudeProfile);
 
                 // Close the pipe ends that belong to the pseudo console.
                 // CreatePseudoConsole() duplicates these handles internally, so our
@@ -384,6 +385,9 @@ namespace MultiTerminal.Terminal
         /// </summary>
         private static bool IsClaudeLaunch(string autoRunCommand)
         {
+            if (string.IsNullOrEmpty(autoRunCommand))
+                return false;
+
             string trimmed = autoRunCommand.TrimStart();
             if (!trimmed.StartsWith("claude", StringComparison.Ordinal))
                 return false;
@@ -391,6 +395,27 @@ namespace MultiTerminal.Terminal
             // "claude" alone, or followed by a separator — never "claudette".
             return trimmed.Length == "claude".Length || !char.IsLetterOrDigit(trimmed["claude".Length]);
         }
+
+        internal const string NoFlickerAssignment = "$env:CLAUDE_CODE_NO_FLICKER = '1'; ";
+
+        /// <summary>
+        /// The Claude Code part of the launch environment, appended last to <c>envSetup</c>: the
+        /// flicker-free renderer flag, then the Claude profile prologue (ticket c8ee0eec).
+        /// <para>EVERY pane MT starts gets the prologue, whatever its auto-run command is. This method
+        /// is deliberately not given the command, so it cannot make the prologue depend on it. It once
+        /// did (only a command whose first token was <c>claude</c>, or a plain shell, got one), and a
+        /// pane started through a full path to <c>claude.exe</c> or a wrapper script then ran Claude
+        /// under whatever CLAUDE_CONFIG_DIR the shell already had: another profile, with nothing on
+        /// screen to say so. A command that does not read the two variables (the Codex launcher) is
+        /// unaffected by having them set, so there is nothing to protect by leaving them out.</para>
+        /// <para>An exception from <paramref name="getProfilePrologue"/> (normally
+        /// <see cref="Services.ClaudeProfileResolver.GetPrologue(Models.ClaudeProfile)"/>) is NOT
+        /// caught: a launch whose profile cannot be applied does not start. The same rule as a headless
+        /// agent, where <c>GetEnvironment</c> throws out of <c>AgentProcess.SpawnAsync</c> before any
+        /// process exists.</para>
+        /// </summary>
+        internal static string BuildClaudeEnvSetup(Func<string> getProfilePrologue) =>
+            NoFlickerAssignment + (getProfilePrologue() ?? "");
 
         /// <summary>
         /// Redacts the <c>MULTITERMINAL_LAUNCH_NONCE</c> assignment from a launch command line before it
@@ -409,7 +434,7 @@ namespace MultiTerminal.Terminal
                     @"(\$env:MULTITERMINAL_LAUNCH_NONCE = ')[^']*(')",
                     "$1***REDACTED***$2");
 
-        private void StartProcess(string shellPath, string workingDirectory, string docId, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string launchNonce = null)
+        private void StartProcess(string shellPath, string workingDirectory, string docId, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string launchNonce = null, Models.ClaudeProfile claudeProfile = null)
         {
             DebugLogService?.Info("ConPtyTerminal", $"StartProcess ===== START =====");
             DebugLogService?.Trace("ConPtyTerminal", $"shellPath: '{shellPath}'");
@@ -610,8 +635,24 @@ namespace MultiTerminal.Terminal
                 DebugLogService?.Trace("ConPtyTerminal", "Bot-identity scripts not found; cleared inherited git wiring");
             }
 
-            // Enable flicker-free alternate-screen renderer for Claude Code
-            envSetup += "$env:CLAUDE_CODE_NO_FLICKER = '1'; ";
+            // Enable flicker-free alternate-screen renderer for Claude Code, then put the launch under
+            // its Claude profile (ticket c8ee0eec), whatever the pane runs: a plain shell, `claude`, a
+            // full path to claude.exe, a wrapper script or Codex. The prologue comes from the resolver and nowhere
+            // else: it is what keeps the Default profile from ever pointing CLAUDE_CONFIG_DIR at
+            // %USERPROFILE%\.claude. A profile whose prologue cannot be built REFUSES the launch (Owner
+            // decision 2026-10-10): running on the shell's own environment would be a silent move to
+            // another profile. MainForm refuses such a profile before it gets here; this is the backstop.
+            try
+            {
+                envSetup += BuildClaudeEnvSetup(() => Services.ClaudeProfileResolver.GetPrologue(claudeProfile));
+            }
+            catch (ArgumentException ex)
+            {
+                DebugLogService?.Error("ConPtyTerminal", $"Launch refused: Claude profile '{claudeProfile?.Name}' cannot be applied: {ex.Message}");
+                throw new Services.ClaudeProfileRefusedException(
+                    $"Claude profile '{claudeProfile?.Name}' cannot be applied, so nothing was started. Fix its folder in Settings > Claude Profiles. ({ex.Message})",
+                    ex);
+            }
 
             string promptFunc = "function prompt { $Host.UI.RawUI.WindowTitle = $PWD.Path; return \\\"PS $($PWD.Path)> \\\" }";
 

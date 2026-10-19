@@ -17,7 +17,8 @@
             <Setter Property="Foreground" Value="#E0E0E0"/>
             <Setter Property="BorderBrush" Value="#3E3E42"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Padding" Value="8,4"/>
+            <!-- No vertical padding: both boxes have a fixed Height of 32 and the template centres the text; 8,4 clipped descenders. -->
+            <Setter Property="Padding" Value="8,0"/>
             <Setter Property="FontFamily" Value="Segoe UI"/>
             <Setter Property="FontSize" Value="13"/>
             <Setter Property="CaretBrush" Value="#E0E0E0"/>

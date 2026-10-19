@@ -125,7 +125,7 @@ namespace MultiTerminal.Tests
             var captured = new Captured();
             var service = new SpawnService
             {
-                OnSpawnRequested = (agentName, agentType, workingDir, initialPrompt, spawnerName) =>
+                OnSpawnRequested = (agentName, agentType, workingDir, initialPrompt, spawnerName, spawnerDocId) =>
                 {
                     captured.Reached = true;
                     return Task.FromResult((true, "doc-9", (string)null, agentName + "-2"));
@@ -161,7 +161,7 @@ namespace MultiTerminal.Tests
             var captured = new Captured();
             var service = new SpawnService
             {
-                OnSpawnRequested = (agentName, agentType, workingDir, initialPrompt, spawnerName) =>
+                OnSpawnRequested = (agentName, agentType, workingDir, initialPrompt, spawnerName, spawnerDocId) =>
                 {
                     captured.SpawnerName = spawnerName;
                     captured.InitialPrompt = initialPrompt;

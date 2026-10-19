@@ -77,12 +77,13 @@ namespace MultiTerminal.API.Controllers
             if (string.IsNullOrEmpty(request?.SessionFilePath))
                 return Problem(detail: "sessionFilePath is required", statusCode: 400);
 
-            // Path traversal protection: only allow indexing files under known Claude project directories
-            string fullPath = System.IO.Path.GetFullPath(request.SessionFilePath);
-            string claudeDir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude")
-                + System.IO.Path.DirectorySeparatorChar;
-            if (!fullPath.StartsWith(claudeDir, StringComparison.OrdinalIgnoreCase))
-                return Problem(detail: "sessionFilePath must be within the Claude projects directory", statusCode: 400);
+            // Path traversal protection: only a .jsonl file inside the projects folder of a configured
+            // Claude profile is indexed (ticket c8ee0eec: any profile, since the path already names the
+            // profile folder it is in; not anywhere else under that folder, which also holds
+            // credentials and settings). The roots come from MT's settings, never from the request.
+            // Links are not resolved (ticket 47484cc4).
+            if (!ClaudeProfileDataRoots.IsSessionTranscriptPath(request.SessionFilePath, out string fullPath))
+                return Problem(detail: "sessionFilePath must be a .jsonl file within a Claude projects directory", statusCode: 400);
 
             int chunks = db.IndexSessionFile(fullPath, request.TerminalName, request.ProjectPath);
 
@@ -106,7 +107,11 @@ namespace MultiTerminal.API.Controllers
             int chunks = 0;
             try
             {
-                chunks = db.IndexProjectSessions(request.ProjectPath, request.TerminalName);
+                // The terminal's own profile when a live terminal is registered under that name, else
+                // the folder decision (ticket c8ee0eec item 33).
+                chunks = db.IndexProjectSessionsUnder(
+                    ClaudeProfileDataRoots.ForAgentOrFolder(request.TerminalName, request.ProjectPath),
+                    request.ProjectPath, request.TerminalName);
             }
             catch (Exception ex)
             {

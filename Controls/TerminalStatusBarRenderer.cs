@@ -29,6 +29,7 @@ namespace MultiTerminal.Controls
         private string _lastStatusLineJson;
         private string _lastTokenMeterJson;
         private bool? _lastRemoteMode;
+        private bool _lastProjectSettingsAvailable;
         // Set true when JS confirms (acks) it actually rendered the statusline rows. Lets the poll keep
         // re-pushing until confirmed, so a raced/dropped delivery self-heals. NOT a bounded retry — it
         // converges on the ack; absent an ack it costs one idempotent 2s re-push (cheap). The ack is
@@ -65,6 +66,11 @@ namespace MultiTerminal.Controls
         /// Event fired when the user clicks the Home button on the status bar.
         /// </summary>
         public event EventHandler HomeRequested;
+
+        /// <summary>
+        /// Event fired when the user clicks the project settings gear next to Home (ticket e20e2ce0).
+        /// </summary>
+        public event EventHandler ProjectSettingsRequested;
 
         /// <summary>
         /// Event fired when the user clicks the Open Folder button on the status bar.
@@ -285,6 +291,7 @@ namespace MultiTerminal.Controls
                             SendMessage($"tokenmeter:{_lastTokenMeterJson}");
                         if (_lastRemoteMode.HasValue)
                             SendMessage($"remoteMode:{(_lastRemoteMode.Value ? "true" : "false")}");
+                        SendMessage($"projectSettings:{(_lastProjectSettingsAvailable ? "true" : "false")}");
 
                         Ready?.Invoke(this, EventArgs.Empty);
                     }
@@ -315,6 +322,11 @@ namespace MultiTerminal.Controls
                     {
                         _debugLogService?.Trace("TerminalStatusBar", "Home button clicked");
                         HomeRequested?.Invoke(this, EventArgs.Empty);
+                    }
+                    else if (type == "projectSettings")
+                    {
+                        _debugLogService?.Trace("TerminalStatusBar", "Project settings gear clicked");
+                        ProjectSettingsRequested?.Invoke(this, EventArgs.Empty);
                     }
                     else if (type == "hudToggle")
                     {
@@ -487,6 +499,17 @@ namespace MultiTerminal.Controls
             {
                 SendMessage($"remoteMode:{(enabled ? "true" : "false")}");
             }
+        }
+
+        /// <summary>
+        /// Enables the project settings gear when this pane belongs to a registered project (ticket
+        /// e20e2ce0). Remembered and replayed on 'ready', like <see cref="SetRemoteMode"/>.
+        /// </summary>
+        public void SetProjectSettingsAvailable(bool available)
+        {
+            _lastProjectSettingsAvailable = available;
+            if (_isInitialized)
+                SendMessage($"projectSettings:{(available ? "true" : "false")}");
         }
 
         /// <summary>

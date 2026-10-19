@@ -68,7 +68,8 @@ namespace MultiTerminal.Services
             string parentSessionId = null,
             string sessionType = null)
         {
-            // CA3003: sessionFilePath is always a Claude Code JSONL under %USERPROFILE%/.claude/projects —
+            // CA3003: sessionFilePath is always a Claude Code JSONL under the projects folder of a
+            // configured Claude profile (ticket c8ee0eec; %USERPROFILE%/.claude/projects for Default) —
             // every caller feeds it either a Directory.GetFiles result (ImportAllSessionsFromFolder/
             // SyncNewSessions) or a DB-stored SessionFilePath written earlier from the same trusted source.
 #pragma warning disable CA3003
@@ -164,15 +165,63 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Converts a project filesystem path to the corresponding .claude/projects/ folder path.
-        /// Returns null if the folder doesn't exist.
+        /// Converts a project filesystem path to that project's folder under <c>projects\</c> in the
+        /// config folder of the Claude profile the project runs under (ticket c8ee0eec). The profile is
+        /// the one a launch in <paramref name="projectPath"/> would get
+        /// (<see cref="ClaudeProfileDataRoots.ForFolder(string)"/>); no other profile's folder is looked
+        /// in. Returns null if the folder doesn't exist, or the profile is not configured on this
+        /// machine, has no folder, or cannot be decided.
         /// </summary>
-        public static string GetClaudeProjectFolder(string projectPath)
-        {
-            string claudeProjectsRoot = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".claude", "projects");
+        public static string GetClaudeProjectFolder(string projectPath) =>
+            GetClaudeProjectFolder(projectPath, ClaudeProfileProjectLookup.Current(), ClaudeProfileResolver.CurrentContext());
 
+        /// <summary>
+        /// As <see cref="GetClaudeProjectFolder(string)"/>, for a caller that has the PANE: the folder
+        /// is looked for only under the profile that pane was launched under
+        /// (<paramref name="paneProfileName"/>; null or blank = Default), whatever project owns
+        /// <paramref name="projectPath"/>.
+        /// </summary>
+        public static string GetClaudeProjectFolderForProfile(string projectPath, string paneProfileName) =>
+            GetClaudeProjectFolderForProfile(projectPath, paneProfileName, ClaudeProfileResolver.CurrentContext());
+
+        /// <summary>
+        /// For a caller that MAY have a pane (a HUD tab of a terminal): under <paramref name="pane"/>'s
+        /// profile when there is one, else (null) the folder decision of
+        /// <see cref="GetClaudeProjectFolder(string)"/>. A pane whose profile cannot be honoured gives
+        /// null, never the folder's profile and never Default.
+        /// </summary>
+        internal static string GetClaudeProjectFolderForPane(string projectPath, ClaudePaneProfile pane) =>
+            GetClaudeProjectFolderUnder(ClaudeProfileDataRoots.ForPaneOrFolder(pane, projectPath), projectPath);
+
+        /// <summary>
+        /// For a caller that holds an AGENT NAME (ticket c8ee0eec item 33): under the profile of the
+        /// live terminal registered as <paramref name="agentName"/> when there is one
+        /// (<see cref="ClaudeProfilePaneLookup"/>), else the folder decision. A folder no project owns
+        /// answers Default by folder, while the agent's pane may run under another profile.
+        /// </summary>
+        internal static string GetClaudeProjectFolderForAgent(string projectPath, string agentName) =>
+            GetClaudeProjectFolderUnder(ClaudeProfileDataRoots.ForAgentOrFolder(agentName, projectPath), projectPath);
+
+        internal static string GetClaudeProjectFolder(string projectPath, ClaudeProfileLookup lookup, ClaudeProfileContext ctx) =>
+            GetClaudeProjectFolderUnder(ClaudeProfileDataRoots.ForProject(null, projectPath, lookup, ctx), projectPath);
+
+        internal static string GetClaudeProjectFolderForProfile(string projectPath, string paneProfileName, ClaudeProfileContext ctx) =>
+            GetClaudeProjectFolderUnder(ClaudeProfileDataRoots.ForProfileName(paneProfileName, ctx), projectPath);
+
+        /// <summary>The folder for <paramref name="projectPath"/> under an already-decided
+        /// <paramref name="root"/> (null root = null: the caller skips).</summary>
+        internal static string GetClaudeProjectFolderUnder(ClaudeDataRoot root, string projectPath)
+        {
+            if (root == null || string.IsNullOrEmpty(projectPath))
+                return null;
+
+            // CA3003 (both checks below): root is a configured Claude profile folder taken from MT's
+            // settings by ClaudeProfileDataRoots. projectPath only SELECTS which configured profile is
+            // used; no part of it becomes part of the root. claudeProjectPath is that root + a literal
+            // "projects" + a folderName whose construction below replaces ':' and '/' away, so no
+            // path-traversal segments survive. Existence checks only; no file read.
+#pragma warning disable CA3003
+            string claudeProjectsRoot = root.ProjectsDir;
             if (!Directory.Exists(claudeProjectsRoot))
                 return null;
 
@@ -181,10 +230,6 @@ namespace MultiTerminal.Services
             string folderName = normalized.Replace(":", "-").Replace("/", "-");
 
             string claudeProjectPath = Path.Combine(claudeProjectsRoot, folderName);
-            // CA3003: claudeProjectPath is built from Environment.GetFolderPath(UserProfile) + a literal
-            // ".claude/projects" + a folderName whose construction above replaces ':' and '/' away, so no
-            // path-traversal segments survive. Existence check only; no file read.
-#pragma warning disable CA3003
             return Directory.Exists(claudeProjectPath) ? claudeProjectPath : null;
 #pragma warning restore CA3003
         }
@@ -208,7 +253,7 @@ namespace MultiTerminal.Services
             var result = new SyncResult();
 
             // CA3003: claudeProjectPath is produced by GetClaudeProjectFolder (internal builder that
-            // anchors to %USERPROFILE%/.claude/projects and strips ':' / '/') or an equivalent trusted
+            // anchors to a configured Claude profile's projects folder and strips ':' / '/') or an equivalent trusted
             // helper. Existence check only; the enumeration below is bounded to that directory tree.
 #pragma warning disable CA3003
             if (!Directory.Exists(claudeProjectPath))
@@ -269,7 +314,7 @@ namespace MultiTerminal.Services
                 string subagentsDir = Path.Combine(sessionDir, "subagents");
                 // CA3003: subagentsDir is Path.Combine(sessionDir, "subagents") where sessionDir comes
                 // from Directory.GetDirectories(claudeProjectPath) — so it is an existing child of a
-                // directory already validated as being under %USERPROFILE%/.claude/projects (guarded by
+                // directory already validated as being under a configured Claude profile's projects folder (guarded by
                 // SessionLineageController.SyncSessions and SafeProjectRoot-style prefix check).
 #pragma warning disable CA3003
                 if (!Directory.Exists(subagentsDir))
@@ -353,8 +398,12 @@ namespace MultiTerminal.Services
             // and non-write I/O must not sit inside the global write gate — that is the same shape the
             // census's ORDERING_EXEMPT exists to avoid, and holding the gate across it would lengthen the
             // hold for every other writer for no benefit.
+            //
+            // Ticket c8ee0eec item 33: the session belongs to the agent's TERMINAL, so its file is
+            // under that terminal's Claude profile. The folder decision is used only when no live
+            // terminal is registered under this name.
             string sessionFilePath = null;
-            string claudeFolder = GetClaudeProjectFolder(projectPath);
+            string claudeFolder = GetClaudeProjectFolderForAgent(projectPath, agentName);
             if (claudeFolder != null)
                 sessionFilePath = Path.Combine(claudeFolder, $"{sessionId}.jsonl");
 
@@ -516,14 +565,30 @@ namespace MultiTerminal.Services
         /// Returns the most recent session for the given project path by converting the
         /// project path to its .claude/projects/ folder and querying by file path prefix.
         /// Returns null if the project folder doesn't exist or no sessions are found.
+        /// <para>Which profile's folder (ticket c8ee0eec item 33): the one of the live terminal
+        /// registered as <paramref name="agentName"/> when there is one, else the folder decision.</para>
         /// </summary>
         public SessionLineageRecord GetMostRecentSessionForProject(string projectPath, string agentName = null, string excludeSessionId = null, int skip = 0)
         {
-            string claudeFolder = GetClaudeProjectFolder(projectPath);
+            string claudeFolder = GetClaudeProjectFolderForAgent(projectPath, agentName);
             if (claudeFolder == null)
                 return null;
 
             return _db.GetMostRecentSessionByFolder(claudeFolder, agentName, excludeSessionId, skip);
+        }
+
+        /// <summary>
+        /// As <see cref="GetMostRecentSessionForProject(string, string, string, int)"/> with no agent
+        /// filter, for a caller that may have a pane (a terminal's HUD): the session is looked for
+        /// under <paramref name="pane"/>'s profile, or by folder when <paramref name="pane"/> is null.
+        /// </summary>
+        internal SessionLineageRecord GetMostRecentSessionForPane(string projectPath, ClaudePaneProfile pane)
+        {
+            string claudeFolder = GetClaudeProjectFolderForPane(projectPath, pane);
+            if (claudeFolder == null)
+                return null;
+
+            return _db.GetMostRecentSessionByFolder(claudeFolder, null, null, 0);
         }
 
         /// <summary>
@@ -556,7 +621,6 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Returns sessions whose file path is within the given Claude project folder.
-        /// Used by ProjectPanel to show sessions for a specific project.
         /// </summary>
         public List<SessionLineageRecord> GetSessionsByFolder(string claudeProjectFolder, int limit = 20)
             => _db.GetSessionsByFolder(claudeProjectFolder, limit);

@@ -33,6 +33,14 @@ namespace MultiTerminal.Panels
         private bool _isPaused = false;
         private bool _isDisposed = false;
 
+        // Set from any thread when an entry was skipped because the panel had no handle; read on the
+        // UI thread in OnHandleCreated. Volatile so a set on a pool thread is seen there.
+        private volatile bool _resyncPending;
+
+        // The thread that owns the ListView. Every creation site (MainForm) runs on the UI thread, and
+        // the handle is created on the thread that creates the control.
+        private readonly int _uiThreadId = Environment.CurrentManagedThreadId;
+
         public DebugPanel()
         {
             InitializeComponent();
@@ -204,10 +212,14 @@ namespace MultiTerminal.Panels
         {
             if (_isDisposed) return;
 
-            // Marshal to UI thread
-            if (InvokeRequired)
+            // Task d41637ab: InvokeRequired answers false when the panel has no handle (never shown,
+            // or hidden before its handle was made), even on a thread-pool thread. The old code then
+            // edited the ListView from that thread, and on 2026-10-16 a FileSystemWatcher error
+            // logged that way corrupted it and crashed MultiTerminal. So the test is thread identity,
+            // which cannot answer wrongly, and an off-thread call never touches the list.
+            if (Environment.CurrentManagedThreadId != _uiThreadId)
             {
-                BeginInvoke(new Action(() => OnLogMessageAdded(sender, entry)));
+                MarshalOrDefer(() => OnLogMessageAdded(sender, entry));
                 return;
             }
 
@@ -276,6 +288,73 @@ namespace MultiTerminal.Panels
             }
         }
 
+        /// <summary>
+        /// Called off the UI thread. Posts <paramref name="action"/> to the UI thread when there is a
+        /// handle to post through; otherwise marks the list for a rebuild from the service's buffer.
+        /// </summary>
+        private void MarshalOrDefer(Action action)
+        {
+            if (IsHandleCreated)
+            {
+                try
+                {
+                    BeginInvoke(action);
+                    return;
+                }
+                catch (InvalidOperationException)
+                {
+                    // The handle was destroyed after the check; fall through to the rebuild.
+                }
+            }
+
+            _resyncPending = true;
+
+            // OnHandleCreated may have read the flag between our handle check and the line above. If
+            // a handle exists now, ask the UI thread to pick the flag up rather than leave it set.
+            if (IsHandleCreated)
+            {
+                try
+                {
+                    BeginInvoke(new Action(ResyncIfPending));
+                }
+                catch (InvalidOperationException)
+                {
+                    // Destroyed again; the next OnHandleCreated reads the flag.
+                }
+            }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            ResyncIfPending();
+        }
+
+        private void ResyncIfPending()
+        {
+            if (_resyncPending) ResyncFromService();
+        }
+
+        /// <summary>
+        /// Rebuilds the list from the service's in-memory buffer, replacing entries that were skipped
+        /// while the panel had no handle. UI thread only.
+        /// </summary>
+        private void ResyncFromService()
+        {
+            _resyncPending = false;
+            if (_logService == null || _isDisposed) return;
+
+            _logListView.Items.Clear();
+            foreach (var entry in _logService.GetMessages())
+            {
+                AddLogEntry(entry);
+            }
+            UpdateCountLabel();
+        }
+
+        /// <summary>Test seam (InternalsVisibleTo): rows currently in the list.</summary>
+        internal int DisplayedEntryCount => _logListView.Items.Count;
+
         private void UpdateCountLabel()
         {
             if (_logService != null)
@@ -288,9 +367,11 @@ namespace MultiTerminal.Panels
         {
             if (_isDisposed) return;
 
-            if (InvokeRequired)
+            // Same hazard as OnLogMessageAdded (DebugController.Clear raises this on a REST thread);
+            // a deferred clear is a rebuild from the emptied buffer.
+            if (Environment.CurrentManagedThreadId != _uiThreadId)
             {
-                BeginInvoke(new Action(() => OnLogCleared(sender, e)));
+                MarshalOrDefer(() => OnLogCleared(sender, e));
                 return;
             }
 

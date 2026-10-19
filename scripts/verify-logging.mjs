@@ -42,8 +42,6 @@ const CONVERTED = new Set([
   'TasksPanel/TasksPanelControl.cs',
   'FilePreviewPanel/FilePreviewPanelDocument.cs',
   'AgentPanel/AgentPanelControl.cs',
-  'Docking/ProjectPanelDocument.cs',
-  'ProjectPanel/ProjectPanelRenderer.cs',
   // Dialogs
   'Dialogs/CodeReviewPopupForm.cs',
   'Dialogs/CodeReviewPopupManager.cs',
@@ -96,11 +94,13 @@ const ALLOWLIST_SITES = new Map([
   ['Services/PlanSeeder.cs',                     'static utility leaf — no instance seam for a sink; dependency-free, not plumbed (ruling #1)'],
   ['Services/SessionContextWriter.cs',           'static utility leaf — no instance seam for a sink; dependency-free, not plumbed (ruling #1)'],
   ['Services/WorktreeLayoutMigrationService.cs', 'static utility leaf — no instance seam for a sink; dependency-free, not plumbed (ruling #1)'],
+  ['Services/ClaudeProfileDataRoots.cs',         'static utility leaf (c8ee0eec) — its messages go to the sink MainForm passes to Configure; the one Debug.WriteLine is only the fallback before Configure runs (and in unit tests), where no sink exists yet (ruling #1)'],
 
   // ── 4c86f18d leaf sweep — dependency-free instance leaves (no sink, no broker; not plumbed) ─────────
   ['MCPServer/Services/ActivityFeedService.cs', 'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],
   ['MCPServer/Services/ActivityService.cs',     'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],
   ['MCPServer/Services/PoolCoordinator.cs',     'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],
+  ['MCPServer/Services/SessionCatalog.cs',      'dependency-free leaf (ec2ed636) — no sink/broker, lookups injected for unit tests; not plumbed (ruling #1)'],
   ['Services/ChangelogAttributionService.cs',   'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],
   ['Services/ChangelogService.cs',              'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],
   ['Services/CompanionProcessManager.cs',       'dependency-free leaf — no sink/broker; not plumbed (ruling #1)'],
@@ -123,10 +123,6 @@ const ALLOWLIST_SITES = new Map([
   // ── 4c86f18d UI+API sweep — sites that legitimately KEEP a Debug/Trace.WriteLine (no clean sink seam) ─
   ['API/MultiTerminalRestServer.cs',
     'converted except 1 self-fallback: the PresenceAdapter log callback writes Debug.WriteLine ONLY when _broker.DebugLogService is null — cannot route a "sink is null" fallback through the null sink (same pattern as PresenceAdapter)'],
-  ['Dialogs/EditProjectDialog.cs',
-    'single benign catch (source-control combo-box population); dialog has no broker/sink field and its caller chain (ProjectManagerDialog→MainForm) has none within 1 hop — no clean seam without cross-file plumbing'],
-  ['Docking/PromptTreeDocument.cs',
-    'dead/orphaned class — never constructed in the live app (MainForm GetContentFromPersistString maps its old persist-string to ProjectPanelDocument); no reachable seam to wire a sink into'],
   ['Program.cs',
     'app entry/composition shim — the 4 Trace lines are splash/loading lifecycle events that fire before/around DebugLogService construction (created inside MainForm); no sink in scope'],
   ['Terminal/WebView2EnvironmentCache.cs',

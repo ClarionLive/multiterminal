@@ -53,12 +53,10 @@ namespace MultiTerminal.API.Controllers
             if (string.IsNullOrWhiteSpace(request.AgentName))
                 return Problem(detail: "agentName is required", statusCode: 400);
 
-            // Guard against path traversal — only allow files within the user's .claude/projects directory
-            string allowedRoot = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".claude", "projects");
-            string fullPath = Path.GetFullPath(request.SessionFilePath);
-            if (!fullPath.StartsWith(allowedRoot, StringComparison.OrdinalIgnoreCase))
+            // Guard against path traversal — only allow files within the projects directory of a
+            // configured Claude profile (ticket c8ee0eec: any profile, since this request names no pane
+            // or project to take one from). The roots come from MT's settings, never from the request.
+            if (!ClaudeProfileDataRoots.IsUnderAnyRoot(request.SessionFilePath, "projects", out _))
                 return Problem(detail: "sessionFilePath must be within the Claude projects directory", statusCode: 400);
 
             var service = GetService();
@@ -122,12 +120,9 @@ namespace MultiTerminal.API.Controllers
             if (string.IsNullOrWhiteSpace(request?.ClaudeProjectPath))
                 return Problem(detail: "claudeProjectPath is required", statusCode: 400);
 
-            // Guard against path traversal
-            string allowedRoot = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".claude", "projects");
-            string fullPath = Path.GetFullPath(request.ClaudeProjectPath);
-            if (!fullPath.StartsWith(allowedRoot, StringComparison.OrdinalIgnoreCase))
+            // Guard against path traversal: a folder inside the projects directory of a configured
+            // Claude profile (any profile; see ImportSession).
+            if (!ClaudeProfileDataRoots.IsUnderAnyRoot(request.ClaudeProjectPath, "projects", out _))
                 return Problem(detail: "claudeProjectPath must be within the Claude projects directory", statusCode: 400);
 
             var service = GetService();
@@ -164,7 +159,9 @@ namespace MultiTerminal.API.Controllers
             if (service == null)
                 return ServiceUnavailable();
 
-            string claudeFolder = SessionLineageService.GetClaudeProjectFolder(request.ProjectPath);
+            // The terminal's own Claude profile when a live terminal is registered under that name, else
+            // the folder decision (ticket c8ee0eec item 33).
+            string claudeFolder = SessionLineageService.GetClaudeProjectFolderForAgent(request.ProjectPath, request.TerminalName);
             if (claudeFolder == null)
                 return Problem(detail: "Claude project folder not found for the given path", statusCode: 404);
 

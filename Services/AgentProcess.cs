@@ -44,6 +44,13 @@ namespace MultiTerminal.Services
         public string SessionId { get; private set; }
 
         /// <summary>
+        /// When the process was started (UTC), or null before <see cref="SpawnAsync"/>. The launch
+        /// prompt (task ec2ed636) needs it while <see cref="SessionId"/> is still null: only a session
+        /// written since this time can be the one this helper holds.
+        /// </summary>
+        public DateTime? StartedUtc { get; private set; }
+
+        /// <summary>
         /// Whether the underlying process is still running.
         /// </summary>
         public bool IsRunning => _process != null && !_process.HasExited;
@@ -97,6 +104,7 @@ namespace MultiTerminal.Services
         /// <param name="permissionMode">Optional permission mode (--permission-mode flag). Defaults to bypass for headless agents.</param>
         /// <param name="extraArgs">Optional additional CLI arguments (e.g. --bare, --disallowedTools).</param>
         /// <param name="environmentVars">Optional environment variables to set on the spawned process.</param>
+        /// <param name="claudeProfile">The Claude Code config profile to run under (ticket c8ee0eec), already resolved with <see cref="ClaudeProfileResolver"/>. Null means Default.</param>
         public async Task SpawnAsync(
             string prompt = null,
             string workingDir = null,
@@ -104,7 +112,8 @@ namespace MultiTerminal.Services
             string sessionId = null,
             string permissionMode = "bypassPermissions",
             string[] extraArgs = null,
-            Dictionary<string, string> environmentVars = null)
+            Dictionary<string, string> environmentVars = null,
+            ClaudeProfile claudeProfile = null)
         {
             if (_process != null)
                 throw new InvalidOperationException("AgentProcess is already running. Call StopAsync() first.");
@@ -132,6 +141,9 @@ namespace MultiTerminal.Services
             {
                 args.Add("--resume");
                 args.Add(sessionId);
+                // Count the resumed session as held from spawn, not from the first stream
+                // message, so the launch prompt never offers it in between (task ec2ed636).
+                SessionId ??= sessionId;
             }
 
             if (!string.IsNullOrEmpty(permissionMode))
@@ -170,15 +182,13 @@ namespace MultiTerminal.Services
             // Enable flicker-free alternate-screen renderer for Claude Code
             psi.Environment["CLAUDE_CODE_NO_FLICKER"] = "1";
 
-            // Set any custom environment variables (e.g. MULTITERMINAL_NAME for channel identity)
-            if (environmentVars != null)
-            {
-                foreach (var kvp in environmentVars)
-                    psi.Environment[kvp.Key] = kvp.Value;
-            }
+            // Custom variables (e.g. MULTITERMINAL_NAME for channel identity), then the Claude profile.
+            // Throws for a profile with no absolute folder, before any process exists.
+            ApplyEnvironment(psi.Environment, environmentVars, ClaudeProfileResolver.GetEnvironment(claudeProfile));
 
             _process = new Process { StartInfo = psi, EnableRaisingEvents = true };
             _process.Exited += OnProcessExited;
+            StartedUtc = DateTime.UtcNow;
             _process.Start();
 
             _stdinWriter = _process.StandardInput;
@@ -192,6 +202,35 @@ namespace MultiTerminal.Services
             if (!string.IsNullOrEmpty(prompt))
             {
                 await SendMessageAsync(prompt);
+            }
+        }
+
+        /// <summary>
+        /// Writes the caller's variables and then the Claude profile's into a child environment.
+        /// A profile entry with a null value REMOVES the variable (ticket c8ee0eec: the Default profile
+        /// must not leave a CLAUDE_CONFIG_DIR behind). The profile is applied last, so a caller's
+        /// variables cannot move the process onto another profile.
+        /// </summary>
+        internal static void ApplyEnvironment(
+            IDictionary<string, string> environment,
+            IEnumerable<KeyValuePair<string, string>> environmentVars,
+            IEnumerable<KeyValuePair<string, string>> profileEnvironment)
+        {
+            if (environmentVars != null)
+            {
+                foreach (var kvp in environmentVars)
+                    environment[kvp.Key] = kvp.Value;
+            }
+
+            if (profileEnvironment != null)
+            {
+                foreach (var kvp in profileEnvironment)
+                {
+                    if (kvp.Value == null)
+                        environment.Remove(kvp.Key);
+                    else
+                        environment[kvp.Key] = kvp.Value;
+                }
             }
         }
 

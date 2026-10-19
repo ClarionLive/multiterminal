@@ -17,8 +17,8 @@ Related kanban tasks:
 | Env-var identity (`MULTITERMINAL_NAME`, `MULTITERMINAL_DOC_ID`, `MULTITERMINAL_PROJECT_ID`) | ✅ | Injected by `ConPtyTerminal.StartProcess` into the parent PowerShell; Codex inherits. |
 | Startup prompt (tells Codex its name + first actions) | ✅ | Template at `%APPDATA%\multiterminal\codex\startup-prompt.md`; delivered by `codex-launch.ps1` as the initial user message. |
 | `AGENTS.md` at project root | ✅ | Generated on first Codex launch. Translates `.claude/CLAUDE.md` when present, else writes a stub. Write-once. |
-| Per-project default terminal | ✅ | `defaultTerminal` field in `.claude/project.json` and the `default_terminal` column in SQLite. Asked in the New Project wizard; editable in the Project pane settings form. |
-| Project card split-button launch | ✅ | Main click launches the default; dropdown offers Claude Code / Codex as one-off overrides. "Terminal: X" label shows the default. |
+| Per-project default terminal | ✅ | `defaultTerminal` field in `.claude/project.json` and the `default_terminal` column in SQLite. Asked in the New Project wizard; editable in the project settings form (Launch section). |
+| One-off terminal override | ✅ | On the start screen's Browse All, each row's launch caret (▼) offers Claude Code / Codex for that one launch. A Home card's "Terminal: X" label shows the default and changes it. (The Project pane's split button that used to do this was removed with the pane in e20e2ce0.) |
 | Settings UI (Codex binary path, model, effort, default agent name) | ✅ partial | Binary path + default agent name are applied on launch. Model / effort are persisted but not yet written to `config.toml` (Phase 2). |
 
 ## What's not in Phase 1 (see `c6091fb8`)
@@ -49,13 +49,13 @@ Explicitly NOT planned:
 
 ### Switch an existing project to Codex
 
-1. Open the project in the Project pane.
-2. In the info section, change **Default Terminal** to `Codex`.
-3. Click the main launch button → it now launches Codex.
+1. Open the project's settings (the gear on its Home card or Browse All row, or on a terminal's status bar).
+2. In the **Launch** section, change **Default terminal** to `Codex` and click **Save**.
+3. Launch the project from its Home card → it now launches Codex.
 
 ### One-off override
 
-Click the ▼ arrow next to **Launch in Terminal**, pick Claude Code or Codex. The project's stored default is not changed.
+In **Browse All** on the start screen, click the ▼ caret at the end of the project's row and pick Claude Code or Codex. The project's stored default is not changed.
 
 ### Point at a custom codex binary
 
@@ -82,15 +82,12 @@ Launch path
   │           └── autoRun = "& codex-launch.ps1; exit" (sets MULTITERMINAL_CODEX_BIN first)
   └── ConPtyTerminal.StartProcess — injects MT env vars into the parent PowerShell
 
-UI (Project pane split button)
-  ├── panel.html .launch-split (main + arrow) + dropdown menu + "Terminal: X" label
-  ├── ProjectPanelRenderer.OnWebMessageReceived parses optional "terminal" field
-  ├── LaunchRequestedEventArgs (override flows through)
-  ├── ProjectPanelDocument.OnRendererLaunchRequested
-  └── MainForm.OnProjectLaunchRequested
-        ├── kind = override ?? project.DefaultTerminal ?? ClaudeCode
-        ├── LaunchCommandBuilder.BuildCommand(kind, project)
-        └── AddNewTerminal(...)  -- no dialog; direct launch
+UI
+  The Project pane and its split button were removed in e20e2ce0. A project launches with
+  its default terminal from a Home card or the header's Launch Project picker; a one-off
+  override is the Browse All row's launch caret (start-screen.html wireLaunchPopup →
+  launch_project with a "terminal" field → StartScreenControl → StartScreenLaunchEventArgs
+  → MainForm.OnStartScreenProjectLaunched).
 ```
 
 ### File layout
@@ -102,7 +99,8 @@ UI (Project pane split button)
 | `Services/CodexPromptService.cs` | Writes `startup-prompt.md` + `codex-launch.ps1` to `%APPDATA%\multiterminal\codex\`. |
 | `Services/CodexAgentsService.cs` | Writes `AGENTS.md` at project root. |
 | `Services/LaunchCommandBuilder.cs` | Adds `BuildCodexCommand` + `BuildCommand(kind, project)` dispatcher. |
-| `ProjectPanel/panel.html` | Split button + Terminal: label + Default Terminal field in info form. |
+| `StartScreen/start-screen.html` | Browse All row launch caret (one-off override) + Home card "Terminal:" label. |
+| `ProjectSettings/project-settings.html` | Default terminal field in the project settings form's Launch section. |
 | `Dialogs/NewProjectWpfDialog.xaml[.cs]` | Default Terminal dropdown in the New Project wizard. |
 | `Dialogs/SettingsWpfDialog.xaml[.cs]` | Codex tab (binary path, model, effort, default agent name). |
 
@@ -125,7 +123,7 @@ Files MultiTerminal owns but the user can customize are marked so regeneration d
 - **Model / effort settings don't flow to `config.toml` yet.** Persisting them took Phase 1 time; wiring them in requires splitting the managed TOML block so top-level keys don't spill into `[mcp_servers.*]` table context. Phase 2 concern.
 - **Managed-content updates after an upgrade.** The write-once files (`startup-prompt.md`, `codex-launch.ps1`, `AGENTS.md`) don't auto-refresh when MT ships a new default template. Users must delete and relaunch. A version-marker check is a future polish.
 - **`register_session` omitted.** The startup prompt instructs Codex to call `register_terminal` but not `register_session`, because without the JSONL importer (Phase 2) the session ID can't be tied back to transcripts.
-- **The Project pane launch button no longer shows the old "Replace Current Terminal / Claude Command" dialog.** Split-button click launches directly. `ShowProjectTerminalDialog` is dead code — left in place for potential future reuse.
+- **Launching a project no longer shows the old "Replace Current Terminal / Claude Command" dialog.** It launches directly. `ShowProjectTerminalDialog` has since been removed from `MainForm.cs`.
 
 ---
 
@@ -141,8 +139,8 @@ Smoke test (run after a successful build):
 6. In the Codex terminal, Codex should have called `register_terminal` on startup (it reports "Registered as <Name>"). Verify in the team roster panel that the new terminal appears within 10 seconds.
 7. From another MT terminal, send a message to the Codex terminal via `send_message`. Codex should receive it in its inbox.
 8. Have Codex claim a kanban task via `claim_task`. Verify the board reflects the claim.
-9. Open the Project pane for the same project. Click the **▼** arrow on the launch button, pick **Claude Code**. Verify a Claude terminal opens for that project (override works without changing the default).
-10. Change **Default Terminal** in the info form back to Claude Code. Close and reopen the pane — the dropdown should reflect the saved value, and the main launch button should launch Claude by default.
+9. On the start screen open **Browse All**. Click the **▼** caret on the same project's row, pick **Claude Code**. Verify a Claude terminal opens for that project (override works without changing the default).
+10. Open the project's settings (gear on its Home card or Browse All row). Under **Launch**, change **Default terminal** back to Claude Code and click **Save**. Close and reopen the form — the field should show the saved value, and launching from the Home card should launch Claude.
 
 ---
 
@@ -153,5 +151,4 @@ Tracked in task `c6091fb8`:
 - Codex session JSONL importer (rollout file → `session_messages` table)
 - MCP `invoke_skill` tool (replaces Claude's Skill tool for Codex agents)
 - Codex model / effort persistence → `~/.codex/config.toml` top-level keys (needs managed-block restructuring)
-- Remove dead code: `ShowProjectTerminalDialog` in `MainForm.cs`
 - Version-marker check for write-once files so MT upgrades auto-refresh templates

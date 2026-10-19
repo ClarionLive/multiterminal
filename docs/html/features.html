@@ -35,6 +35,7 @@
         <div class="nav-section-title">Features</div>
         <a href="features.html" class="nav-link active">Features</a>
         <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="claude-profiles.html" class="nav-link">Claude Profiles</a>
         <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
         <a href="presence.html" class="nav-link">Presence Sensors</a>
         <a href="code-graph.html" class="nav-link">Code Graph</a>
@@ -93,6 +94,7 @@
           </ol>
           <p style="margin-top:1rem;">Newer subsystems each have a dedicated guide:
             <a href="worktrees.html">Git Worktrees</a> &middot;
+            <a href="claude-profiles.html">Claude Profiles</a> &middot;
             <a href="multi-connect.html">Multi-Connect</a> &middot;
             <a href="presence.html">Presence Sensors</a> &middot;
             <a href="code-graph.html">Code Graph</a> &middot;
@@ -150,20 +152,24 @@
           </ul>
         </div>
 
-        <!-- Project Panel -->
-        <h3 id="panel-project">Project Panel</h3>
+        <!-- Project Settings -->
+        <h3 id="panel-project-settings">Project Settings</h3>
         <div class="card">
-          <p><strong>Toolbar button:</strong> Project &nbsp;|&nbsp; <strong>HTML:</strong> <code>ProjectPanel/panel.html</code></p>
-          <p>Manage projects registered with MultiTerminal. View and edit project details, assign agents, configure MCP servers, manage named paths, store prompts, and enable specialist agents.</p>
-          <p><strong>Key interactions:</strong></p>
+          <p><strong>Opened by:</strong> the gear on a terminal's status bar (next to Home), on each Home card, or on each Browse All row &nbsp;|&nbsp; <strong>HTML:</strong> <code>ProjectSettings/project-settings.html</code></p>
+          <p>A resizable window with one project's settings. It replaced the Project panel and the Project Manager and Edit Project dialogs. One window per project; the status bar gear is disabled when the terminal belongs to no registered project.</p>
+          <p><strong>Sections (left rail):</strong></p>
           <ul>
-            <li>Browse registered projects with search and filter</li>
-            <li>Edit project name, description, paths, build commands, and git settings</li>
-            <li>Assign agents with roles and preferred models</li>
-            <li>Configure MCP servers per project (enable/disable)</li>
-            <li>Manage specialist agents (verifier, debugger, security auditor, etc.)</li>
-            <li>Store reusable prompts and instructions</li>
+            <li><strong>General</strong> &mdash; name, description, type, status, version, icon, colour, pinned, created by, plus dates and stats</li>
+            <li><strong>Launch</strong> &mdash; Claude profile, default terminal, quiet start, team lead, launch command. Profile, default terminal, quiet start and launch command apply to terminals started afterwards; running terminals keep what they started with</li>
+            <li><strong>Paths</strong> &mdash; the project folder (read-only, with Copy and Open folder), source, deploy and build-output paths, and other named paths</li>
+            <li><strong>Build &amp; Deploy</strong>, <strong>Git</strong> (repo URL, default branch, auto-commit, source control account)</li>
+            <li><strong>Agents</strong> &mdash; project agents and specialist agents</li>
+            <li><strong>MCP &amp; Skills</strong> &mdash; MCP servers (with <strong>Sync MCP config</strong>) and skills</li>
+            <li><strong>Prompts</strong>, <strong>Change Log</strong></li>
+            <li><strong>Danger zone</strong> &mdash; delete the project, optionally also deleting its <code>.claude/project.json</code></li>
           </ul>
+          <p>Changes are kept until you click <strong>Save</strong>; closing with unsaved changes asks first.</p>
+          <p>The list of all projects is the Start Screen's <strong>Browse All</strong> view (also reachable from the header's Browse All Projects). Each row shows Pin and Version columns and the project's path, and has a settings gear, a delete button (with a choice to also delete the project config), and a launch caret for picking Claude Code or Codex for one launch. <strong>New Project</strong> is on the same view.</p>
         </div>
 
         <!-- Profile Panel -->
@@ -456,7 +462,7 @@
         <h2 id="team-agent-system">Team &amp; Agent System</h2>
 
         <h3>Native Claude Code Teams</h3>
-        <p>MultiTerminal supports Claude Code's native team agent system (requires <code>CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1</code>). Teams are created via <code>TeamCreate</code>, and agents are spawned as subagents that appear in the Agent Panel.</p>
+        <p>MultiTerminal supports Claude Code's native team agent system (requires <code>CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1</code>, which MultiTerminal sets on every Claude launch it makes). Teams are created via <code>TeamCreate</code>, and agents are spawned as subagents that appear in the Agent Panel.</p>
 
         <h3>Spawned Agents (AgentProcess)</h3>
         <p>Agents spawn helpers with the <code>spawn_helper</code> MCP tool (<code>POST /api/spawn/terminal</code>), which builds the launch command through the same <code>LaunchCommandBuilder</code> as every docked terminal (task 77d1182f; the former <code>TerminalSpawner</code> class was never wired and has been deleted). Each spawned helper:</p>
@@ -620,7 +626,7 @@
         <h3>Toolbar</h3>
         <p>The main toolbar contains buttons for all panel toggles, layout controls, and settings:</p>
         <p>
-          <code>New Terminal</code> | <code>Project</code> | <code>Chat</code> | <code>History</code> | <code>Help</code> | <code>Activity</code> | <code>Tasks</code> | <code>Profiles</code> | <code>Inbox</code> | <code>Office</code> | <code>Debug</code> | <code>File Preview</code> | <code>Recent</code> | <code>Grid Layout</code> | Theme | Settings | About
+          <code>New Terminal</code> | <code>Chat</code> | <code>History</code> | <code>Help</code> | <code>Activity</code> | <code>Tasks</code> | <code>Profiles</code> | <code>Inbox</code> | <code>Office</code> | <code>Debug</code> | <code>File Preview</code> | <code>Recent</code> | <code>Grid Layout</code> | Theme | Settings | About
         </p>
 
         <!-- =========================================== -->
@@ -642,17 +648,12 @@
             <tr>
               <td><strong>New Project (WPF)</strong></td>
               <td>Register a new project with paths, build command, and git config</td>
-              <td>Project panel "New" button</td>
+              <td>"New Project" on the Start Screen (Home or Browse All) or the header</td>
             </tr>
             <tr>
-              <td><strong>Project Manager</strong></td>
-              <td>Browse, edit, and manage all registered projects</td>
-              <td>Project panel</td>
-            </tr>
-            <tr>
-              <td><strong>Edit Project</strong></td>
-              <td>Edit details of a specific project</td>
-              <td>Project Manager dialog</td>
+              <td><strong>Project settings</strong></td>
+              <td>Edit one project's settings (see <a href="#panel-project-settings">Project Settings</a>)</td>
+              <td>Gear on a terminal's status bar, a Home card, or a Browse All row</td>
             </tr>
             <tr>
               <td><strong>Chat History</strong></td>
@@ -677,7 +678,7 @@
             <tr>
               <td><strong>Save Prompt</strong></td>
               <td>Save a reusable prompt to the project's prompt collection</td>
-              <td>Project panel</td>
+              <td>Terminal context menu ("Save as Prompt...")</td>
             </tr>
             <tr>
               <td><strong>Owner Profile (WPF)</strong></td>

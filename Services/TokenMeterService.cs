@@ -110,24 +110,14 @@ namespace MultiTerminal.Services
         {
             if (string.IsNullOrEmpty(sessionId) || string.IsNullOrEmpty(filePath)) return null;
 
-            // Confine to a Claude transcript JSONL under ~/.claude, even if a caller is tricked (by a
-            // writable temp file) into passing some other path — the meter's own trust-boundary guard,
-            // in addition to the caller's sessionId validation. The extension alone only narrows the
-            // arbitrary-file-open; the canonical-root check actually bounds it. [codex-security A01/A04]
-            if (!filePath.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase)) return null;
-            string canonicalPath;
-            try
-            {
-                canonicalPath = Path.GetFullPath(filePath);
-            }
-            catch (Exception ex) when (ex is ArgumentException || ex is NotSupportedException || ex is PathTooLongException)
-            {
-                return null;
-            }
-
-            string claudeRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude")
-                + Path.DirectorySeparatorChar;
-            if (!canonicalPath.StartsWith(claudeRoot, StringComparison.OrdinalIgnoreCase)) return null;
+            // Confine to a Claude transcript JSONL under a configured Claude config root, even if a
+            // caller is tricked (by a writable temp file) into passing some other path — the meter's
+            // own trust-boundary guard, in addition to the caller's sessionId validation.
+            // [codex-security A01/A04] The roots come only from MT's settings + startup environment
+            // (ClaudeProfileResolver.GetAllRoots), never from the path being checked. Re-read per call:
+            // profiles can change in Settings at runtime, and the read is an in-memory settings lookup
+            // plus a small JSON parse, a few times per 2s poll (ticket c8ee0eec item 9).
+            if (!IsAllowedTranscriptPath(filePath, ClaudeProfileResolver.GetAllRoots())) return null;
 
             FileTailState prevState = _fileState.TryGetValue(filePath, out FileTailState st) ? st : null;
             long startOffset = prevState?.Offset ?? 0;
@@ -210,6 +200,53 @@ namespace MultiTerminal.Services
             {
                 return acc.ToSnapshot(BurnWindowMinutes);
             }
+        }
+
+        /// <summary>
+        /// Pure transcript-path guard (ticket c8ee0eec item 9; test seam via InternalsVisibleTo).
+        /// True only when <paramref name="filePath"/> is an absolute <c>.jsonl</c> path whose canonical
+        /// form (<see cref="Path.GetFullPath(string)"/>, so <c>..</c> segments are resolved first) lies
+        /// under one of <paramref name="roots"/>. Each root is itself canonicalised and compared WITH a
+        /// trailing separator, ordinal-ignore-case, so <c>.claude-other\</c> never admits
+        /// <c>.claude-otherX\</c>. A root that is relative, malformed, or a volume root (drive or UNC
+        /// share) is ignored, so a bad entry can never widen the guard to a whole disk.
+        /// Does not resolve symlinks/junctions (unchanged from the original ~/.claude guard).
+        /// </summary>
+        internal static bool IsAllowedTranscriptPath(string filePath, IEnumerable<string> roots)
+        {
+            if (string.IsNullOrEmpty(filePath) || roots == null) return false;
+            if (!filePath.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase)) return false;
+
+            string canonicalPath;
+            try
+            {
+                // A relative path would resolve against the process's current directory, which says
+                // nothing about where the transcript lives — refuse it outright.
+                if (!Path.IsPathFullyQualified(filePath)) return false;
+                canonicalPath = Path.GetFullPath(filePath);
+            }
+            catch (Exception ex) when (ex is ArgumentException || ex is NotSupportedException || ex is PathTooLongException)
+            {
+                return false;
+            }
+
+            foreach (string root in roots)
+            {
+                string prefix = CanonicalRootPrefix(root);
+                if (prefix != null && canonicalPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>Root → canonical full path + one trailing separator, or null if unusable or a volume root.
+        /// Canonicalised by the same function the profile resolver uses, so the guard and the roots it is
+        /// handed cannot disagree about what a folder is.</summary>
+        private static string CanonicalRootPrefix(string root)
+        {
+            string full = ClaudeProfileResolver.Canonicalize(root);
+            if (full == null || ClaudeProfileResolver.IsVolumeRoot(full)) return null;
+            return full + Path.DirectorySeparatorChar;
         }
 
         /// <summary>

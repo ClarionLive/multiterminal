@@ -30,6 +30,7 @@
         <div class="nav-section-title">Features</div>
         <a href="features.html" class="nav-link">Features</a>
         <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="claude-profiles.html" class="nav-link">Claude Profiles</a>
         <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
         <a href="presence.html" class="nav-link">Presence Sensors</a>
         <a href="code-graph.html" class="nav-link">Code Graph</a>
@@ -209,7 +210,7 @@ H:\DevLaptop\ClarionPowerShell\Deploy\MultiTerminal.exe</code></pre>
             <tr>
               <td><code>settings.json</code></td>
               <td><code>~/.claude/</code></td>
-              <td>Global Claude Code settings (experimental features like agent teams).</td>
+              <td>Global Claude Code settings. Yours: MultiTerminal's installer does not write to it.</td>
             </tr>
             <tr>
               <td><code>.mcp.json</code></td>
@@ -320,7 +321,7 @@ H:\DevLaptop\ClarionPowerShell\Deploy\MultiTerminal.exe</code></pre>
             </tr>
           </tbody>
         </table>
-        <p>Backends are stored in the gateway's own SQLite database and grouped into profiles, not in <code>.mcp.json</code>. Manage them at runtime via the gateway's <code>gateway__*</code> tools or per-project from the Project Panel.</p>
+        <p>Backends are stored in the gateway's own SQLite database and grouped into profiles, not in <code>.mcp.json</code>. Manage them at runtime via the gateway's <code>gateway__*</code> tools or per-project from the <strong>MCP &amp; Skills</strong> section of the project settings form.</p>
 
         <!-- Claude Integration -->
         <h2 id="claude-integration">Claude Code Integration</h2>
@@ -420,8 +421,8 @@ H:\DevLaptop\ClarionPowerShell\Deploy\MultiTerminal.exe</code></pre>
             </tr>
             <tr>
               <td><code>CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS</code></td>
-              <td>User config</td>
-              <td>Enable native Claude Code team agent support (set to <code>1</code>)</td>
+              <td>Terminal launch</td>
+              <td>Enables native Claude Code team agent support. MultiTerminal sets it to <code>1</code> on every Claude launch it makes; the installer no longer writes it to <code>settings.json</code>, so sessions started outside MultiTerminal need it set by the user</td>
             </tr>
           </tbody>
         </table>

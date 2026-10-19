@@ -161,6 +161,43 @@ namespace MultiTerminal.Models
         /// <summary><see cref="QuietStart"/> with null read as off.</summary>
         public bool IsQuietStart => QuietStart == true;
 
+        /// <summary>
+        /// What a project launch does about the previous session (task ec2ed636): ask
+        /// (new / continue last / pick one), always start new, or always resume the newest.
+        /// <para>SQLite-only (<c>projects.launch_mode</c>), NOT carried by project.json, and NOT in
+        /// the SaveRichProject UPSERT at all, so a project.json re-save can neither reset nor write
+        /// it. Read via <see cref="ParseLaunchMode"/> (NULL / unknown read as
+        /// <see cref="ProjectLaunchMode.Ask"/>); written only by ProjectDatabase.SetLaunchMode.</para>
+        /// </summary>
+        public ProjectLaunchMode LaunchMode { get; set; } = ProjectLaunchMode.Ask;
+
+        /// <summary>
+        /// Parses a stored <c>launch_mode</c> value, case-insensitively and ignoring surrounding
+        /// whitespace. Null, blank and unrecognized values read as <see cref="ProjectLaunchMode.Ask"/>,
+        /// so a bad DB value can never make a launch skip the prompt.
+        /// </summary>
+        public static ProjectLaunchMode ParseLaunchMode(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return ProjectLaunchMode.Ask;
+            switch (value.Trim().ToLowerInvariant())
+            {
+                case "new": return ProjectLaunchMode.New;
+                case "continue": return ProjectLaunchMode.Continue;
+                default: return ProjectLaunchMode.Ask;
+            }
+        }
+
+        /// <summary>The lowercase storage string for a launch mode: "ask", "new" or "continue".</summary>
+        public static string LaunchModeToStorage(ProjectLaunchMode mode)
+        {
+            switch (mode)
+            {
+                case ProjectLaunchMode.New: return "new";
+                case ProjectLaunchMode.Continue: return "continue";
+                default: return "ask";
+            }
+        }
+
         // ── Git configuration ─────────────────────────────────────────────────
 
         /// <summary>
@@ -183,6 +220,16 @@ namespace MultiTerminal.Models
         /// resolve credentials + identity for push/publish operations. Null = no account assigned.
         /// </summary>
         public string SourceControlAccountId { get; set; }
+
+        /// <summary>
+        /// Name of the Claude Code config profile this project's terminals launch under (ticket c8ee0eec,
+        /// GitHub #21). The profile NAME, never a path, so a machine with the profile in a different
+        /// folder still matches. Null or blank = the implicit Default profile. Resolve it with
+        /// <see cref="ClaudeProfileResolver.Resolve(string, string)"/>, which BLOCKS the launch when this
+        /// machine has no profile of that name (it never falls back to Default). At launch the value is
+        /// read from the database row, not from this object: see <c>ClaudeProfileLaunchPolicy</c>.
+        /// </summary>
+        public string ClaudeProfile { get; set; }
 
         // ── Legacy collections (loaded from .claude/project.json) ─────────────
 
@@ -236,5 +283,20 @@ namespace MultiTerminal.Models
                 Prompts = new List<Prompt>()
             };
         }
+    }
+
+    /// <summary>
+    /// Per-project launch behaviour (task ec2ed636), stored in <c>projects.launch_mode</c>.
+    /// </summary>
+    public enum ProjectLaunchMode
+    {
+        /// <summary>Show the "new session / continue last / pick a session" prompt. The default.</summary>
+        Ask = 0,
+
+        /// <summary>Always start a new session.</summary>
+        New = 1,
+
+        /// <summary>Always resume the newest session.</summary>
+        Continue = 2,
     }
 }

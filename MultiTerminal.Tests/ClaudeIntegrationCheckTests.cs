@@ -16,6 +16,8 @@ namespace MultiTerminal.Tests
     {
         private const string IndexJs = @"C:\Users\Dev\AppData\Roaming\multiterminal\mcp\index.js";
         private const string PluginDir = @"C:\Users\Dev\.claude\plugins\marketplaces\multiterminal-marketplace\plugins\multiterminal";
+        private static readonly string[] PluginDirs = { PluginDir };
+        private const string SharedPluginDir = @"C:\ProgramData\MultiTerminal\marketplace\plugins\multiterminal";
         private const string NodeDir = @"C:\Program Files\nodejs";
         private const string NodePath = NodeDir + @"\node.exe";
 
@@ -33,11 +35,11 @@ namespace MultiTerminal.Tests
         [Fact]
         public void The_elevated_install_shape_is_reported_with_its_cause()
         {
-            var problems = ClaudeIntegrationCheck.Find(IndexJs, PluginDir, NodeDir, null, Existing(NodePath), Existing());
+            var problems = ClaudeIntegrationCheck.Find(IndexJs, PluginDirs, NodeDir, null, Existing(NodePath), Existing());
 
             Assert.Equal(new[] { Problem.McpServerMissing, Problem.PluginMissing }, problems);
 
-            string message = ClaudeIntegrationCheck.BuildMessage(problems, IndexJs, PluginDir);
+            string message = ClaudeIntegrationCheck.BuildMessage(problems, IndexJs, PluginDirs);
             Assert.Contains(IndexJs, message, StringComparison.Ordinal);
             Assert.Contains(PluginDir, message, StringComparison.Ordinal);
             Assert.Contains("DIFFERENT Windows account", message, StringComparison.Ordinal);
@@ -46,20 +48,65 @@ namespace MultiTerminal.Tests
         [Fact]
         public void A_complete_install_raises_nothing()
         {
-            var problems = ClaudeIntegrationCheck.Find(IndexJs, PluginDir, NodeDir, null, Existing(IndexJs, NodePath), Existing(PluginDir));
+            var problems = ClaudeIntegrationCheck.Find(IndexJs, PluginDirs, NodeDir, null, Existing(IndexJs, NodePath), Existing(PluginDir));
 
             Assert.Empty(problems);
             Assert.False(ClaudeIntegrationCheck.ShouldWarn(problems, suppressedFingerprint: null));
+        }
+
+        /// <summary>
+        /// Ticket c8ee0eec: a plugin installed only at the shared location is a complete install. Discriminates:
+        /// a check that probed only the default-profile path (the pre-c8ee0eec shape) reports PluginMissing here.
+        /// </summary>
+        [Fact]
+        public void A_plugin_found_at_any_candidate_is_not_missing()
+        {
+            var candidates = new[] { SharedPluginDir, PluginDir };
+
+            var problems = ClaudeIntegrationCheck.Find(IndexJs, candidates, NodeDir, null, Existing(IndexJs, NodePath), Existing(SharedPluginDir));
+
+            Assert.Empty(problems);
+        }
+
+        /// <summary>
+        /// Ticket c8ee0eec review: Find uses the launch lookup's own rule (LaunchCommandBuilder.ResolveMtPluginPath),
+        /// so a candidate whose probe throws counts as absent instead of escaping Find. Discriminates: the previous
+        /// <c>expectedPluginDirs.Any(directoryExists)</c> shape threw UnauthorizedAccessException out of this call.
+        /// </summary>
+        [Fact]
+        public void A_throwing_plugin_probe_counts_as_absent_like_the_launch_lookup()
+        {
+            var candidates = new[] { SharedPluginDir, PluginDir };
+            Func<string, bool> probe = d => d == SharedPluginDir ? throw new UnauthorizedAccessException() : d == PluginDir;
+
+            Assert.Empty(ClaudeIntegrationCheck.Find(IndexJs, candidates, NodeDir, null, Existing(IndexJs, NodePath), probe));
+
+            Func<string, bool> onlyThrows = _ => throw new UnauthorizedAccessException();
+            Assert.Equal(new[] { Problem.PluginMissing }, ClaudeIntegrationCheck.Find(IndexJs, candidates, NodeDir, null, Existing(IndexJs, NodePath), onlyThrows));
+        }
+
+        /// <summary>When no candidate exists, the warning names every place that was searched.</summary>
+        [Fact]
+        public void A_missing_plugin_message_names_every_searched_location()
+        {
+            var candidates = new[] { SharedPluginDir, PluginDir };
+
+            var problems = ClaudeIntegrationCheck.Find(IndexJs, candidates, NodeDir, null, Existing(IndexJs, NodePath), Existing());
+            Assert.Equal(new[] { Problem.PluginMissing }, problems);
+
+            string message = ClaudeIntegrationCheck.BuildMessage(problems, IndexJs, candidates);
+            Assert.Contains(SharedPluginDir, message, StringComparison.Ordinal);
+            Assert.Contains(PluginDir, message, StringComparison.Ordinal);
         }
 
         /// <summary>A missing Node is not an elevation problem, so the message must not blame one.</summary>
         [Fact]
         public void Missing_node_alone_does_not_blame_the_installing_account()
         {
-            var problems = ClaudeIntegrationCheck.Find(IndexJs, PluginDir, @"C:\Windows", null, Existing(IndexJs), Existing(PluginDir));
+            var problems = ClaudeIntegrationCheck.Find(IndexJs, PluginDirs, @"C:\Windows", null, Existing(IndexJs), Existing(PluginDir));
 
             Assert.Equal(new[] { Problem.NodeMissing }, problems);
-            Assert.DoesNotContain("DIFFERENT Windows account", ClaudeIntegrationCheck.BuildMessage(problems, IndexJs, PluginDir), StringComparison.Ordinal);
+            Assert.DoesNotContain("DIFFERENT Windows account", ClaudeIntegrationCheck.BuildMessage(problems, IndexJs, PluginDirs), StringComparison.Ordinal);
         }
 
         /// <summary>
@@ -106,7 +153,7 @@ namespace MultiTerminal.Tests
             string shim = ShimDir + @"\node.cmd";
 
             var problems = ClaudeIntegrationCheck.Find(
-                IndexJs, PluginDir, ShimDir, ".COM;.EXE;.BAT;.CMD", Existing(IndexJs, shim), Existing(PluginDir));
+                IndexJs, PluginDirs, ShimDir, ".COM;.EXE;.BAT;.CMD", Existing(IndexJs, shim), Existing(PluginDir));
 
             Assert.Empty(problems);
         }

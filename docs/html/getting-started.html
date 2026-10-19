@@ -35,6 +35,7 @@
         <div class="nav-section-title">Features</div>
         <a href="features.html" class="nav-link">Features</a>
         <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="claude-profiles.html" class="nav-link">Claude Profiles</a>
         <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
         <a href="presence.html" class="nav-link">Presence Sensors</a>
         <a href="code-graph.html" class="nav-link">Code Graph</a>
@@ -114,9 +115,9 @@
         <p>A <em>project</em> is a folder MultiTerminal knows about. Registering it stores its path plus optional metadata &mdash; assigned agents, MCP servers, named paths, prompts, and skills &mdash; in the app's SQLite database. There are two ways to register one:</p>
         <ul>
           <li><strong>The <code>/new-project</code> wizard</strong> &mdash; run inside a Claude&nbsp;Code terminal, this interactive wizard onboards either a brand-new project from an archetype (Clarion COM, WebView2, Clarion App, MT Feature, Generic C#) or an existing folder you already have on disk.</li>
-          <li><strong>The Project panel</strong> &mdash; toggle it from the toolbar (the <strong>Project</strong> button) to add, edit, and inspect projects through the UI.</li>
+          <li><strong>The New Project dialog</strong> &mdash; open it with <strong>New Project</strong> on the Start Screen&rsquo;s Home or Browse All view, or from the header. To change a registered project later, click the gear on its Home card or Browse All row (or on a terminal&rsquo;s status bar) to open its settings form.</li>
         </ul>
-        <p>Once a project is registered it appears on the Start Screen and in the Project panel, and any terminal you open in it inherits its context.</p>
+        <p>Once a project is registered it appears on the Start Screen (Home and Browse All), and any terminal you open in it inherits its context.</p>
 
         <h2 id="open-terminal">Open a Terminal with an Identity</h2>
         <p>Open a terminal by choosing a project on the Start Screen, or with the <strong>New Terminal</strong> toolbar button. Each terminal tab is a full ConPTY-based shell rendered in WebView2, so you can run Claude&nbsp;Code or any normal command.</p>
@@ -141,7 +142,6 @@
           </thead>
           <tbody>
             <tr><td>New Terminal</td><td>Opens a new terminal tab.</td></tr>
-            <tr><td>Project</td><td>Toggles the Project panel (project registry and settings).</td></tr>
             <tr><td>Chat</td><td>Toggles the Chat panel for messaging between terminals.</td></tr>
             <tr><td>History</td><td>Opens chat history.</td></tr>
             <tr><td>Activity</td><td>Toggles the Activity feed of task changes, messages, and agent events.</td></tr>

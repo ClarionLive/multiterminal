@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project Settings</title>
+<!--
+  Project settings form (ticket e20e2ce0). Hosted by ProjectSettings/ProjectSettingsForm.cs.
+  Contract (ProjectSettingsPayload.cs):
+    C# -> page : load, stats, saveResult, folderPicked, notice, theme, missing
+    page -> C# : ready, save, reload, dirty, browseFolder, copyPath, openFolder, syncMcp, deleteProject, close
+  Every scalar input carries data-field="<camelCase name>"; the set must equal
+  ProjectSettingsService.EditableFields (ProjectSettingsPayloadTests pins it).
+  All project values are written with textContent / .value, never innerHTML.
+-->
+<style>
+    :root {
+        --bg-primary: #1a1a2e;
+        --bg-secondary: #16213e;
+        --bg-card: #1f2937;
+        --text-primary: #e2e8f0;
+        --text-secondary: #94a3b8;
+        --text-muted: #64748b;
+        --accent: #4FC3F7;
+        --accent-hover: #29B6F6;
+        --accent-text: #0b1220;
+        --border: #334155;
+        --input-bg: #1e293b;
+        --input-border: #334155;
+        --btn-secondary-bg: #1e293b;
+        --btn-secondary-hover: #263548;
+        --danger: #f87171;
+        --danger-bg: rgba(248, 113, 113, 0.12);
+        --success: #22c55e;
+        --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    }
+    body.light {
+        --bg-primary: #f8fafc;
+        --bg-secondary: #f1f5f9;
+        --bg-card: #ffffff;
+        --text-primary: #0f172a;
+        --text-secondary: #475569;
+        --text-muted: #94a3b8;
+        --accent: #0284c7;
+        --accent-hover: #0369a1;
+        --accent-text: #ffffff;
+        --border: #e2e8f0;
+        --input-bg: #ffffff;
+        --input-border: #cbd5e1;
+        --btn-secondary-bg: #f1f5f9;
+        --btn-secondary-hover: #e2e8f0;
+        --danger: #dc2626;
+        --danger-bg: rgba(220, 38, 38, 0.08);
+        --success: #16a34a;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+        background: var(--bg-primary);
+        color: var(--text-primary);
+        font: 13px/1.45 var(--font);
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        overflow: hidden;
+    }
+    header {
+        padding: 14px 20px 12px;
+        border-bottom: 1px solid var(--border);
+        background: var(--bg-secondary);
+    }
+    header h1 { font-size: 17px; font-weight: 600; margin: 0; }
+    header .sub { color: var(--text-secondary); font-size: 12px; margin-top: 2px; word-break: break-all; }
+    main { display: grid; grid-template-columns: 200px 1fr; min-height: 0; }
+    nav.rail {
+        border-right: 1px solid var(--border);
+        background: var(--bg-secondary);
+        padding: 10px 8px;
+        overflow-y: auto;
+    }
+    nav.rail button {
+        display: block; width: 100%; text-align: left;
+        background: none; border: 0; border-radius: 6px;
+        color: var(--text-secondary); font: inherit;
+        padding: 7px 10px; margin-bottom: 2px; cursor: pointer;
+    }
+    nav.rail button:hover { background: var(--btn-secondary-hover); color: var(--text-primary); }
+    nav.rail button.active { background: var(--bg-card); color: var(--text-primary); box-shadow: inset 3px 0 0 var(--accent); }
+    nav.rail button.danger-link { color: var(--danger); margin-top: 12px; }
+    nav.rail .count { float: right; color: var(--text-muted); font-size: 11px; }
+    .content { overflow-y: auto; padding: 18px 24px 28px; }
+    section { display: none; max-width: 760px; }
+    section.active { display: block; }
+    section h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+    section .lead { color: var(--text-secondary); margin: 0 0 16px; }
+    h3 { font-size: 13px; font-weight: 600; margin: 22px 0 8px; }
+    .field { display: grid; grid-template-columns: 170px 1fr; gap: 6px 14px; align-items: start; margin-bottom: 12px; }
+    .field > label { padding-top: 6px; color: var(--text-secondary); }
+    .field .hint { grid-column: 2; color: var(--text-muted); font-size: 12px; margin-top: -2px; }
+    .field .hint.warn { color: var(--danger); }
+    input[type=text], input[type=number], select, textarea {
+        width: 100%; background: var(--input-bg); color: var(--text-primary);
+        border: 1px solid var(--input-border); border-radius: 6px;
+        padding: 6px 8px; font: inherit;
+    }
+    textarea { resize: vertical; min-height: 64px; }
+    textarea.tall { min-height: 320px; font-family: Consolas, 'Cascadia Mono', monospace; font-size: 12px; }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+    input[readonly] { color: var(--text-secondary); }
+    .check { display: flex; align-items: center; gap: 8px; padding-top: 5px; }
+    .check input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .row > input { flex: 1; }
+    button.btn {
+        background: var(--btn-secondary-bg); color: var(--text-primary);
+        border: 1px solid var(--border); border-radius: 6px;
+        padding: 6px 12px; font: inherit; cursor: pointer; white-space: nowrap;
+    }
+    button.btn:hover { background: var(--btn-secondary-hover); }
+    button.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+    button.btn.primary:hover { background: var(--accent-hover); }
+    button.btn.primary:disabled { opacity: .5; cursor: default; }
+    button.btn.danger { color: var(--danger); border-color: var(--danger); background: var(--danger-bg); }
+    button.icon { background: none; border: 0; color: var(--text-muted); cursor: pointer; font-size: 15px; padding: 2px 6px; border-radius: 4px; }
+    button.icon:hover { color: var(--danger); background: var(--danger-bg); }
+    .about { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-top: 22px; }
+    .about dl { display: grid; grid-template-columns: 130px 1fr; gap: 4px 12px; margin: 0; }
+    .about dt { color: var(--text-secondary); }
+    .about dd { margin: 0; word-break: break-all; }
+    .stats { display: flex; gap: 10px; margin-top: 12px; }
+    .stat { flex: 1; background: var(--bg-secondary); border-radius: 6px; padding: 8px 10px; }
+    .stat b { display: block; font-size: 17px; }
+    .stat span { color: var(--text-secondary); font-size: 11px; }
+    .note { background: var(--bg-card); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 8px 12px; color: var(--text-secondary); margin-bottom: 16px; }
+    table.list { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+    table.list th { text-align: left; font-weight: 600; color: var(--text-secondary); font-size: 12px; padding: 4px 6px; border-bottom: 1px solid var(--border); }
+    table.list td { padding: 4px 6px; vertical-align: top; }
+    table.list td.narrow, table.list th.narrow { width: 1%; white-space: nowrap; text-align: center; }
+    table.list .empty td { color: var(--text-muted); font-style: italic; padding: 10px 6px; }
+    .danger-zone { border: 1px solid var(--danger); border-radius: 8px; padding: 14px; background: var(--danger-bg); }
+    footer {
+        display: flex; align-items: center; gap: 10px;
+        padding: 10px 20px; border-top: 1px solid var(--border); background: var(--bg-secondary);
+    }
+    footer .status { flex: 1; color: var(--text-secondary); min-height: 18px; }
+    footer .status.error { color: var(--danger); }
+    footer .status.ok { color: var(--success); }
+    .missing { padding: 40px; color: var(--text-secondary); }
+</style>
+</head>
+<body>
+<header>
+    <h1 id="title">Project Settings</h1>
+    <div class="sub" id="subtitle"></div>
+</header>
+
+<main>
+    <nav class="rail" id="rail">
+        <button data-section="general" class="active">General</button>
+        <button data-section="launch">Launch</button>
+        <button data-section="paths">Paths <span class="count" data-count="paths"></span></button>
+        <button data-section="build">Build &amp; Deploy</button>
+        <button data-section="git">Git</button>
+        <button data-section="agents">Agents <span class="count" data-count="agents"></span></button>
+        <button data-section="mcp">MCP &amp; Skills <span class="count" data-count="mcpServers"></span></button>
+        <button data-section="prompts">Prompts <span class="count" data-count="prompts"></span></button>
+        <button data-section="changelog">Change Log</button>
+        <button data-section="danger" class="danger-link">Danger zone</button>
+    </nav>
+
+    <div class="content" id="content">
+        <section id="general" class="active">
+            <h2>General</h2>
+            <p class="lead">What the project is called and how it shows up on Home.</p>
+            <div class="field"><label for="f-name">Name</label><input type="text" id="f-name" data-field="name" maxlength="200"></div>
+            <div class="field"><label for="f-description">Description</label><textarea id="f-description" data-field="description"></textarea></div>
+            <div class="field"><label for="f-projectType">Type</label><select id="f-projectType" data-field="projectType" data-options="projectTypes"></select></div>
+            <div class="field"><label for="f-status">Status</label><select id="f-status" data-field="status" data-options="statuses"></select>
+                <div class="hint">Archived projects are hidden on Home unless you show them.</div></div>
+            <div class="field"><label for="f-currentVersion">Version</label><input type="text" id="f-currentVersion" data-field="currentVersion"></div>
+            <div class="field"><label for="f-icon">Icon</label><input type="text" id="f-icon" data-field="icon"></div>
+            <div class="field"><label for="f-iconColor">Icon colour</label><input type="text" id="f-iconColor" data-field="iconColor" placeholder="#4FC3F7"></div>
+            <div class="field"><label>Pinned</label><label class="check"><input type="checkbox" data-field="isPinned"> Keep at the top of Home</label></div>
+            <div class="field"><label for="f-createdBy">Created by</label><input type="text" id="f-createdBy" data-field="createdBy"></div>
+
+            <div class="about">
+                <dl>
+                    <dt>Folder</dt><dd id="about-path"></dd>
+                    <dt>Created</dt><dd id="about-created"></dd>
+                    <dt>Updated</dt><dd id="about-updated"></dd>
+                    <dt>Last opened</dt><dd id="about-opened"></dd>
+                </dl>
+                <div class="stats">
+                    <div class="stat"><b id="stat-files">…</b><span>Source files (first 1000)</span></div>
+                    <div class="stat"><b id="stat-lines">…</b><span>Lines in them</span></div>
+                    <div class="stat"><b id="stat-days">…</b><span>Days old</span></div>
+                </div>
+            </div>
+        </section>
+
+        <section id="launch">
+            <h2>Launch</h2>
+            <p class="lead">How new terminals for this project start.</p>
+            <div class="note">Claude profile, launch mode, default terminal, quiet start and launch command apply the next time a terminal for this project starts. Terminals already running keep what they started with.</div>
+            <div class="field"><label for="f-claudeProfile">Claude profile</label><select id="f-claudeProfile" data-field="claudeProfile" data-options="claudeProfiles"></select>
+                <div class="hint" id="profile-hint">Which Claude configuration folder (account, settings, sessions) the project's terminals use.</div></div>
+            <div class="field"><label for="f-launchMode">Launch mode</label><select id="f-launchMode" data-field="launchMode" data-options="launchModes"></select>
+                <div class="hint">What launching the project does when it has past sessions: ask each time, always start a new session, or always continue the newest one. Applies at the next launch.</div></div>
+            <div class="field"><label for="f-defaultTerminal">Default terminal</label><select id="f-defaultTerminal" data-field="defaultTerminal" data-options="terminals"></select></div>
+            <div class="field"><label>Quiet start</label><label class="check"><input type="checkbox" data-field="quietStart"> Open straight to an idle prompt, no recap or menu</label>
+                <div class="hint">Claude Code terminals only; Codex terminals still get their startup prompt. Helpers never start quietly.</div></div>
+            <div class="field"><label for="f-teamLead">Team lead</label><select id="f-teamLead" data-field="teamLead" data-options="teamLeads" data-none="(none)"></select></div>
+            <div class="field"><label for="f-launchCommand">Launch command</label><input type="text" id="f-launchCommand" data-field="launchCommand"></div>
+        </section>
+
+        <section id="paths">
+            <h2>Paths</h2>
+            <p class="lead">Where the project's files live.</p>
+            <div class="field"><label for="about-path-input">Project folder</label>
+                <div class="row"><input type="text" id="about-path-input" readonly>
+                    <button class="btn" id="btn-copy-path">Copy</button>
+                    <button class="btn" id="btn-open-folder">Open folder</button></div>
+                <div class="hint">The project's identity folder; it is not changed here.</div></div>
+            <div class="field"><label for="f-sourcePath">Source</label>
+                <div class="row"><input type="text" id="f-sourcePath" data-field="sourcePath"><button class="btn" data-browse="sourcePath">Browse…</button></div></div>
+            <div class="field"><label for="f-deployPath">Deploy</label>
+                <div class="row"><input type="text" id="f-deployPath" data-field="deployPath"><button class="btn" data-browse="deployPath">Browse…</button></div></div>
+            <div class="field"><label for="f-buildOutputPath">Build output</label>
+                <div class="row"><input type="text" id="f-buildOutputPath" data-field="buildOutputPath"><button class="btn" data-browse="buildOutputPath">Browse…</button></div></div>
+            <h3>Other paths</h3>
+            <div data-list="paths"></div>
+        </section>
+
+        <section id="build">
+            <h2>Build &amp; Deploy</h2>
+            <p class="lead">Commands agents use to build and ship the project.</p>
+            <div class="field"><label for="f-buildCommand">Build command</label><input type="text" id="f-buildCommand" data-field="buildCommand"></div>
+            <div class="field"><label for="f-deployCommand">Deploy command</label><input type="text" id="f-deployCommand" data-field="deployCommand"></div>
+        </section>
+
+        <section id="git">
+            <h2>Git</h2>
+            <p class="lead">Repository and the account agents commit with.</p>
+            <div class="field"><label for="f-gitRepoUrl">Repository URL</label><input type="text" id="f-gitRepoUrl" data-field="gitRepoUrl"></div>
+            <div class="field"><label for="f-gitDefaultBranch">Default branch</label><input type="text" id="f-gitDefaultBranch" data-field="gitDefaultBranch" placeholder="main"></div>
+            <div class="field"><label>Auto-commit</label><label class="check"><input type="checkbox" data-field="gitAutoCommit"> Commit agent changes automatically</label></div>
+            <div class="field"><label for="f-sourceControlAccountId">Source control account</label><select id="f-sourceControlAccountId" data-field="sourceControlAccountId" data-options="sourceAccounts" data-none="(none)"></select></div>
+        </section>
+
+        <section id="agents">
+            <h2>Agents</h2>
+            <p class="lead">Who works on this project, and which specialist reviewers it uses.</p>
+            <h3>Project agents</h3>
+            <div data-list="agents"></div>
+            <h3>Specialist agents</h3>
+            <div data-list="specialistAgents"></div>
+        </section>
+
+        <section id="mcp">
+            <h2>MCP &amp; Skills</h2>
+            <p class="lead">Tools and skills the project's terminals get.</p>
+            <div class="note">MCP server changes apply the next time a terminal for this project starts. Terminals already running keep the servers they started with.</div>
+            <h3>MCP servers</h3>
+            <div data-list="mcpServers"></div>
+            <div class="row" style="margin-bottom:6px">
+                <button class="btn" id="btn-sync-mcp">Sync MCP config</button>
+                <span class="hint" style="color:var(--text-muted)">Pushes the enabled servers to the gateway profile and removes a stale .mcp.json from the project folder.</span>
+            </div>
+            <h3>Skills</h3>
+            <div data-list="skills"></div>
+        </section>
+
+        <section id="prompts">
+            <h2>Prompts</h2>
+            <p class="lead">Instructions stored with the project, in order.</p>
+            <div data-list="prompts"></div>
+        </section>
+
+        <section id="changelog">
+            <h2>Change Log</h2>
+            <p class="lead">The project's running change log.</p>
+            <textarea class="tall" id="f-changeLog" data-field="changeLog"></textarea>
+        </section>
+
+        <section id="danger">
+            <h2>Danger zone</h2>
+            <p class="lead">Actions that cannot be undone from here.</p>
+            <div class="danger-zone">
+                <p style="margin-top:0">Delete removes the project from MultiTerminal. Its tasks are kept. You can choose to also delete the folder's .claude/project.json.</p>
+                <button class="btn danger" id="btn-delete">Delete project…</button>
+            </div>
+        </section>
+    </div>
+</main>
+
+<footer>
+    <div class="status" id="status"></div>
+    <button class="btn" id="btn-reload" hidden title="Discard your edits and show the settings as they are stored now">Reload</button>
+    <button class="btn" id="btn-close">Close</button>
+    <button class="btn primary" id="btn-save" disabled>Save</button>
+</footer>
+
+<script>
+(function () {
+    'use strict';
+
+    // ── List editors: one spec per child table ──────────────────────────────────
+    // kind: text | check | textarea | number; suggest: an options key used as a datalist.
+    var LISTS = {
+        paths: { add: 'Add path', empty: 'No other paths.', blank: { id: 0, pathType: '', pathValue: '', description: '' },
+            columns: [ { key: 'pathType', label: 'Type', kind: 'text', placeholder: 'docs' },
+                       { key: 'pathValue', label: 'Path', kind: 'text' },
+                       { key: 'description', label: 'Description', kind: 'text' } ] },
+        agents: { add: 'Add agent', empty: 'No agents assigned.', blank: { agentName: '', role: '', preferredModel: '' },
+            columns: [ { key: 'agentName', label: 'Name', kind: 'text', suggest: 'availableAgents' },
+                       { key: 'role', label: 'Role', kind: 'text' },
+                       { key: 'preferredModel', label: 'Model', kind: 'text' } ] },
+        specialistAgents: { add: 'Add specialist', empty: 'No specialist agents.', blank: { agentType: '', isEnabled: true, customPrompt: '' },
+            columns: [ { key: 'agentType', label: 'Agent', kind: 'text', suggest: 'availableSpecialists' },
+                       { key: 'isEnabled', label: 'On', kind: 'check' },
+                       { key: 'customPrompt', label: 'Custom prompt', kind: 'text' } ] },
+        mcpServers: { add: 'Add MCP server', empty: 'No MCP servers.', blank: { serverName: '', isEnabled: true },
+            columns: [ { key: 'serverName', label: 'Server', kind: 'text', suggest: 'availableMcpServers' },
+                       { key: 'isEnabled', label: 'On', kind: 'check' } ] },
+        skills: { add: 'Add skill', empty: 'No skills.', blank: { skillName: '', isEnabled: true },
+            columns: [ { key: 'skillName', label: 'Skill', kind: 'text', suggest: 'availableSkills' },
+                       { key: 'isEnabled', label: 'On', kind: 'check' } ] },
+        prompts: { add: 'Add prompt', empty: 'No prompts.', blank: { id: 0, promptType: '', promptText: '', displayOrder: 0 },
+            columns: [ { key: 'promptType', label: 'Type', kind: 'text', placeholder: 'workflow' },
+                       { key: 'promptText', label: 'Text', kind: 'textarea' },
+                       { key: 'displayOrder', label: 'Order', kind: 'number' } ] }
+    };
+
+    var state = { loaded: false, lists: {}, options: {}, baseline: '' , saving: false, reloading: false };
+
+    function post(msg) {
+        if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(msg);
+    }
+
+    function $(id) { return document.getElementById(id); }
+    function fieldEls() { return Array.prototype.slice.call(document.querySelectorAll('[data-field]')); }
+
+    // ── Rail ────────────────────────────────────────────────────────────────────
+    function showSection(name) {
+        document.querySelectorAll('nav.rail button').forEach(function (b) {
+            b.classList.toggle('active', b.getAttribute('data-section') === name);
+        });
+        document.querySelectorAll('section').forEach(function (s) {
+            s.classList.toggle('active', s.id === name);
+        });
+        $('content').scrollTop = 0;
+    }
+    document.querySelectorAll('nav.rail button').forEach(function (b) {
+        b.addEventListener('click', function () { showSection(b.getAttribute('data-section')); });
+    });
+
+    // ── Rendering ───────────────────────────────────────────────────────────────
+    function fillSelect(select, items, current) {
+        while (select.firstChild) select.removeChild(select.firstChild);
+        var none = select.getAttribute('data-none');
+        var values = {};
+        if (none !== null) {
+            var o = document.createElement('option');
+            o.value = ''; o.textContent = none; select.appendChild(o);
+            values[''] = true;
+        }
+        (items || []).forEach(function (it) {
+            var opt = document.createElement('option');
+            opt.value = it.value; opt.textContent = it.label;
+            select.appendChild(opt);
+            values[it.value] = true;
+        });
+        // A stored value with no matching option is kept as its own entry, so an untouched save keeps it.
+        if (current && !values[current]) {
+            var keep = document.createElement('option');
+            keep.value = current; keep.textContent = current + ' (not in the list)';
+            select.appendChild(keep);
+        }
+        select.value = current || '';
+    }
+
+    function setField(el, value) {
+        if (el.type === 'checkbox') el.checked = !!value;
+        else if (el.tagName === 'SELECT') fillSelect(el, state.options[el.getAttribute('data-options')], value);
+        else el.value = value == null ? '' : value;
+    }
+
+    function readField(el) {
+        return el.type === 'checkbox' ? el.checked : el.value;
+    }
+
+    function ensureDatalist(key) {
+        var id = 'dl-' + key;
+        if ($(id)) return id;
+        var dl = document.createElement('datalist');
+        dl.id = id;
+        (state.options[key] || []).forEach(function (it) {
+            var o = document.createElement('option');
+            if (typeof it === 'string') { o.value = it; }
+            else { o.value = it.name || it.type; if (it.description || it.role) o.label = it.description || it.role; }
+            dl.appendChild(o);
+        });
+        document.body.appendChild(dl);
+        return id;
+    }
+
+    function renderList(name) {
+        var spec = LISTS[name];
+        var host = document.querySelector('[data-list="' + name + '"]');
+        while (host.firstChild) host.removeChild(host.firstChild);
+        var rows = state.lists[name] || [];
+
+        var table = document.createElement('table');
+        table.className = 'list';
+        var head = document.createElement('tr');
+        spec.columns.forEach(function (c) {
+            var th = document.createElement('th');
+            th.textContent = c.label;
+            if (c.kind === 'check' || c.kind === 'number') th.className = 'narrow';
+            head.appendChild(th);
+        });
+        head.appendChild(document.createElement('th')).className = 'narrow';
+        table.appendChild(head);
+
+        if (rows.length === 0) {
+            var er = document.createElement('tr'); er.className = 'empty';
+            var ec = document.createElement('td'); ec.colSpan = spec.columns.length + 1; ec.textContent = spec.empty;
+            er.appendChild(ec); table.appendChild(er);
+        }
+
+        rows.forEach(function (row, index) {
+            var tr = document.createElement('tr');
+            spec.columns.forEach(function (c) {
+                var td = document.createElement('td');
+                var input;
+                if (c.kind === 'textarea') { input = document.createElement('textarea'); input.value = row[c.key] || ''; }
+                else if (c.kind === 'check') { input = document.createElement('input'); input.type = 'checkbox'; input.checked = !!row[c.key]; td.className = 'narrow'; }
+                else if (c.kind === 'number') { input = document.createElement('input'); input.type = 'number'; input.style.width = '70px'; input.value = row[c.key] || 0; td.className = 'narrow'; }
+                else { input = document.createElement('input'); input.type = 'text'; input.value = row[c.key] || ''; }
+                if (c.placeholder) input.placeholder = c.placeholder;
+                if (c.suggest) input.setAttribute('list', ensureDatalist(c.suggest));
+                input.addEventListener('input', function () {
+                    row[c.key] = c.kind === 'check' ? input.checked : (c.kind === 'number' ? (parseInt(input.value, 10) || 0) : input.value);
+                    onChanged();
+                });
+                input.addEventListener('change', function () {
+                    row[c.key] = c.kind === 'check' ? input.checked : (c.kind === 'number' ? (parseInt(input.value, 10) || 0) : input.value);
+                    onChanged();
+                });
+                td.appendChild(input);
+                tr.appendChild(td);
+            });
+            var rm = document.createElement('td'); rm.className = 'narrow';
+            var rb = document.createElement('button'); rb.className = 'icon'; rb.title = 'Remove'; rb.textContent = '✕';
+            rb.addEventListener('click', function () { rows.splice(index, 1); renderList(name); onChanged(); });
+            rm.appendChild(rb); tr.appendChild(rm);
+            table.appendChild(tr);
+        });
+        host.appendChild(table);
+
+        var add = document.createElement('button');
+        add.className = 'btn'; add.textContent = spec.add;
+        add.addEventListener('click', function () {
+            rows.push(JSON.parse(JSON.stringify(spec.blank)));
+            state.lists[name] = rows;
+            renderList(name);
+            onChanged();
+            var inputs = host.querySelectorAll('tr:last-child input, tr:last-child textarea');
+            if (inputs.length) inputs[0].focus();
+        });
+        host.appendChild(add);
+        updateCounts();
+    }
+
+    function updateCounts() {
+        document.querySelectorAll('[data-count]').forEach(function (el) {
+            var n = (state.lists[el.getAttribute('data-count')] || []).length;
+            el.textContent = n ? String(n) : '';
+        });
+    }
+
+    // ── Dirty tracking ──────────────────────────────────────────────────────────
+    function collect() {
+        var fields = {};
+        fieldEls().forEach(function (el) { fields[el.getAttribute('data-field')] = readField(el); });
+        var out = { type: 'save', fields: fields };
+        Object.keys(LISTS).forEach(function (k) { out[k] = state.lists[k] || []; });
+        return out;
+    }
+
+    var lastDirty = false;
+    function onChanged() {
+        if (!state.loaded) return;
+        var dirty = JSON.stringify(collect()) !== state.baseline;
+        $('btn-save').disabled = !dirty || state.saving;
+        if (dirty !== lastDirty) {
+            lastDirty = dirty;
+            post({ type: 'dirty', dirty: dirty });
+            if (dirty) setStatus('Unsaved changes.');
+            else setStatus('');
+        }
+    }
+
+    function setStatus(text, kind) {
+        var s = $('status');
+        s.textContent = text || '';
+        s.className = 'status' + (kind ? ' ' + kind : '');
+    }
+
+    fieldEls().forEach(function (el) {
+        el.addEventListener('input', onChanged);
+        el.addEventListener('change', onChanged);
+    });
+
+    // ── Load ────────────────────────────────────────────────────────────────────
+    function applyTheme(theme) { document.body.classList.toggle('light', theme === 'light'); }
+
+    function onLoad(msg) {
+        applyTheme(msg.theme);
+        state.options = msg.options || {};
+        document.querySelectorAll('datalist').forEach(function (d) { d.parentNode.removeChild(d); });
+
+        fieldEls().forEach(function (el) { setField(el, msg.fields[el.getAttribute('data-field')]); });
+
+        var name = msg.fields.name || 'Project';
+        $('title').textContent = name;
+        $('subtitle').textContent = msg.about.path || '';
+        $('about-path').textContent = msg.about.path || '(no folder)';
+        $('about-path-input').value = msg.about.path || '';
+        $('about-created').textContent = msg.about.createdAt || '—';
+        $('about-updated').textContent = msg.about.updatedAt || '—';
+        $('about-opened').textContent = msg.about.lastOpenedAt || '—';
+
+        var missing = (state.options.claudeProfiles || []).some(function (c) { return c.missing && c.value === msg.fields.claudeProfile; });
+        var hint = $('profile-hint');
+        hint.classList.toggle('warn', missing);
+        hint.textContent = missing
+            ? 'This profile is not configured on this machine, so the project cannot launch until it is added in Settings or another profile is chosen.'
+            : 'Which Claude configuration folder (account, settings, sessions) the project\'s terminals use.';
+
+        state.lists = {};
+        Object.keys(LISTS).forEach(function (k) {
+            state.lists[k] = JSON.parse(JSON.stringify((msg.lists && msg.lists[k]) || []));
+            renderList(k);
+        });
+
+        state.baseline = JSON.stringify(collect());
+        state.loaded = true;
+        $('btn-reload').hidden = true;
+        // After Reload the old "Nothing was saved: ..." message is stale; say what just happened instead
+        // (ticket e20e2ce0 item 8). Any other load (first open, after a save) leaves the status alone.
+        if (state.reloading) {
+            state.reloading = false;
+            setStatus('Outside changes have been loaded.', 'ok');
+        }
+        lastDirty = false;
+        post({ type: 'dirty', dirty: false });
+        $('btn-save').disabled = true;
+    }
+
+    // ── Buttons ─────────────────────────────────────────────────────────────────
+    $('btn-save').addEventListener('click', function () {
+        if (state.saving) return;
+        state.saving = true;
+        $('btn-save').disabled = true;
+        setStatus('Saving…');
+        post(collect());
+    });
+    $('btn-reload').addEventListener('click', function () { state.reloading = true; post({ type: 'reload' }); });
+    $('btn-close').addEventListener('click', function () { post({ type: 'close' }); });
+    $('btn-copy-path').addEventListener('click', function () { post({ type: 'copyPath' }); });
+    $('btn-open-folder').addEventListener('click', function () { post({ type: 'openFolder' }); });
+    $('btn-sync-mcp').addEventListener('click', function () { post({ type: 'syncMcp' }); });
+    $('btn-delete').addEventListener('click', function () { post({ type: 'deleteProject' }); });
+    document.querySelectorAll('[data-browse]').forEach(function (b) {
+        b.addEventListener('click', function () {
+            var field = b.getAttribute('data-browse');
+            post({ type: 'browseFolder', field: field, current: document.querySelector('[data-field="' + field + '"]').value });
+        });
+    });
+
+    document.addEventListener('keydown', function (e) {
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+            e.preventDefault();
+            if (!$('btn-save').disabled) $('btn-save').click();
+        } else if (e.key === 'Escape') {
+            post({ type: 'close' });
+        }
+    });
+
+    // ── Messages from C# ────────────────────────────────────────────────────────
+    if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.addEventListener('message', function (ev) {
+            var msg = ev.data;
+            if (!msg || typeof msg !== 'object') return;
+            switch (msg.type) {
+                case 'load':
+                    onLoad(msg);
+                    break;
+                case 'stats':
+                    $('stat-files').textContent = String(msg.fileCount);
+                    $('stat-lines').textContent = Number(msg.linesOfCode).toLocaleString();
+                    $('stat-days').textContent = String(msg.daysOld);
+                    break;
+                case 'saveResult':
+                    state.saving = false;
+                    if (msg.success) {
+                        var w = (msg.warnings || []).join(' ');
+                        var saved = msg.nextLaunch
+                            ? 'Saved. Launch settings apply to terminals started from now on; running ones are unchanged.'
+                            : 'Saved.';
+                        setStatus(w ? saved + ' ' + w : saved, w ? 'error' : 'ok');
+                    } else {
+                        setStatus(msg.error || 'Save failed.', 'error');
+                        // Changed elsewhere since loading: saving again cannot succeed, so offer Reload.
+                        $('btn-reload').hidden = !msg.conflict;
+                        onChanged();
+                        $('btn-save').disabled = !!msg.conflict;
+                    }
+                    break;
+                case 'folderPicked':
+                    var el = document.querySelector('[data-field="' + msg.field + '"]');
+                    if (el) { el.value = msg.path; onChanged(); }
+                    break;
+                case 'notice':
+                    setStatus(msg.text, msg.kind === 'error' ? 'error' : 'ok');
+                    break;
+                case 'theme':
+                    applyTheme(msg.theme);
+                    break;
+                case 'missing':
+                    state.reloading = false;
+                    var main = document.querySelector('main');
+                    while (main.firstChild) main.removeChild(main.firstChild);
+                    var p = document.createElement('div'); p.className = 'missing'; p.textContent = msg.text;
+                    main.appendChild(p);
+                    $('btn-save').disabled = true;
+                    break;
+            }
+        });
+    }
+
+    post({ type: 'ready' });
+})();
+</script>
+</body>
+</html>

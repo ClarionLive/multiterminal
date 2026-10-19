@@ -171,8 +171,10 @@ namespace MultiTerminal.Services
         {
             using var gate = _gate.Enter();
             // CA3003: jsonlPath reaches this sink only through sanitized flows — SessionMemoryController.
-            // IndexSession canonicalizes with Path.GetFullPath and rejects anything outside %USERPROFILE%/
-            // .claude, and IndexProjectSessions walks files enumerated from Directory.GetFiles under a
+            // IndexSession canonicalizes with Path.GetFullPath and rejects anything that is not a .jsonl
+            // inside a configured Claude profile's projects folder
+            // (ClaudeProfileDataRoots.IsSessionTranscriptPath; ticket c8ee0eec), and
+            // IndexProjectSessions walks files enumerated from Directory.GetFiles under a
             // GetClaudeProjectFolder-anchored directory. No raw user path reaches here.
 #pragma warning disable CA3003
             if (!File.Exists(jsonlPath)) return 0;
@@ -271,11 +273,21 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Index all unindexed session files for a project folder.
+        /// Index all unindexed session files for a project folder. Path-only: the profile whose folder
+        /// is read is the one a launch in <paramref name="projectPath"/> would get. A caller that has
+        /// a pane or an agent name uses <see cref="IndexProjectSessionsUnder"/> instead.
         /// </summary>
-        public int IndexProjectSessions(string projectPath, string terminalName = null)
+        public int IndexProjectSessions(string projectPath, string terminalName = null) =>
+            IndexProjectSessionsUnder(ClaudeProfileDataRoots.ForFolder(projectPath), projectPath, terminalName);
+
+        /// <summary>
+        /// As <see cref="IndexProjectSessions"/>, reading only under <paramref name="root"/>, which the
+        /// caller has already decided (ticket c8ee0eec item 33: from the PANE's profile where one is
+        /// known). A null root indexes nothing.
+        /// </summary>
+        internal int IndexProjectSessionsUnder(ClaudeDataRoot root, string projectPath, string terminalName = null)
         {
-            string claudeFolder = SessionLineageService.GetClaudeProjectFolder(projectPath);
+            string claudeFolder = SessionLineageService.GetClaudeProjectFolderUnder(root, projectPath);
             if (claudeFolder == null) return 0;
 
             // Phase markers (a5ac5f71): each per-file IndexSessionFile opens its OWN short write
@@ -306,8 +318,9 @@ namespace MultiTerminal.Services
                 string subagentsDir = Path.Combine(sessionDir, "subagents");
                 // CA3003: subagentsDir is Path.Combine(sessionDir, "subagents") where sessionDir comes
                 // from Directory.GetDirectories(claudeFolder), and claudeFolder is the result of
-                // SessionLineageService.GetClaudeProjectFolder — always anchored to %USERPROFILE%/
-                // .claude/projects with separators stripped from the folder-name segment.
+                // SessionLineageService.GetClaudeProjectFolder — always anchored to the projects folder
+                // of a configured Claude profile (ticket c8ee0eec), with separators stripped from the
+                // folder-name segment.
 #pragma warning disable CA3003
                 if (!Directory.Exists(subagentsDir)) continue;
 #pragma warning restore CA3003

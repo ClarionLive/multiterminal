@@ -1,11 +1,16 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Globalization;
+using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Threading;
 using Microsoft.Win32;
 
 using MultiTerminal.API.Gateway;
@@ -55,6 +60,13 @@ namespace MultiTerminal.Dialogs
         private string _mcOrigVapidSubject = "";
         private string _mcOrigRelayBaseUrl = "";
 
+        // -------- Claude Profiles tab state (ticket c8ee0eec, GitHub #21) --------
+        private readonly ObservableCollection<ClaudeProfileRow> _claudeProfileRows = new ObservableCollection<ClaudeProfileRow>();
+        private List<ClaudeProfile> _claudeProfilesStored = new List<ClaudeProfile>();
+        // Set by ValidateClaudeProfiles when the grid differs from what is stored; null = leave the setting alone.
+        private IReadOnlyList<ClaudeProfile> _claudeProfilesToSave;
+        private DispatcherTimer _claudeProfileStatusTimer;
+
         /// <summary>
         /// True if the user edited their owner profile during this settings session.
         /// MainForm checks this to know if the profile was updated.
@@ -71,7 +83,6 @@ namespace MultiTerminal.Dialogs
         // Public properties for MainForm to read after dialog closes
         public float ToolbarFontSize => GetSelectedFontSize(ToolbarFontCombo);
         public float TerminalFontSize => GetSelectedFontSize(TerminalFontCombo);
-        public float ProjectPanelFontSize => GetSelectedFontSize(ProjectPanelFontCombo);
         public float ChatPanelFontSize => GetSelectedFontSize(ChatPanelFontCombo);
         public float TasksPanelFontSize => GetSelectedFontSize(TasksPanelFontCombo);
         public float ActivityPanelFontSize => GetSelectedFontSize(ActivityPanelFontCombo);
@@ -100,6 +111,7 @@ namespace MultiTerminal.Dialogs
             LoadSettings();
             LoadProfileSummary();
             LoadMultiConnect();
+            LoadClaudeProfiles();
 
             // Source control accounts manager is only available when its service is injected.
             ManageSourceControlAccountsButton.IsEnabled = _sourceControlAccountService != null;
@@ -112,7 +124,6 @@ namespace MultiTerminal.Dialogs
             {
                 string item = $"{size}pt";
                 ToolbarFontCombo.Items.Add(item);
-                ProjectPanelFontCombo.Items.Add(item);
                 ChatPanelFontCombo.Items.Add(item);
                 TasksPanelFontCombo.Items.Add(item);
                 ActivityPanelFontCombo.Items.Add(item);
@@ -142,14 +153,21 @@ namespace MultiTerminal.Dialogs
             CodexEffortCombo.Items.Add(SettingsService.CodexEffortMedium);
             CodexEffortCombo.Items.Add(SettingsService.CodexEffortLow);
             CodexEffortCombo.SelectedIndex = 0;
+
+            // Home view: index 0 = list (the default), 1 = cards. HomeViewChoice maps them.
+            HomeViewCombo.Items.Add("Project list (Browse All)");
+            HomeViewCombo.Items.Add("Project cards");
+            HomeViewCombo.SelectedIndex = 0;
         }
+
+        // The Home view combo's items in index order (ticket e20e2ce0 item 8).
+        private static readonly string[] HomeViewChoice = { SettingsService.StartScreenHomeViewList, SettingsService.StartScreenHomeViewCards };
 
         private void LoadSettings()
         {
             // Font sizes
             SelectFontSize(ToolbarFontCombo, _settings.GetToolbarFontSize());
             SelectFontSize(TerminalFontCombo, _settings.GetTerminalFontSize());
-            SelectFontSize(ProjectPanelFontCombo, _settings.GetPromptsFontSize());
             SelectFontSize(ChatPanelFontCombo, _settings.GetChatFontSize());
             SelectFontSize(TasksPanelFontCombo, _settings.GetTasksFontSize());
             SelectFontSize(ActivityPanelFontCombo, _settings.GetActivityFontSize());
@@ -179,6 +197,7 @@ namespace MultiTerminal.Dialogs
 
             // Default working directory
             DefaultWorkingDirText.Text = _settings.GetDefaultWorkingDirectory() ?? "";
+            HomeViewCombo.SelectedIndex = Math.Max(0, Array.IndexOf(HomeViewChoice, _settings.GetStartScreenHomeView()));
 
             // Git: per-task worktree isolation
             WorktreeModeCheck.IsChecked = string.Equals(
@@ -218,7 +237,6 @@ namespace MultiTerminal.Dialogs
             {
                 _settings.SetToolbarFontSize(GetSelectedFontSize(ToolbarFontCombo));
                 _settings.SetTerminalFontSize(GetSelectedFontSize(TerminalFontCombo));
-                _settings.SetPromptsFontSize(GetSelectedFontSize(ProjectPanelFontCombo));
                 _settings.SetChatFontSize(GetSelectedFontSize(ChatPanelFontCombo));
                 _settings.SetTasksFontSize(GetSelectedFontSize(TasksPanelFontCombo));
                 _settings.SetActivityFontSize(GetSelectedFontSize(ActivityPanelFontCombo));
@@ -229,6 +247,7 @@ namespace MultiTerminal.Dialogs
                 _settings.SetAgentPanelCloseMode(AgentPanelCloseMode);
 
                 _settings.SetDefaultWorkingDirectory(DefaultWorkingDirText.Text?.Trim());
+                _settings.SetStartScreenHomeView(HomeViewChoice[Math.Max(0, HomeViewCombo.SelectedIndex)]);
 
                 _settings.SetWorktreeMode(
                     WorktreeModeCheck.IsChecked == true
@@ -256,6 +275,9 @@ namespace MultiTerminal.Dialogs
                 });
 
                 SaveMultiConnect();
+
+                if (_claudeProfilesToSave != null)
+                    _settings.SetClaudeProfiles(_claudeProfilesToSave);
             }
             finally
             {
@@ -594,6 +616,9 @@ namespace MultiTerminal.Dialogs
                 return;
             }
 
+            if (!ValidateClaudeProfiles())
+                return;
+
             SaveSettings();
 
             // If a restart-required Multi-Connect field changed, re-apply the gateway in-process so
@@ -640,6 +665,183 @@ namespace MultiTerminal.Dialogs
         private void CancelBtn_Click(object sender, RoutedEventArgs e)
         {
             DialogResult = false;
+        }
+
+        // =================================================================
+        // Claude Profiles tab (ticket c8ee0eec, GitHub #21)
+        // Rows are edited freely and checked once, on OK. The decisions (which rows count, which
+        // row an error belongs to, what a save removes) live in ClaudeProfileEditorRules.
+        // =================================================================
+
+        private void LoadClaudeProfiles()
+        {
+            ClaudeDefaultProfileText.Text = ClaudeProfileEditorRules.DescribeDefault(
+                ClaudeProfileResolver.DefaultProfile.ConfigDir,
+                ClaudeProfileResolver.InheritedConfigDir);
+
+            _claudeProfilesStored = _settings.GetClaudeProfiles();
+            foreach (var profile in _claudeProfilesStored)
+                _claudeProfileRows.Add(new ClaudeProfileRow { Name = profile.Name, ConfigDir = profile.ConfigDir });
+
+            _claudeProfileRows.CollectionChanged += (s, e) => UpdateClaudeProfilesEmptyText();
+            ClaudeProfilesList.ItemsSource = _claudeProfileRows;
+            UpdateClaudeProfilesEmptyText();
+            RefreshClaudeProfileStatuses();
+
+            // The Sign in window runs on its own, so the dialog looks again every couple of seconds and
+            // a row turns to "Signed in" without the user doing anything. A File.Exists per row is cheap.
+            _claudeProfileStatusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _claudeProfileStatusTimer.Tick += (s, e) => RefreshClaudeProfileStatuses();
+            _claudeProfileStatusTimer.Start();
+            Closed += (s, e) => _claudeProfileStatusTimer.Stop();
+        }
+
+        private void RefreshClaudeProfileStatuses()
+        {
+            foreach (var row in _claudeProfileRows)
+                row.RefreshStatus(ClaudeProfileResolver.IsSignedIn);
+        }
+
+        private static string SuggestClaudeProfileFolder(string name) =>
+            ClaudeProfileEditorRules.SuggestFolder(name, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+
+        private void UpdateClaudeProfilesEmptyText()
+        {
+            ClaudeProfilesEmptyText.Visibility = _claudeProfileRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        private void ClaudeProfileAddButton_Click(object sender, RoutedEventArgs e)
+        {
+            var row = new ClaudeProfileRow(SuggestClaudeProfileFolder);
+            row.PropertyChanged += (s, args) =>
+            {
+                if (args.PropertyName == nameof(ClaudeProfileRow.ConfigDir))
+                    row.RefreshStatus(ClaudeProfileResolver.IsSignedIn);
+            };
+            _claudeProfileRows.Add(row);
+        }
+
+        /// <summary>
+        /// Opens a console window signed in to nothing yet, running claude under this row's folder
+        /// (<see cref="ClaudeProfileSignIn"/>). Nothing is saved: the row is checked like OK would check
+        /// it, its folder is created, and the window opens. The row turns to "Signed in" by itself.
+        /// </summary>
+        private void ClaudeProfileSignInButton_Click(object sender, RoutedEventArgs e)
+        {
+            if ((sender as FrameworkElement)?.DataContext is not ClaudeProfileRow row) return;
+
+            int index = _claudeProfileRows.IndexOf(row);
+            var rows = _claudeProfileRows.Select(r => (r.Name, r.ConfigDir)).ToList();
+            var result = ClaudeProfileEditorRules.Evaluate(rows, ClaudeProfileResolver.ValidateAllowingMissingFolders);
+            if (result.RowErrors.TryGetValue(index, out string error))
+            {
+                row.Error = error;
+                return;
+            }
+
+            row.Error = null;
+            try
+            {
+                ClaudeProfileSignIn.Start(row.Name, row.ConfigDir);
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException
+                || ex is ArgumentException || ex is InvalidOperationException || ex is System.ComponentModel.Win32Exception)
+            {
+                row.Error = "Could not open the sign-in window: " + ex.Message;
+                return;
+            }
+
+            row.RefreshStatus(ClaudeProfileResolver.IsSignedIn);
+        }
+
+        private void ClaudeProfileRemoveButton_Click(object sender, RoutedEventArgs e)
+        {
+            // Nothing is stored until OK, and OK asks before dropping a stored name.
+            if ((sender as FrameworkElement)?.DataContext is ClaudeProfileRow row)
+                _claudeProfileRows.Remove(row);
+        }
+
+        private void ClaudeProfileBrowseButton_Click(object sender, RoutedEventArgs e)
+        {
+            if ((sender as FrameworkElement)?.DataContext is not ClaudeProfileRow row) return;
+
+            using var dlg = new System.Windows.Forms.FolderBrowserDialog
+            {
+                Description = "Select the Claude Code config folder for this profile",
+                ShowNewFolderButton = true
+            };
+
+            string current = row.ConfigDir?.Trim();
+            if (!string.IsNullOrEmpty(current) && System.IO.Directory.Exists(current))
+                dlg.SelectedPath = current;
+
+            if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                row.ConfigDir = dlg.SelectedPath;
+        }
+
+        /// <summary>
+        /// Checks the grid and decides what OK will store. False means stay in the dialog: either a row
+        /// is wrong (its error line is set and the tab is shown) or the user declined to remove a
+        /// stored profile. Writes nothing; SaveSettings stores <see cref="_claudeProfilesToSave"/>.
+        /// </summary>
+        private bool ValidateClaudeProfiles()
+        {
+            _claudeProfilesToSave = null;
+
+            var rows = _claudeProfileRows.Select(r => (r.Name, r.ConfigDir)).ToList();
+            // A missing folder is not an error: it is created below, after every other check has passed.
+            var result = ClaudeProfileEditorRules.Evaluate(rows, ClaudeProfileResolver.ValidateAllowingMissingFolders);
+
+            // Untouched grid: nothing to check or write, so a stored profile whose folder is missing
+            // right now does not block OK for an unrelated setting.
+            if (ClaudeProfileEditorRules.IsUnchanged(_claudeProfilesStored, result.ToSave))
+            {
+                foreach (var row in _claudeProfileRows)
+                    row.Error = null;
+                return true;
+            }
+
+            for (int i = 0; i < _claudeProfileRows.Count; i++)
+                _claudeProfileRows[i].Error = result.RowErrors.TryGetValue(i, out string error) ? error : null;
+
+            if (!result.IsValid)
+            {
+                SettingsTabs.SelectedItem = ClaudeProfilesTab;
+                MessageBox.Show(this,
+                    "Fix these before saving:\n\n" + string.Join("\n", result.Messages),
+                    "Claude Profiles", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return false;
+            }
+
+            var removed = ClaudeProfileEditorRules.RemovedNames(_claudeProfilesStored, result.ToSave);
+            if (removed.Count > 0)
+            {
+                SettingsTabs.SelectedItem = ClaudeProfilesTab;
+                var answer = MessageBox.Show(this,
+                    ClaudeProfileEditorRules.RemovalWarning(removed),
+                    "Claude Profiles", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
+                if (answer != MessageBoxResult.Yes)
+                    return false;
+            }
+
+            foreach (string dir in ClaudeProfileEditorRules.FoldersToCreate(result.ToSave, Directory.Exists))
+            {
+                try
+                {
+                    Directory.CreateDirectory(dir);
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException || ex is NotSupportedException)
+                {
+                    SettingsTabs.SelectedItem = ClaudeProfilesTab;
+                    MessageBox.Show(this,
+                        $"Could not create the folder {dir}:\n\n{ex.Message}",
+                        "Claude Profiles", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return false;
+                }
+            }
+
+            _claudeProfilesToSave = result.ToSave;
+            return true;
         }
 
         // =================================================================
@@ -996,6 +1198,128 @@ namespace MultiTerminal.Dialogs
             {
                 MC_TailscaleStatusText.Text = "Copy failed: " + ex.Message;
             }
+        }
+    }
+
+    // =====================================================================
+    // One editable row of the Claude Profiles tab
+    // =====================================================================
+
+    /// <summary>
+    /// A row in the Settings dialog's Claude Profiles tab. Public because WPF data binding only reads
+    /// public types; it is the dialog's view state, not a stored model (that is <see cref="ClaudeProfile"/>).
+    /// </summary>
+    public sealed class ClaudeProfileRow : INotifyPropertyChanged
+    {
+        private readonly Func<string, string> _suggestFolder;
+        private string _name = "";
+        private string _configDir = "";
+        private string _error;
+        private string _status = "";
+        private bool _isSignedIn;
+        private bool _canSignIn;
+
+        // The folder this row last filled in from its name. While the folder box still holds exactly
+        // that (or is empty), typing in the name keeps it in step; once the user edits or browses to
+        // another folder, the name stops touching it.
+        private string _lastSuggestedFolder;
+
+        public event PropertyChangedEventHandler PropertyChanged;
+
+        public ClaudeProfileRow()
+        {
+        }
+
+        /// <param name="suggestFolder">Name → suggested folder (<see cref="ClaudeProfileEditorRules.SuggestFolder"/>),
+        /// or null for a row whose folder never follows its name.</param>
+        internal ClaudeProfileRow(Func<string, string> suggestFolder)
+        {
+            _suggestFolder = suggestFolder;
+        }
+
+        public string Name
+        {
+            get => _name;
+            set
+            {
+                if (!Set(ref _name, value ?? "", nameof(Name)) || _suggestFolder == null)
+                    return;
+
+                if (_configDir.Length == 0 || string.Equals(_configDir, _lastSuggestedFolder, StringComparison.Ordinal))
+                {
+                    _lastSuggestedFolder = _suggestFolder(_name) ?? "";
+                    ConfigDir = _lastSuggestedFolder;
+                }
+            }
+        }
+
+        public string ConfigDir
+        {
+            get => _configDir;
+            set => Set(ref _configDir, value ?? "", nameof(ConfigDir));
+        }
+
+        /// <summary>The row's validation error from the last OK, or null. Shown under the row.</summary>
+        public string Error
+        {
+            get => _error;
+            set => Set(ref _error, value, nameof(Error));
+        }
+
+        /// <summary>"Signed in", "Needs sign-in", or empty while the folder is not a usable path.</summary>
+        public string Status
+        {
+            get => _status;
+            private set => Set(ref _status, value ?? "", nameof(Status));
+        }
+
+        public bool IsSignedIn
+        {
+            get => _isSignedIn;
+            private set => SetBool(ref _isSignedIn, value, nameof(IsSignedIn));
+        }
+
+        /// <summary>True when the Sign in button is shown: the folder is a full path and Claude has not run there.</summary>
+        public bool CanSignIn
+        {
+            get => _canSignIn;
+            private set => SetBool(ref _canSignIn, value, nameof(CanSignIn));
+        }
+
+        /// <summary>
+        /// Recomputes <see cref="Status"/>, <see cref="IsSignedIn"/> and <see cref="CanSignIn"/> from the
+        /// folder as it is now. <paramref name="isSignedIn"/> is
+        /// <see cref="ClaudeProfileResolver.IsSignedIn(string)"/> outside tests.
+        /// </summary>
+        internal void RefreshStatus(Func<string, bool> isSignedIn)
+        {
+            if (ClaudeProfileResolver.Canonicalize(_configDir) == null)
+            {
+                Status = "";
+                IsSignedIn = false;
+                CanSignIn = false;
+                return;
+            }
+
+            bool signedIn = isSignedIn?.Invoke(_configDir) == true;
+            Status = signedIn ? "✓ Signed in" : "Needs sign-in";
+            IsSignedIn = signedIn;
+            CanSignIn = !signedIn;
+        }
+
+        private bool Set(ref string field, string value, string propertyName)
+        {
+            if (string.Equals(field, value, StringComparison.Ordinal)) return false;
+            field = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+            return true;
+        }
+
+        private void SetBool(ref bool field, bool value, string propertyName)
+        {
+            if (field == value) return;
+            field = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
         }
     }
 

@@ -33,7 +33,7 @@ namespace MultiTerminal.Tests
     /// logic lives in inbox-panel.html driven by WebView2 postMessage. There is no honest way to
     /// drive either in-process. Rather than fake coverage with a mock that proves nothing, these
     /// inspect the source — the technique this repo already uses in
-    /// <see cref="InboxBadgeRecipientTests"/> and ProjectPanelCopyCompletenessTests, for the same
+    /// <see cref="InboxBadgeRecipientTests"/>, for the same
     /// reason and the same "silence in the UI layer" failure mode.
     ///
     /// CONSEQUENCE, STATED PLAINLY: these catch someone REMOVING the fix. They do not catch a
