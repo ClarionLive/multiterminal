@@ -251,6 +251,7 @@ namespace MultiTerminal.Services
             RunMigration(nameof(MigrateAddNoteTabAuthorship), MigrateAddNoteTabAuthorship);
             RunMigration(nameof(MigrateAddNoteTabReadState), MigrateAddNoteTabReadState);
             RunMigration(nameof(MigrateAddNoteTabPinAndCategory), MigrateAddNoteTabPinAndCategory);
+            RunMigration(nameof(MigrateAddPaneLaunches), MigrateAddPaneLaunches);
 
             // Seed default agent profiles on first run
             SeedDefaultProfiles();
@@ -7815,6 +7816,213 @@ namespace MultiTerminal.Services
                 results.Add(ReadSessionLineageFromReader(reader));
             }
             return results;
+        }
+
+        #endregion
+
+        #region Pane Launches
+
+        /// <summary>
+        /// Adds <c>pane_launches</c> (task 7d20e94c): one row per pane launch, so a PM session can find
+        /// the helper sessions it spawned after MT restarts. The name <c>helper_sessions</c> is taken by
+        /// an unrelated table. Idempotent: every statement is IF NOT EXISTS.
+        /// </summary>
+        private void MigrateAddPaneLaunches()
+        {
+            const string createSql = @"
+                CREATE TABLE IF NOT EXISTS pane_launches (
+                    id TEXT PRIMARY KEY,
+                    mt_run_id TEXT,
+                    doc_id TEXT,
+                    terminal_name TEXT,
+                    project_id TEXT,
+                    cwd TEXT,
+                    kind TEXT,
+                    session_id TEXT,
+                    resumed_from_session_id TEXT,
+                    spawner_launch_id TEXT,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    end_reason TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_pane_launches_session ON pane_launches(session_id);
+                CREATE INDEX IF NOT EXISTS idx_pane_launches_spawner ON pane_launches(spawner_launch_id);
+                CREATE INDEX IF NOT EXISTS idx_pane_launches_run ON pane_launches(mt_run_id);
+            ";
+            using var createCmd = new SQLiteCommand(createSql, _connection);
+            createCmd.ExecuteNonQuery();
+        }
+
+        private const string PaneLaunchColumns =
+            "id, mt_run_id, doc_id, terminal_name, project_id, cwd, kind, session_id, resumed_from_session_id, " +
+            "spawner_launch_id, started_at, ended_at, end_reason";
+
+        /// <summary>Inserts one launch row. <see cref="PaneLaunchRecord.Id"/> is required.</summary>
+        public void InsertPaneLaunch(PaneLaunchRecord launch)
+        {
+            if (launch == null) throw new ArgumentNullException(nameof(launch));
+            if (string.IsNullOrEmpty(launch.Id)) throw new ArgumentException("A launch id is required.", nameof(launch));
+
+            // GATE BEFORE LockConn — never wait for the gate while holding _dbLock (see SqliteWriteGate).
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.InsertPaneLaunch", launch.Id);
+            using var gate = LockConn();
+            const string sql = "INSERT INTO pane_launches (" + PaneLaunchColumns + @")
+                VALUES (@id, @run, @doc, @name, @project, @cwd, @kind, @session, @resumedFrom,
+                        @spawner, @started, @ended, @reason)";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@id", launch.Id);
+            cmd.Parameters.AddWithValue("@run", (object)launch.MtRunId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@doc", (object)launch.DocId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@name", (object)launch.TerminalName ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@project", (object)launch.ProjectId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@cwd", (object)launch.Cwd ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@kind", (object)launch.Kind ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@session", (object)launch.SessionId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@resumedFrom", (object)launch.ResumedFromSessionId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@spawner", (object)launch.SpawnerLaunchId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@started", FormatPaneLaunchTime(launch.StartedAt));
+            cmd.Parameters.AddWithValue("@ended", launch.EndedAt.HasValue ? FormatPaneLaunchTime(launch.EndedAt.Value) : DBNull.Value);
+            cmd.Parameters.AddWithValue("@reason", (object)launch.EndReason ?? DBNull.Value);
+            cmd.ExecuteNonQuery();
+        }
+
+        /// <summary>Sets the launch's Claude session id. Touches only <c>session_id</c>.</summary>
+        /// <returns>True when the row existed and its session id changed.</returns>
+        public bool SetPaneLaunchSession(string launchId, string sessionId)
+        {
+            if (string.IsNullOrEmpty(launchId) || string.IsNullOrEmpty(sessionId)) return false;
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.SetPaneLaunchSession", launchId);
+            using var gate = LockConn();
+            using var cmd = new SQLiteCommand(
+                "UPDATE pane_launches SET session_id = @session WHERE id = @id AND session_id IS NOT @session", _connection);
+            cmd.Parameters.AddWithValue("@id", launchId);
+            cmd.Parameters.AddWithValue("@session", sessionId);
+            return cmd.ExecuteNonQuery() > 0;
+        }
+
+        /// <summary>Links a launch to the launch row of the pane that spawned it. Touches only <c>spawner_launch_id</c>.</summary>
+        /// <returns>True when the row existed and the link changed.</returns>
+        public bool SetPaneLaunchSpawner(string launchId, string spawnerLaunchId)
+        {
+            if (string.IsNullOrEmpty(launchId) || string.IsNullOrEmpty(spawnerLaunchId)) return false;
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.SetPaneLaunchSpawner", launchId);
+            using var gate = LockConn();
+            using var cmd = new SQLiteCommand(
+                "UPDATE pane_launches SET spawner_launch_id = @spawner WHERE id = @id AND spawner_launch_id IS NOT @spawner", _connection);
+            cmd.Parameters.AddWithValue("@id", launchId);
+            cmd.Parameters.AddWithValue("@spawner", spawnerLaunchId);
+            return cmd.ExecuteNonQuery() > 0;
+        }
+
+        /// <summary>
+        /// Ends a launch. An already-ended launch is left alone, so the first reason recorded wins
+        /// (a <c>close_helper</c> is not overwritten by the <c>process_exit</c> that follows it).
+        /// </summary>
+        /// <returns>True when this call ended the launch.</returns>
+        public bool EndPaneLaunch(string launchId, string reason)
+        {
+            if (string.IsNullOrEmpty(launchId) || string.IsNullOrEmpty(reason)) return false;
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.EndPaneLaunch", launchId);
+            using var gate = LockConn();
+            using var cmd = new SQLiteCommand(
+                "UPDATE pane_launches SET ended_at = @now, end_reason = @reason WHERE id = @id AND ended_at IS NULL", _connection);
+            cmd.Parameters.AddWithValue("@id", launchId);
+            cmd.Parameters.AddWithValue("@reason", reason);
+            cmd.Parameters.AddWithValue("@now", FormatPaneLaunchTime(DateTime.UtcNow));
+            return cmd.ExecuteNonQuery() > 0;
+        }
+
+        /// <summary>Ends every still-open launch of one MT run (used at MT exit). Rows of other runs and ended rows are untouched.</summary>
+        /// <returns>The number of rows ended.</returns>
+        public int EndOpenPaneLaunchesForRun(string mtRunId, string reason)
+        {
+            if (string.IsNullOrEmpty(mtRunId) || string.IsNullOrEmpty(reason)) return 0;
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.EndOpenPaneLaunchesForRun", mtRunId);
+            using var gate = LockConn();
+            using var cmd = new SQLiteCommand(
+                "UPDATE pane_launches SET ended_at = @now, end_reason = @reason WHERE mt_run_id = @run AND ended_at IS NULL", _connection);
+            cmd.Parameters.AddWithValue("@run", mtRunId);
+            cmd.Parameters.AddWithValue("@reason", reason);
+            cmd.Parameters.AddWithValue("@now", FormatPaneLaunchTime(DateTime.UtcNow));
+            return cmd.ExecuteNonQuery();
+        }
+
+        /// <summary>One launch row by id, or null.</summary>
+        public PaneLaunchRecord GetPaneLaunch(string launchId)
+        {
+            using var gate = LockConn();
+            if (string.IsNullOrEmpty(launchId)) return null;
+            using var cmd = new SQLiteCommand("SELECT " + PaneLaunchColumns + " FROM pane_launches WHERE id = @id", _connection);
+            cmd.Parameters.AddWithValue("@id", launchId);
+            using var reader = cmd.ExecuteReader();
+            return reader.Read() ? ReadPaneLaunch(reader) : null;
+        }
+
+        /// <summary>Every launch that ran (or resumed) <paramref name="sessionId"/>, newest first.</summary>
+        public List<PaneLaunchRecord> GetPaneLaunchesBySession(string sessionId)
+        {
+            using var gate = LockConn();
+            var results = new List<PaneLaunchRecord>();
+            if (string.IsNullOrEmpty(sessionId)) return results;
+            using var cmd = new SQLiteCommand(
+                "SELECT " + PaneLaunchColumns + " FROM pane_launches WHERE session_id = @session ORDER BY started_at DESC", _connection);
+            cmd.Parameters.AddWithValue("@session", sessionId);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read()) results.Add(ReadPaneLaunch(reader));
+            return results;
+        }
+
+        /// <summary>
+        /// Every launch whose <c>spawner_launch_id</c> is one of <paramref name="spawnerLaunchIds"/>, newest
+        /// first. One level only: children of the returned rows are not included.
+        /// </summary>
+        public List<PaneLaunchRecord> GetChildLaunches(IEnumerable<string> spawnerLaunchIds)
+        {
+            using var gate = LockConn();
+            var results = new List<PaneLaunchRecord>();
+            if (spawnerLaunchIds == null) return results;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            // One parameterized query per spawner rather than a built IN list, so the SQL text stays constant.
+            using var cmd = new SQLiteCommand(
+                "SELECT " + PaneLaunchColumns + " FROM pane_launches WHERE spawner_launch_id = @spawner", _connection);
+            var spawner = cmd.Parameters.Add("@spawner", System.Data.DbType.String);
+            foreach (var id in spawnerLaunchIds)
+            {
+                if (string.IsNullOrEmpty(id) || !seen.Add(id)) continue;
+                spawner.Value = id;
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read()) results.Add(ReadPaneLaunch(reader));
+            }
+            results.Sort((a, b) => b.StartedAt.CompareTo(a.StartedAt));
+            return results;
+        }
+
+        private static string FormatPaneLaunchTime(DateTime value)
+            => (value.Kind == DateTimeKind.Utc ? value : value.ToUniversalTime()).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+
+        private static DateTime ParsePaneLaunchTime(string value)
+            => DateTime.Parse(value, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+
+        private static PaneLaunchRecord ReadPaneLaunch(SQLiteDataReader reader)
+        {
+            string Str(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
+            string ended = Str(11);
+            return new PaneLaunchRecord
+            {
+                Id = Str(0),
+                MtRunId = Str(1),
+                DocId = Str(2),
+                TerminalName = Str(3),
+                ProjectId = Str(4),
+                Cwd = Str(5),
+                Kind = Str(6),
+                SessionId = Str(7),
+                ResumedFromSessionId = Str(8),
+                SpawnerLaunchId = Str(9),
+                StartedAt = ParsePaneLaunchTime(Str(10)),
+                EndedAt = ended == null ? (DateTime?)null : ParsePaneLaunchTime(ended),
+                EndReason = Str(12),
+            };
         }
 
         #endregion
