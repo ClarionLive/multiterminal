@@ -4223,7 +4223,7 @@ namespace MultiTerminal
                 // Shift skips the prompt. Cancel returns the pane to its start screen with nothing launched
                 // or registered. Restored panes need no exception: they come back on the start screen
                 // and launch only when the user clicks a project, which is an ordinary launch.
-                if (!TryChooseLaunchSession(doc, kind, project, launchIdentity.Name, out var resumeSession, out string chosenName))
+                if (!TryChooseLaunchSession(doc, kind, project, launchIdentity.Name, out var resumeSession, out string chosenName, out var helpersToResume))
                 {
                     doc.ShowStartScreen();
                     return;
@@ -4453,6 +4453,12 @@ namespace MultiTerminal
                 doc.Activate();
                 doc.FocusTerminal();
                 _lastActiveTerminal = doc;
+
+                // Task 7d20e94c item 6: a RESUMED PM brings back the helpers it left open (the ticked ones
+                // from the dialog, or all of them in Continue mode). A new session never does. Posted, so
+                // this launch handler finishes first and the PM's own launch row exists to link to.
+                if (resumeSession != null && helpersToResume.Count > 0)
+                    QueueHelperResume(doc, project, resumeSession.Entry.SessionId, terminalName, helpersToResume);
             }
             catch (Exception ex)
             {
@@ -4474,10 +4480,11 @@ namespace MultiTerminal
         /// something to resume.
         /// </summary>
         private bool TryChooseLaunchSession(TerminalDocument doc, TerminalKind kind, Models.Project project, string newSessionName,
-            out LaunchSessionCandidate resume, out string chosenName)
+            out LaunchSessionCandidate resume, out string chosenName, out IReadOnlyList<OpenHelper> helpersToResume)
         {
             resume = null;
             chosenName = null;
+            helpersToResume = Array.Empty<OpenHelper>();
 
             bool shiftHeld = (Control.ModifierKeys & Keys.Shift) == Keys.Shift;
             var decision = LaunchSessionChoiceModel.Decide(
@@ -4503,6 +4510,10 @@ namespace MultiTerminal
             {
                 resume = decision.Candidate;
                 chosenName = LaunchSessionChoiceModel.DefaultNameFor(LaunchSessionChoice.ContinueLast, resume, newSessionName);
+
+                // Continue mode has no dialog: every helper the session left open comes back (Owner
+                // decision, task 7d20e94c); anything skipped is reported once afterwards.
+                helpersToResume = decision.Model?.HelpersFor(resume) ?? Array.Empty<OpenHelper>();
                 return true;
             }
 
@@ -4537,7 +4548,44 @@ namespace MultiTerminal
 
             resume = dialog.SelectedCandidate;
             chosenName = dialog.ChosenName;
+            helpersToResume = dialog.HelpersToResume ?? Array.Empty<OpenHelper>();
             return resume != null;
+        }
+
+        /// <summary>
+        /// Posts <see cref="ResumeHelpersFor"/> for a PM that was just resumed (task 7d20e94c item 6), then
+        /// shows ONE summary, and only when a helper was skipped or came back under another name. Runs
+        /// only while <paramref name="pmDoc"/> is still running the launch that resumed
+        /// <paramref name="pmSessionId"/>: a PM whose launch failed (a refused profile returns the pane to
+        /// its start screen) or was replaced in the meantime takes no helpers with it.
+        /// </summary>
+        private void QueueHelperResume(TerminalDocument pmDoc, Models.Project project, string pmSessionId, string pmName, IReadOnlyList<OpenHelper> helpers)
+        {
+            if (!IsHandleCreated || IsDisposed)
+                return;
+
+            BeginInvoke(new Action(() =>
+            {
+                try
+                {
+                    if (pmDoc.IsDisposed || !pmDoc.IsTerminalStarted
+                        || !string.Equals(pmDoc.LastLaunchArgs?.ResumeSessionId, pmSessionId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _debugLogService?.Warning("LaunchSession", $"Helper resume for session {pmSessionId} not run: the PM pane is no longer running that launch.");
+                        return;
+                    }
+
+                    var report = ResumeHelpersFor(pmDoc, project, helpers);
+                    _debugLogService?.Info("LaunchSession", $"Helper resume for '{pmName}': {report.Resumed.Count} resumed, {report.Skipped.Count} skipped, {report.Renamed.Count} renamed.");
+                    string summary = report.BuildSummary(pmName);
+                    if (summary != null)
+                        MessageBox.Show(this, summary, "Resume helpers", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    _debugLogService?.Error("LaunchSession", $"Helper resume for session {pmSessionId} failed: {ex.Message}");
+                }
+            }));
         }
 
         /// <summary>
