@@ -19,6 +19,7 @@ body {
     --save-indicator: #a6e3a1;
     --danger: #f38ba8;
     --drop-indicator: #89b4fa;
+    --mark: rgba(137, 180, 250, 0.30);
 
     margin: 0; padding: 0;
     font-family: "Segoe UI", system-ui, sans-serif;
@@ -46,6 +47,7 @@ body.light {
     --save-indicator: #40a02b;
     --danger: #d20f39;
     --drop-indicator: #1e66f5;
+    --mark: rgba(30, 102, 245, 0.18);
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -77,247 +79,189 @@ body.light {
 .save-status.saving { color: var(--accent); }
 .save-status.conflict { color: var(--danger); }
 
-/* ── Tab bar ── */
-.tab-bar {
+/* ── Body: rail + editor (task 9a4a9d5e; replaced the tab strip) ── */
+.body-row { flex: 1; display: flex; min-height: 0; position: relative; }
+
+.rail {
+    position: relative;
     display: flex;
-    align-items: stretch;
+    flex-direction: column;
     background: var(--bg-header);
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-    overflow: hidden;
-    position: relative;
-}
-
-.tab-scroll {
-    display: flex;
-    align-items: stretch;
-    overflow-x: auto;
-    flex: 1;
-    min-width: 0;
-    scrollbar-width: none;
-}
-.tab-scroll::-webkit-scrollbar { display: none; }
-
-/* Edge fades: a mask on the strip itself (not an overlay pseudo-element),
-   so it tracks the strip's real edges whichever nav buttons are showing.
-   updateScrollFade() sets the class for whichever sides hide content. */
-.tab-scroll.fade-left {
-    -webkit-mask-image: linear-gradient(to right, transparent 0, #000 20px);
-            mask-image: linear-gradient(to right, transparent 0, #000 20px);
-}
-.tab-scroll.fade-right {
-    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent 100%);
-            mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent 100%);
-}
-.tab-scroll.fade-left.fade-right {
-    -webkit-mask-image: linear-gradient(to right, transparent 0, #000 20px, #000 calc(100% - 20px), transparent 100%);
-            mask-image: linear-gradient(to right, transparent 0, #000 20px, #000 calc(100% - 20px), transparent 100%);
-}
-
-.tab {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 5px 8px;
-    font-size: 11px;
-    color: var(--text-muted);
-    background: var(--bg-tab);
     border-right: 1px solid var(--border);
-    cursor: pointer;
-    white-space: nowrap;
-    user-select: none;
     flex-shrink: 0;
-    transition: background 0.15s, color 0.15s;
-    position: relative;
+    min-width: 0;
 }
-.tab:hover { background: var(--bg-tab-hover); color: var(--text-secondary); }
-.tab.active { background: var(--bg-tab-active); color: var(--text-primary); font-weight: 600; }
-
-.tab.drag-over-left::before {
-    content: '';
-    position: absolute;
-    left: -1px; top: 4px; bottom: 4px;
-    width: 2px;
-    background: var(--drop-indicator);
-    border-radius: 1px;
-}
-.tab.drag-over-right::after {
-    content: '';
-    position: absolute;
-    right: -1px; top: 4px; bottom: 4px;
-    width: 2px;
-    background: var(--drop-indicator);
-    border-radius: 1px;
-}
-.tab.dragging { opacity: 0.4; }
-
-.tab-label {
-    pointer-events: none;
-}
-
-.tab-label-edit {
+.rail-top { display: flex; align-items: center; gap: 4px; padding: 6px 6px 6px 8px; border-bottom: 1px solid var(--border); }
+.search {
+    flex: 1; min-width: 0;
+    display: flex; align-items: center; gap: 5px;
     background: var(--bg-editor);
-    color: var(--text-primary);
-    border: 1px solid var(--accent);
-    border-radius: 2px;
-    font-size: 11px;
-    font-family: inherit;
-    padding: 0 3px;
-    outline: none;
-    width: 80px;
-}
-
-/* Agent-written tab (task 5d94ac91): a small accent glyph before the name;
-   the agent's name is in the tooltip. Unread: an agent added or changed the
-   tab since the Owner last looked at it. */
-.tab-agent {
-    font-size: 9px;
-    color: var(--accent);
-    pointer-events: none;
-}
-.tab-unread {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--accent);
-    pointer-events: none;
-}
-.tab-nav-all.has-unread { color: var(--accent); }
-/* Unread count on ▾ (task c133b27d); the ▾ widens to fit it. */
-.tab-nav-all.has-unread { width: auto; padding: 0 5px; gap: 3px; }
-.tab-unread-count {
-    font-size: 9px;
-    font-weight: 700;
-    line-height: 13px;
-    min-width: 13px;
-    padding: 0 3px;
-    border-radius: 7px;
-    text-align: center;
-    background: var(--accent);
-    color: var(--bg-primary, #1e1e2e);
-}
-
-.tab-close {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 14px;
-    height: 14px;
-    font-size: 9px;
-    color: var(--text-muted);
-    border-radius: 3px;
-    cursor: pointer;
-    opacity: 0;
-    transition: opacity 0.15s, background 0.15s, color 0.15s;
-}
-.tab:hover .tab-close { opacity: 1; }
-.tab-close:hover { background: var(--danger); color: #fff; opacity: 1; }
-
-.tab-add {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    flex-shrink: 0;
-    font-size: 14px;
-    color: var(--text-muted);
-    cursor: pointer;
-    border-left: 1px solid var(--border);
-    transition: background 0.15s, color 0.15s;
-}
-.tab-add:hover { background: var(--bg-tab-hover); color: var(--accent); }
-
-/* ── Overflow navigation (‹ › ▾) ── shown only while the strip overflows */
-.tab-nav {
-    display: none;
-    align-items: center;
-    justify-content: center;
-    width: 22px;
-    flex-shrink: 0;
-    font-size: 14px;
-    color: var(--text-muted);
-    cursor: pointer;
-    user-select: none;
-    transition: background 0.15s, color 0.15s, opacity 0.15s;
-}
-.tab-nav-left { border-right: 1px solid var(--border); }
-.tab-nav-right, .tab-nav-all { border-left: 1px solid var(--border); }
-.tab-nav-all { font-size: 10px; }
-.tab-bar.overflowing .tab-nav { display: flex; }
-.tab-nav:hover { background: var(--bg-tab-hover); color: var(--accent); }
-.tab-nav.disabled { opacity: 0.35; cursor: not-allowed; }
-.tab-nav.disabled:hover { background: transparent; color: var(--text-muted); }
-.tab-nav-all.open { background: var(--bg-tab-hover); color: var(--accent); }
-
-/* ── All-notes menu ── body-appended + position:fixed for the same reason
-   as .delete-confirm below (task d8a1d0c4): the strip clips anything
-   positioned inside it. JS sets left/top from the ▾ button's rect. */
-.tab-menu {
-    position: fixed;
-    min-width: 140px;
-    max-width: 280px;
-    max-height: 60vh;
-    overflow-y: auto;
-    background: var(--bg-tab-active);
     border: 1px solid var(--border);
     border-radius: 4px;
-    padding: 3px 0;
-    z-index: 10;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    padding: 3px 6px;
 }
-.tab-menu::-webkit-scrollbar { width: 4px; }
-.tab-menu::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-.tab-menu-item {
-    padding: 4px 10px;
-    font-size: 11px;
-    color: var(--text-secondary);
-    cursor: pointer;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    user-select: none;
+.search:focus-within { border-color: var(--accent); }
+.search svg { flex-shrink: 0; color: var(--text-muted); }
+.search input { flex: 1; min-width: 0; border: none; outline: none; background: transparent; color: var(--text-primary); font: inherit; font-size: 11px; }
+.search input::placeholder { color: var(--text-muted); }
+.search .clear { color: var(--text-muted); cursor: pointer; font-size: 10px; display: none; }
+.search.has-text .clear { display: block; }
+.icon-btn {
+    width: 22px; height: 22px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 4px; color: var(--text-muted);
+    cursor: pointer; user-select: none; font-size: 14px;
 }
-.tab-menu-item:hover { background: var(--bg-tab-hover); color: var(--text-primary); }
-.tab-menu-item.active { color: var(--accent); font-weight: 600; }
-.tab-menu-item.unread::after { content: ' ●'; color: var(--accent); }
+.icon-btn:hover { background: var(--bg-tab-hover); color: var(--accent); }
+/* "Unread only" filter under the search (Owner request, live test of 9a4a9d5e) */
+.unread-filter {
+    display: flex; align-items: center; gap: 6px;
+    padding: 0 8px 6px 9px;
+    border-bottom: 1px solid var(--border);
+    font-size: 10px; color: var(--text-secondary);
+    cursor: pointer; user-select: none;
+}
+.unread-filter input { margin: 0; accent-color: var(--accent); cursor: pointer; }
+.unread-filter .n { color: var(--accent); font-weight: 600; }
+.rail-top { border-bottom: none; }
 
-/* ── Delete confirmation ── */
-/* position:fixed + body-appended: the tab bar is a clipped scroll row
-   (.tab-bar overflow:hidden, .tab-scroll overflow-x:auto), so a popup
-   absolutely positioned inside a tab at top:100% is clipped invisible —
-   that was the "x does nothing" bug (task d8a1d0c4). Fixed positioning
-   escapes every ancestor clip; JS sets left/top from the tab's rect. */
-.delete-confirm {
-    display: none;
-    position: fixed;
+.rail-list { flex: 1; overflow-y: auto; padding: 2px 0 6px; outline: none; }
+.rail-list::-webkit-scrollbar { width: 4px; }
+.rail-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.group {
+    display: flex; align-items: center; gap: 5px;
+    padding: 7px 10px 3px 6px;
+    font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--text-muted);
+    cursor: pointer; user-select: none;
+}
+.group:hover { color: var(--text-secondary); }
+.group.pinned-head { cursor: default; }
+.group .caret { width: 9px; font-size: 8px; text-align: center; display: flex; justify-content: center; }
+.group .count { font-weight: 600; letter-spacing: 0; }
+.group .gdot { margin-left: auto; }
+.group .group-edit { text-transform: none; letter-spacing: 0; font-weight: 600; }
+
+.row {
+    position: relative;
+    display: flex; align-items: center; gap: 5px;
+    padding: 4px 8px 4px 20px;
+    cursor: pointer; user-select: none;
+    color: var(--text-secondary);
+}
+.row:hover { background: var(--bg-tab-hover); color: var(--text-primary); }
+.row.active { background: var(--bg-tab-active); color: var(--text-primary); font-weight: 600; box-shadow: inset 2px 0 0 var(--accent); }
+.row.menu-target { outline: 1px solid var(--accent); outline-offset: -1px; }
+.row .agent { font-size: 9px; color: var(--accent); flex-shrink: 0; }
+.row .name-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.row .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
+.row.unread .name { color: var(--text-primary); font-weight: 600; }
+.row .snippet { font-size: 10px; font-weight: 400; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+.row .time { font-size: 9px; color: var(--text-muted); font-weight: 400; flex-shrink: 0; }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
+.row.drop-above::before, .row.drop-below::after {
+    content: ''; position: absolute; left: 8px; right: 8px; height: 2px;
+    background: var(--drop-indicator); border-radius: 1px;
+}
+.row.drop-above::before { top: -1px; }
+.row.drop-below::after { bottom: -1px; }
+.row.dragging { opacity: .4; }
+mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1px; }
+.inline-edit {
+    width: 100%;
+    background: var(--bg-editor); color: var(--text-primary);
+    border: 1px solid var(--accent); border-radius: 2px;
+    font: inherit; font-size: 11px; padding: 1px 4px; outline: none;
+}
+.confirm {
+    display: flex; align-items: center; gap: 6px;
+    margin: 2px 6px 4px 20px; padding: 5px 7px;
+    border: 1px solid var(--danger); border-radius: 4px;
     background: var(--bg-tab-active);
-    border: 1px solid var(--danger);
-    border-radius: 4px;
-    padding: 6px 8px;
-    font-size: 10px;
-    color: var(--text-primary);
-    z-index: 10;
-    white-space: nowrap;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    font-size: 10px; color: var(--text-primary);
 }
-.delete-confirm.visible { display: flex; align-items: center; gap: 6px; }
-.delete-confirm button {
-    padding: 2px 8px;
-    border: none;
-    border-radius: 3px;
-    font-size: 10px;
-    cursor: pointer;
+.confirm span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.confirm button { padding: 2px 8px; border: none; border-radius: 3px; font-size: 10px; cursor: pointer; font-family: inherit; }
+.confirm .btn-yes { background: var(--danger); color: #fff; }
+.confirm .btn-no { background: var(--border); color: var(--text-primary); }
+.empty { padding: 14px 10px; color: var(--text-muted); font-size: 11px; text-align: center; }
+
+.resize { position: absolute; top: 0; right: -3px; width: 6px; height: 100%; cursor: col-resize; z-index: 2; }
+.resize::after { content: ''; position: absolute; left: 2px; top: 0; bottom: 0; width: 2px; background: transparent; transition: background .15s; }
+.resize:hover::after, body.resizing .resize::after { background: var(--accent); }
+body.resizing { cursor: col-resize; user-select: none; }
+
+/* Collapsed rail: a thin strip */
+.rail.collapsed { width: 30px !important; align-items: center; padding-top: 5px; gap: 4px; }
+.rail.collapsed > :not(.mini) { display: none; }
+.rail:not(.collapsed) > .mini { display: none; }
+.mini-badge {
+    min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px;
+    background: var(--accent); color: var(--bg-primary);
+    font-size: 9px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
 }
-.delete-confirm .btn-yes { background: var(--danger); color: #fff; }
-.delete-confirm .btn-no { background: var(--border); color: var(--text-primary); }
+.mini-sep { width: 14px; height: 1px; background: var(--border); }
+
+/* Narrow HUD: an expanded rail floats over the editor */
+.rail.overlay { position: absolute; top: 0; left: 0; bottom: 0; z-index: 3; box-shadow: 4px 0 14px rgba(0, 0, 0, .35); }
+.scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, .25); z-index: 2; display: none; }
+body.overlay-open .scrim { display: block; }
+
+/* Right-click menu and the category list (body-appended, position:fixed) */
+.menu {
+    position: fixed; z-index: 10;
+    min-width: 150px; max-height: 70vh; overflow-y: auto;
+    background: var(--bg-tab-active);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 3px 0;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, .3);
+    font-size: 11px;
+}
+.menu .mi { display: flex; align-items: center; gap: 8px; padding: 4px 12px 4px 10px; color: var(--text-secondary); cursor: pointer; white-space: nowrap; user-select: none; }
+.menu .mi:hover, .menu .mi.hot { background: var(--bg-tab-hover); color: var(--text-primary); }
+.menu .mi.disabled { opacity: .45; cursor: default; }
+.menu .mi.disabled:hover { background: transparent; color: var(--text-secondary); }
+.menu .mi .ic { width: 12px; display: flex; justify-content: center; color: var(--text-muted); }
+.menu .mi .kbd, .menu .mi .sub { margin-left: auto; padding-left: 14px; font-size: 9px; color: var(--text-muted); }
+.menu .mi.check .ic { color: var(--accent); }
+.menu .mi.danger { color: var(--danger); }
+.menu .mi.danger:hover { background: var(--danger); color: #fff; }
+.menu .mi.add { color: var(--accent); }
+.menu .sep { height: 1px; background: var(--border); margin: 3px 0; }
+.menu .mi-input { padding: 3px 8px; }
 
 /* ── Editor ── */
 .editor-container {
     flex: 1;
     display: flex;
+    flex-direction: column;
     overflow: hidden;
     min-height: 0;
+    min-width: 0;
+    background: var(--bg-editor);
 }
+.editor-title {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 12px; min-height: 29px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px; color: var(--text-secondary);
+}
+.editor-title .title-name { color: var(--text-primary); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.editor-title .by { color: var(--text-muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cat-select {
+    margin-left: auto; flex-shrink: 0;
+    display: flex; align-items: center; gap: 6px;
+    padding: 2px 6px 2px 8px;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-secondary); font-size: 10px;
+    cursor: pointer; user-select: none;
+}
+.cat-select:hover, .cat-select.open { border-color: var(--accent); color: var(--text-primary); }
+.cat-select .lbl { color: var(--text-muted); }
+.cat-select .chev { font-size: 8px; color: var(--text-muted); }
 
 textarea {
     flex: 1;
@@ -351,8 +295,7 @@ textarea::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2p
 }
 .no-project-icon { font-size: 28px; opacity: 0.3; }
 body.no-project-state .notes-header { display: none; }
-body.no-project-state .tab-bar { display: none; }
-body.no-project-state .editor-container { display: none; }
+body.no-project-state .body-row { display: none; }
 body.no-project-state .no-project { display: flex; }
 </style>
 </head>
@@ -368,29 +311,67 @@ body.no-project-state .no-project { display: flex; }
     <span class="save-status" id="save-status"></span>
 </div>
 
-<div class="tab-bar" id="tab-bar">
-    <div class="tab-nav tab-nav-left" id="tab-nav-left" title="Scroll left">&#8249;</div>
-    <div class="tab-scroll" id="tab-scroll"></div>
-    <div class="tab-nav tab-nav-right" id="tab-nav-right" title="Scroll right">&#8250;</div>
-    <div class="tab-nav tab-nav-all" id="tab-nav-all" title="All notes">&#9662;</div>
-    <div class="tab-add" id="tab-add" title="New tab (Ctrl+T)">+</div>
-</div>
-
-<div class="editor-container">
-    <textarea id="editor" placeholder="Type your notes here..."></textarea>
+<div class="body-row">
+    <div class="scrim" id="scrim"></div>
+    <div class="rail" id="rail">
+        <div class="rail-top">
+            <label class="search" id="search">
+                <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="7" cy="7" r="5"/><path d="M11 11l4 4"/></svg>
+                <input id="search-input" placeholder="Search notes" spellcheck="false">
+                <span class="clear" id="search-clear" title="Clear (Esc)">&#10005;</span>
+            </label>
+            <span class="icon-btn" id="add-note" title="New note (Ctrl+T)">+</span>
+            <span class="icon-btn" id="collapse-rail" title="Hide notes list">&laquo;</span>
+        </div>
+        <label class="unread-filter" title="Show only notes an agent changed since you last read them">
+            <input type="checkbox" id="unread-only"> Unread only <span class="n" id="unread-only-count"></span>
+        </label>
+        <div class="rail-list" id="rail-list" tabindex="0"></div>
+        <div class="resize" id="rail-resize" title="Drag to resize"></div>
+        <span class="icon-btn mini" id="expand-rail" title="Show notes">&raquo;</span>
+        <span class="mini-badge mini" id="mini-badge" style="display:none"></span>
+        <span class="mini-sep mini"></span>
+        <span class="icon-btn mini" id="mini-add" title="New note (Ctrl+T)">+</span>
+    </div>
+    <div class="editor-container">
+        <div class="editor-title">
+            <span class="title-name" id="title-name"></span>
+            <span class="by" id="title-by"></span>
+            <span class="cat-select" id="cat-select" title="Category"><span class="lbl">Category</span><span id="cat-current">General</span><span class="chev">&#9662;</span></span>
+        </div>
+        <textarea id="editor" placeholder="Type your notes here..."></textarea>
+    </div>
 </div>
 
 <script>
 const editor = document.getElementById('editor');
 const saveStatus = document.getElementById('save-status');
-const tabScroll = document.getElementById('tab-scroll');
-const tabAddBtn = document.getElementById('tab-add');
-const tabBar = document.getElementById('tab-bar');
-const navLeftBtn = document.getElementById('tab-nav-left');
-const navRightBtn = document.getElementById('tab-nav-right');
-const navAllBtn = document.getElementById('tab-nav-all');
+const rail = document.getElementById('rail');
+const railList = document.getElementById('rail-list');
+const searchBox = document.getElementById('search');
+const searchInput = document.getElementById('search-input');
+const miniBadge = document.getElementById('mini-badge');
+const scrim = document.getElementById('scrim');
+const titleName = document.getElementById('title-name');
+const titleBy = document.getElementById('title-by');
+const catSelect = document.getElementById('cat-select');
+const catCurrent = document.getElementById('cat-current');
+const unreadOnlyBox = document.getElementById('unread-only');
+const unreadOnlyCount = document.getElementById('unread-only-count');
 
-let tabs = [];           // [{name, content, isDefault, createdBy, updatedBy, unread, agentRev}]
+const ICON = {
+    pin: '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M10.5 1.5l4 4-1.4 1.4-.8-.4-2.6 2.6.4 3.3-1.4 1.4-2.9-2.9-3.6 3.6-.7-.7 3.6-3.6L2.2 7.3l1.4-1.4 3.3.4 2.6-2.6-.4-.8z"/></svg>',
+    pen: '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M11 2.5l2.5 2.5L6 12.5H3.5V10z"/></svg>',
+    tag: '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 2h6l6 6-6 6-6-6z"/><circle cx="5.5" cy="5.5" r="1"/></svg>',
+    x: '<svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3l10 10M13 3L3 13"/></svg>',
+};
+const GENERAL = 'General';
+const CATEGORY_MAX = 40;          // TaskDatabase.NoteCategoryMaxLength
+const RAIL_MIN = 140, RAIL_MAX = 420, RAIL_DEFAULT = 215;   // SettingsService.HudNotesRail{Min,Max,Default}Width
+const NARROW_PX = 380;            // below this the rail starts collapsed and opens over the editor
+
+let tabs = [];           // [{name, content, isDefault, createdBy, updatedBy, unread, agentRev, pinned, category, changedAt}]
+let categories = [GENERAL];   // the shared list, General first (host order)
 // Tabs an agent wrote after the Owner last saw them. Comes from the HOST (stored read
 // state, task c133b27d), so it survives a restart and agrees across panes; the page
 // only clears an entry when it tells the host the tab was read.
@@ -400,90 +381,308 @@ let activeTab = null;     // current tab name
 let tabContents = {};     // in-memory content cache per tab
 let lastSavedContent = {};
 let saveTimeout = null;
-let dragSrcName = null;
-let deleteConfirmEl = null;
-let tabMenuEl = null;
-let renderPending = false;  // a live update arrived mid-rename/prompt/menu; redraw when it closes
+let renderPending = false;  // a live update arrived mid-rename/confirm/menu; redraw when it closes
 let pendingConflict = null; // {tab, by}: the next save of this tab overwrites an agent's unmergeable change
 
-// ── Tab rendering ──
+// Rail state. Width, collapsed and folded groups are one global setting kept by the host.
+let railWidth = RAIL_DEFAULT;
+let railCollapsed = false;
+let folded = new Set();
+let searchText = '';
+let overlayOpen = false;     // narrow HUD only: the rail is open over the editor
+// The selected note keeps the place it had when it was picked (Owner decision): reading it clears
+// its dot and typing in it bumps its time, and either would otherwise make it jump under the Owner.
+let sticky = null;           // {name, unread, changedAt}
+let menuEl = null;           // open right-click menu / category list
+let menuTarget = null;       // the row name a menu acts on
+let confirmFor = null;       // {kind:'note'|'category', name}
+let editing = null;          // {kind:'note'|'category', name}
+let dragSrcName = null;
+let unreadOnly = false;      // the "Unread only" filter (this pane, this session)
+let followName = null;       // a note this pane just renamed: keep its row in view once the rename lands
+let followDue = false;       // the rename has merged, so the next render makes the one attempt
 
-function renderTabs() {
-    renderPending = false;
-    // The confirm popup is body-appended (not inside a tab), so a re-render
-    // no longer removes it implicitly — dismiss it here or it would linger
-    // detached over rebuilt tabs.
-    hideDeleteConfirm();
-    hideTabMenu();
-    tabScroll.innerHTML = '';
-    tabs.forEach((tab, i) => {
-        const el = document.createElement('div');
-        el.className = 'tab' + (tab.name === activeTab ? ' active' : '');
-        el.dataset.name = tab.name;
-        el.draggable = true;
-
-        const label = document.createElement('span');
-        label.className = 'tab-label';
-        label.textContent = tab.name;
-        if (tab.createdBy) {
-            const marker = document.createElement('span');
-            marker.className = 'tab-agent';
-            marker.textContent = '✦';
-            el.appendChild(marker);
-            el.title = tabAuthorText(tab);
-        }
-        el.appendChild(label);
-        if (unreadTabs.has(tab.name)) {
-            const dot = document.createElement('span');
-            dot.className = 'tab-unread';
-            el.appendChild(dot);
-        }
-
-        if (!tab.isDefault) {
-            const close = document.createElement('span');
-            close.className = 'tab-close';
-            close.textContent = '\u2715';
-            close.title = 'Close tab';
-            close.addEventListener('click', (e) => { e.stopPropagation(); showDeleteConfirm(el, tab.name); });
-            el.appendChild(close);
-        }
-
-        el.addEventListener('click', () => switchTab(tab.name));
-        el.addEventListener('dblclick', () => startRename(el, tab.name));
-
-        // Drag events
-        el.addEventListener('dragstart', onDragStart);
-        el.addEventListener('dragover', onDragOver);
-        el.addEventListener('dragleave', onDragLeave);
-        el.addEventListener('drop', onDrop);
-        el.addEventListener('dragend', onDragEnd);
-
-        tabScroll.appendChild(el);
-    });
-    updateUnreadIndicator();
-    scrollActiveTabIntoView();
-    updateScrollFade();
+function post(msg) {
+    if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(msg);
 }
 
-// Horizontal-only "scroll into view" for the active tab. Manual scrollLeft
-// math rather than el.scrollIntoView(), which may also scroll ancestors
-// (body) vertically. Keeps a 20px margin so the tab isn't under an edge fade.
-function scrollActiveTabIntoView() {
-    if (!activeTab) return;
-    const el = Array.from(tabScroll.children).find(c => c.dataset.name === activeTab);
-    if (!el) return;
-    const margin = 20;
-    const stripRect = tabScroll.getBoundingClientRect();
-    const elRect = el.getBoundingClientRect();
-    const left = elRect.left - stripRect.left + tabScroll.scrollLeft;
-    const right = left + elRect.width;
-    const viewLeft = tabScroll.scrollLeft;
-    const viewRight = viewLeft + tabScroll.clientWidth;
-    if (left - margin < viewLeft) {
-        tabScroll.scrollLeft = Math.max(0, left - margin);
-    } else if (right + margin > viewRight) {
-        tabScroll.scrollLeft = right + margin - tabScroll.clientWidth;
+function isNarrow() { return window.innerWidth < NARROW_PX; }
+
+// ── Ordering: Pinned in the Owner's order, then one group per category, each unread first,
+//    then newest. Stored array order is the host's tab_order, which is the pinned order.
+
+function sortUnread(t) { return sticky && sticky.name === t.name ? sticky.unread : unreadTabs.has(t.name); }
+function sortTime(t) { return sticky && sticky.name === t.name ? sticky.changedAt : (t.changedAt || 0); }
+function categoryOf(t) { return categories.includes(t.category) ? t.category : GENERAL; }
+
+function matches(t, q) {
+    if (!q) return true;
+    const needle = q.toLowerCase();
+    return t.name.toLowerCase().includes(needle) || (tabContents[t.name] ?? t.content ?? '').toLowerCase().includes(needle);
+}
+
+function railGroups() {
+    const q = searchText.trim();
+    const visible = tabs.filter(t => matches(t, q) && (!unreadOnly || sortUnread(t)));
+    const pinned = visible.filter(t => t.pinned);
+    const groups = categories.map(c => ({
+        cat: c,
+        notes: visible.filter(t => !t.pinned && categoryOf(t) === c)
+            .sort((a, b) => (sortUnread(b) - sortUnread(a)) || (sortTime(b) - sortTime(a))),
+    })).filter(g => g.notes.length > 0);
+    return { pinned, groups };
+}
+
+// Notes in the order the rail shows them (folded groups skipped), for ↑/↓.
+function visibleOrder() {
+    const { pinned, groups } = railGroups();
+    const out = pinned.map(t => t.name);
+    groups.forEach(g => { if (filtering() || !folded.has(g.cat)) g.notes.forEach(t => out.push(t.name)); });
+    return out;
+}
+
+// The note at the top of the rail, for when there is no current one. Stored order is the pinned
+// order, not the rail's, so tabs[0] can sit mid-list.
+function firstRailNote() {
+    const order = visibleOrder();
+    return order.length ? order[0] : (tabs.length ? tabs[0].name : null);
+}
+
+// Search and the unread filter both open folded groups: a fold must not hide a match.
+function filtering() { return !!searchText.trim() || unreadOnly; }
+
+function setSticky(name) {
+    const t = tabs.find(x => x.name === name);
+    sticky = t ? { name, unread: unreadTabs.has(name), changedAt: t.changedAt || 0 } : null;
+}
+
+// ── Rendering ──
+
+function ago(ms) {
+    if (!ms) return '';
+    const m = Math.max(0, Math.round((Date.now() - ms) / 60000));
+    if (m < 1) return 'now';
+    if (m < 60) return m + 'm';
+    if (m < 1440) return Math.round(m / 60) + 'h';
+    return Math.round(m / 1440) + 'd';
+}
+
+// Text with the first match highlighted. User text only ever reaches the DOM as text nodes.
+function highlighted(text, q) {
+    const frag = document.createDocumentFragment();
+    const i = q ? text.toLowerCase().indexOf(q.toLowerCase()) : -1;
+    if (i < 0) { frag.appendChild(document.createTextNode(text)); return frag; }
+    frag.appendChild(document.createTextNode(text.slice(0, i)));
+    const mark = document.createElement('mark');
+    mark.textContent = text.slice(i, i + q.length);
+    frag.appendChild(mark);
+    frag.appendChild(document.createTextNode(text.slice(i + q.length)));
+    return frag;
+}
+
+function snippetText(content, q) {
+    const flat = content.replace(/\s+/g, ' ');
+    const i = flat.toLowerCase().indexOf(q.toLowerCase());
+    const start = Math.max(0, i - 14);
+    return (start > 0 ? '…' : '') + flat.slice(start, start + 70);
+}
+
+function tabAuthorText(tab) {
+    let text = `Written by ${tab.createdBy}`;
+    if (tab.updatedBy !== tab.createdBy) text += `, last edited by ${tab.updatedBy || 'you'}`;
+    return text;
+}
+
+function renderRow(t, q) {
+    const row = document.createElement('div');
+    row.className = 'row' + (unreadTabs.has(t.name) ? ' unread' : '') + (t.name === activeTab ? ' active' : '')
+        + (t.name === menuTarget ? ' menu-target' : '');
+    row.dataset.name = t.name;
+    if (t.createdBy) {
+        const agent = document.createElement('span');
+        agent.className = 'agent';
+        agent.textContent = '✦';
+        row.title = tabAuthorText(t);
+        row.appendChild(agent);
     }
+    const wrap = document.createElement('span');
+    wrap.className = 'name-wrap';
+    if (editing && editing.kind === 'note' && editing.name === t.name) {
+        wrap.appendChild(inlineEditor(t.name, commitNoteRename));
+    } else {
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.appendChild(highlighted(t.name, q));
+        wrap.appendChild(name);
+        if (q && !t.name.toLowerCase().includes(q.toLowerCase())) {
+            const snip = document.createElement('span');
+            snip.className = 'snippet';
+            snip.appendChild(highlighted(snippetText(tabContents[t.name] ?? t.content ?? '', q), q));
+            wrap.appendChild(snip);
+        }
+    }
+    row.appendChild(wrap);
+    if (unreadTabs.has(t.name)) {
+        const dot = document.createElement('span');
+        dot.className = 'dot';
+        dot.title = 'Unread';
+        row.appendChild(dot);
+    }
+    const time = document.createElement('span');
+    time.className = 'time';
+    time.textContent = ago(t.changedAt);
+    row.appendChild(time);
+
+    if (t.pinned && !q) {
+        row.draggable = true;
+        row.addEventListener('dragstart', onDragStart);
+        row.addEventListener('dragover', onDragOver);
+        row.addEventListener('dragleave', onDragLeave);
+        row.addEventListener('drop', onDrop);
+        row.addEventListener('dragend', onDragEnd);
+    }
+    row.addEventListener('click', () => { if (!editing) selectNote(t.name); });
+    row.addEventListener('dblclick', () => startNoteRename(t.name));
+    row.addEventListener('contextmenu', (e) => { e.preventDefault(); showNoteMenu(t.name, e.clientX, e.clientY); });
+    return row;
+}
+
+function renderGroupHeader(cat, count, isFolded, hasUnread) {
+    const head = document.createElement('div');
+    head.className = 'group';
+    head.dataset.cat = cat;
+    const caret = document.createElement('span');
+    caret.className = 'caret';
+    caret.textContent = isFolded ? '▸' : '▾';
+    head.appendChild(caret);
+    if (editing && editing.kind === 'category' && editing.name === cat) {
+        const input = inlineEditor(cat, commitCategoryRename);
+        input.classList.add('group-edit');
+        head.appendChild(input);
+    } else {
+        head.appendChild(document.createTextNode(cat + ' '));
+        const c = document.createElement('span');
+        c.className = 'count';
+        c.textContent = String(count);
+        head.appendChild(c);
+    }
+    if (isFolded && hasUnread) {
+        const dot = document.createElement('span');
+        dot.className = 'dot gdot';
+        dot.title = 'Unread notes inside';
+        head.appendChild(dot);
+    }
+    head.addEventListener('click', () => { if (!editing) toggleFold(cat); });
+    head.addEventListener('contextmenu', (e) => { e.preventDefault(); showCategoryMenu(cat, e.clientX, e.clientY); });
+    return head;
+}
+
+function confirmEl(text, onYes) {
+    const box = document.createElement('div');
+    box.className = 'confirm';
+    const label = document.createElement('span');
+    label.textContent = text;
+    const yes = document.createElement('button');
+    yes.className = 'btn-yes';
+    yes.textContent = 'Delete';
+    const no = document.createElement('button');
+    no.className = 'btn-no';
+    no.textContent = 'Cancel';
+    yes.addEventListener('click', (e) => { e.stopPropagation(); confirmFor = null; onYes(); renderRail(); });
+    no.addEventListener('click', (e) => { e.stopPropagation(); confirmFor = null; renderRail(); });
+    box.append(label, yes, no);
+    return box;
+}
+
+function renderRail() {
+    renderPending = false;
+    const q = searchText.trim();
+    const narrow = isNarrow();
+    const collapsed = narrow ? !overlayOpen : railCollapsed;
+    rail.classList.toggle('collapsed', collapsed);
+    rail.classList.toggle('overlay', narrow && overlayOpen);
+    document.body.classList.toggle('overlay-open', narrow && overlayOpen);
+    rail.style.width = railWidth + 'px';
+    searchBox.classList.toggle('has-text', searchText.length > 0);
+
+    const n = unreadTabs.size;
+    miniBadge.style.display = n > 0 ? '' : 'none';
+    miniBadge.textContent = n > 99 ? '99+' : String(n);
+    miniBadge.title = `${n} unread`;
+    unreadOnlyCount.textContent = n > 0 ? `(${n})` : '';
+    unreadOnlyBox.checked = unreadOnly;
+
+    const scrollTop = railList.scrollTop;
+    // Rebuilding removes a focused inline editor, and a removal can fire blur: mark it cancelled so
+    // that blur can never commit half-typed text, and carry the typing into the rebuilt editor.
+    const oldEditor = railList.querySelector('.inline-edit');
+    const pendingText = oldEditor ? oldEditor.value : null;
+    if (oldEditor) oldEditor.dataset.cancelled = '1';
+    railList.innerHTML = '';
+    const { pinned, groups } = railGroups();
+    if (pinned.length) {
+        const head = document.createElement('div');
+        head.className = 'group pinned-head';
+        head.innerHTML = `<span class="caret">${ICON.pin}</span>Pinned <span class="count">${pinned.length}</span>`;
+        railList.appendChild(head);
+        pinned.forEach(t => appendRow(t, q));
+    }
+    groups.forEach(g => {
+        const isFolded = !filtering() && folded.has(g.cat);
+        railList.appendChild(renderGroupHeader(g.cat, g.notes.length, isFolded, g.notes.some(t => unreadTabs.has(t.name))));
+        if (!isFolded) g.notes.forEach(t => appendRow(t, q));
+    });
+    if (!pinned.length && !groups.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.textContent = q ? `No note matches "${q}"${unreadOnly ? ' among unread notes' : ''}`
+            : unreadOnly ? 'No unread notes' : 'No notes yet';
+        railList.appendChild(empty);
+    }
+    railList.scrollTop = scrollTop;
+    renderTitle();
+    const newEditor = railList.querySelector('.inline-edit');
+    if (newEditor && pendingText !== null) newEditor.value = pendingText;
+    // An edit whose row is not drawn would leave every row and header click ignored; drop it.
+    if (editing && !newEditor) editing = null;
+    // A rename re-sorts by time; keep the renamed row in view rather than wherever the list lands
+    // (Owner live test of 9a4a9d5e, step 5).
+    // One try, on the render after the rename merged: a renamed note hidden by a search is not chased
+    // into view later.
+    if (followName && followDue) {
+        const row = Array.from(railList.querySelectorAll('.row')).find(r => r.dataset.name === followName);
+        if (row) row.scrollIntoView({ block: 'nearest' });
+        followName = null;
+        followDue = false;
+    }
+    focusInlineEditor();
+}
+
+function appendRow(t, q) {
+    railList.appendChild(renderRow(t, q));
+    if (confirmFor && confirmFor.kind === 'note' && confirmFor.name === t.name) {
+        railList.appendChild(confirmEl('Delete?', () => post({ type: 'delete_tab', tabName: t.name })));
+    }
+}
+
+function renderTitle() {
+    const tab = tabs.find(t => t.name === activeTab);
+    titleName.textContent = tab ? tab.name : '';
+    titleBy.textContent = tab && tab.createdBy ? `✦ ${tabAuthorText(tab)}` : '';
+    catSelect.style.visibility = tab ? '' : 'hidden';
+    catCurrent.textContent = tab ? categoryOf(tab) : GENERAL;
+}
+
+function scrollActiveRowIntoView() {
+    const row = Array.from(railList.querySelectorAll('.row')).find(r => r.dataset.name === activeTab);
+    if (row) row.scrollIntoView({ block: 'nearest' });
+}
+
+// ── Selecting a note ──
+
+function selectNote(name) {
+    switchTab(name);
+    if (isNarrow() && overlayOpen) { overlayOpen = false; renderRail(); }
 }
 
 function switchTab(name) {
@@ -495,13 +694,14 @@ function switchTab(name) {
         if (saveTimeout) { clearTimeout(saveTimeout); saveTimeout = null; saveCurrentTab(); }
     }
     activeTab = name;
+    setSticky(name);
     markActiveRead();
     editor.value = tabContents[name] || '';
     lastSavedContent[name] = tabContents[name] || '';
     saveStatus.textContent = '';
     saveStatus.className = 'save-status';
-    renderTabs();
-    editor.focus();
+    renderRail();
+    scrollActiveRowIntoView();
 }
 
 function saveCurrentTab() {
@@ -513,14 +713,10 @@ function saveCurrentTab() {
     saveStatus.className = 'save-status saving';
 
     tabContents[activeTab] = content;
+    const saved = tabs.find(t => t.name === activeTab);
+    if (saved) saved.changedAt = Date.now(); // its time; the sticky place keeps it from jumping
 
-    if (window.chrome && window.chrome.webview) {
-        window.chrome.webview.postMessage({
-            type: 'save_tab',
-            tabName: activeTab,
-            content: content
-        });
-    }
+    post({ type: 'save_tab', tabName: activeTab, content: content });
 
     lastSavedContent[activeTab] = content;
 
@@ -546,10 +742,10 @@ function saveCurrentTab() {
     }, 200);
 }
 
-// ── Add tab ──
+// ── New note ──
 
 function addNewTab() {
-    let baseName = 'New Tab';
+    let baseName = 'New Note';
     let name = baseName;
     let counter = 1;
     const existing = new Set(tabs.map(t => t.name.toLowerCase()));
@@ -557,106 +753,320 @@ function addNewTab() {
         counter++;
         name = `${baseName} ${counter}`;
     }
+    post({ type: 'add_tab', tabName: name });
+}
+document.getElementById('add-note').addEventListener('click', addNewTab);
+document.getElementById('mini-add').addEventListener('click', addNewTab);
 
-    if (window.chrome && window.chrome.webview) {
-        window.chrome.webview.postMessage({ type: 'add_tab', tabName: name });
+// ── Inline rename (notes and categories) ──
+
+function inlineEditor(value, commit) {
+    const input = document.createElement('input');
+    input.className = 'inline-edit';
+    input.type = 'text';
+    input.value = value;
+    input.dataset.original = value;
+    let done = false;
+    const finish = (save) => {
+        if (done || input.dataset.cancelled) return;
+        done = true;
+        const original = input.dataset.original;
+        const next = input.value.trim();
+        editing = null;
+        if (save) commit(original, next);
+        renderRail();
+        flushPendingRender();
+    };
+    input.addEventListener('click', (e) => e.stopPropagation());
+    input.addEventListener('blur', () => finish(true));
+    input.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+        if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+    });
+    return input;
+}
+
+function focusInlineEditor() {
+    const input = railList.querySelector('.inline-edit');
+    if (input && document.activeElement !== input) { input.focus(); input.select(); }
+}
+
+// Rename and delete act on a row in the rail, so first make sure it is drawn: its group unfolded,
+// a search that hides it cleared, the rail open. F2, Ctrl+W and Del reach notes the rail is hiding.
+function revealNote(name) {
+    const t = tabs.find(n => n.name === name);
+    if (!t) return;
+    if (searchText.trim() && !matches(t, searchText.trim())) { searchText = ''; searchInput.value = ''; }
+    if (unreadOnly && !sortUnread(t)) unreadOnly = false; // the filter hides a read note; renderRail unticks the box
+    const cat = categoryOf(t);
+    if (!t.pinned && folded.has(cat)) { folded.delete(cat); sendRailState(); }
+    if (isNarrow()) overlayOpen = true;
+    else if (railCollapsed) { railCollapsed = false; sendRailState(); }
+}
+
+function startNoteRename(name) {
+    hideMenu();
+    revealNote(name);
+    editing = { kind: 'note', name };
+    confirmFor = null;
+    renderRail();
+}
+
+function commitNoteRename(oldName, newName) {
+    if (newName && newName !== oldName && !tabs.some(t => t.name.toLowerCase() === newName.toLowerCase())) {
+        followName = newName;
+        post({ type: 'rename_tab', oldName, newName });
     }
 }
 
-tabAddBtn.addEventListener('click', addNewTab);
-
-// ── Delete tab ──
-
-function showDeleteConfirm(tabEl, name) {
-    hideDeleteConfirm();
-    deleteConfirmEl = document.createElement('div');
-    deleteConfirmEl.className = 'delete-confirm visible';
-    deleteConfirmEl.innerHTML = `Delete?
-        <button class="btn-yes">Yes</button>
-        <button class="btn-no">No</button>`;
-    deleteConfirmEl.querySelector('.btn-yes').addEventListener('click', (e) => {
-        e.stopPropagation();
-        hideDeleteConfirm();
-        if (window.chrome && window.chrome.webview) {
-            window.chrome.webview.postMessage({ type: 'delete_tab', tabName: name });
-        }
-    });
-    deleteConfirmEl.querySelector('.btn-no').addEventListener('click', (e) => {
-        e.stopPropagation();
-        hideDeleteConfirm();
-    });
-
-    // Body-appended + fixed coordinates so the tab bar's overflow clipping
-    // can't hide it (the popup used to render inside the tab, below the
-    // clipped strip — invisible). Position under the tab, clamped to the
-    // viewport so a right-edge tab doesn't push it offscreen.
-    document.body.appendChild(deleteConfirmEl);
-    const rect = tabEl.getBoundingClientRect();
-    const popupW = deleteConfirmEl.offsetWidth;
-    deleteConfirmEl.style.left = Math.max(4, Math.min(rect.left, window.innerWidth - popupW - 4)) + 'px';
-    deleteConfirmEl.style.top = (rect.bottom + 2) + 'px';
-
-    // Close on outside click; also on tab-strip scroll so the popup can't
-    // float detached from a tab that scrolled away.
-    setTimeout(() => document.addEventListener('click', hideDeleteConfirm, { once: true }), 0);
-    tabScroll.addEventListener('scroll', hideDeleteConfirm, { once: true });
+function startCategoryRename(cat) {
+    hideMenu();
+    editing = { kind: 'category', name: cat };
+    renderRail();
 }
 
-function hideDeleteConfirm() {
-    if (deleteConfirmEl) {
-        deleteConfirmEl.remove();
-        deleteConfirmEl = null;
+function commitCategoryRename(oldName, newName) {
+    if (!validCategoryName(newName) || newName === oldName || newName.toLowerCase() === GENERAL.toLowerCase()) return;
+    if (categories.some(c => c !== oldName && c.toLowerCase() === newName.toLowerCase())) return;
+    if (folded.has(oldName)) { folded.delete(oldName); folded.add(newName); sendRailState(); }
+    post({ type: 'rename_category', oldName, newName });
+}
+
+function validCategoryName(name) {
+    return !!name && name.length <= CATEGORY_MAX && !/[\u0000-\u001f\u007f]/.test(name);
+}
+
+// ── Right-click menus and the category list ──
+
+function menuItem(icon, label, onClick, opts = {}) {
+    const mi = document.createElement('div');
+    mi.className = 'mi' + (opts.cls ? ' ' + opts.cls : '') + (opts.disabled ? ' disabled' : '');
+    mi.innerHTML = `<span class="ic">${icon || ''}</span>`;
+    mi.appendChild(document.createTextNode(label));
+    if (opts.hint) {
+        const hint = document.createElement('span');
+        hint.className = opts.sub ? 'sub' : 'kbd';
+        hint.textContent = opts.hint;
+        mi.appendChild(hint);
     }
+    if (!opts.disabled) mi.addEventListener('click', (e) => { e.stopPropagation(); onClick(mi); });
+    return mi;
+}
+
+function separator() {
+    const sep = document.createElement('div');
+    sep.className = 'sep';
+    return sep;
+}
+
+function openMenu(el, x, y) {
+    hideMenu();
+    menuEl = el;
+    menuEl.className = 'menu';
+    document.body.appendChild(menuEl);
+    const w = menuEl.offsetWidth, h = menuEl.offsetHeight;
+    menuEl.style.left = Math.max(4, Math.min(x, window.innerWidth - w - 4)) + 'px';
+    menuEl.style.top = Math.max(4, Math.min(y, window.innerHeight - h - 4)) + 'px';
+    // Deferred so the click that opened the menu doesn't immediately close it.
+    setTimeout(() => {
+        if (!menuEl) return;
+        document.addEventListener('mousedown', onMenuOutside, true);
+        document.addEventListener('keydown', onMenuKeydown, true);
+    }, 0);
+}
+
+function hideMenu() {
+    if (menuEl) { menuEl.remove(); menuEl = null; }
+    catSelect.classList.remove('open');
+    document.removeEventListener('mousedown', onMenuOutside, true);
+    document.removeEventListener('keydown', onMenuKeydown, true);
+    if (menuTarget) { menuTarget = null; renderRailWhenIdle(); }
     flushPendingRender();
 }
 
-// ── Rename tab ──
-
-function startRename(tabEl, name) {
-    const label = tabEl.querySelector('.tab-label');
-    if (!label) return;
-
-    const input = document.createElement('input');
-    input.className = 'tab-label-edit';
-    input.type = 'text';
-    input.value = name;
-    input.style.width = Math.max(60, label.offsetWidth + 16) + 'px';
-
-    label.style.display = 'none';
-    tabEl.insertBefore(input, label);
-    tabEl.draggable = false;
-    input.focus();
-    input.select();
-
-    function commit() {
-        const newName = input.value.trim();
-        tabEl.draggable = true;
-        input.remove();
-        label.style.display = '';
-        flushPendingRender();
-
-        if (newName && newName !== name && !tabs.some(t => t.name.toLowerCase() === newName.toLowerCase())) {
-            if (window.chrome && window.chrome.webview) {
-                window.chrome.webview.postMessage({ type: 'rename_tab', oldName: name, newName: newName });
-            }
-        }
+// The category dropdown's own button toggles the list in its click handler; closing it here first
+// would make that click reopen it.
+function onMenuOutside(e) {
+    if (menuEl && !menuEl.contains(e.target) && !catSelect.contains(e.target)) hideMenu();
+}
+function onMenuKeydown(e) {
+    if (e.key === 'Escape' && !(e.target && e.target.classList && e.target.classList.contains('inline-edit'))) {
+        e.preventDefault(); e.stopPropagation(); hideMenu();
     }
-
-    function cancel() {
-        tabEl.draggable = true;
-        input.remove();
-        label.style.display = '';
-        flushPendingRender();
-    }
-
-    input.addEventListener('blur', commit);
-    input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
-        if (e.key === 'Escape') { e.preventDefault(); input.removeEventListener('blur', commit); cancel(); }
-    });
 }
 
-// ── Drag & drop reorder ──
+function showNoteMenu(name, x, y) {
+    const t = tabs.find(n => n.name === name);
+    if (!t) return;
+    const menu = document.createElement('div');
+    menu.appendChild(menuItem(ICON.pin, t.pinned ? 'Unpin' : 'Pin to top', () => { hideMenu(); post({ type: 'pin_tab', tabName: name, pinned: !t.pinned }); }));
+    menu.appendChild(menuItem(ICON.pen, 'Rename', () => startNoteRename(name), { hint: 'F2' }));
+    menu.appendChild(menuItem(ICON.tag, 'Category', (mi) => {
+        const r = mi.getBoundingClientRect();
+        showCategoryList(name, r.right - 4, r.top);
+    }, { hint: categoryOf(t) + ' ▸', sub: true }));
+    menu.appendChild(separator());
+    menu.appendChild(menuItem(ICON.x, 'Delete', () => askDeleteNote(name), { cls: 'danger', hint: 'Del', disabled: t.isDefault }));
+    openMenu(menu, x, y);
+    menuTarget = name;
+    renderRail();
+}
+
+function showCategoryMenu(cat, x, y) {
+    if (cat === GENERAL) return; // built in: cannot be renamed or deleted
+    const menu = document.createElement('div');
+    menu.appendChild(menuItem(ICON.pen, 'Rename category', () => startCategoryRename(cat)));
+    // The host asks in a standard message box (Owner request): an inline confirm is cut off at a
+    // normal rail width, and this delete reaches notes in every project.
+    menu.appendChild(menuItem(ICON.x, 'Delete category…', () => { hideMenu(); post({ type: 'delete_category', name: cat }); },
+        { cls: 'danger', hint: `notes → ${GENERAL}`, sub: true }));
+    openMenu(menu, x, y);
+}
+
+// The category list: "Add…" on top, then every category, General first. Used by the editor's
+// dropdown and by the right-click menu's Category entry; both file the given note.
+function showCategoryList(tabName, x, y) {
+    const t = tabs.find(n => n.name === tabName);
+    if (!t) return;
+    const keepTarget = menuTarget;
+    const menu = document.createElement('div');
+    const add = menuItem('+', 'Add…', () => {
+        const box = document.createElement('div');
+        box.className = 'mi-input';
+        const input = document.createElement('input');
+        input.className = 'inline-edit';
+        input.placeholder = 'New category name';
+        input.maxLength = CATEGORY_MAX;
+        input.addEventListener('keydown', (e) => {
+            e.stopPropagation();
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                const name = input.value.trim();
+                if (!validCategoryName(name)) return;
+                hideMenu();
+                post({ type: 'add_category', name, tabName });
+            }
+            if (e.key === 'Escape') { e.preventDefault(); box.replaceWith(add); }
+        });
+        box.appendChild(input);
+        add.replaceWith(box);
+        input.focus();
+    }, { cls: 'add' });
+    menu.appendChild(add);
+    menu.appendChild(separator());
+    const current = categoryOf(t);
+    categories.forEach(c => {
+        menu.appendChild(menuItem(c === current ? '✓' : '', c, () => {
+            hideMenu();
+            if (c !== current) post({ type: 'set_category', tabName, category: c });
+        }, { cls: c === current ? 'check' : '' }));
+    });
+    openMenu(menu, x, y);
+    menuTarget = keepTarget;
+}
+
+catSelect.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!activeTab) return;
+    if (menuEl && catSelect.classList.contains('open')) { hideMenu(); return; }
+    const r = catSelect.getBoundingClientRect();
+    showCategoryList(activeTab, r.right - 170, r.bottom + 2);
+    catSelect.classList.add('open');
+});
+
+function askDeleteNote(name) {
+    const t = tabs.find(n => n.name === name);
+    hideMenu();
+    if (!t || t.isDefault) return;
+    revealNote(name);
+    confirmFor = { kind: 'note', name };
+    renderRail();
+}
+
+// ── Folding, collapsing, resizing ──
+
+function toggleFold(cat) {
+    if (folded.has(cat)) folded.delete(cat); else folded.add(cat);
+    sendRailState();
+    renderRail();
+}
+
+// A narrow pane does not send "collapsed": its forced collapse must not overwrite the wide panes' setting.
+function sendRailState() {
+    const msg = { type: 'rail_state', width: railWidth, folded: Array.from(folded) };
+    if (!isNarrow()) msg.collapsed = railCollapsed;
+    post(msg);
+}
+
+document.getElementById('collapse-rail').addEventListener('click', () => {
+    hideMenu();
+    if (isNarrow()) overlayOpen = false;
+    else { railCollapsed = true; sendRailState(); }
+    renderRail();
+});
+document.getElementById('expand-rail').addEventListener('click', () => {
+    if (isNarrow()) overlayOpen = true;
+    else { railCollapsed = false; sendRailState(); }
+    renderRail();
+});
+scrim.addEventListener('click', () => { overlayOpen = false; renderRail(); });
+
+document.getElementById('rail-resize').addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const startX = e.clientX, startW = railWidth;
+    document.body.classList.add('resizing');
+    const move = (ev) => {
+        railWidth = Math.max(RAIL_MIN, Math.min(RAIL_MAX, startW + ev.clientX - startX));
+        rail.style.width = railWidth + 'px';
+    };
+    const up = () => {
+        document.body.classList.remove('resizing');
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        sendRailState();
+    };
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+});
+
+let wasNarrow = isNarrow();
+window.addEventListener('resize', () => {
+    hideMenu();
+    const narrow = isNarrow();
+    if (narrow !== wasNarrow) { wasNarrow = narrow; overlayOpen = false; renderRail(); }
+});
+
+// ── Search ──
+
+searchInput.addEventListener('input', () => { searchText = searchInput.value; renderRail(); });
+unreadOnlyBox.addEventListener('change', () => { unreadOnly = unreadOnlyBox.checked; renderRail(); });
+document.getElementById('search-clear').addEventListener('click', (e) => {
+    e.preventDefault();
+    searchInput.value = '';
+    searchText = '';
+    renderRail();
+    searchInput.focus();
+});
+searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); searchInput.value = ''; searchText = ''; renderRail(); }
+    else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); moveSelection(e.key === 'ArrowDown' ? 1 : -1); }
+    else if (e.key === 'Enter') { e.preventDefault(); editor.focus(); }
+});
+railList.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); moveSelection(e.key === 'ArrowDown' ? 1 : -1); }
+    else if (e.key === 'Delete' && activeTab) { e.preventDefault(); askDeleteNote(activeTab); }
+});
+
+function moveSelection(step) {
+    const order = visibleOrder();
+    if (!order.length) return;
+    const i = order.indexOf(activeTab);
+    const next = order[Math.max(0, Math.min(order.length - 1, i < 0 ? 0 : i + step))];
+    if (next && next !== activeTab) switchTab(next);
+}
+
+// ── Drag to reorder: the pinned group only ──
 
 function onDragStart(e) {
     dragSrcName = e.currentTarget.dataset.name;
@@ -665,59 +1075,42 @@ function onDragStart(e) {
     e.dataTransfer.setData('text/plain', dragSrcName);
 }
 
+function dropBefore(e, row) {
+    const rect = row.getBoundingClientRect();
+    return e.clientY < rect.top + rect.height / 2;
+}
+
 function onDragOver(e) {
+    if (!dragSrcName) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
-    const tab = e.currentTarget;
-    if (tab.dataset.name === dragSrcName) return;
-
-    // Determine left/right half
-    const rect = tab.getBoundingClientRect();
-    const midX = rect.left + rect.width / 2;
+    const row = e.currentTarget;
     clearDropIndicators();
-    if (e.clientX < midX) {
-        tab.classList.add('drag-over-left');
-    } else {
-        tab.classList.add('drag-over-right');
-    }
+    if (row.dataset.name === dragSrcName) return;
+    row.classList.add(dropBefore(e, row) ? 'drop-above' : 'drop-below');
 }
 
-function onDragLeave(e) {
-    e.currentTarget.classList.remove('drag-over-left', 'drag-over-right');
-}
+function onDragLeave(e) { e.currentTarget.classList.remove('drop-above', 'drop-below'); }
 
 function onDrop(e) {
     e.preventDefault();
-    const targetTab = e.currentTarget;
-    const targetName = targetTab.dataset.name;
+    const row = e.currentTarget;
+    const targetName = row.dataset.name;
+    const before = dropBefore(e, row);
     clearDropIndicators();
-
     if (!dragSrcName || dragSrcName === targetName) return;
-
-    const srcIdx = tabs.findIndex(t => t.name === dragSrcName);
-    const targetIdx = tabs.findIndex(t => t.name === targetName);
-    if (srcIdx < 0 || targetIdx < 0) return;
-
-    // Determine insert position based on cursor half
-    const rect = targetTab.getBoundingClientRect();
-    const midX = rect.left + rect.width / 2;
-    const insertBefore = e.clientX < midX;
-
-    // Remove source from array
-    const [moved] = tabs.splice(srcIdx, 1);
-
-    // Find new target index (may have shifted after splice)
-    let newIdx = tabs.findIndex(t => t.name === targetName);
-    if (!insertBefore) newIdx++;
-    tabs.splice(newIdx, 0, moved);
-
-    renderTabs();
-
-    // Persist new order
-    const tabNames = tabs.map(t => t.name);
-    if (window.chrome && window.chrome.webview) {
-        window.chrome.webview.postMessage({ type: 'reorder_tabs', tabNames: tabNames });
-    }
+    const pinnedNames = tabs.filter(t => t.pinned).map(t => t.name);
+    const from = pinnedNames.indexOf(dragSrcName);
+    if (from < 0 || pinnedNames.indexOf(targetName) < 0) return;
+    pinnedNames.splice(from, 1);
+    let to = pinnedNames.indexOf(targetName);
+    if (!before) to++;
+    pinnedNames.splice(to, 0, dragSrcName);
+    // Reflect the new order straight away; the host's announcement then confirms it.
+    const pinnedTabs = pinnedNames.map(n => tabs.find(t => t.name === n));
+    tabs = pinnedTabs.concat(tabs.filter(t => !t.pinned));
+    renderRail();
+    post({ type: 'reorder_tabs', tabNames: pinnedNames });
 }
 
 function onDragEnd(e) {
@@ -727,151 +1120,8 @@ function onDragEnd(e) {
 }
 
 function clearDropIndicators() {
-    tabScroll.querySelectorAll('.drag-over-left, .drag-over-right').forEach(el => {
-        el.classList.remove('drag-over-left', 'drag-over-right');
-    });
+    railList.querySelectorAll('.drop-above, .drop-below').forEach(el => el.classList.remove('drop-above', 'drop-below'));
 }
-
-// ── Scroll fade + overflow navigation ──
-
-function stripOverflows() {
-    return tabScroll.scrollWidth > tabScroll.clientWidth + 1;
-}
-
-// Single source of truth for overflow-dependent UI: the edge fades, the
-// .overflowing class that reveals ‹ › ▾, and the arrows' disabled states.
-// Stable under its own layout change: showing the buttons only narrows the
-// strip (still overflowing), and they are hidden only when the narrower
-// strip already fits.
-function updateScrollFade() {
-    const hasOverflow = stripOverflows();
-    const atStart = tabScroll.scrollLeft <= 1;
-    const atEnd = tabScroll.scrollLeft + tabScroll.clientWidth >= tabScroll.scrollWidth - 2;
-    tabBar.classList.toggle('overflowing', hasOverflow);
-    tabScroll.classList.toggle('fade-left', hasOverflow && !atStart);
-    tabScroll.classList.toggle('fade-right', hasOverflow && !atEnd);
-    navLeftBtn.classList.toggle('disabled', !hasOverflow || atStart);
-    navRightBtn.classList.toggle('disabled', !hasOverflow || atEnd);
-    if (!hasOverflow) hideTabMenu();
-}
-tabScroll.addEventListener('scroll', () => { updateScrollFade(); hideTabMenu(); });
-new ResizeObserver(updateScrollFade).observe(tabScroll);
-
-// Vertical mouse wheel scrolls the strip horizontally (its scrollbar is
-// hidden, so without this the overflowed tabs were unreachable).
-tabScroll.addEventListener('wheel', (e) => {
-    if (!stripOverflows()) return;
-    if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
-    let delta = e.deltaY;
-    if (e.deltaMode === 1) delta *= 16;                         // lines
-    else if (e.deltaMode === 2) delta *= tabScroll.clientWidth; // pages
-    tabScroll.scrollLeft += delta;
-    e.preventDefault();
-}, { passive: false });
-
-function scrollStripBy(direction) {
-    tabScroll.scrollBy({ left: direction * Math.max(40, tabScroll.clientWidth * 0.7), behavior: 'smooth' });
-}
-
-navLeftBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (!navLeftBtn.classList.contains('disabled')) scrollStripBy(-1);
-});
-navRightBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (!navRightBtn.classList.contains('disabled')) scrollStripBy(1);
-});
-
-// ── Drag auto-scroll ──
-// dragover fires repeatedly while hovering, so a small step per event gives
-// a steady scroll. The drop itself still lands on a tab via onDrop.
-const DRAG_EDGE_PX = 32;
-const DRAG_STEP_PX = 8;
-
-tabScroll.addEventListener('dragover', (e) => {
-    if (!dragSrcName) return;
-    const rect = tabScroll.getBoundingClientRect();
-    if (e.clientX < rect.left + DRAG_EDGE_PX) tabScroll.scrollLeft -= DRAG_STEP_PX;
-    else if (e.clientX > rect.right - DRAG_EDGE_PX) tabScroll.scrollLeft += DRAG_STEP_PX;
-});
-
-[[navLeftBtn, -1], [navRightBtn, 1]].forEach(([btn, dir]) => {
-    const onDragHover = () => { if (dragSrcName) tabScroll.scrollLeft += dir * DRAG_STEP_PX * 1.5; };
-    btn.addEventListener('dragenter', onDragHover);
-    btn.addEventListener('dragover', onDragHover);
-});
-
-// ── All-notes menu ──
-
-function showTabMenu() {
-    hideTabMenu();
-    hideDeleteConfirm();
-    tabMenuEl = document.createElement('div');
-    tabMenuEl.className = 'tab-menu';
-    tabs.forEach(tab => {
-        const item = document.createElement('div');
-        item.className = 'tab-menu-item' + (tab.name === activeTab ? ' active' : '');
-        item.textContent = tab.name;   // user text: never innerHTML
-        if (unreadTabs.has(tab.name)) item.classList.add('unread');
-        item.title = tab.createdBy ? `${tab.name} — ${tabAuthorText(tab)}` : tab.name;
-        item.addEventListener('click', (e) => {
-            e.stopPropagation();
-            hideTabMenu();
-            switchTab(tab.name);
-        });
-        tabMenuEl.appendChild(item);
-    });
-
-    // Body-appended + fixed, positioned under the ▾ button and clamped to
-    // the viewport (same approach as showDeleteConfirm, task d8a1d0c4).
-    document.body.appendChild(tabMenuEl);
-    navAllBtn.classList.add('open');
-    const rect = navAllBtn.getBoundingClientRect();
-    const menuW = tabMenuEl.offsetWidth;
-    const menuH = tabMenuEl.offsetHeight;
-    tabMenuEl.style.left = Math.max(4, Math.min(rect.right - menuW, window.innerWidth - menuW - 4)) + 'px';
-    tabMenuEl.style.top = Math.max(4, Math.min(rect.bottom + 2, window.innerHeight - menuH - 4)) + 'px';
-
-    // Long list: bring the active entry into the menu's own view.
-    const activeItem = tabMenuEl.querySelector('.tab-menu-item.active');
-    if (activeItem && activeItem.offsetTop + activeItem.offsetHeight > tabMenuEl.clientHeight) {
-        tabMenuEl.scrollTop = activeItem.offsetTop - tabMenuEl.clientHeight / 2;
-    }
-
-    // Deferred so the click that opened the menu doesn't immediately close it.
-    setTimeout(() => {
-        if (tabMenuEl) {
-            document.addEventListener('click', onTabMenuOutsideClick);
-            document.addEventListener('keydown', onTabMenuKeydown);
-        }
-    }, 0);
-}
-
-function hideTabMenu() {
-    if (tabMenuEl) {
-        tabMenuEl.remove();
-        tabMenuEl = null;
-    }
-    navAllBtn.classList.remove('open');
-    document.removeEventListener('click', onTabMenuOutsideClick);
-    document.removeEventListener('keydown', onTabMenuKeydown);
-    flushPendingRender();
-}
-
-function onTabMenuOutsideClick(e) {
-    if (tabMenuEl && (tabMenuEl.contains(e.target) || navAllBtn.contains(e.target))) return;
-    hideTabMenu();
-}
-
-function onTabMenuKeydown(e) {
-    if (e.key === 'Escape') { e.preventDefault(); hideTabMenu(); }
-}
-
-navAllBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (tabMenuEl) hideTabMenu(); else showTabMenu();
-});
-window.addEventListener('resize', hideTabMenu);
 
 // ── Auto-save ──
 
@@ -897,20 +1147,32 @@ document.addEventListener('keydown', (e) => {
         if (saveTimeout) { clearTimeout(saveTimeout); saveTimeout = null; }
         saveCurrentTab();
     }
-    // Ctrl+T: new tab
+    // Ctrl+T: new note
     if ((e.ctrlKey || e.metaKey) && e.key === 't') {
         e.preventDefault();
         addNewTab();
     }
-    // Ctrl+W: close current tab (if not default)
+    // Ctrl+F: search the notes
+    if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault();
+        if (isNarrow()) overlayOpen = true;
+        else if (railCollapsed) { railCollapsed = false; sendRailState(); }
+        renderRail();
+        searchInput.focus();
+        searchInput.select();
+    }
+    // F2: rename the selected note
+    if (e.key === 'F2' && activeTab) {
+        e.preventDefault();
+        startNoteRename(activeTab);
+    }
+    // Ctrl+W: delete the current note (with the confirm), unless it is the default one
     if ((e.ctrlKey || e.metaKey) && e.key === 'w') {
         if (activeTab) {
             const tab = tabs.find(t => t.name === activeTab);
             if (tab && !tab.isDefault) {
                 e.preventDefault();
-                if (window.chrome && window.chrome.webview) {
-                    window.chrome.webview.postMessage({ type: 'delete_tab', tabName: activeTab });
-                }
+                askDeleteNote(activeTab);
             }
         }
     }
@@ -924,7 +1186,16 @@ document.addEventListener('keydown', (e) => {
 function toTabModel(t) {
     return { name: t.name, content: (t.content || '').replace(/\r\n?/g, '\n'), isDefault: t.isDefault,
              createdBy: t.createdBy || null, updatedBy: t.updatedBy || null,
-             unread: !!t.unread, agentRev: Number(t.agentRev) || 0 };
+             unread: !!t.unread, agentRev: Number(t.agentRev) || 0,
+             pinned: !!t.pinned, category: t.category || GENERAL, changedAt: Number(t.changedAt) || 0 };
+}
+
+function takeCategories(data) {
+    if (Array.isArray(data.categories) && data.categories.length) categories = data.categories.slice();
+    // A folded group that no longer exists (renamed or deleted elsewhere) is forgotten.
+    let changed = false;
+    folded.forEach(c => { if (!categories.includes(c)) { folded.delete(c); changed = true; } });
+    if (changed) sendRailState();
 }
 
 function syncUnreadFromTabs() {
@@ -940,31 +1211,8 @@ function markActiveRead() {
     if (!tab) return false;
     unreadTabs.delete(activeTab);
     tab.unread = false;
-    if (window.chrome && window.chrome.webview) {
-        window.chrome.webview.postMessage({ type: 'mark_read', tabName: activeTab, rev: tab.agentRev });
-    }
+    post({ type: 'mark_read', tabName: activeTab, rev: tab.agentRev });
     return true;
-}
-
-// Tooltip for an agent-written tab. A null updatedBy means the Owner saved it last.
-function tabAuthorText(tab) {
-    let text = `Written by ${tab.createdBy}`;
-    if (tab.updatedBy !== tab.createdBy) text += `, last edited by ${tab.updatedBy || 'you'}`;
-    return text;
-}
-
-function updateUnreadIndicator() {
-    unreadTabs.forEach(n => { if (!tabs.some(t => t.name === n)) unreadTabs.delete(n); });
-    const n = unreadTabs.size;
-    navAllBtn.classList.toggle('has-unread', n > 0);
-    navAllBtn.textContent = '\u25BE';
-    if (n > 0) {
-        const count = document.createElement('span');
-        count.className = 'tab-unread-count';
-        count.textContent = n > 99 ? '99+' : String(n);
-        navAllBtn.appendChild(count);
-    }
-    navAllBtn.title = n > 0 ? `All notes (${n} unread)` : 'All notes';
 }
 
 // What an agent's append added to `base`, or null when `stored` is not an append
@@ -978,20 +1226,11 @@ function appendedSuffix(base, stored) {
     return stored.length > head.length && stored.startsWith(head) ? stored.slice(trimmed.length) : null;
 }
 
-// Live update after an agent wrote a note (task 5d94ac91). A MERGE, not a reload:
-// the Owner keeps the tab they are on, and unsaved typing in it is never replaced.
-// Every other tab, and a clean active tab, takes the stored text.
-//
-// When the active tab has unsaved typing AND an agent changed that same tab, the
-// pending save would write the Owner's buffer over the agent's change, which the
-// agent was already told had succeeded. So an append is carried INTO the buffer
-// (the Owner's text, then the agent's addition) and saved with it. Anything that is
-// not an append (a replace) cannot be merged; the Owner's text still wins, but the
-// status line says so instead of losing the agent's version silently.
-// The Owner renamed a tab in ANOTHER pane (task c133b27d). Move this page's state for
-// it to the new name before merging, so the current tab and any unsaved typing in it
-// survive instead of the merge treating the tab as deleted. A pane that already has
-// the new name (the one that did the rename) has nothing under the old one: no-op.
+// The Owner renamed a tab, in this pane or another (task c133b27d; since 9a4a9d5e the pane
+// that did the rename gets no reload and relies on this too). Move this page's state for it
+// to the new name before merging, so the current tab and any unsaved typing in it survive
+// instead of the merge treating the tab as deleted. A page with nothing under the old name,
+// or already something under the new one, has nothing to move: no-op.
 function renameLocalTab(from, to) {
     if (!from || !to || from === to || !(from in tabContents) || (to in tabContents)) return;
     tabContents[to] = tabContents[from];
@@ -1001,15 +1240,29 @@ function renameLocalTab(from, to) {
         delete lastSavedContent[from];
     }
     if (activeTab === from) activeTab = to;
+    if (sticky && sticky.name === from) sticky.name = to;
     if (pendingConflict && pendingConflict.tab === from) pendingConflict.tab = to;
 }
 
+// Live update after an agent wrote a note (task 5d94ac91), or after another pane changed
+// the list. A MERGE, not a reload: the Owner keeps the note they are on, and unsaved typing
+// in it is never replaced. Every other note, and a clean active note, takes the stored text.
+//
+// When the active note has unsaved typing AND an agent changed that same note, the
+// pending save would write the Owner's buffer over the agent's change, which the
+// agent was already told had succeeded. So an append is carried INTO the buffer
+// (the Owner's text, then the agent's addition) and saved with it. Anything that is
+// not an append (a replace) cannot be merged; the Owner's text still wins, but the
+// status line says so instead of losing the agent's version silently.
 function mergeTabs(data) {
     if (document.body.classList.contains('no-project-state')) return;
     if (data.renamed) renameLocalTab(data.renamed.from, data.renamed.to);
+    if (followName && data.renamed && data.renamed.to === followName) followDue = true;
+    takeCategories(data);
     const base = activeTab ? (lastSavedContent[activeTab] ?? '') : '';
     const activeDirty = !!activeTab && editor.value !== base;
     tabs = (data.tabs || []).map(toTabModel);
+    if (followName && !followDue && !tabs.some(t => t.name === followName)) followName = null; // a refused rename
 
     const nextContents = {};
     const nextSaved = {};
@@ -1036,10 +1289,11 @@ function mergeTabs(data) {
     lastSavedContent = nextSaved;
 
     if (!activeTab || !tabs.some(t => t.name === activeTab)) {
-        activeTab = tabs.length > 0 ? tabs[0].name : null;
+        activeTab = firstRailNote();
         editor.value = activeTab ? (tabContents[activeTab] || '') : '';
+        setSticky(activeTab);
     } else if (editor.value !== tabContents[activeTab]) {
-        // The active tab's text changed underneath (a clean tab taking the stored
+        // The active note's text changed underneath (a clean note taking the stored
         // text, or a dirty one gaining an agent's append at the end): keep caret and scroll.
         const { selectionStart, selectionEnd, scrollTop } = editor;
         editor.value = tabContents[activeTab];
@@ -1052,9 +1306,10 @@ function mergeTabs(data) {
         saveStatus.textContent = `${conflictBy} rewrote this note while you were editing; your version will be saved`;
         saveStatus.className = 'save-status conflict';
     }
+    if (confirmFor && confirmFor.kind === 'note' && !tabs.some(t => t.name === confirmFor.name)) confirmFor = null;
     syncUnreadFromTabs();
     markActiveRead();
-    renderTabsWhenIdle();
+    renderRailWhenIdle();
 }
 
 // Read state changed elsewhere (another pane read or deleted a note): refresh the
@@ -1064,34 +1319,36 @@ function applyUnreadState(data) {
     tabs.forEach(t => {
         const s = byName.get(t.name);
         // A tab the host no longer has cannot be unread; keeping its old flag would
-        // leave a dot and a dropdown count that disagree with the header badge.
+        // leave a dot and a count that disagree with the header badge.
         if (s) { t.unread = !!s.unread; t.agentRev = Number(s.agentRev) || 0; }
         else t.unread = false;
     });
     syncUnreadFromTabs();
     markActiveRead();
-    renderTabsWhenIdle();
+    renderRailWhenIdle();
 }
 
 // A live update must not tear down what the Owner is in the middle of: an inline
-// rename, the delete prompt or the all-notes menu. renderTabs rebuilds the strip and
-// closes both popups, so it waits until they are gone. The data above is already
-// merged; only the redraw is deferred.
-function renderTabsWhenIdle() {
-    if (tabScroll.querySelector('.tab-label-edit') || deleteConfirmEl || tabMenuEl) {
+// rename or an open menu. The data above is already merged; only the redraw waits
+// until they are gone. (A delete confirm needs no wait: it is redrawn from confirmFor.)
+function railBusy() { return !!railList.querySelector('.inline-edit') || !!menuEl; }
+
+function renderRailWhenIdle() {
+    if (railBusy()) {
         renderPending = true;
         return;
     }
-    renderTabs();
+    renderRail();
 }
 function flushPendingRender() {
     if (!renderPending) return;
     // Deferred so it runs after the closing click/commit has finished its own work.
-    setTimeout(() => { if (renderPending) renderTabsWhenIdle(); }, 0);
+    setTimeout(() => { if (renderPending) renderRailWhenIdle(); }, 0);
 }
 
 function loadAllTabs(data) {
     document.body.classList.remove('no-project-state');
+    takeCategories(data);
     tabs = (data.tabs || []).map(toTabModel);
 
     // Populate content cache
@@ -1106,16 +1363,30 @@ function loadAllTabs(data) {
     if (data.activeTab && tabs.some(t => t.name === data.activeTab)) {
         activeTab = data.activeTab;
     } else if (!activeTab || !tabs.some(t => t.name === activeTab)) {
-        activeTab = tabs.length > 0 ? tabs[0].name : null;
+        activeTab = firstRailNote();
     }
 
     editor.value = activeTab ? (tabContents[activeTab] || '') : '';
     saveStatus.textContent = '';
     saveStatus.className = 'save-status';
     syncUnreadFromTabs();
+    setSticky(activeTab);
     markActiveRead();
-    renderTabs();
+    confirmFor = null;
+    editing = null;
+    renderRail();
+    scrollActiveRowIntoView();
 }
+
+function applyRailState(data) {
+    railWidth = Math.max(RAIL_MIN, Math.min(RAIL_MAX, Number(data.width) || RAIL_DEFAULT));
+    railCollapsed = !!data.collapsed;
+    folded = new Set(Array.isArray(data.folded) ? data.folded : []);
+    renderRailWhenIdle();
+}
+
+// Relative times ("3m") age while the pane is open.
+setInterval(() => { if (!railBusy() && tabs.length) renderRail(); }, 60000);
 
 if (window.chrome && window.chrome.webview) {
     window.chrome.webview.postMessage({ type: 'ready' });
@@ -1134,9 +1405,12 @@ if (window.chrome && window.chrome.webview) {
             case 'unread_state':
                 applyUnreadState(data);
                 break;
+            case 'rail_state':
+                applyRailState(data);
+                break;
             case 'seen':
                 hostSeen = !!data.seen;
-                if (markActiveRead()) renderTabsWhenIdle();
+                if (markActiveRead()) renderRailWhenIdle();
                 break;
             case 'load_notes':
                 // Legacy fallback: treat as single "General" tab
@@ -1146,8 +1420,9 @@ if (window.chrome && window.chrome.webview) {
                 document.body.classList.toggle('light', !data.isDark);
                 break;
             case 'no_project':
-                hideTabMenu();
-                hideDeleteConfirm();
+                hideMenu();
+                confirmFor = null;
+                editing = null;
                 document.body.classList.add('no-project-state');
                 break;
         }

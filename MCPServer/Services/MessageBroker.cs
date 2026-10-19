@@ -349,11 +349,13 @@ namespace MultiTerminal.MCPServer.Services
         /// The one write path for agent-authored project notes: applies the ownership rules in
         /// <see cref="TaskDatabase.WriteAgentNoteTab"/> and announces a successful write on
         /// <see cref="ProjectNotesChanged"/>. <paramref name="projectKey"/> is a note-tab key as resolved by
-        /// <see cref="ProjectNoteKeys.TryResolve"/>.
+        /// <see cref="ProjectNoteKeys.TryResolve"/>. <paramref name="category"/> is optional: a name from the
+        /// shared category list, used only when the note is created; an unknown one files it under General
+        /// (task 9a4a9d5e).
         /// </summary>
-        public AgentNoteWriteResult WriteAgentProjectNote(string projectKey, string tabName, string content, string agentName, AgentNoteWriteMode mode)
+        public AgentNoteWriteResult WriteAgentProjectNote(string projectKey, string tabName, string content, string agentName, AgentNoteWriteMode mode, string category = null)
         {
-            var result = _taskDb.WriteAgentNoteTab(projectKey, tabName, content, agentName, mode);
+            var result = _taskDb.WriteAgentNoteTab(projectKey, tabName, content, agentName, mode, category);
             if (result.Succeeded)
             {
                 RaiseSafe(ProjectNotesChanged, new ProjectNotesChangedEventArgs(
@@ -389,6 +391,16 @@ namespace MultiTerminal.MCPServer.Services
             RaiseSafe(ProjectNoteReadStateChanged, new ProjectNoteReadStateChangedEventArgs(
                 TaskDatabase.CanonicalNoteTabKey(projectPath), tabsChanged: true, renamedFrom, renamedTo));
         }
+
+        /// <summary>
+        /// The shared note-category list changed: a category was added, renamed or deleted (task 9a4a9d5e).
+        /// The list is global, so EVERY Notes pane refreshes, whatever project it shows: a rename or delete
+        /// also changes the category shown on notes in other projects.
+        /// </summary>
+        public event EventHandler<EventArgs> NoteCategoriesChanged;
+
+        /// <summary>Raises <see cref="NoteCategoriesChanged"/>.</summary>
+        public void NotifyNoteCategoriesChanged() => RaiseSafe(NoteCategoriesChanged, EventArgs.Empty);
 
         /// <summary>
         /// Activity service for auto-updating terminal activity on task operations.

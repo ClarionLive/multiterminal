@@ -36,6 +36,18 @@ namespace MultiTerminal.MCPServer.Models
         public long OwnerReadRev { get; set; }
 
         /// <summary>
+        /// The Owner pinned the note to the top of the Notes rail (task 9a4a9d5e). Pinned notes keep the
+        /// Owner's drag order in <see cref="Order"/>; every other note is sorted, never ordered by hand.
+        /// </summary>
+        public bool IsPinned { get; set; }
+
+        /// <summary>The note's category id, or null for General (task 9a4a9d5e).</summary>
+        public long? CategoryId { get; set; }
+
+        /// <summary>The note's category name; <see cref="NoteCategory.General"/> when it has none.</summary>
+        public string Category { get; set; } = NoteCategory.General;
+
+        /// <summary>
         /// An agent wrote this tab after the Owner last saw it. Same rule as
         /// <c>TaskDatabase.NoteTabUnreadSql</c>: an Owner save clears <see cref="UpdatedBy"/>, which also
         /// marks the tab read.
@@ -43,6 +55,21 @@ namespace MultiTerminal.MCPServer.Models
         public bool IsUnread => !string.IsNullOrEmpty(UpdatedBy) && AgentRev > OwnerReadRev;
 
         public bool IsAgentWritten => !string.IsNullOrEmpty(CreatedBy);
+    }
+
+    /// <summary>
+    /// A note category (task 9a4a9d5e). One list shared by every project, so the same names mean the same
+    /// thing everywhere. <see cref="General"/> is built in: never stored, never renamed or deleted, and
+    /// what a note with no category shows as.
+    /// </summary>
+    public sealed class NoteCategory
+    {
+        public const string General = "General";
+
+        /// <summary>The stored id; null for <see cref="General"/>.</summary>
+        public long? Id { get; init; }
+
+        public string Name { get; init; }
     }
 
     /// <summary>How an agent's note write treats an existing tab of the same name.</summary>
@@ -100,6 +127,15 @@ namespace MultiTerminal.MCPServer.Models
 
         /// <summary>Why a write was refused (null otherwise).</summary>
         public string Reason { get; init; }
+
+        /// <summary>The category the note is filed under after the write (task 9a4a9d5e).</summary>
+        public string Category { get; init; }
+
+        /// <summary>
+        /// Set when the requested category was not used: unknown (the note went to General), or the note
+        /// already existed and keeps the category it has. Null when the request was honoured or omitted.
+        /// </summary>
+        public string CategoryNote { get; init; }
 
         public bool Succeeded => Outcome != AgentNoteWriteOutcome.Refused;
 
