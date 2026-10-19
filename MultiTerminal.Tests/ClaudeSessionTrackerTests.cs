@@ -136,6 +136,97 @@ namespace MultiTerminal.Tests
             Assert.Null(t.SessionId);
         }
 
+        // ── Task 7d20e94c item 1: TryAdopt reports a CHANGE, which is what TerminalDocument raises
+        // ClaudeSessionAdopted on. The raise itself (and its BeginInvoke) is in the WebView2-backed
+        // document and is build + review only; these pin the decision it raises on.
+
+        [Fact]
+        public void A_new_id_reports_a_change_once_and_its_repeats_do_not()
+        {
+            var t = new ClaudeSessionTracker();
+            t.BeginLaunch(LaunchMs);
+
+            Assert.True(t.TryAdopt(t.Generation, "s1", LaunchMs + 10, true, out bool changed, out string previous));
+            Assert.True(changed);
+            Assert.Null(previous);
+
+            // The statusline re-reports the same id on every refresh; same id in another case is the same session.
+            Assert.True(t.TryAdopt(t.Generation, "s1", LaunchMs + 20, true, out changed, out previous));
+            Assert.False(changed);
+            Assert.Equal("s1", previous);
+            Assert.True(t.TryAdopt(t.Generation, "S1", LaunchMs + 30, true, out changed, out _));
+            Assert.False(changed);
+        }
+
+        [Fact]
+        public void A_forked_id_reports_a_change_with_the_previous_id()
+        {
+            var t = new ClaudeSessionTracker();
+            t.BeginLaunch(LaunchMs, "old-session");
+            Assert.True(t.TryAdopt(t.Generation, "old-session", LaunchMs + 10, true, out bool changed, out _));
+            Assert.True(changed);
+
+            Assert.True(t.TryAdopt(t.Generation, "forked", LaunchMs + 20, true, out changed, out string previous));
+            Assert.True(changed);
+            Assert.Equal("old-session", previous);
+            Assert.Equal("forked", t.SessionId);
+        }
+
+        [Fact]
+        public void A_fenced_off_adoption_reports_no_change()
+        {
+            var t = new ClaudeSessionTracker();
+            t.BeginLaunch(LaunchMs);
+            long observed = t.Generation;
+            Assert.True(t.TryAdopt(observed, "s1", LaunchMs + 10, true, out _, out _));
+
+            // A different id that every fence refuses, one fence at a time: stale generation,
+            // previous process's file, foreign file, no timestamp, ended launch.
+            t.BeginLaunch(LaunchMs + 100);
+            Assert.True(t.TryAdopt(t.Generation, "s1", LaunchMs + 110, true, out _, out _));
+            Assert.False(t.TryAdopt(observed, "s2", LaunchMs + 200, true, out bool changed, out string previous));
+            Assert.False(changed);
+            Assert.Null(previous);
+            Assert.False(t.TryAdopt(t.Generation, "s2", LaunchMs + 50, true, out changed, out _));
+            Assert.False(changed);
+            Assert.False(t.TryAdopt(t.Generation, "s2", LaunchMs + 200, false, out changed, out _));
+            Assert.False(changed);
+            Assert.False(t.TryAdopt(t.Generation, "s2", null, true, out changed, out _));
+            Assert.False(changed);
+            t.EndLaunch();
+            Assert.False(t.TryAdopt(t.Generation, "s2", LaunchMs + 200, true, out changed, out _));
+            Assert.False(changed);
+        }
+
+        [Fact]
+        public void A_relaunch_reports_the_same_id_as_a_change_with_no_previous()
+        {
+            // A resume of the session the pane last ran is a new launch: subscribers must hear it again.
+            var t = new ClaudeSessionTracker();
+            t.BeginLaunch(LaunchMs);
+            Assert.True(t.TryAdopt(t.Generation, "s1", LaunchMs + 10, true, out _, out _));
+
+            t.BeginLaunch(LaunchMs + 100, "s1");
+            Assert.True(t.TryAdopt(t.Generation, "s1", LaunchMs + 110, true, out bool changed, out string previous));
+            Assert.True(changed);
+            Assert.Null(previous);
+        }
+
+        [Theory]
+        [InlineData(null, PaneLaunchKind.PowerShell)]
+        [InlineData("   ", PaneLaunchKind.PowerShell)]
+        [InlineData("claude --mcp-config 'x.json' --dangerously-skip-permissions; exit", PaneLaunchKind.Claude)]
+        [InlineData("claude; exit", PaneLaunchKind.Claude)]
+        [InlineData("\"C:\\Tools\\claude.exe\" -r 3f2504e0-4f89-11d3-9a0c-0305e82c3301", PaneLaunchKind.Claude)]
+        [InlineData("$env:MULTITERMINAL_CODEX_BIN = 'codex'; & 'C:\\x\\launch.ps1'; exit", PaneLaunchKind.Codex)]
+        [InlineData("codex --yolo", PaneLaunchKind.Codex)]
+        [InlineData("claudette --help", PaneLaunchKind.Unknown)]
+        [InlineData("npm run dev", PaneLaunchKind.Unknown)]
+        public void Launch_kind_is_derived_from_the_auto_run_command(string command, string expected)
+        {
+            Assert.Equal(expected, PaneLaunchKind.FromAutoRunCommand(command));
+        }
+
         [Fact]
         public void An_empty_session_id_is_never_adopted()
         {

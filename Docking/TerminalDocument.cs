@@ -280,6 +280,76 @@ namespace MultiTerminal.Docking
         public event EventHandler TerminalStartFailed;
 
         /// <summary>
+        /// Raised once per launch by <see cref="StartTerminal"/> (task 7d20e94c item 1), which every pane
+        /// launch goes through. Raised only after <c>_terminal.Start</c> returned: a Start that throws
+        /// releases the launch and raises nothing. Returning is NOT proof a process runs:
+        /// <c>TerminalControl</c> catches its own start failures, so a launch refused over its
+        /// Claude profile is followed by <see cref="TerminalExited"/> and <see cref="TerminalStartFailed"/>.
+        /// Raised synchronously on the thread that called StartTerminal (the UI thread for every current
+        /// caller), after the launch identity was adopted. A throwing subscriber is logged and swallowed,
+        /// so it cannot fail a launch that has already started. The same args stay readable as
+        /// <see cref="LastLaunchArgs"/>.
+        /// </summary>
+        public event EventHandler<PaneLaunchBeganEventArgs> LaunchBegan;
+
+        /// <summary>
+        /// Raised when <see cref="CurrentClaudeSessionId"/> changes to a new non-null id (task 7d20e94c
+        /// item 1): the first adoption of each launch, and each later different id (a fork, <c>/clear</c>,
+        /// a switched session). Not raised for the statusline re-reporting the same id, nor when the id is
+        /// cleared (launch end). The statusline poll adopts on a thread-pool timer; the event is POSTED to
+        /// the UI thread with BeginInvoke (the doc's convention for timer-originated work), in adoption
+        /// order. Because it is posted, the session may already have ended or changed again by delivery;
+        /// a subscriber that needs liveness re-reads <see cref="CurrentClaudeSessionId"/>.
+        /// </summary>
+        public event EventHandler<ClaudeSessionAdoptedEventArgs> ClaudeSessionAdopted;
+
+        /// <summary>
+        /// The args of this pane's most recent <see cref="LaunchBegan"/>, or <c>null</c> before its first
+        /// launch. Not cleared when the launch ends, so it describes the LAST launch, not a running one.
+        /// </summary>
+        public PaneLaunchBeganEventArgs LastLaunchArgs { get; private set; }
+
+        private void RaiseLaunchBegan(PaneLaunchBeganEventArgs args)
+        {
+            try
+            {
+                LaunchBegan?.Invoke(this, args);
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("TerminalDocument", $"LaunchBegan subscriber threw for DocId='{_docId}': {ex.Message}");
+            }
+        }
+
+        /// <summary>Posts <see cref="ClaudeSessionAdopted"/> to the UI thread from the statusline poll.</summary>
+        private void PostClaudeSessionAdopted(string sessionId, string previousSessionId)
+        {
+            var args = new ClaudeSessionAdoptedEventArgs(_docId, sessionId, previousSessionId);
+            _debugLogService?.Info("TerminalDocument", $"DocId='{_docId}' Claude session '{previousSessionId ?? ""}' → '{sessionId}' (task 7d20e94c).");
+            try
+            {
+                if (!IsHandleCreated || IsDisposed) return;
+                BeginInvoke(new Action(() =>
+                {
+                    if (IsDisposed) return;
+                    try
+                    {
+                        ClaudeSessionAdopted?.Invoke(this, args);
+                    }
+                    catch (Exception ex)
+                    {
+                        _debugLogService?.Error("TerminalDocument", $"ClaudeSessionAdopted subscriber threw for DocId='{_docId}': {ex.Message}");
+                    }
+                }));
+            }
+            catch (Exception ex) when (ex is InvalidOperationException || ex is ObjectDisposedException)
+            {
+                // The handle went away between the check and the post: the pane is closing.
+                _debugLogService?.Warning("TerminalDocument", $"ClaudeSessionAdopted not posted for DocId='{_docId}': {ex.Message}");
+            }
+        }
+
+        /// <summary>
         /// Event fired when project.json is created or modified in the terminal's working directory.
         /// </summary>
         public event EventHandler ProjectFileChanged;
@@ -1499,6 +1569,9 @@ namespace MultiTerminal.Docking
             // A resume reserves its session id in the same step (pipeline Run 1), so the pane counts as
             // holding it from the first instant (see PendingResumeSessionId).
             _claudeSession.BeginLaunch(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), resumeSessionId);
+            // The tracker's normalised form (trimmed, blank => null), captured before any statusline tick
+            // could drop it, for LaunchBegan below (task 7d20e94c item 1).
+            string launchResumeSessionId = _claudeSession.PendingResumeSessionId;
 
             // Derive project name for tab title: use project lookup, or fall back to folder name
             if (!string.IsNullOrEmpty(projectId) && _messageBroker != null)
@@ -1578,6 +1651,20 @@ namespace MultiTerminal.Docking
                 throw;
             }
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"_terminal.Start returned");
+
+            // LaunchBegan (task 7d20e94c item 1) only AFTER Start returned: a Start that throws took the
+            // catch above, so a failed launch never announces itself and needs no LaunchFailed partner.
+            // The name is the identity AdoptLaunchIdentity just settled (null when none/Unassigned).
+            var launchArgs = new PaneLaunchBeganEventArgs(
+                _docId,
+                _originalAgentName,
+                workingDirectory,
+                string.IsNullOrEmpty(projectId) ? null : projectId,
+                PaneLaunchKind.FromAutoRunCommand(autoRunCommand),
+                launchResumeSessionId,
+                string.IsNullOrEmpty(spawnerName) ? null : spawnerName);
+            LastLaunchArgs = launchArgs;
+            RaiseLaunchBegan(launchArgs);
 
             // Update status bar after terminal starts
             UpdateStatusBar();
@@ -3537,7 +3624,11 @@ namespace MultiTerminal.Docking
                             ? tsVal : (long?)null;
                         bool ownPaneFile = !string.IsNullOrEmpty(_docId)
                             && Path.GetFileName(filePath).EndsWith("-" + _docId + ".json", StringComparison.OrdinalIgnoreCase);
-                        _claudeSession.TryAdopt(claudeLaunchGen, tokenSessionId, fileTimestampMs, ownPaneFile);
+                        if (_claudeSession.TryAdopt(claudeLaunchGen, tokenSessionId, fileTimestampMs, ownPaneFile, out bool sessionChanged, out string previousSessionId)
+                            && sessionChanged)
+                        {
+                            PostClaudeSessionAdopted(tokenSessionId, previousSessionId);
+                        }
                     }
                     // Read account-level quota from the shared file so all terminals
                     // show identical 5h/7d stats regardless of which one was updated last.
@@ -4358,17 +4449,134 @@ namespace MultiTerminal.Docking
         /// own, and it was written no earlier than the launch started. Returns whether it adopted.
         /// </summary>
         public bool TryAdopt(long observedGeneration, string sessionId, long? fileTimestampMs, bool ownPaneFile)
+            => TryAdopt(observedGeneration, sessionId, fileTimestampMs, ownPaneFile, out _, out _);
+
+        /// <summary>
+        /// <see cref="TryAdopt(long, string, long?, bool)"/>, also reporting whether the adoption CHANGED
+        /// the running session (task 7d20e94c item 1). <paramref name="changed"/> is true only when it
+        /// adopted AND the id differs (ordinal-ignore-case, the comparison the resume reservation uses)
+        /// from the one held just before; <paramref name="previousSessionId"/> is that id, which is
+        /// <c>null</c> for the first adoption of a launch because <see cref="BeginLaunch"/> forgets the
+        /// last launch's session. The statusline re-reports the same id on every refresh, so this is
+        /// what lets the pane raise <see cref="TerminalDocument.ClaudeSessionAdopted"/> once per change.
+        /// Both outs are decided under the same lock as the write, so two racing ticks cannot both see
+        /// one change.
+        /// </summary>
+        public bool TryAdopt(long observedGeneration, string sessionId, long? fileTimestampMs, bool ownPaneFile, out bool changed, out string previousSessionId)
         {
+            changed = false;
+            previousSessionId = null;
             if (string.IsNullOrEmpty(sessionId) || !ownPaneFile || fileTimestampMs == null) return false;
             lock (_gate)
             {
                 if (observedGeneration != _generation || !_launchActive || fileTimestampMs.Value < _launchStartedMs)
                     return false;
+                previousSessionId = _sessionId;
+                changed = !string.Equals(previousSessionId, sessionId, StringComparison.OrdinalIgnoreCase);
                 _sessionId = sessionId;
                 if (_pendingResumeId != null && !string.Equals(_pendingResumeId, sessionId, StringComparison.OrdinalIgnoreCase))
                     _pendingResumeId = null;
                 return true;
             }
+        }
+    }
+
+    /// <summary>
+    /// The CLI a pane launch runs (task 7d20e94c item 1), derived from the launch's auto-run command
+    /// because StartTerminal receives no kind. Values: <see cref="Claude"/>, <see cref="Codex"/>,
+    /// <see cref="PowerShell"/> (no auto-run command: a plain shell), <see cref="Unknown"/>.
+    /// </summary>
+    public static class PaneLaunchKind
+    {
+        public const string Claude = "claude";
+        public const string Codex = "codex";
+        public const string PowerShell = "powershell";
+        public const string Unknown = "unknown";
+
+        /// <summary>
+        /// Classifies an auto-run command. Claude: the first token (quotes stripped) is <c>claude</c> or
+        /// <c>claude.exe</c>, bare or as a path's file name, which is how
+        /// <c>LaunchCommandBuilder.BuildClaudeCommand</c> starts its command. Codex: the command sets
+        /// <c>MULTITERMINAL_CODEX_BIN</c> (<c>BuildCodexCommand</c>'s launcher) or its first token is
+        /// <c>codex</c>/<c>codex.exe</c>. Null or blank: a plain shell. Anything else: unknown, never a
+        /// guess.
+        /// </summary>
+        public static string FromAutoRunCommand(string autoRunCommand)
+        {
+            if (string.IsNullOrWhiteSpace(autoRunCommand)) return PowerShell;
+            string trimmed = autoRunCommand.TrimStart();
+            if (trimmed.IndexOf("MULTITERMINAL_CODEX_BIN", StringComparison.OrdinalIgnoreCase) >= 0) return Codex;
+
+            int end = 0;
+            while (end < trimmed.Length && !char.IsWhiteSpace(trimmed[end]) && trimmed[end] != ';') end++;
+            string token = trimmed.Substring(0, end).Trim('"', '\'');
+            string name;
+            try { name = System.IO.Path.GetFileName(token); }
+            catch (ArgumentException) { return Unknown; }
+
+            if (string.Equals(name, "claude", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "claude.exe", StringComparison.OrdinalIgnoreCase))
+                return Claude;
+            if (string.Equals(name, "codex", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "codex.exe", StringComparison.OrdinalIgnoreCase))
+                return Codex;
+            return Unknown;
+        }
+    }
+
+    /// <summary>Args of <see cref="TerminalDocument.LaunchBegan"/> (task 7d20e94c item 1). Immutable.</summary>
+    public sealed class PaneLaunchBeganEventArgs : EventArgs
+    {
+        /// <summary>The pane's DocId.</summary>
+        public string DocId { get; }
+
+        /// <summary>The launch identity the pane adopted; <c>null</c> when the launch had no name (or the Unassigned placeholder).</summary>
+        public string TerminalName { get; }
+
+        /// <summary>The working directory passed to StartTerminal, as given (may be null).</summary>
+        public string WorkingDirectory { get; }
+
+        /// <summary>The project id the launch carried; <c>null</c> for a launch with no project (e.g. "Launch as...").</summary>
+        public string ProjectId { get; }
+
+        /// <summary>A <see cref="PaneLaunchKind"/> value.</summary>
+        public string Kind { get; }
+
+        /// <summary>The session this launch resumes (trimmed), or <c>null</c> for a new session.</summary>
+        public string ResumeSessionId { get; }
+
+        /// <summary>The spawning agent's name for a helper pane, or <c>null</c>.</summary>
+        public string SpawnerName { get; }
+
+        public PaneLaunchBeganEventArgs(string docId, string terminalName, string workingDirectory, string projectId, string kind, string resumeSessionId, string spawnerName)
+        {
+            DocId = docId;
+            TerminalName = terminalName;
+            WorkingDirectory = workingDirectory;
+            ProjectId = projectId;
+            Kind = kind;
+            ResumeSessionId = resumeSessionId;
+            SpawnerName = spawnerName;
+        }
+    }
+
+    /// <summary>Args of <see cref="TerminalDocument.ClaudeSessionAdopted"/> (task 7d20e94c item 1). Immutable.</summary>
+    public sealed class ClaudeSessionAdoptedEventArgs : EventArgs
+    {
+        /// <summary>The pane's DocId.</summary>
+        public string DocId { get; }
+
+        /// <summary>The newly adopted session id (never null or empty).</summary>
+        public string SessionId { get; }
+
+        /// <summary>The id held just before within the same launch; <c>null</c> for a launch's first adoption.</summary>
+        public string PreviousSessionId { get; }
+
+        public ClaudeSessionAdoptedEventArgs(string docId, string sessionId, string previousSessionId)
+        {
+            DocId = docId;
+            SessionId = sessionId;
+            PreviousSessionId = previousSessionId;
         }
     }
 
