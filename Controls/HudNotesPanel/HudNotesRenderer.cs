@@ -674,11 +674,12 @@ namespace MultiTerminal.Controls
             if (string.IsNullOrEmpty(_projectPath) || _broker?.TaskDb == null) return;
             try
             {
+                // No full reload for this pane (Owner live test of 9a4a9d5e, step 5): it reselected and
+                // scrolled the rail to the top, and replaced the page state the rename merge needs to carry
+                // the selection and typing across. The announcement brings this pane the same merge as
+                // every other pane.
                 if (_broker.TaskDb.RenameNoteTab(_projectPath, oldName, newName))
-                {
-                    LoadAllTabs();
-                    _broker.NotifyProjectNoteTabsChanged(_projectPath, oldName, newName); // other panes take the new name
-                }
+                    _broker.NotifyProjectNoteTabsChanged(_projectPath, oldName, newName);
             }
             catch { }
         }
@@ -765,12 +766,29 @@ namespace MultiTerminal.Controls
             catch { }
         }
 
+        /// <summary>
+        /// Asks the Owner to confirm deleting a category; true to go ahead. A standard message box (Owner
+        /// request, live test of 9a4a9d5e): the inline confirm was cut off at a normal rail width, and the
+        /// delete reaches notes in every project. Tests swap it.
+        /// </summary>
+        internal Func<string, bool> ConfirmCategoryDelete { get; set; }
+
+        private bool AskCategoryDelete(string name)
+        {
+            string text = $"Delete the category \"{name}\"?\n\nIts notes move to {NoteCategory.General}, in every project.";
+            return MessageBox.Show(SeenWindowFor(this), text, "Delete category", MessageBoxButtons.YesNo,
+                       MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+        }
+
         internal void DeleteCategory(string name)
         {
-            if (_broker?.TaskDb == null) return;
+            if (_broker?.TaskDb == null || string.IsNullOrWhiteSpace(name)) return;
             try
             {
-                if (_broker.TaskDb.DeleteNoteCategory(name))
+                var category = _broker.TaskDb.FindNoteCategory(name);
+                if (category?.Id == null) return; // General, or gone already: nothing to ask about
+                if (!(ConfirmCategoryDelete ?? AskCategoryDelete)(category.Name)) return;
+                if (_broker.TaskDb.DeleteNoteCategory(category.Name))
                     _broker.NotifyNoteCategoriesChanged();
             }
             catch { }

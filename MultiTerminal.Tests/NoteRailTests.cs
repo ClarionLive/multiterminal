@@ -341,8 +341,59 @@ namespace MultiTerminal.Tests
             Assert.Equal("Live tests", LastTab(postedThere, "There").GetProperty("category").GetString());
 
             postedThere.Clear();
+            here.ConfirmCategoryDelete = _ => true; // the Owner answers Yes
             here.DeleteCategory("Live tests");
             Assert.Equal("General", LastTab(postedThere, "There").GetProperty("category").GetString());
+        }
+
+        /// <summary>
+        /// Owner live test, step 5: a rename sent this pane a full reload before the rename merge, which
+        /// reselected and scrolled the rail to the top and left the merge nothing to carry across. The
+        /// acting pane now gets only the merge, with the old and new names, like every other pane.
+        /// </summary>
+        [Fact]
+        public void A_rename_reaches_the_acting_pane_as_a_merge_not_a_reload()
+        {
+            using var broker = new MultiTerminal.MCPServer.Services.MessageBroker();
+            broker.TaskDb.SaveNoteTab(_project, "Old", "x");
+            var posted = new System.Collections.Generic.List<string>();
+            using var pane = Pane(broker, _project, posted);
+            posted.Clear();
+
+            pane.RenameTab("Old", "New");
+
+            var types = posted.Select(j => System.Text.Json.JsonDocument.Parse(j).RootElement.GetProperty("type").GetString()).ToList();
+            Assert.DoesNotContain("load_all_tabs", types);
+            var merge = Merges(posted).Single();
+            Assert.Equal("Old", merge.GetProperty("renamed").GetProperty("from").GetString());
+            Assert.Equal("New", merge.GetProperty("renamed").GetProperty("to").GetString());
+        }
+
+        /// <summary>
+        /// Owner live test, step 7: deleting a category asks first (a message box in the app), naming the
+        /// category; No keeps it. General is built in and is never offered.
+        /// </summary>
+        [Fact]
+        public void Deleting_a_category_asks_first_and_No_keeps_it()
+        {
+            using var broker = new MultiTerminal.MCPServer.Services.MessageBroker();
+            broker.TaskDb.AddNoteCategory("Live test", out _);
+            using var pane = new MultiTerminal.Controls.HudNotesRenderer();
+            pane.Initialize(broker);
+            pane.SetProject(_project);
+            var asked = new System.Collections.Generic.List<string>();
+
+            pane.ConfirmCategoryDelete = name => { asked.Add(name); return false; };
+            pane.DeleteCategory("live test");
+            Assert.Equal(new[] { "Live test" }, asked);
+            Assert.Contains(broker.TaskDb.ListNoteCategories(), c => c.Name == "Live test");
+
+            pane.DeleteCategory("General");
+            Assert.Single(asked); // never asked about General
+
+            pane.ConfirmCategoryDelete = name => { asked.Add(name); return true; };
+            pane.DeleteCategory("Live test");
+            Assert.DoesNotContain(broker.TaskDb.ListNoteCategories(), c => c.Name == "Live test");
         }
 
         [Fact]

@@ -113,6 +113,17 @@ body.light {
     cursor: pointer; user-select: none; font-size: 14px;
 }
 .icon-btn:hover { background: var(--bg-tab-hover); color: var(--accent); }
+/* "Unread only" filter under the search (Owner request, live test of 9a4a9d5e) */
+.unread-filter {
+    display: flex; align-items: center; gap: 6px;
+    padding: 0 8px 6px 9px;
+    border-bottom: 1px solid var(--border);
+    font-size: 10px; color: var(--text-secondary);
+    cursor: pointer; user-select: none;
+}
+.unread-filter input { margin: 0; accent-color: var(--accent); cursor: pointer; }
+.unread-filter .n { color: var(--accent); font-weight: 600; }
+.rail-top { border-bottom: none; }
 
 .rail-list { flex: 1; overflow-y: auto; padding: 2px 0 6px; outline: none; }
 .rail-list::-webkit-scrollbar { width: 4px; }
@@ -312,6 +323,9 @@ body.no-project-state .no-project { display: flex; }
             <span class="icon-btn" id="add-note" title="New note (Ctrl+T)">+</span>
             <span class="icon-btn" id="collapse-rail" title="Hide notes list">&laquo;</span>
         </div>
+        <label class="unread-filter" title="Show only notes an agent changed since you last read them">
+            <input type="checkbox" id="unread-only"> Unread only <span class="n" id="unread-only-count"></span>
+        </label>
         <div class="rail-list" id="rail-list" tabindex="0"></div>
         <div class="resize" id="rail-resize" title="Drag to resize"></div>
         <span class="icon-btn mini" id="expand-rail" title="Show notes">&raquo;</span>
@@ -342,6 +356,8 @@ const titleName = document.getElementById('title-name');
 const titleBy = document.getElementById('title-by');
 const catSelect = document.getElementById('cat-select');
 const catCurrent = document.getElementById('cat-current');
+const unreadOnlyBox = document.getElementById('unread-only');
+const unreadOnlyCount = document.getElementById('unread-only-count');
 
 const ICON = {
     pin: '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M10.5 1.5l4 4-1.4 1.4-.8-.4-2.6 2.6.4 3.3-1.4 1.4-2.9-2.9-3.6 3.6-.7-.7 3.6-3.6L2.2 7.3l1.4-1.4 3.3.4 2.6-2.6-.4-.8z"/></svg>',
@@ -382,6 +398,9 @@ let menuTarget = null;       // the row name a menu acts on
 let confirmFor = null;       // {kind:'note'|'category', name}
 let editing = null;          // {kind:'note'|'category', name}
 let dragSrcName = null;
+let unreadOnly = false;      // the "Unread only" filter (this pane, this session)
+let followName = null;       // a note this pane just renamed: keep its row in view once the rename lands
+let followDue = false;       // the rename has merged, so the next render makes the one attempt
 
 function post(msg) {
     if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(msg);
@@ -404,7 +423,7 @@ function matches(t, q) {
 
 function railGroups() {
     const q = searchText.trim();
-    const visible = tabs.filter(t => matches(t, q));
+    const visible = tabs.filter(t => matches(t, q) && (!unreadOnly || sortUnread(t)));
     const pinned = visible.filter(t => t.pinned);
     const groups = categories.map(c => ({
         cat: c,
@@ -418,7 +437,7 @@ function railGroups() {
 function visibleOrder() {
     const { pinned, groups } = railGroups();
     const out = pinned.map(t => t.name);
-    groups.forEach(g => { if (searchText.trim() || !folded.has(g.cat)) g.notes.forEach(t => out.push(t.name)); });
+    groups.forEach(g => { if (filtering() || !folded.has(g.cat)) g.notes.forEach(t => out.push(t.name)); });
     return out;
 }
 
@@ -428,6 +447,9 @@ function firstRailNote() {
     const order = visibleOrder();
     return order.length ? order[0] : (tabs.length ? tabs[0].name : null);
 }
+
+// Search and the unread filter both open folded groups: a fold must not hide a match.
+function filtering() { return !!searchText.trim() || unreadOnly; }
 
 function setSticky(name) {
     const t = tabs.find(x => x.name === name);
@@ -587,6 +609,8 @@ function renderRail() {
     miniBadge.style.display = n > 0 ? '' : 'none';
     miniBadge.textContent = n > 99 ? '99+' : String(n);
     miniBadge.title = `${n} unread`;
+    unreadOnlyCount.textContent = n > 0 ? `(${n})` : '';
+    unreadOnlyBox.checked = unreadOnly;
 
     const scrollTop = railList.scrollTop;
     // Rebuilding removes a focused inline editor, and a removal can fire blur: mark it cancelled so
@@ -604,17 +628,15 @@ function renderRail() {
         pinned.forEach(t => appendRow(t, q));
     }
     groups.forEach(g => {
-        const isFolded = !q && folded.has(g.cat);
+        const isFolded = !filtering() && folded.has(g.cat);
         railList.appendChild(renderGroupHeader(g.cat, g.notes.length, isFolded, g.notes.some(t => unreadTabs.has(t.name))));
-        if (confirmFor && confirmFor.kind === 'category' && confirmFor.name === g.cat) {
-            railList.appendChild(confirmEl(`Delete category? Its notes move to ${GENERAL}.`, () => post({ type: 'delete_category', name: g.cat })));
-        }
         if (!isFolded) g.notes.forEach(t => appendRow(t, q));
     });
     if (!pinned.length && !groups.length) {
         const empty = document.createElement('div');
         empty.className = 'empty';
-        empty.textContent = q ? `No note matches "${q}"` : 'No notes yet';
+        empty.textContent = q ? `No note matches "${q}"${unreadOnly ? ' among unread notes' : ''}`
+            : unreadOnly ? 'No unread notes' : 'No notes yet';
         railList.appendChild(empty);
     }
     railList.scrollTop = scrollTop;
@@ -623,6 +645,16 @@ function renderRail() {
     if (newEditor && pendingText !== null) newEditor.value = pendingText;
     // An edit whose row is not drawn would leave every row and header click ignored; drop it.
     if (editing && !newEditor) editing = null;
+    // A rename re-sorts by time; keep the renamed row in view rather than wherever the list lands
+    // (Owner live test of 9a4a9d5e, step 5).
+    // One try, on the render after the rename merged: a renamed note hidden by a search is not chased
+    // into view later.
+    if (followName && followDue) {
+        const row = Array.from(railList.querySelectorAll('.row')).find(r => r.dataset.name === followName);
+        if (row) row.scrollIntoView({ block: 'nearest' });
+        followName = null;
+        followDue = false;
+    }
     focusInlineEditor();
 }
 
@@ -766,6 +798,7 @@ function revealNote(name) {
     const t = tabs.find(n => n.name === name);
     if (!t) return;
     if (searchText.trim() && !matches(t, searchText.trim())) { searchText = ''; searchInput.value = ''; }
+    if (unreadOnly && !sortUnread(t)) unreadOnly = false; // the filter hides a read note; renderRail unticks the box
     const cat = categoryOf(t);
     if (!t.pinned && folded.has(cat)) { folded.delete(cat); sendRailState(); }
     if (isNarrow()) overlayOpen = true;
@@ -782,6 +815,7 @@ function startNoteRename(name) {
 
 function commitNoteRename(oldName, newName) {
     if (newName && newName !== oldName && !tabs.some(t => t.name.toLowerCase() === newName.toLowerCase())) {
+        followName = newName;
         post({ type: 'rename_tab', oldName, newName });
     }
 }
@@ -883,7 +917,9 @@ function showCategoryMenu(cat, x, y) {
     if (cat === GENERAL) return; // built in: cannot be renamed or deleted
     const menu = document.createElement('div');
     menu.appendChild(menuItem(ICON.pen, 'Rename category', () => startCategoryRename(cat)));
-    menu.appendChild(menuItem(ICON.x, 'Delete category', () => { hideMenu(); confirmFor = { kind: 'category', name: cat }; renderRail(); },
+    // The host asks in a standard message box (Owner request): an inline confirm is cut off at a
+    // normal rail width, and this delete reaches notes in every project.
+    menu.appendChild(menuItem(ICON.x, 'Delete category…', () => { hideMenu(); post({ type: 'delete_category', name: cat }); },
         { cls: 'danger', hint: `notes → ${GENERAL}`, sub: true }));
     openMenu(menu, x, y);
 }
@@ -1004,6 +1040,7 @@ window.addEventListener('resize', () => {
 // ── Search ──
 
 searchInput.addEventListener('input', () => { searchText = searchInput.value; renderRail(); });
+unreadOnlyBox.addEventListener('change', () => { unreadOnly = unreadOnlyBox.checked; renderRail(); });
 document.getElementById('search-clear').addEventListener('click', (e) => {
     e.preventDefault();
     searchInput.value = '';
@@ -1189,10 +1226,11 @@ function appendedSuffix(base, stored) {
     return stored.length > head.length && stored.startsWith(head) ? stored.slice(trimmed.length) : null;
 }
 
-// The Owner renamed a tab in ANOTHER pane (task c133b27d). Move this page's state for
-// it to the new name before merging, so the current tab and any unsaved typing in it
-// survive instead of the merge treating the tab as deleted. A pane that already has
-// the new name (the one that did the rename) has nothing under the old one: no-op.
+// The Owner renamed a tab, in this pane or another (task c133b27d; since 9a4a9d5e the pane
+// that did the rename gets no reload and relies on this too). Move this page's state for it
+// to the new name before merging, so the current tab and any unsaved typing in it survive
+// instead of the merge treating the tab as deleted. A page with nothing under the old name,
+// or already something under the new one, has nothing to move: no-op.
 function renameLocalTab(from, to) {
     if (!from || !to || from === to || !(from in tabContents) || (to in tabContents)) return;
     tabContents[to] = tabContents[from];
@@ -1219,10 +1257,12 @@ function renameLocalTab(from, to) {
 function mergeTabs(data) {
     if (document.body.classList.contains('no-project-state')) return;
     if (data.renamed) renameLocalTab(data.renamed.from, data.renamed.to);
+    if (followName && data.renamed && data.renamed.to === followName) followDue = true;
     takeCategories(data);
     const base = activeTab ? (lastSavedContent[activeTab] ?? '') : '';
     const activeDirty = !!activeTab && editor.value !== base;
     tabs = (data.tabs || []).map(toTabModel);
+    if (followName && !followDue && !tabs.some(t => t.name === followName)) followName = null; // a refused rename
 
     const nextContents = {};
     const nextSaved = {};
