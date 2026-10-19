@@ -400,6 +400,7 @@ let editing = null;          // {kind:'note'|'category', name}
 let dragSrcName = null;
 let unreadOnly = false;      // the "Unread only" filter (this pane, this session)
 let followName = null;       // a note this pane just renamed: keep its row in view once the rename lands
+let followDue = false;       // the rename has merged, so the next render makes the one attempt
 
 function post(msg) {
     if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(msg);
@@ -646,9 +647,13 @@ function renderRail() {
     if (editing && !newEditor) editing = null;
     // A rename re-sorts by time; keep the renamed row in view rather than wherever the list lands
     // (Owner live test of 9a4a9d5e, step 5).
-    if (followName) {
+    // One try, on the render after the rename merged: a renamed note hidden by a search is not chased
+    // into view later.
+    if (followName && followDue) {
         const row = Array.from(railList.querySelectorAll('.row')).find(r => r.dataset.name === followName);
-        if (row) { row.scrollIntoView({ block: 'nearest' }); followName = null; }
+        if (row) row.scrollIntoView({ block: 'nearest' });
+        followName = null;
+        followDue = false;
     }
     focusInlineEditor();
 }
@@ -793,6 +798,7 @@ function revealNote(name) {
     const t = tabs.find(n => n.name === name);
     if (!t) return;
     if (searchText.trim() && !matches(t, searchText.trim())) { searchText = ''; searchInput.value = ''; }
+    if (unreadOnly && !sortUnread(t)) unreadOnly = false; // the filter hides a read note; renderRail unticks the box
     const cat = categoryOf(t);
     if (!t.pinned && folded.has(cat)) { folded.delete(cat); sendRailState(); }
     if (isNarrow()) overlayOpen = true;
@@ -1220,10 +1226,11 @@ function appendedSuffix(base, stored) {
     return stored.length > head.length && stored.startsWith(head) ? stored.slice(trimmed.length) : null;
 }
 
-// The Owner renamed a tab in ANOTHER pane (task c133b27d). Move this page's state for
-// it to the new name before merging, so the current tab and any unsaved typing in it
-// survive instead of the merge treating the tab as deleted. A pane that already has
-// the new name (the one that did the rename) has nothing under the old one: no-op.
+// The Owner renamed a tab, in this pane or another (task c133b27d; since 9a4a9d5e the pane
+// that did the rename gets no reload and relies on this too). Move this page's state for it
+// to the new name before merging, so the current tab and any unsaved typing in it survive
+// instead of the merge treating the tab as deleted. A page with nothing under the old name,
+// or already something under the new one, has nothing to move: no-op.
 function renameLocalTab(from, to) {
     if (!from || !to || from === to || !(from in tabContents) || (to in tabContents)) return;
     tabContents[to] = tabContents[from];
@@ -1250,10 +1257,12 @@ function renameLocalTab(from, to) {
 function mergeTabs(data) {
     if (document.body.classList.contains('no-project-state')) return;
     if (data.renamed) renameLocalTab(data.renamed.from, data.renamed.to);
+    if (followName && data.renamed && data.renamed.to === followName) followDue = true;
     takeCategories(data);
     const base = activeTab ? (lastSavedContent[activeTab] ?? '') : '';
     const activeDirty = !!activeTab && editor.value !== base;
     tabs = (data.tabs || []).map(toTabModel);
+    if (followName && !followDue && !tabs.some(t => t.name === followName)) followName = null; // a refused rename
 
     const nextContents = {};
     const nextSaved = {};
