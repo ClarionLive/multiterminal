@@ -15,7 +15,7 @@ It was written by following these steps on a clean Windows 11 machine that had n
 | **Claude Code CLI** | Installed, on `PATH`, and signed in at least once (`claude` in a normal terminal). |
 | **WebView2 Runtime** | Preinstalled on Windows 11. On Windows 10 you may need to install it. |
 
-> ⚠️ **Node version.** The plugin's hooks store activity, profiles and session state in MT's SQLite database through a bundled native `better-sqlite3` binary built for **Node 24**. On any other Node major version that binary does not load, and those features switch off **silently** (for example, the Attention rail never clears a card after you answer a question). Until [multiterminal-marketplace#2](https://github.com/ClarionLive/multiterminal-marketplace/pull/2) is merged, use **Node 24**. Once it is, any Node from 22.5 up works. Tracking issue: [multiterminal-marketplace#1](https://github.com/ClarionLive/multiterminal-marketplace/issues/1).
+> ⚠️ **Node version.** The plugin's hooks store activity, profiles and session state in MT's SQLite database through a bundled native `better-sqlite3` binary built for **Node 24**. On any other Node major version that binary does not load, and those features switch off **silently** (for example, the Attention rail never clears a card after you answer a question). Until [multiterminal-marketplace#2](https://github.com/ClarionLive/multiterminal-marketplace/pull/2) is merged, use **Node 24**. Once it is, any Node from 22.13 up works (22.5 to 22.12 have the built-in SQLite only behind a flag the hooks do not use). Tracking issue: [multiterminal-marketplace#1](https://github.com/ClarionLive/multiterminal-marketplace/issues/1).
 
 ## 2. Clone
 
