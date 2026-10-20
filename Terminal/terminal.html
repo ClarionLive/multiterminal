@@ -366,10 +366,14 @@
                 }
             }, 2000);
 
-            // Handle Ctrl+mousewheel for font size
+            // Handle Ctrl+mousewheel for font size. Capture phase: when the app turns on mouse
+            // tracking or the alternate screen (Claude Code does), xterm.js consumes the wheel
+            // and stops propagation, so a bubble-phase listener never saw it. stopPropagation
+            // here keeps xterm from also forwarding the wheel to the app.
             container.addEventListener('wheel', (e) => {
                 if (e.ctrlKey) {
                     e.preventDefault();
+                    e.stopPropagation();
                     const delta = e.deltaY > 0 ? -1 : 1;
                     const newSize = Math.max(6, Math.min(32, currentFontSize + delta));
                     if (newSize !== currentFontSize) {
@@ -378,7 +382,7 @@
                         sendToHost({ type: 'fontSizeChanged', fontSize: newSize });
                     }
                 }
-            }, { passive: false });
+            }, { capture: true, passive: false });
 
             // Right-click (GH #24): copy if there is a selection, otherwise paste — the Windows
             // Terminal convention — and no menu. Shift+Right-click opens the host context menu
