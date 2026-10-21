@@ -182,8 +182,11 @@ namespace MultiTerminal.Services
         /// No main-thread row for this long, over uninterrupted successful reads, counts as idle. The
         /// common case: a manual <c>/compact</c> runs only between turns, and the turn's TURN_END came
         /// BEFORE the compaction, so none follows it.
+        /// <para>10s, not shorter (PM decision, pipeline run 5): a turn whose model is still thinking
+        /// before its first tool writes no row and looks quiet, and typing into it is the outcome most
+        /// worth avoiding. The cost is a few seconds' delay after each compaction.</para>
         /// </summary>
-        public TimeSpan Quiet { get; init; } = TimeSpan.FromSeconds(4);
+        public TimeSpan Quiet { get; init; } = TimeSpan.FromSeconds(10);
 
         /// <summary>Longest wait for idle. Reached without it, nothing is typed.</summary>
         public TimeSpan MaxIdleWait { get; init; } = TimeSpan.FromMinutes(5);
@@ -226,8 +229,9 @@ namespace MultiTerminal.Services
     /// </para>
     /// <para>
     /// Not covered: a turn that is running but has written no row for <see cref="CompactContinueTiming.Quiet"/>
-    /// (the model thinking before its first tool) looks quiet. After a manual compaction no turn is
-    /// running unless something submitted one in those seconds.
+    /// (the model thinking before its first tool) looks quiet; the 10s default makes that window as
+    /// long as is tolerable. After a manual compaction no turn is running unless something submitted
+    /// one in those seconds.
     /// </para>
     /// </remarks>
     internal sealed class CompactContinueSequencer

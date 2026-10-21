@@ -125,6 +125,20 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void With_default_timing_a_quiet_feed_waits_ten_seconds_before_typing()
+        {
+            // The other facts pass their own short Timing; this one uses the shipped default, so a
+            // change back to a shorter quiet window (a model still thinking would then be typed into)
+            // goes red here.
+            var s = new CompactContinueSequencer(T0);
+            s.NoteFeedRead(true, T0);
+
+            Assert.Equal(CompactContinueStep.Wait, s.Next(At(9.9)));
+            Assert.Equal(CompactContinueStep.Type, s.Next(At(10)));
+            Assert.Equal(CompactContinueTypeReason.Quiet, s.TypeReason);
+        }
+
+        [Fact]
         public void A_feed_that_never_reads_is_never_quiet_and_gives_up_without_typing()
         {
             var s = new CompactContinueSequencer(T0, Timing);
