@@ -340,6 +340,35 @@ async function resolveNotesProject(args) {
   };
 }
 
+// compact_my_context byte cap (ticket c0ebcfd4). TerminalControl.InjectInputAsync splits any injected
+// text over 500 UTF-8 bytes into chunks prefixed "[1/2] ", "[2/2] " and submits each separately, so a
+// long "/compact <focus>" arrives as a plain message ("[1/2] /compact ...", not a command) and the rest
+// sits unsent. Cap the WHOLE command at 450 bytes (headroom under 500). The focus is cut on code-point
+// boundaries (for...of iterates code points, so a surrogate pair is never split), trimmed, and "…" is
+// appended (room for it is reserved). focusBytes is the sanitised focus's size before trimming.
+const COMPACT_MAX_BYTES = 450;
+
+function capCompactCommand(focus) {
+  const prefix = "/compact";
+  if (!focus) return { text: prefix, trimmed: false, focusBytes: 0 };
+  const focusBytes = Buffer.byteLength(focus, "utf8");
+  const full = `${prefix} ${focus}`;
+  if (Buffer.byteLength(full, "utf8") <= COMPACT_MAX_BYTES) return { text: full, trimmed: false, focusBytes };
+  const ellipsis = "…";
+  const budget = COMPACT_MAX_BYTES - Buffer.byteLength(`${prefix} `, "utf8") - Buffer.byteLength(ellipsis, "utf8");
+  let kept = "";
+  let used = 0;
+  for (const ch of focus) {
+    const b = Buffer.byteLength(ch, "utf8");
+    if (used + b > budget) break;
+    kept += ch;
+    used += b;
+  }
+  kept = kept.trim();
+  const text = kept ? `${prefix} ${kept}${ellipsis}` : prefix;
+  return { text, trimmed: true, focusBytes };
+}
+
 // Format terminal list for display
 function formatTerminals(terminals) {
   if (!terminals || terminals.length === 0) {
@@ -1149,7 +1178,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "compact_my_context",
-        description: "Compact YOUR OWN context by submitting /compact into your terminal (types '/compact' + Enter). Unlike clear_my_context (which WIPES the conversation), /compact PRESERVES a running summary — use it at a mid-work boundary to reclaim context WITHOUT losing your place and keep going. ⚠️ BEFORE calling: write continuation notes (update_task_continuation) — /compact's auto-summary is LOSSY, so your notes stay the authoritative record of where to resume. Make this the LAST action of your turn (/compact fires at turn end). Single call — no acknowledge needed, /compact is non-destructive (this is the key difference from clear_my_context's two-step guard). When to pick which: compact = mid-work, preserve summary and continue; clear = task-end, full reset. Use check_my_context to decide when (≥70% is the nudge threshold). This tool targets your OWN terminal ONLY: agentName defaults to $MULTITERMINAL_NAME, and an explicit agentName that isn't you is REJECTED with an error (omit agentName to self-target). Compacting a DIFFERENT agent is a separate authorized tool, not this one. (Legacy clear_my_context retrofits to this self-only standard in 6d406e84.)",
+        description: "Compact YOUR OWN context by submitting /compact into your terminal (types '/compact' + Enter). Unlike clear_my_context (which WIPES the conversation), /compact PRESERVES a running summary — use it at a mid-work boundary to reclaim context WITHOUT losing your place and keep going. ⚠️ BEFORE calling: write continuation notes (update_task_continuation) — /compact's auto-summary is LOSSY, so your notes stay the authoritative record of where to resume. Make this the LAST action of your turn (/compact fires at turn end). Single call — no acknowledge needed, /compact is non-destructive (this is the key difference from clear_my_context's two-step guard). When to pick which: compact = mid-work, preserve summary and continue; clear = task-end, full reset. Use check_my_context to decide when (≥70% is the nudge threshold). This tool targets your OWN terminal ONLY: agentName defaults to $MULTITERMINAL_NAME, and an explicit agentName that isn't you is REJECTED with an error (omit agentName to self-target). Compacting a DIFFERENT agent is a separate authorized tool, not this one. Keep focus SHORT (one line, under ~400 characters): terminal input over 500 bytes is split into separate submissions, which breaks /compact. Put the detail in continuation notes, not here. (Legacy clear_my_context retrofits to this self-only standard in 6d406e84.)",
         inputSchema: {
           type: "object",
           properties: {
@@ -1159,7 +1188,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             focus: {
               type: "string",
-              description: "Optional guidance appended to /compact steering what the summary must preserve (e.g. 'keep the active task ID, modified files, and next step'). Omit for a plain /compact. Sanitized to a single line before use.",
+              description: "Optional guidance appended to /compact steering what the summary must preserve (e.g. 'keep the active task ID, modified files, and next step'). Omit for a plain /compact. Sanitized to a single line before use. Keep focus SHORT (one line, under ~400 characters): terminal input over 500 bytes is split into separate submissions, which breaks /compact. Put the detail in continuation notes, not here. A longer focus is trimmed to fit.",
             },
           },
         },
@@ -3757,13 +3786,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const focus = typeof args.focus === "string"
           ? [...args.focus].map((ch) => (ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127) ? " " : ch).join("").replace(/ +/g, " ").trim()
           : "";
-        const compactText = focus ? `/compact ${focus}` : "/compact";
-        await apiCall(`/api/terminals/${seg(cmpName)}/submit`, "POST", { text: compactText });
+        // Byte cap (c0ebcfd4): over 500 bytes the inject is split into "[1/2] "-prefixed submissions,
+        // which turns /compact into a plain message. capCompactCommand keeps it at <= 450 bytes.
+        const { text: compactText, trimmed: focusTrimmed, focusBytes } = capCompactCommand(focus);
+        // continueAfterCompact (ticket c0ebcfd4): MT arms this pane, and when the plugin's
+        // SessionStart(compact) hook reports the compaction finished, types a continue prompt once
+        // the pane is idle. A manual /compact otherwise ends with no new turn.
+        await apiCall(`/api/terminals/${seg(cmpName)}/submit`, "POST", { text: compactText, continueAfterCompact: true });
+        const trimNote = focusTrimmed
+          ? `\n✂️ Your focus was ${focusBytes} bytes; it was trimmed to fit the 500-byte terminal input limit (longer input is split into separate submissions and breaks /compact). Put details in update_task_continuation instead.`
+          : "";
         // Honest best-effort wording: the inject is fire-and-forget (TerminalsController.Submit
         // returns OK once the inject is REQUESTED; MainForm fires InjectInputAsync without
         // awaiting, and it can no-op for a stale/renamed/uninitialized terminal). Do not claim
         // it definitely compacted. (Adversary-gate finding; shared clear_my_context reword in 6d406e84.)
-        return { content: [{ type: "text", text: `🗜️ Requested '${compactText}' for '${cmpName}' — submitted best-effort (the inject is fire-and-forget; a stale/renamed terminal or renderer hiccup can silently no-op). If it landed, the terminal compacts at turn end, preserving a summary (not a wipe) — verify on your next turn. Make sure you already wrote continuation notes (update_task_continuation); /compact's summary is lossy and your notes stay authoritative.` }] };
+        return { content: [{ type: "text", text: `🗜️ Requested '${compactText}' for '${cmpName}' — submitted best-effort (the inject is fire-and-forget; a stale/renamed terminal or renderer hiccup can silently no-op). If it landed, the terminal compacts at turn end, preserving a summary (not a wipe) — verify on your next turn. Make sure you already wrote continuation notes (update_task_continuation); /compact's summary is lossy and your notes stay authoritative. After the compaction MultiTerminal types a prompt telling you to continue; you do not need the Owner to.${trimNote}` }] };
       }
 
       case "get_my_active_task": {

@@ -342,18 +342,12 @@ namespace MultiTerminal.Controls
         }
 
         /// <summary>
-        /// Maximum chunk size in bytes for message chunking.
-        /// Set to 500 bytes to prevent PowerShell's bracketed paste mode from triggering.
-        /// PowerShell enters paste mode at ~500-600 characters, causing messages to wait for user confirmation.
-        /// </summary>
-        private const int MaxChunkSize = 500;
-
-        /// <summary>
         /// Injects text input into the terminal and submits it.
         /// Uses xterm.js JavaScript injection for the Enter key to work with apps
         /// like Claude Code that detect programmatic input differently.
         /// Returns a Task that completes when the Enter key has been acknowledged by JS.
-        /// Large messages (>500 bytes) are automatically chunked with markers to prevent PowerShell paste mode.
+        /// Large messages (>500 bytes) are chunked with markers to prevent PowerShell paste mode,
+        /// except a slash command, which is one submission cut to 500 bytes (see <see cref="InjectionChunking"/>).
         /// </summary>
         /// <param name="text">The text to inject.</param>
         /// <returns>A Task that completes when injection is finished. Returns true if successful.</returns>
@@ -367,17 +361,21 @@ namespace MultiTerminal.Controls
                 return false;
             }
 
-            // Check if chunking is needed
-            var textBytes = Encoding.UTF8.GetByteCount(text);
-            if (textBytes > MaxChunkSize)
+            List<string> submissions = InjectionChunking.Plan(text, out int? truncatedFromBytes);
+            if (truncatedFromBytes is int originalBytes)
             {
-                LogTrace($"InjectInputAsync: using chunked mode ({textBytes} bytes)");
-                return await InjectChunkedInputAsync(text);
+                _debugLogService?.Warning("TerminalControl",
+                    $"InjectInputAsync: slash command of {originalBytes} bytes cut to {InjectionChunking.MaxChunkBytes} and sent as one submission (a chunked command would not run)");
             }
 
-            // Single message - inject directly
-            LogTrace("InjectInputAsync: using single mode");
-            return await InjectSingleInputAsync(text);
+            if (submissions.Count == 1)
+            {
+                LogTrace("InjectInputAsync: using single mode");
+                return await InjectSingleInputAsync(submissions[0]);
+            }
+
+            LogTrace($"InjectInputAsync: using chunked mode ({Encoding.UTF8.GetByteCount(text)} bytes into {submissions.Count} chunks)");
+            return await InjectChunkedInputAsync(submissions);
         }
 
         /// <summary>
@@ -493,22 +491,16 @@ namespace MultiTerminal.Controls
         }
 
         /// <summary>
-        /// Injects large text by splitting into chunks with markers.
-        /// Each chunk is sent as a separate message with [n/total] prefix.
+        /// Injects large text already split by <see cref="InjectionChunking.Plan"/>.
+        /// Each chunk (carrying its [n/total] prefix) is sent as a separate message.
         /// </summary>
-        private async Task<bool> InjectChunkedInputAsync(string text)
+        private async Task<bool> InjectChunkedInputAsync(List<string> chunks)
         {
-            var chunks = SplitIntoChunks(text, MaxChunkSize);
             var totalChunks = chunks.Count;
-
-            LogTrace($"Chunking message: {Encoding.UTF8.GetByteCount(text)} bytes into {totalChunks} chunks");
 
             for (int i = 0; i < totalChunks; i++)
             {
-                var chunkMarker = $"[{i + 1}/{totalChunks}] ";
-                var chunkText = chunkMarker + chunks[i];
-
-                var success = await InjectSingleInputAsync(chunkText);
+                var success = await InjectSingleInputAsync(chunks[i]);
                 if (!success)
                 {
                     LogTrace($"Chunk {i + 1}/{totalChunks} failed to inject");
@@ -523,75 +515,6 @@ namespace MultiTerminal.Controls
             }
 
             return true;
-        }
-
-        /// <summary>
-        /// Splits text into chunks at word boundaries where possible.
-        /// </summary>
-        /// <param name="text">Text to split.</param>
-        /// <param name="maxChunkBytes">Maximum bytes per chunk (excluding chunk marker).</param>
-        /// <returns>List of text chunks.</returns>
-        private static List<string> SplitIntoChunks(string text, int maxChunkBytes)
-        {
-            var chunks = new List<string>();
-
-            // Reserve space for chunk marker like "[99/99] " (9 bytes max)
-            var effectiveMaxBytes = maxChunkBytes - 10;
-
-            var remaining = text;
-            while (!string.IsNullOrEmpty(remaining))
-            {
-                var chunk = GetChunkAtWordBoundary(remaining, effectiveMaxBytes);
-                chunks.Add(chunk);
-                remaining = remaining.Substring(chunk.Length).TrimStart();
-            }
-
-            return chunks;
-        }
-
-        /// <summary>
-        /// Gets a chunk from the start of text, breaking at word boundary if possible.
-        /// </summary>
-        private static string GetChunkAtWordBoundary(string text, int maxBytes)
-        {
-            // If text fits, return it all
-            if (Encoding.UTF8.GetByteCount(text) <= maxBytes)
-            {
-                return text;
-            }
-
-            // Find the longest substring that fits
-            int low = 0;
-            int high = text.Length;
-            int bestFit = 0;
-
-            while (low <= high)
-            {
-                int mid = (low + high) / 2;
-                if (Encoding.UTF8.GetByteCount(text.Substring(0, mid)) <= maxBytes)
-                {
-                    bestFit = mid;
-                    low = mid + 1;
-                }
-                else
-                {
-                    high = mid - 1;
-                }
-            }
-
-            if (bestFit == 0) bestFit = 1; // At minimum take one character
-
-            // Try to break at word boundary (look back for space/newline)
-            var candidate = text.Substring(0, bestFit);
-            var lastSpace = candidate.LastIndexOfAny(new[] { ' ', '\n', '\r', '\t' });
-
-            // Only use word boundary if it's reasonably close (within 20% of max)
-            if (lastSpace > bestFit * 0.8)
-            {
-                return text.Substring(0, lastSpace);
-            }
-
-            return candidate;
         }
 
         /// <summary>
@@ -627,8 +550,38 @@ namespace MultiTerminal.Controls
                 _terminal.Write(data);
             }
 
+            if (CountsAsUserInput(data))
+            {
+                LastUserInputUtc = DateTime.UtcNow;
+            }
+
             // Buffer input characters to detect slash commands
             BufferInputForSlashDetection(data);
+        }
+
+        /// <summary>
+        /// Whether <paramref name="data"/> could put text in the input line: anything but a terminal
+        /// report (<see cref="IsTerminalReport"/>) or a lone carriage return. A lone Enter submits what is
+        /// already there; on an empty line it does nothing. Excluding it is what lets MT's own injected
+        /// Enters (the /compact's, the continue prompt's) pass without a timing window, while a single
+        /// typed character still counts (pipeline runs 3-4).
+        /// </summary>
+        internal static bool CountsAsUserInput(byte[] data)
+        {
+            if (data == null || data.Length == 0) return false;
+            if (data.Length == 1 && data[0] == 0x0D) return false;
+            return !IsTerminalReport(data);
+        }
+
+        /// <summary>
+        /// True for data xterm.js sends on its own rather than for a key or a paste: focus reports
+        /// (ESC [ I, ESC [ O) and mouse reports (ESC [ &lt;, ESC [ M).
+        /// </summary>
+        internal static bool IsTerminalReport(byte[] data)
+        {
+            if (data.Length < 3 || data[0] != 0x1B || data[1] != (byte)'[') return false;
+            byte kind = data[2];
+            return (data.Length == 3 && (kind == (byte)'I' || kind == (byte)'O')) || kind == (byte)'<' || kind == (byte)'M';
         }
 
         /// <summary>
@@ -724,6 +677,68 @@ namespace MultiTerminal.Controls
         /// before every launch, so a reused pane never keeps a previous project's value.
         /// </summary>
         public bool QuietStart { get; set; }
+
+        private readonly CompactContinueGate _compactContinueGate = new CompactContinueGate();
+
+        /// <summary>
+        /// Marks this pane's next compaction as agent-requested, so it is followed by a continue prompt
+        /// (ticket c0ebcfd4). Called when MT submits a <c>compact_my_context</c> request.
+        /// </summary>
+        public void ArmCompactContinue()
+        {
+            CompactArmedUtc = DateTime.UtcNow;
+            _compactContinueGate.Arm(CompactArmedUtc.Value);
+            LogTrace("compact-continue armed");
+        }
+
+        /// <summary>Withdraws the request because its /compact submission failed.</summary>
+        public void DisarmCompactContinue()
+        {
+            _compactContinueGate.Disarm();
+            LogTrace("compact-continue disarmed (the /compact submission failed)");
+        }
+
+        /// <summary>
+        /// When the latest continue request was armed, just before its <c>/compact</c> was injected, or
+        /// null. Keystrokes after it mean someone is using the input line, which accepts typing during
+        /// the compaction. The injected Enter is a lone carriage return, which
+        /// <see cref="CountsAsUserInput"/> excludes, so no timing window is needed to step over it.
+        /// </summary>
+        public DateTime? CompactArmedUtc { get; private set; }
+
+        /// <summary>The plugin's PreCompact hook reported a compaction starting in this pane.</summary>
+        public void NoteCompactionStarting(bool manual) => _compactContinueGate.NoteCompactionStarting(manual);
+
+        /// <summary>
+        /// True once per <see cref="ArmCompactContinue"/>, within <see cref="CompactContinueGate.Expiry"/>,
+        /// after a manual compaction. False for a compaction nobody asked MT to follow up.
+        /// </summary>
+        public bool TryConsumeCompactContinue() => _compactContinueGate.TryConsume(DateTime.UtcNow);
+
+        /// <summary>
+        /// When a person last typed into this pane (any keyboard data from xterm.js, pastes and arrow
+        /// keys included, except focus and mouse reports), or null. Text MT types through
+        /// <see cref="TypeInput"/> and the Enter of <see cref="SendEnterAsync"/> also arrive this way, so a
+        /// caller must read it relative to its own typing; a prompt whose typing outlasts
+        /// <see cref="TypeAndSubmitAsync"/>'s estimate reads as later input.
+        /// </summary>
+        public DateTime? LastUserInputUtc { get; private set; }
+
+        /// <summary>
+        /// Types <paramref name="text"/> and Enter through xterm.js's typing queue, the same path the
+        /// post-/clear "initializing..." uses, and waits for the typing to finish.
+        /// </summary>
+        public async Task TypeAndSubmitAsync(string text, int charDelayMs = 20)
+        {
+            TypeInput(text, "cr", charDelayMs);
+
+            // TypeInput is fire-and-forget; wait until the queue has typed it, so a caller timing
+            // what follows starts from the Enter, not from the first character.
+            await Task.Delay((text.Length * charDelayMs) + 500);
+        }
+
+        /// <summary>True while the pane has a running process and a live renderer.</summary>
+        public bool IsLiveForInjection => !_isDisposed && _terminal != null && _terminal.IsRunning && IsRendererReady;
 
         // Dedupe window so the hook-driven path and the keystroke fallback can't both
         // inject "initializing..." for a single /clear (task be599e08).
