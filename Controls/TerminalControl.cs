@@ -550,13 +550,27 @@ namespace MultiTerminal.Controls
                 _terminal.Write(data);
             }
 
-            if (data != null && data.Length > 0 && !IsTerminalReport(data))
+            if (CountsAsUserInput(data))
             {
                 LastUserInputUtc = DateTime.UtcNow;
             }
 
             // Buffer input characters to detect slash commands
             BufferInputForSlashDetection(data);
+        }
+
+        /// <summary>
+        /// Whether <paramref name="data"/> could put text in the input line: anything but a terminal
+        /// report (<see cref="IsTerminalReport"/>) or a lone carriage return. A lone Enter submits what is
+        /// already there; on an empty line it does nothing. Excluding it is what lets MT's own injected
+        /// Enters (the /compact's, the continue prompt's) pass without a timing window, while a single
+        /// typed character still counts (pipeline runs 3-4).
+        /// </summary>
+        internal static bool CountsAsUserInput(byte[] data)
+        {
+            if (data == null || data.Length == 0) return false;
+            if (data.Length == 1 && data[0] == 0x0D) return false;
+            return !IsTerminalReport(data);
         }
 
         /// <summary>
@@ -672,8 +686,8 @@ namespace MultiTerminal.Controls
         /// </summary>
         public void ArmCompactContinue()
         {
-            CompactSubmittedUtc = null;
-            _compactContinueGate.Arm(DateTime.UtcNow);
+            CompactArmedUtc = DateTime.UtcNow;
+            _compactContinueGate.Arm(CompactArmedUtc.Value);
             LogTrace("compact-continue armed");
         }
 
@@ -685,14 +699,12 @@ namespace MultiTerminal.Controls
         }
 
         /// <summary>
-        /// When the armed request's <c>/compact</c> finished submitting (its own Enter already sent), or
+        /// When the latest continue request was armed, just before its <c>/compact</c> was injected, or
         /// null. Keystrokes after it mean someone is using the input line, which accepts typing during
-        /// the compaction.
+        /// the compaction. The injected Enter is a lone carriage return, which
+        /// <see cref="CountsAsUserInput"/> excludes, so no timing window is needed to step over it.
         /// </summary>
-        public DateTime? CompactSubmittedUtc { get; private set; }
-
-        /// <summary>Records that the armed request's <c>/compact</c> was submitted.</summary>
-        public void NoteCompactSubmitted() => CompactSubmittedUtc = DateTime.UtcNow;
+        public DateTime? CompactArmedUtc { get; private set; }
 
         /// <summary>The plugin's PreCompact hook reported a compaction starting in this pane.</summary>
         public void NoteCompactionStarting(bool manual) => _compactContinueGate.NoteCompactionStarting(manual);

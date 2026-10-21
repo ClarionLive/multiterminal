@@ -1507,10 +1507,6 @@ namespace MultiTerminal
                         {
                             terminal.DisarmCompactContinue();
                         }
-                        else if (armCompact)
-                        {
-                            terminal.NoteCompactSubmitted();
-                        }
                     },
                     System.Threading.Tasks.TaskScheduler.FromCurrentSynchronizationContext());
                 return;
@@ -1555,11 +1551,10 @@ namespace MultiTerminal
                 type: text => OnUiThread(() => terminal.TypeAndSubmitAsync(text), System.Threading.Tasks.Task.CompletedTask),
                 sendEnter: () => OnUiThread(() => terminal.SendEnterAsync(), System.Threading.Tasks.Task.FromResult(false)),
                 log: msg => _debugLogService?.Info("MainForm", msg),
-                // The input line accepts typing for the whole compaction, so any keystroke after the
-                // /compact was submitted counts. No grace window: the /compact's own Enter is processed
-                // before NoteCompactSubmitted runs, and if it ever arrived later the result is a logged
-                // give-up, not a prompt typed over someone's text (pipeline run 3).
-                ownerInputSinceUtc: terminal.CompactSubmittedUtc);
+                // The input line accepts typing for the whole compaction, so any keystroke since the
+                // request was armed counts. The /compact's own Enter is a lone CR, which
+                // TerminalControl.CountsAsUserInput excludes, so no timing window (pipeline runs 3-4).
+                ownerInputSinceUtc: terminal.CompactArmedUtc);
 
             _ = System.Threading.Tasks.Task.Run(runner.RunAsync).ContinueWith(
                 t => _debugLogService?.Error("MainForm", $"compact-continue for '{e.AgentName}' faulted: {t.Exception?.GetBaseException().Message}"),

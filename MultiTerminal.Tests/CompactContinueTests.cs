@@ -258,6 +258,19 @@ namespace MultiTerminal.Tests
             Assert.Equal(isReport, MultiTerminal.Controls.TerminalControl.IsTerminalReport(data));
         }
 
+        [Theory]
+        [InlineData(new byte[] { 0x0D }, false)]                                              // a lone Enter: MT's own, or harmless
+        [InlineData(new byte[] { (byte)'a' }, true)]                                          // one typed character
+        [InlineData(new byte[] { (byte)'a', 0x0D }, true)]
+        [InlineData(new byte[] { 0x1B, (byte)'[', (byte)'2', (byte)'0', (byte)'0', (byte)'~', (byte)'h', (byte)'i' }, true)] // paste
+        [InlineData(new byte[] { 0x1B, (byte)'[', (byte)'A' }, true)]                         // history recall
+        [InlineData(new byte[] { 0x1B, (byte)'[', (byte)'I' }, false)]                        // focus report
+        [InlineData(new byte[0], false)]
+        public void Everything_but_reports_and_a_lone_enter_counts_as_someone_typing(byte[] data, bool counts)
+        {
+            Assert.Equal(counts, MultiTerminal.Controls.TerminalControl.CountsAsUserInput(data));
+        }
+
         [Fact]
         public void Keystrokes_from_before_the_compaction_finished_do_not_count()
         {
