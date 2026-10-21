@@ -550,13 +550,24 @@ namespace MultiTerminal.Controls
                 _terminal.Write(data);
             }
 
-            if (data != null && data.Length > 0 && data[0] != 0x1B)
+            if (data != null && data.Length > 0 && !IsTerminalReport(data))
             {
                 LastUserInputUtc = DateTime.UtcNow;
             }
 
             // Buffer input characters to detect slash commands
             BufferInputForSlashDetection(data);
+        }
+
+        /// <summary>
+        /// True for data xterm.js sends on its own rather than for a key or a paste: focus reports
+        /// (ESC [ I, ESC [ O) and mouse reports (ESC [ &lt;, ESC [ M).
+        /// </summary>
+        internal static bool IsTerminalReport(byte[] data)
+        {
+            if (data.Length < 3 || data[0] != 0x1B || data[1] != (byte)'[') return false;
+            byte kind = data[2];
+            return (data.Length == 3 && (kind == (byte)'I' || kind == (byte)'O')) || kind == (byte)'<' || kind == (byte)'M';
         }
 
         /// <summary>
@@ -661,6 +672,7 @@ namespace MultiTerminal.Controls
         /// </summary>
         public void ArmCompactContinue()
         {
+            CompactSubmittedUtc = null;
             _compactContinueGate.Arm(DateTime.UtcNow);
             LogTrace("compact-continue armed");
         }
@@ -672,6 +684,15 @@ namespace MultiTerminal.Controls
             LogTrace("compact-continue disarmed (the /compact submission failed)");
         }
 
+        /// <summary>
+        /// When the armed request's <c>/compact</c> finished submitting, or null. Keystrokes after it (less
+        /// its own Enter) mean someone is using the input line, which accepts typing during the compaction.
+        /// </summary>
+        public DateTime? CompactSubmittedUtc { get; private set; }
+
+        /// <summary>Records that the armed request's <c>/compact</c> was submitted.</summary>
+        public void NoteCompactSubmitted() => CompactSubmittedUtc = DateTime.UtcNow;
+
         /// <summary>The plugin's PreCompact hook reported a compaction starting in this pane.</summary>
         public void NoteCompactionStarting(bool manual) => _compactContinueGate.NoteCompactionStarting(manual);
 
@@ -682,9 +703,11 @@ namespace MultiTerminal.Controls
         public bool TryConsumeCompactContinue() => _compactContinueGate.TryConsume(DateTime.UtcNow);
 
         /// <summary>
-        /// When a person last typed into this pane (keyboard data from xterm.js that is not an escape
-        /// sequence, so focus and mouse reports do not count), or null. Text MT types through
-        /// <see cref="TypeInput"/> also arrives this way, so a caller must read it relative to its own typing.
+        /// When a person last typed into this pane (any keyboard data from xterm.js, pastes and arrow
+        /// keys included, except focus and mouse reports), or null. Text MT types through
+        /// <see cref="TypeInput"/> and the Enter of <see cref="SendEnterAsync"/> also arrive this way, so a
+        /// caller must read it relative to its own typing; a prompt whose typing outlasts
+        /// <see cref="TypeAndSubmitAsync"/>'s estimate reads as later input.
         /// </summary>
         public DateTime? LastUserInputUtc { get; private set; }
 

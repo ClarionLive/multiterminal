@@ -1472,6 +1472,10 @@ namespace MultiTerminal
                 {
                     targetDoc.Terminal.NoteCompactionStarting(string.Equals(e.Text, "manual", StringComparison.Ordinal));
                 }
+                else
+                {
+                    _debugLogService?.Trace("MainForm", $"compact-starting for '{e.AgentName}': docId does not match the pane registered under that name; ignored");
+                }
 
                 return;
             }
@@ -1502,6 +1506,10 @@ namespace MultiTerminal
                         if (armCompact && !delivered)
                         {
                             terminal.DisarmCompactContinue();
+                        }
+                        else if (armCompact)
+                        {
+                            terminal.NoteCompactSubmitted();
                         }
                     },
                     System.Threading.Tasks.TaskScheduler.FromCurrentSynchronizationContext());
@@ -1546,7 +1554,9 @@ namespace MultiTerminal
                 lastUserInput: () => OnUiThread(() => terminal.LastUserInputUtc, (DateTime?)null),
                 type: text => OnUiThread(() => terminal.TypeAndSubmitAsync(text), System.Threading.Tasks.Task.CompletedTask),
                 sendEnter: () => OnUiThread(() => terminal.SendEnterAsync(), System.Threading.Tasks.Task.FromResult(false)),
-                log: msg => _debugLogService?.Info("MainForm", msg));
+                log: msg => _debugLogService?.Info("MainForm", msg),
+                // The input line accepts typing for the whole compaction; the margin covers the /compact's own Enter.
+                ownerInputSinceUtc: terminal.CompactSubmittedUtc?.AddSeconds(2));
 
             _ = System.Threading.Tasks.Task.Run(runner.RunAsync).ContinueWith(
                 t => _debugLogService?.Error("MainForm", $"compact-continue for '{e.AgentName}' faulted: {t.Exception?.GetBaseException().Message}"),

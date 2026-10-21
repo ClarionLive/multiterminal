@@ -168,7 +168,7 @@ namespace MultiTerminal.Services
         /// <summary>The activity feed could not be read long enough to prove the pane idle.</summary>
         FeedUnavailable,
 
-        /// <summary>Someone typed in the pane after the compaction finished; their input is not ours to submit.</summary>
+        /// <summary>Someone typed in the pane after the <c>/compact</c> was submitted; their input is not ours to submit.</summary>
         OwnerTyping,
     }
 
@@ -209,7 +209,8 @@ namespace MultiTerminal.Services
     /// <b>Idle evidence</b>, from the activity feed the plugin's activity hook writes: a
     /// <c>TURN_END</c> with no later work, or no main-thread row for <see cref="CompactContinueTiming.Quiet"/>
     /// of uninterrupted successful reads (a failed read restarts that window; a feed that cannot be
-    /// read never counts as quiet). Without either by <see cref="CompactContinueTiming.MaxIdleWait"/>,
+    /// read never counts as quiet). Either way the latest read must have succeeded and drained the
+    /// feed to its end, so no later row can be hiding behind a failure or a full batch. Without either by <see cref="CompactContinueTiming.MaxIdleWait"/>,
     /// it gives up.
     /// </para>
     /// <para>
@@ -232,10 +233,13 @@ namespace MultiTerminal.Services
     internal sealed class CompactContinueSequencer
     {
         private readonly DateTime _finishedAtUtc;
+        private readonly DateTime _ownerInputSinceUtc;
         private readonly CompactContinueTiming _timing;
 
-        private DateTime? _lastTurnEndUtc;
-        private DateTime? _lastWorkUtc;
+        // The LAST main-thread signal in feed (row id) order. Not times: rows read in one poll share an
+        // observation time, so "work after the turn end" must come from order, not from a comparison
+        // of equal timestamps (found by Runner_drains_a_backlog_past_one_batch_before_deciding).
+        private CompactContinueSignal? _lastSignal;
         private DateTime? _healthySinceUtc;
         private DateTime? _lastFeedFailureUtc;
         private DateTime? _lastUserInputUtc;
@@ -245,9 +249,17 @@ namespace MultiTerminal.Services
         private CompactContinueStep? _final;
 
         /// <summary>Starts the sequence at the moment MT learned the compaction finished.</summary>
-        public CompactContinueSequencer(DateTime finishedAtUtc, CompactContinueTiming timing = null)
+        /// <param name="finishedAtUtc">When MT learned the compaction finished.</param>
+        /// <param name="timing">Time limits; defaults when null.</param>
+        /// <param name="ownerInputSinceUtc">
+        /// Keystrokes after this mean someone is using the input line. Normally shortly after the
+        /// <c>/compact</c> was submitted, because the input line accepts typing for the whole compaction;
+        /// <paramref name="finishedAtUtc"/> when that time is unknown.
+        /// </param>
+        public CompactContinueSequencer(DateTime finishedAtUtc, CompactContinueTiming timing = null, DateTime? ownerInputSinceUtc = null)
         {
             _finishedAtUtc = finishedAtUtc;
+            _ownerInputSinceUtc = ownerInputSinceUtc ?? finishedAtUtc;
             _timing = timing ?? new CompactContinueTiming();
         }
 
@@ -257,7 +269,7 @@ namespace MultiTerminal.Services
         /// <summary>Why nothing was typed, once the sequence has given up.</summary>
         public CompactContinueGiveUpReason GiveUpReason { get; private set; }
 
-        /// <summary>Records a main-thread row seen at <paramref name="observedAtUtc"/>.</summary>
+        /// <summary>Records a main-thread row, in feed order, seen at <paramref name="observedAtUtc"/>.</summary>
         public void Observe(CompactContinueSignal signal, DateTime observedAtUtc)
         {
             if (_typedAtUtc != null)
@@ -266,14 +278,7 @@ namespace MultiTerminal.Services
                 return;
             }
 
-            if (signal == CompactContinueSignal.TurnEnded)
-            {
-                _lastTurnEndUtc = observedAtUtc;
-            }
-            else
-            {
-                _lastWorkUtc = observedAtUtc;
-            }
+            _lastSignal = signal;
         }
 
         /// <summary>Records whether a read of the activity feed succeeded.</summary>
@@ -318,7 +323,7 @@ namespace MultiTerminal.Services
 
         private CompactContinueStep NextBeforeTyping(DateTime nowUtc)
         {
-            if (_lastUserInputUtc is DateTime input && input > _finishedAtUtc)
+            if (_lastUserInputUtc is DateTime input && input > _ownerInputSinceUtc)
             {
                 return GiveUp(CompactContinueGiveUpReason.OwnerTyping);
             }
@@ -329,15 +334,24 @@ namespace MultiTerminal.Services
                 return CompactContinueStep.Wait;
             }
 
-            bool busy = _lastWorkUtc is DateTime work && (_lastTurnEndUtc is not DateTime end || work > end);
+            bool busy = _lastSignal == CompactContinueSignal.Working;
 
-            if (!busy && _lastTurnEndUtc != null)
+            // Every way to type needs the LATEST read to have succeeded: a TURN_END seen before a failed
+            // read says nothing about work written during the outage (pipeline run 2).
+            if (_healthySinceUtc == null)
+            {
+                return sinceFinished >= _timing.MaxIdleWait
+                    ? GiveUp(busy ? CompactContinueGiveUpReason.StillWorking : CompactContinueGiveUpReason.FeedUnavailable)
+                    : CompactContinueStep.Wait;
+            }
+
+            if (_lastSignal == CompactContinueSignal.TurnEnded)
             {
                 TypeReason = CompactContinueTypeReason.TurnEnded;
                 return CompactContinueStep.Type;
             }
 
-            if (_lastWorkUtc == null && _lastTurnEndUtc == null && _healthySinceUtc is DateTime healthySince)
+            if (_lastSignal == null && _healthySinceUtc is DateTime healthySince)
             {
                 DateTime quietFrom = healthySince > _finishedAtUtc ? healthySince : _finishedAtUtc;
                 if (nowUtc - quietFrom >= _timing.Quiet)
@@ -403,6 +417,12 @@ namespace MultiTerminal.Services
         /// <summary>Poll interval for the activity feed.</summary>
         internal static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(500);
 
+        /// <summary>Rows per feed read.</summary>
+        internal const int BatchSize = 200;
+
+        /// <summary>Reads per poll before an undrained feed counts as not readable this poll.</summary>
+        internal const int MaxBatchesPerPoll = 20;
+
         private readonly IActivityFeedReader _feed;
         private readonly string _agentName;
         private readonly Func<bool> _paneAlive;
@@ -413,6 +433,7 @@ namespace MultiTerminal.Services
         private readonly Func<DateTime> _utcNow;
         private readonly Func<TimeSpan, Task> _delay;
         private readonly CompactContinueTiming _timing;
+        private readonly DateTime? _ownerInputSinceUtc;
 
         public CompactContinueRunner(
             IActivityFeedReader feed,
@@ -424,9 +445,11 @@ namespace MultiTerminal.Services
             Action<string> log,
             Func<DateTime> utcNow = null,
             Func<TimeSpan, Task> delay = null,
-            CompactContinueTiming timing = null)
+            CompactContinueTiming timing = null,
+            DateTime? ownerInputSinceUtc = null)
         {
             _feed = feed;
+            _ownerInputSinceUtc = ownerInputSinceUtc;
             _agentName = agentName ?? throw new ArgumentNullException(nameof(agentName));
             _paneAlive = paneAlive ?? throw new ArgumentNullException(nameof(paneAlive));
             _lastUserInput = lastUserInput ?? (() => null);
@@ -451,7 +474,7 @@ namespace MultiTerminal.Services
                 return CompactContinueStep.GaveUp;
             }
 
-            var sequencer = new CompactContinueSequencer(_utcNow(), _timing);
+            var sequencer = new CompactContinueSequencer(_utcNow(), _timing, _ownerInputSinceUtc);
             long? watermark = null;
 
             while (true)
@@ -513,21 +536,32 @@ namespace MultiTerminal.Services
                     return max;
                 }
 
-                List<ActivityFeedEntry> rows = _feed.GetActivitiesAfterId(after, 200) ?? new List<ActivityFeedEntry>();
                 DateTime now = _utcNow();
-                sequencer.NoteFeedRead(true, now);
-
-                foreach (ActivityFeedEntry row in rows)
+                for (int batch = 0; batch < MaxBatchesPerPoll; batch++)
                 {
-                    if (row == null) continue;
-                    if (row.Id > after) after = row.Id;
+                    List<ActivityFeedEntry> rows = _feed.GetActivitiesAfterId(after, BatchSize) ?? new List<ActivityFeedEntry>();
 
-                    if (Classify(row, _agentName) is CompactContinueSignal signal)
+                    foreach (ActivityFeedEntry row in rows)
                     {
-                        sequencer.Observe(signal, now);
+                        if (row == null) continue;
+                        if (row.Id > after) after = row.Id;
+
+                        if (Classify(row, _agentName) is CompactContinueSignal signal)
+                        {
+                            sequencer.Observe(signal, now);
+                        }
+                    }
+
+                    if (rows.Count < BatchSize)
+                    {
+                        // Drained to the end: this read can vouch for "nothing later".
+                        sequencer.NoteFeedRead(true, now);
+                        return after;
                     }
                 }
 
+                // Still full after the last batch: rows remain unread, so this read cannot vouch for idle.
+                sequencer.NoteFeedRead(false, now);
                 return after;
             }
             catch (Exception ex)

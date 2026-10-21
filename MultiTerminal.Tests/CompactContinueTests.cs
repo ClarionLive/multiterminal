@@ -150,6 +150,45 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void A_turn_end_seen_before_a_failed_read_is_not_typed_on_until_a_read_succeeds()
+        {
+            var s = Healthy();
+            s.Observe(CompactContinueSignal.TurnEnded, At(0.5));
+            s.NoteFeedRead(false, At(2));
+
+            Assert.Equal(CompactContinueStep.Wait, s.Next(At(2)));
+
+            s.NoteFeedRead(true, At(2.5));
+            Assert.Equal(CompactContinueStep.Type, s.Next(At(2.5)));
+        }
+
+        [Fact]
+        public async Task Runner_drains_a_backlog_past_one_batch_before_deciding()
+        {
+            // A TURN_END followed by more than one batch of rows that end in work: a single 200-row
+            // read would see only the TURN_END and type into a working agent.
+            var feed = new FakeFeed();
+            DateTime now = T0;
+            var typedAt = new List<DateTime>();
+            bool added = false;
+
+            var runner = Runner(feed, () => now, d =>
+            {
+                now += d;
+                if (!added && now >= At(1))
+                {
+                    added = true;
+                    feed.Add("Alice", "TURN_END");
+                    for (int i = 0; i < CompactContinueRunner.BatchSize + 5; i++) feed.Add("Bob", "TOOL_START");
+                    feed.Add("Alice", "TOOL_START");
+                }
+            }, typedAt, () => { });
+
+            Assert.Equal(CompactContinueStep.GaveUp, await runner.RunAsync());
+            Assert.Empty(typedAt);
+        }
+
+        [Fact]
         public void A_working_agent_is_never_typed_into_and_is_given_up_on_at_the_cap()
         {
             var s = Healthy();
@@ -191,6 +230,32 @@ namespace MultiTerminal.Tests
 
             Assert.Equal(CompactContinueStep.GaveUp, s.Next(At(5)));
             Assert.Equal(CompactContinueGiveUpReason.OwnerTyping, s.GiveUpReason);
+        }
+
+        [Fact]
+        public void Someone_typing_during_the_compaction_means_nothing_is_typed()
+        {
+            // The /compact was submitted 40s before the compaction finished; the input line was open.
+            var s = new CompactContinueSequencer(T0, Timing, ownerInputSinceUtc: At(-40));
+            s.NoteFeedRead(true, T0);
+            s.NoteUserInput(At(-20));
+
+            Assert.Equal(CompactContinueStep.GaveUp, s.Next(At(5)));
+            Assert.Equal(CompactContinueGiveUpReason.OwnerTyping, s.GiveUpReason);
+        }
+
+        [Theory]
+        [InlineData(new byte[] { 0x1B, (byte)'[', (byte)'I' }, true)]                         // focus in
+        [InlineData(new byte[] { 0x1B, (byte)'[', (byte)'O' }, true)]                         // focus out
+        [InlineData(new byte[] { 0x1B, (byte)'[', (byte)'<', (byte)'0', (byte)';', (byte)'1', (byte)';', (byte)'1', (byte)'M' }, true)] // SGR mouse
+        [InlineData(new byte[] { 0x1B, (byte)'[', (byte)'M', 32, 33, 33 }, true)]             // X10 mouse
+        [InlineData(new byte[] { 0x1B, (byte)'[', (byte)'2', (byte)'0', (byte)'0', (byte)'~', (byte)'h', (byte)'i' }, false)] // bracketed paste
+        [InlineData(new byte[] { 0x1B, (byte)'[', (byte)'A' }, false)]                        // Up arrow (history recall)
+        [InlineData(new byte[] { (byte)'a' }, false)]
+        [InlineData(new byte[] { 0x0D }, false)]
+        public void Only_focus_and_mouse_reports_are_not_counted_as_someone_typing(byte[] data, bool isReport)
+        {
+            Assert.Equal(isReport, MultiTerminal.Controls.TerminalControl.IsTerminalReport(data));
         }
 
         [Fact]
@@ -298,7 +363,8 @@ namespace MultiTerminal.Tests
             public List<ActivityFeedEntry> GetActivitiesAfterId(long afterId, int limit = 200)
             {
                 if (Broken) throw new InvalidOperationException("database is locked");
-                return Rows.FindAll(r => r.Id > afterId);
+                List<ActivityFeedEntry> after = Rows.FindAll(r => r.Id > afterId);
+                return after.GetRange(0, Math.Min(limit, after.Count));
             }
 
             public void Add(string actor, string type)
