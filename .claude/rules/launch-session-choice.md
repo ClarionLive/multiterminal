@@ -176,8 +176,8 @@ Alice's 2 helpers (TestA, TestB)? They'll come back when you resume Alice." (`He
 
 - **Where.** `TerminalDocument.FormClosing`, subscribed in `WirePaneLaunchRecording`
   (`MainForm.OnPaneFormClosing`). Every close of a docked pane goes through `Form.Close()` (the tab's
-  ✕ via DockPanelSuite's `DockContentHandler.Close`, the tab menu's Close / Close All / Close all but
-  this), so this is the one cancellable point BEFORE the pane leaves the dock;
+  ✕ via DockPanelSuite's `DockContentHandler.Close`, the tab menu's Close, and each pane of a batch
+  close, below), so this is the one cancellable point BEFORE the pane leaves the dock;
   `OnDockContentRemoved` is too late to cancel.
 - **Which helpers.** `PaneLaunchTracker.GetOpenHelperDocIds(pm)`: the panes whose CURRENT launch is
   linked to the PM's current launch (the tracker mirrors the spawner link per launch, carried across a
@@ -187,6 +187,16 @@ Alice's 2 helpers (TestA, TestB)? They'll come back when you resume Alice." (`He
   pane is closed and disposed as `close_helper` does; then the PM closes normally. **No**: only the PM
   closes; helpers keep running (and their later tab close is a normal `pane_closed`). **Cancel**: the
   PM stays open.
+- **Close All Tabs / Close all but this** (review fix). The tab menu does not close its fixed list
+  one by one: `TerminalDocument.BatchCloseRequested` hands the panes (tab order) to
+  `MainForm.OnPaneBatchCloseRequested`, and the pure `PaneBatchClose` (tests: `PaneBatchCloseTests`)
+  decides order and skips. A pane is closed after every PM in the batch that lists it as an open
+  helper, so the PM is asked before a helper whose tab comes first could be closed `pane_closed`. A
+  close left docked (Cancel, or any other veto) STOPS the batch: nothing after it closes, its helpers
+  included. Helpers handled by a PM's answer leave the batch: Yes already closed them; **No means they
+  keep running even though Close All named them** (the Owner just said not to close them). A helper
+  whose PM is NOT in the batch (Close all but this, on the PM) closes as an ordinary `pane_closed`;
+  a PM's Yes closes every open helper it listed, including a "this" pane of Close all but this.
 - **Not asked** during MT's shutdown (`IsShuttingDown`), for a pane MT is closing itself
   (`close_helper`, a helper being closed with its PM: `_panesClosedByMt`), or when no helper pane is
   open. A second close gesture while the question is up is swallowed.

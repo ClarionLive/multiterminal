@@ -6618,6 +6618,7 @@ namespace MultiTerminal
             doc.LaunchBegan += OnPaneLaunchBegan;
             doc.ClaudeSessionAdopted += OnPaneClaudeSessionAdopted;
             doc.FormClosing += OnPaneFormClosing;
+            doc.BatchCloseRequested += OnPaneBatchCloseRequested;
         }
 
         // Item 8: panes MT is closing itself (close_helper, closed with their PM), which never ask about
@@ -6625,11 +6626,72 @@ namespace MultiTerminal
         private readonly HashSet<string> _panesClosedByMt = new HashSet<string>(StringComparer.Ordinal);
         private readonly HashSet<string> _helperClosePromptOpen = new HashSet<string>(StringComparer.Ordinal);
 
+        // Item 8 review fix: while a batch close runs, OnPaneFormClosing records here which helpers each
+        // PM's answer handled (Yes: closed with it; No: keep running). Null outside a batch.
+        private Dictionary<string, IReadOnlyList<string>> _batchHelpersHandled;
+
+        /// <summary>
+        /// The tab menu's Close All Tabs / Close all but this (task 7d20e94c item 8 review fix). Closing a
+        /// fixed list one by one used to close a helper whose tab comes before its PM as a plain
+        /// <c>pane_closed</c> (unresumable, never offered), and to go on closing a PM's helpers after
+        /// Cancel kept the PM. <see cref="PaneBatchClose"/> decides the order and the skips: PMs before
+        /// their helpers; a cancelled close stops the batch; helpers handled by a PM's Yes or No are not
+        /// closed again (No means they keep running even though the batch named them).
+        /// </summary>
+        private void OnPaneBatchCloseRequested(object sender, PaneBatchCloseRequestedEventArgs e)
+        {
+            if (e == null || e.Panes.Count == 0)
+                return;
+            if (_batchHelpersHandled != null)
+            {
+                // A batch inside a batch (a menu click while a question is up): ignore it.
+                return;
+            }
+
+            var byId = new Dictionary<string, TerminalDocument>(StringComparer.Ordinal);
+            foreach (var pane in e.Panes)
+            {
+                if (pane != null && !string.IsNullOrEmpty(pane.DocId))
+                    byId.TryAdd(pane.DocId, pane);
+            }
+
+            var plan = new PaneBatchClose(
+                e.Panes.Where(p => p != null).Select(p => p.DocId),
+                id => _paneLaunches?.GetOpenHelperDocIds(id));
+
+            _batchHelpersHandled = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+            try
+            {
+                for (var id = plan.Next(); id != null; id = plan.Next())
+                {
+                    if (!byId.TryGetValue(id, out var doc) || doc.IsDisposed || doc.DockPanel == null)
+                        continue;
+
+                    _batchHelpersHandled.Clear();
+                    doc.Close();
+                    if (!doc.IsDisposed && doc.DockPanel != null)
+                    {
+                        _debugLogService?.Info("MainForm", $"Batch close stopped: closing '{doc.CustomTitle}' (docId={id}) was cancelled (task 7d20e94c item 8).");
+                        plan.ReportCancelled();
+                        break;
+                    }
+
+                    if (_batchHelpersHandled.TryGetValue(id, out var handled))
+                        plan.ReportHelpersHandled(handled);
+                }
+            }
+            finally
+            {
+                _batchHelpersHandled = null;
+            }
+        }
+
         /// <summary>
         /// The Owner is closing a pane (task 7d20e94c item 8). Every close of a docked pane goes through
         /// <c>Form.Close()</c> (the tab's ✕ via DockPanelSuite's <c>DockContentHandler.Close</c>, the tab
-        /// menu's Close / Close All / Close all but this), so FormClosing is the one cancellable
-        /// point BEFORE the pane leaves the dock. When this pane's launch spawned helper panes that are
+        /// menu's Close, and each pane of Close All / Close all but this, which
+        /// <see cref="OnPaneBatchCloseRequested"/> orders PMs first and stops at a Cancel), so FormClosing
+        /// is the one cancellable point BEFORE the pane leaves the dock. When this pane's launch spawned helper panes that are
         /// still open, ask once whether to close them too: Yes ends each helper's launch
         /// <c>closed_with_pm</c> first (so it comes back when this session is resumed) and closes it; No
         /// closes only this pane; Cancel keeps this pane open. Never asked during MT's shutdown, for a pane
@@ -6681,6 +6743,10 @@ namespace MultiTerminal
                 e.Cancel = true;
                 return;
             }
+
+            // In a batch close, the helpers this answer handled (closed with the PM, or kept running) are
+            // taken out of the rest of the batch.
+            _batchHelpersHandled?.TryAdd(pm.DocId, helpers.Select(h => h.DocId).ToList());
 
             // MT may have begun exiting while the question was up; its shutdown pass owns every pane now.
             if (answer != DialogResult.Yes || _paneLaunches.IsShuttingDown)

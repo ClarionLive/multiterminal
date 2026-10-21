@@ -304,6 +304,13 @@ namespace MultiTerminal.Docking
         public event EventHandler<ClaudeSessionAdoptedEventArgs> ClaudeSessionAdopted;
 
         /// <summary>
+        /// Raised by the tab menu's Close All Tabs and Close all but this with the panes to close, in tab
+        /// order (task 7d20e94c item 8 review fix). The subscriber (MainForm) closes them, PMs before their
+        /// helpers and stopping at a cancelled close; with no subscriber the pane closes them in order.
+        /// </summary>
+        public event EventHandler<PaneBatchCloseRequestedEventArgs> BatchCloseRequested;
+
+        /// <summary>
         /// The args of this pane's most recent <see cref="LaunchBegan"/>, or <c>null</c> before its first
         /// launch. Not cleared when the launch ends, so it describes the LAST launch, not a running one.
         /// </summary>
@@ -1465,24 +1472,29 @@ namespace MultiTerminal.Docking
         {
             if (DockPanel == null) return;
 
-            var docsToClose = DockPanel.Documents
+            CloseBatch(DockPanel.Documents
                 .OfType<TerminalDocument>()
-                .ToList();
-
-            foreach (var doc in docsToClose)
-            {
-                doc.Close();
-            }
+                .ToList());
         }
 
         private void CloseAllButThis()
         {
             if (DockPanel == null) return;
 
-            var docsToClose = DockPanel.Documents
+            CloseBatch(DockPanel.Documents
                 .OfType<TerminalDocument>()
                 .Where(doc => doc != this)
-                .ToList();
+                .ToList());
+        }
+
+        private void CloseBatch(List<TerminalDocument> docsToClose)
+        {
+            var handler = BatchCloseRequested;
+            if (handler != null)
+            {
+                handler(this, new PaneBatchCloseRequestedEventArgs(docsToClose));
+                return;
+            }
 
             foreach (var doc in docsToClose)
             {
@@ -4523,6 +4535,18 @@ namespace MultiTerminal.Docking
             ResumeSessionId = resumeSessionId;
             LaunchGeneration = launchGeneration;
         }
+    }
+
+    /// <summary>Args of <see cref="TerminalDocument.BatchCloseRequested"/> (task 7d20e94c item 8 review fix). Immutable.</summary>
+    public sealed class PaneBatchCloseRequestedEventArgs : EventArgs
+    {
+        public PaneBatchCloseRequestedEventArgs(IReadOnlyList<TerminalDocument> panes)
+        {
+            Panes = panes ?? Array.Empty<TerminalDocument>();
+        }
+
+        /// <summary>The panes to close, in tab order.</summary>
+        public IReadOnlyList<TerminalDocument> Panes { get; }
     }
 
     /// <summary>Args of <see cref="TerminalDocument.ClaudeSessionAdopted"/> (task 7d20e94c item 1). Immutable.</summary>

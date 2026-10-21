@@ -501,25 +501,34 @@ namespace MultiTerminal.Dialogs
         /// </summary>
         private void PaintHeaderRemainder(ListView list)
         {
+            // One painter per live handle. Both events are subscribed ONCE, here: subscribing
+            // HandleDestroyed inside Attach added one more handler per handle recreation (review fix).
+            HeaderRemainderPainter current = null;
+
+            void Release()
+            {
+                if (current == null)
+                    return;
+                current.ReleaseHandle();
+                _headerPainters.Remove(current);
+                current = null;
+            }
+
             void Attach()
             {
+                Release();
                 var header = HeaderRemainderPainter.SendMessage(list.Handle, HeaderRemainderPainter.LVM_GETHEADER, IntPtr.Zero, IntPtr.Zero);
                 if (header == IntPtr.Zero)
                     return;
-                var painter = new HeaderRemainderPainter(list, this);
-                painter.AssignHandle(header);
-                _headerPainters.Add(painter);
-                list.HandleDestroyed += (s, e) =>
-                {
-                    painter.ReleaseHandle();
-                    _headerPainters.Remove(painter);
-                };
+                current = new HeaderRemainderPainter(list, this);
+                current.AssignHandle(header);
+                _headerPainters.Add(current);
             }
 
+            list.HandleCreated += (s, e) => Attach();
+            list.HandleDestroyed += (s, e) => Release();
             if (list.IsHandleCreated)
                 Attach();
-            else
-                list.HandleCreated += (s, e) => Attach();
         }
 
         /// <summary>Paints a ListView header's strip right of its last column; see <see cref="PaintHeaderRemainder"/>.</summary>

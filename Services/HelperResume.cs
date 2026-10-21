@@ -188,4 +188,100 @@ namespace MultiTerminal.Services
                    $"Cancel: keep {pm} open.";
         }
     }
+
+    /// <summary>
+    /// The order and the skips of a batch close, the tab menu's Close All Tabs and Close all but this
+    /// (task 7d20e94c item 8 review fix). Pure: MainForm closes each pane <see cref="Next"/> returns and
+    /// reports what happened.
+    /// <list type="bullet">
+    /// <item>A pane comes after every PM in the batch that lists it as an open helper, so the PM's
+    /// "also close helpers?" is asked before the helper is closed as an ordinary <c>pane_closed</c>
+    /// (which would make it unresumable). Otherwise tab order is kept; a cycle (not possible with one
+    /// level of helpers) falls back to tab order.</item>
+    /// <item>A pane whose close was cancelled (Cancel on the question, or any other veto) STOPS the
+    /// batch: nothing after it is closed, its helpers included.</item>
+    /// <item>Helpers closed with their PM (Yes) are not closed again.</item>
+    /// <item>"No" removes that PM's helpers from the batch: the Owner said not to close them, so they
+    /// keep running even though "Close All" named them.</item>
+    /// </list>
+    /// </summary>
+    public sealed class PaneBatchClose
+    {
+        private readonly List<string> _order;
+        private readonly HashSet<string> _done = new HashSet<string>(StringComparer.Ordinal);
+        private int _index;
+
+        /// <param name="batchInTabOrder">DocIds of the panes to close, in tab order; blanks and duplicates are dropped.</param>
+        /// <param name="openHelpersOf">A pane's open helper DocIds (<c>PaneLaunchTracker.GetOpenHelperDocIds</c>); null means none.</param>
+        public PaneBatchClose(IEnumerable<string> batchInTabOrder, Func<string, IEnumerable<string>> openHelpersOf)
+        {
+            var batch = new List<string>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var id in batchInTabOrder ?? Enumerable.Empty<string>())
+            {
+                if (!string.IsNullOrEmpty(id) && seen.Add(id))
+                    batch.Add(id);
+            }
+
+            // pmsOf[h] = the panes IN THE BATCH that list h as an open helper.
+            var pmsOf = batch.ToDictionary(id => id, _ => new HashSet<string>(StringComparer.Ordinal), StringComparer.Ordinal);
+            foreach (var pm in batch)
+            {
+                foreach (var helper in openHelpersOf?.Invoke(pm) ?? Enumerable.Empty<string>())
+                {
+                    if (helper != null && !string.Equals(helper, pm, StringComparison.Ordinal) && pmsOf.TryGetValue(helper, out var set))
+                        set.Add(pm);
+                }
+            }
+
+            // Stable: each step takes the first remaining pane (in tab order) whose PMs are all placed.
+            _order = new List<string>(batch.Count);
+            var placed = new HashSet<string>(StringComparer.Ordinal);
+            var remaining = new List<string>(batch);
+            while (remaining.Count > 0)
+            {
+                int pick = remaining.FindIndex(id => pmsOf[id].All(placed.Contains));
+                if (pick < 0)
+                    pick = 0;
+                _order.Add(remaining[pick]);
+                placed.Add(remaining[pick]);
+                remaining.RemoveAt(pick);
+            }
+        }
+
+        /// <summary>The planned close order.</summary>
+        public IReadOnlyList<string> Order => _order;
+
+        /// <summary>True once a close was cancelled; <see cref="Next"/> then returns null.</summary>
+        public bool Stopped { get; private set; }
+
+        /// <summary>The next pane to close, or null when the batch is finished or stopped.</summary>
+        public string Next()
+        {
+            while (!Stopped && _index < _order.Count)
+            {
+                var id = _order[_index++];
+                if (_done.Add(id))
+                    return id;
+            }
+
+            return null;
+        }
+
+        /// <summary>The last pane's close was cancelled: stop the batch.</summary>
+        public void ReportCancelled() => Stopped = true;
+
+        /// <summary>
+        /// The last pane closed, and these helpers were either closed with it (Yes) or are to keep
+        /// running (No). Either way none of them is closed by the rest of the batch.
+        /// </summary>
+        public void ReportHelpersHandled(IEnumerable<string> helperDocIds)
+        {
+            foreach (var id in helperDocIds ?? Enumerable.Empty<string>())
+            {
+                if (!string.IsNullOrEmpty(id))
+                    _done.Add(id);
+            }
+        }
+    }
 }
