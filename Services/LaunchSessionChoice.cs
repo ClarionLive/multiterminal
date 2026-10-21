@@ -624,10 +624,13 @@ namespace MultiTerminal.Services
         /// </summary>
         /// <summary>
         /// The launch-record states that account for a recent transcript write by a process MT has
-        /// provably lost: it died with a previous run, or MT closed it with its PM (item 8).
+        /// provably lost: it died with a previous run, MT closed it with its PM (item 8), or this run
+        /// closed its pane or saw its process exit (<see cref="PriorLaunchState.ClosedInCurrentRun"/>).
         /// </summary>
         internal static bool WaivesRecencyFlag(PriorLaunchState prior) =>
-            prior == PriorLaunchState.DiedWithPreviousRun || prior == PriorLaunchState.ClosedWithPm;
+            prior == PriorLaunchState.DiedWithPreviousRun
+            || prior == PriorLaunchState.ClosedWithPm
+            || prior == PriorLaunchState.ClosedInCurrentRun;
 
         private static string MayBeOpenReasonFor(SessionCatalogEntry entry, DateTime? earliestUnknownLaunch, PriorLaunchState prior)
         {

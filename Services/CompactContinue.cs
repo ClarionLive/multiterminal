@@ -605,4 +605,53 @@ namespace MultiTerminal.Services
             return null;
         }
     }
+
+    /// <summary>What to do with an agent-requested <c>/compact</c> while the Owner may be typing.</summary>
+    internal enum CompactInjectStep
+    {
+        /// <summary>The input line is empty and quiet: type the <c>/compact</c> now.</summary>
+        Inject,
+
+        /// <summary>Someone has text in the input line or typed just now: check again shortly.</summary>
+        Wait,
+
+        /// <summary>The line never cleared within <see cref="CompactInjectWait.MaxWait"/>: drop the request.</summary>
+        GiveUp,
+    }
+
+    /// <summary>
+    /// When MT may type an agent-requested <c>/compact</c> into a pane (ticket c0ebcfd4, live TEST 4).
+    /// </summary>
+    /// <remarks>
+    /// The inject writes into the input line as it stands. With the Owner's half-typed text there, the
+    /// two merged ("aga/compact ...i") and were submitted as one ordinary message: no compaction ran
+    /// and the Owner's text was sent. So the inject waits until the line is empty (MT's own record of
+    /// typed characters since the last Enter, Esc or Ctrl+C) and nobody has typed for
+    /// <see cref="Quiet"/>. Clearing the line first was rejected: it would delete the Owner's text.
+    /// A line that never clears is dropped after <see cref="MaxWait"/> rather than typed into.
+    /// The record is a heuristic (it does not see Ctrl+U or a history recall), so a stale non-empty
+    /// line costs a dropped compaction, never a merged message.
+    /// </remarks>
+    internal static class CompactInjectWait
+    {
+        /// <summary>How long nobody may have typed before the inject.</summary>
+        internal static readonly TimeSpan Quiet = TimeSpan.FromSeconds(3);
+
+        /// <summary>How long to wait for the line to clear before dropping the request.</summary>
+        internal static readonly TimeSpan MaxWait = TimeSpan.FromMinutes(2);
+
+        /// <summary>How often the caller checks again after <see cref="CompactInjectStep.Wait"/>.</summary>
+        internal static readonly TimeSpan Poll = TimeSpan.FromMilliseconds(250);
+
+        public static CompactInjectStep Decide(bool lineHasTypedText, DateTime? lastUserInputUtc, DateTime startedUtc, DateTime nowUtc)
+        {
+            bool quiet = lastUserInputUtc is not DateTime last || nowUtc - last >= Quiet;
+            if (!lineHasTypedText && quiet)
+            {
+                return CompactInjectStep.Inject;
+            }
+
+            return nowUtc - startedUtc >= MaxWait ? CompactInjectStep.GiveUp : CompactInjectStep.Wait;
+        }
+    }
 }

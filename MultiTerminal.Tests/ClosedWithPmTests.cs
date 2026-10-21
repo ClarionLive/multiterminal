@@ -274,9 +274,9 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
-        public void Only_the_newest_row_decides_so_a_later_owner_close_is_ended()
+        public void Only_the_newest_row_decides_so_a_later_owner_close_is_that_close()
         {
-            Assert.Equal(PriorLaunchState.Ended, PaneLaunchRecorder.ClassifyPriorLaunch(
+            Assert.Equal(PriorLaunchState.ClosedInCurrentRun, PaneLaunchRecorder.ClassifyPriorLaunch(
                 new[] { Row("now", 1, PaneLaunchEndReason.ClosedWithPm), Row("now", 2, PaneLaunchEndReason.PaneClosed) }, "now", _ => false));
         }
 

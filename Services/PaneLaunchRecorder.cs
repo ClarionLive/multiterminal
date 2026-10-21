@@ -106,6 +106,16 @@ namespace MultiTerminal.Services
         /// flag is WAIVED, as for <see cref="DiedWithPreviousRun"/>. This run's live set still applies.
         /// </summary>
         ClosedWithPm = 5,
+
+        /// <summary>
+        /// The newest launch belongs to THIS MT run and ended <c>pane_closed</c>, <c>close_helper</c> or
+        /// <c>process_exit</c>: this MT watched its process end (an exit) or ended it (disposing the pane
+        /// terminates its process tree). A transcript written seconds before is that process, so the
+        /// recency flag is WAIVED, as for <see cref="ClosedWithPm"/>; without this, a session closed a
+        /// minute ago showed "may be open elsewhere". Not <c>session_changed</c>: that process still runs
+        /// (under a new session) and stays <see cref="Ended"/>.
+        /// </summary>
+        ClosedInCurrentRun = 6,
     }
 
     /// <summary>An MT process as recorded in <c>mt_runs</c>: its id and its start time (UTC).</summary>
@@ -497,7 +507,10 @@ namespace MultiTerminal.Services
             bool currentRun = !string.IsNullOrEmpty(currentRunId)
                 && string.Equals(newest.MtRunId, currentRunId, StringComparison.Ordinal);
             if (currentRun)
-                return newest.EndedAt == null ? PriorLaunchState.OpenInCurrentRun : PriorLaunchState.Ended;
+            {
+                if (newest.EndedAt == null) return PriorLaunchState.OpenInCurrentRun;
+                return EndedByThisRunsClose(newest.EndReason) ? PriorLaunchState.ClosedInCurrentRun : PriorLaunchState.Ended;
+            }
             if (!IsOpen(newest))
                 return PriorLaunchState.Ended;
 
@@ -513,6 +526,12 @@ namespace MultiTerminal.Services
 
             return gone ? PriorLaunchState.DiedWithPreviousRun : PriorLaunchState.OpenElsewhere;
         }
+
+        /// <summary>The end reasons that mean this run saw the launch's process end or ended it itself.</summary>
+        private static bool EndedByThisRunsClose(string endReason) =>
+            string.Equals(endReason, PaneLaunchEndReason.PaneClosed, StringComparison.Ordinal)
+            || string.Equals(endReason, PaneLaunchEndReason.CloseHelper, StringComparison.Ordinal)
+            || string.Equals(endReason, PaneLaunchEndReason.ProcessExit, StringComparison.Ordinal);
 
         /// <summary>True only when the run recorded its process and the probe says that process is gone.</summary>
         private bool IsRunProvablyGone(string runId)

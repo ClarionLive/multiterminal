@@ -252,7 +252,8 @@ recorder's `MtRunId`; pure rule `ClassifyPriorLaunch`):
 | previous run, still open or `mt_exit`, MT process NOT provably gone (alive, never recorded, unreadable) | `OpenElsewhere` | PM: recency flag applies as for `NoRecord`; helper: skipped as "may still be open elsewhere" whatever the transcript's age |
 | this run, not ended | `OpenInCurrentRun` | flagged open (PM: confirm; helper: skipped as already open) |
 | ended `closed_with_pm`, any run (item 8) | `ClosedWithPm` | recency flag WAIVED: MT closed that pane itself, and disposing it terminates its process tree. Without this a helper closed with its PM seconds ago would be skipped as "may be open elsewhere" |
-| anything else (ended this run, or closed in an earlier run) | `Ended` | recency flag applies as before |
+| this run, ended `pane_closed`, `close_helper` or `process_exit` | `ClosedInCurrentRun` | recency flag WAIVED: this MT ended that process (disposing the pane kills its job) or watched it exit. Without this a session whose tab was closed a minute ago showed ⚠ "may be open elsewhere" (live test, 2026-10-21) |
+| anything else (this run's `session_changed` or `mt_exit`, or closed in an earlier run) | `Ended` | recency flag applies as before |
 
 **Fail-closed on the previous run** (pipeline Run 1). Each recorder writes its MT process id and
 process start time to `mt_runs` under its run id. A previous run's open row counts as dead only when
@@ -272,8 +273,8 @@ It applies to both the PM's offer (`LaunchSessionChoiceModel`'s `priorLaunch` ar
 offered session in `LoadLaunchSessionChoices`) and each helper (`HelperResume.Check`'s `prior`). The
 waiver touches only the recency flag: this run's live set (`CurrentClaudeSessionId`,
 `PendingResumeSessionId`, `AgentProcess.SessionId`), the unknown-pane rule and the pre-launch
-`RecheckResume` all still apply. Deliberately narrow: a session ended in this run or closed in an
-earlier one keeps the recency flag. The record cannot see a process outside MT in any case, so a
+`RecheckResume` all still apply. Deliberately narrow: a session closed in an earlier run, or whose
+process went on under a new session (`session_changed`), keeps the recency flag. The record cannot see a process outside MT in any case, so a
 session resumed in a CA tab after an `mt_exit` is also unflagged; that is accepted, because the flag
 was always advisory and a quick relaunch after an exit is the case this feature exists for.
 

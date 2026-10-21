@@ -81,14 +81,39 @@ namespace MultiTerminal.Tests
         public void This_runs_launch_is_open_until_it_ends()
         {
             Assert.Equal(PriorLaunchState.OpenInCurrentRun, PaneLaunchRecorder.ClassifyPriorLaunch(new[] { Row("now", 0) }, "now", Gone));
-            Assert.Equal(PriorLaunchState.Ended, PaneLaunchRecorder.ClassifyPriorLaunch(new[] { Row("now", 0, PaneLaunchEndReason.ProcessExit) }, "now", Gone));
+            Assert.Equal(PriorLaunchState.ClosedInCurrentRun, PaneLaunchRecorder.ClassifyPriorLaunch(new[] { Row("now", 0, PaneLaunchEndReason.ProcessExit) }, "now", Gone));
+        }
+
+        // This run watched the process end or ended it itself, so a recent transcript write is that
+        // process and the "may be open elsewhere" flag is waived (the false alarm seen in the live test).
+        [Theory]
+        [InlineData(PaneLaunchEndReason.PaneClosed)]
+        [InlineData(PaneLaunchEndReason.CloseHelper)]
+        [InlineData(PaneLaunchEndReason.ProcessExit)]
+        public void This_runs_closed_launch_is_closed_in_current_run_and_waives_the_flag(string reason)
+        {
+            var state = PaneLaunchRecorder.ClassifyPriorLaunch(new[] { Row("now", 0, reason) }, "now", _ => false);
+            Assert.Equal(PriorLaunchState.ClosedInCurrentRun, state);
+            Assert.True(LaunchSessionChoiceModel.WaivesRecencyFlag(state));
+        }
+
+        // After /clear the process still runs under a new session, and mt_exit is MT's own shutdown
+        // write: neither waives.
+        [Theory]
+        [InlineData(PaneLaunchEndReason.SessionChanged)]
+        [InlineData(PaneLaunchEndReason.MtExit)]
+        public void This_runs_session_change_or_mt_exit_stays_ended(string reason)
+        {
+            var state = PaneLaunchRecorder.ClassifyPriorLaunch(new[] { Row("now", 0, reason) }, "now", _ => false);
+            Assert.Equal(PriorLaunchState.Ended, state);
+            Assert.False(LaunchSessionChoiceModel.WaivesRecencyFlag(state));
         }
 
         [Fact]
         public void Only_the_newest_launch_decides()
         {
             // An older crash row does not outvote a newer launch that ended this run, and vice versa.
-            Assert.Equal(PriorLaunchState.Ended, PaneLaunchRecorder.ClassifyPriorLaunch(
+            Assert.Equal(PriorLaunchState.ClosedInCurrentRun, PaneLaunchRecorder.ClassifyPriorLaunch(
                 new[] { Row("old", 0), Row("now", 5, PaneLaunchEndReason.PaneClosed) }, "now", Gone));
             Assert.Equal(PriorLaunchState.DiedWithPreviousRun, PaneLaunchRecorder.ClassifyPriorLaunch(
                 new[] { Row("older", 9, PaneLaunchEndReason.MtExit), Row("oldest", 0, PaneLaunchEndReason.PaneClosed) }, "now", Gone));

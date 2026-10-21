@@ -101,6 +101,7 @@ namespace MultiTerminal.Tests
                 "OnChatInjectRequested",          // Chat panel + board Inject button
                 "OnChatReplyRequested",           // reply prompt (see ticket 1fcb266c)
                 "OnBrokerTerminalInjectRequested",// the self-clear submit tool
+                "InjectCompactWhenLineClearAsync",// compact_my_context; waits for an empty, quiet input line (c0ebcfd4 TEST 4)
                 "ProcessNextMessage",             // message-injection fallback (tier 3)
                 "OnStartScreenNewProject",        // /new-project onboarding
                 "OnTaskDroppedOnTerminal",        // drag a card onto a pane

@@ -706,6 +706,13 @@ namespace MultiTerminal.Controls
         /// </summary>
         public DateTime? CompactArmedUtc { get; private set; }
 
+        /// <summary>
+        /// True while MT's record of the input line holds characters someone typed since the last
+        /// Enter, Esc or Ctrl+C (<see cref="BufferInputForSlashDetection"/>). A heuristic: it does not
+        /// see Ctrl+U or a recalled history entry. UI thread.
+        /// </summary>
+        public bool InputLineHasTypedText => _inputLineBuffer.Length > 0;
+
         /// <summary>The plugin's PreCompact hook reported a compaction starting in this pane.</summary>
         public void NoteCompactionStarting(bool manual) => _compactContinueGate.NoteCompactionStarting(manual);
 

@@ -1488,39 +1488,77 @@ namespace MultiTerminal
 
             if (string.Equals(e.Kind, "submit", StringComparison.OrdinalIgnoreCase))
             {
-                // An agent-requested /compact (compact_my_context) arms THIS pane to continue once the
-                // compaction finishes. Armed BEFORE the inject, because an idle pane can start compacting
-                // before the inject returns; disarmed again if the inject fails or faults, so a request
-                // that never reached the pane cannot be claimed by a later compaction.
-                bool armCompact = e.ContinueAfterCompact && e.Text != null && e.Text.StartsWith("/compact", StringComparison.Ordinal);
-                var terminal = targetDoc.Terminal;
-                if (armCompact)
+                // An agent-requested /compact (compact_my_context) waits for an empty input line, then
+                // arms THIS pane to continue once the compaction finishes (InjectCompactWhenLineClearAsync).
+                if (e.ContinueAfterCompact && e.Text != null && e.Text.StartsWith("/compact", StringComparison.Ordinal))
                 {
-                    terminal.ArmCompactContinue();
+                    _ = InjectCompactWhenLineClearAsync(targetDoc, e);
+                    return;
                 }
 
                 _ = targetDoc.InjectInputAsync(e.Text).ContinueWith(
-                    t =>
-                    {
-                        bool delivered = t.Status == System.Threading.Tasks.TaskStatus.RanToCompletion && t.Result;
-                        if (t.IsFaulted)
-                        {
-                            _debugLogService?.Error("MainForm",
-                                $"TerminalInjectRequested(submit) for '{e.AgentName}' faulted: {t.Exception?.GetBaseException().Message}");
-                        }
-
-                        if (armCompact && !delivered)
-                        {
-                            terminal.DisarmCompactContinue();
-                        }
-                    },
-                    System.Threading.Tasks.TaskScheduler.FromCurrentSynchronizationContext());
+                    t => _debugLogService?.Error("MainForm",
+                        $"TerminalInjectRequested(submit) for '{e.AgentName}' faulted: {t.Exception?.GetBaseException().Message}"),
+                    System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);
                 return;
             }
 
             // Default (Kind=="clear-trigger"): funnel through the deduped trigger so the hook
             // path and the keystroke fallback can't double-inject for the same /clear.
             targetDoc.Terminal.TriggerClearSessionStart("hook", e.Text);
+        }
+
+        /// <summary>
+        /// Types an agent-requested <c>/compact</c> once the pane's input line is empty and nobody has
+        /// typed for a moment (<see cref="CompactInjectWait"/>, live TEST 4 of ticket c0ebcfd4: typed into
+        /// the Owner's half-written text, the two were submitted as one ordinary message). Arms the
+        /// continue only then, so the Owner's typing that was waited out does not count against it.
+        /// A line that never clears drops the request. Runs on the UI thread.
+        /// </summary>
+        private async System.Threading.Tasks.Task InjectCompactWhenLineClearAsync(TerminalDocument targetDoc, TerminalInjectEventArgs e)
+        {
+            var terminal = targetDoc.Terminal;
+            var started = DateTime.UtcNow;
+            bool waited = false;
+            try
+            {
+                while (true)
+                {
+                    if (terminal.IsDisposed || !terminal.IsLiveForInjection)
+                    {
+                        _debugLogService?.Info("MainForm", $"compact request for '{e.AgentName}' dropped: the pane is no longer running");
+                        return;
+                    }
+
+                    var step = CompactInjectWait.Decide(terminal.InputLineHasTypedText, terminal.LastUserInputUtc, started, DateTime.UtcNow);
+                    if (step == CompactInjectStep.Inject) break;
+                    if (step == CompactInjectStep.GiveUp)
+                    {
+                        _debugLogService?.Warning("MainForm", $"compact request for '{e.AgentName}' dropped: the input line held typed text for {CompactInjectWait.MaxWait.TotalMinutes:0} minutes");
+                        return;
+                    }
+
+                    if (!waited)
+                    {
+                        waited = true;
+                        _debugLogService?.Info("MainForm", $"compact request for '{e.AgentName}': someone is typing in the pane; waiting for the line to clear");
+                    }
+
+                    await System.Threading.Tasks.Task.Delay(CompactInjectWait.Poll);
+                }
+
+                terminal.ArmCompactContinue();
+                bool delivered = await targetDoc.InjectInputAsync(e.Text);
+                if (!delivered)
+                {
+                    terminal.DisarmCompactContinue();
+                }
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("MainForm", $"TerminalInjectRequested(submit) for '{e.AgentName}' faulted: {ex.GetBaseException().Message}");
+                if (!terminal.IsDisposed) terminal.DisarmCompactContinue();
+            }
         }
 
         /// <summary>
