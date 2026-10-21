@@ -84,7 +84,7 @@ test("the handler submits the capped text and reports the trim", () => {
   const handler = src.slice(start, src.indexOf("\n      case ", start + 10));
   const code = handler.split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l)).join("\n");
   assert.match(code, /= capCompactCommand\(focus\)/);
-  assert.match(code, /\{ text: compactText \}/);
+  assert.match(code, /\{ text: compactText[ ,]/);
   assert.match(code, /it was trimmed to fit the 500-byte terminal input limit/);
   assert.match(code, /\$\{trimNote\}/);
 });

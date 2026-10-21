@@ -1456,8 +1456,23 @@ namespace MultiTerminal
             // agent's own terminal. Best-effort, fire-and-forget — matches the broker's
             // "delivery is the subscriber's responsibility" contract. NOT routed through the
             // post-/clear dedup trigger (that's for the SessionStart(source=clear) recovery).
+            // Kind=="compact-continue" (ticket c0ebcfd4): the plugin reports a finished compaction.
+            // Only the pane that armed it, and only once, gets the continue prompt.
+            if (string.Equals(e.Kind, "compact-continue", StringComparison.OrdinalIgnoreCase))
+            {
+                StartCompactContinue(targetDoc, e);
+                return;
+            }
+
             if (string.Equals(e.Kind, "submit", StringComparison.OrdinalIgnoreCase))
             {
+                // An agent-requested /compact (compact_my_context) arms THIS pane to continue once the
+                // compaction finishes. Armed before the inject, which only queues the keystrokes.
+                if (e.ContinueAfterCompact && e.Text != null && e.Text.StartsWith("/compact", StringComparison.Ordinal))
+                {
+                    targetDoc.Terminal.ArmCompactContinue();
+                }
+
                 _ = targetDoc.InjectInputAsync(e.Text).ContinueWith(
                     t => _debugLogService?.Error("MainForm",
                         $"TerminalInjectRequested(submit) for '{e.AgentName}' faulted: {t.Exception?.GetBaseException().Message}"),
@@ -1468,6 +1483,63 @@ namespace MultiTerminal
             // Default (Kind=="clear-trigger"): funnel through the deduped trigger so the hook
             // path and the keystroke fallback can't double-inject for the same /clear.
             targetDoc.Terminal.TriggerClearSessionStart("hook", e.Text);
+        }
+
+        /// <summary>
+        /// After a compaction the pane asked for (compact_my_context), waits until the agent is idle,
+        /// types the continue prompt and checks that a turn started (ticket c0ebcfd4). The decisions
+        /// are <see cref="CompactContinueSequencer"/>'s; this only wires the pane and the feed to it.
+        /// Called on the UI thread.
+        /// </summary>
+        private void StartCompactContinue(TerminalDocument targetDoc, TerminalInjectEventArgs e)
+        {
+            // The pane is named by the hook's MULTITERMINAL_DOC_ID, so a caller that only knows the
+            // agent's name cannot fire another pane's continue. Checked BEFORE consuming, so a stray
+            // report leaves a genuine armed request in place.
+            if (!string.Equals(targetDoc.DocId, e.DocId, StringComparison.Ordinal))
+            {
+                _debugLogService?.Info("MainForm", $"compact-continue for '{e.AgentName}': docId does not match the pane registered under that name; ignored");
+                return;
+            }
+
+            var terminal = targetDoc.Terminal;
+            if (!terminal.TryConsumeCompactContinue())
+            {
+                _debugLogService?.Trace("MainForm", $"compact-continue for '{e.AgentName}': not armed (Owner's own or automatic compaction); nothing to do");
+                return;
+            }
+
+            // The runner polls SQLite, so it runs off the UI thread; everything that touches the pane
+            // is marshalled back here.
+            var runner = new CompactContinueRunner(
+                _mcpServer?.Broker?.ActivityFeedService,
+                e.AgentName,
+                paneAlive: () => OnUiThread(() => !terminal.IsDisposed && terminal.IsLiveForInjection, false),
+                type: text => OnUiThread(() => terminal.TypeAndSubmitAsync(text), System.Threading.Tasks.Task.CompletedTask),
+                sendEnter: () => OnUiThread(() => terminal.SendEnterAsync(), System.Threading.Tasks.Task.FromResult(false)),
+                log: msg => _debugLogService?.Info("MainForm", msg));
+
+            _ = System.Threading.Tasks.Task.Run(runner.RunAsync).ContinueWith(
+                t => _debugLogService?.Error("MainForm", $"compact-continue for '{e.AgentName}' faulted: {t.Exception?.GetBaseException().Message}"),
+                System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);
+        }
+
+        /// <summary>Runs <paramref name="func"/> on the UI thread; <paramref name="fallback"/> once the form is closing or gone.</summary>
+        private T OnUiThread<T>(Func<T> func, T fallback)
+        {
+            try
+            {
+                if (IsDisposed || Disposing) return fallback;
+                return InvokeRequired ? (T)Invoke(func) : func();
+            }
+            catch (ObjectDisposedException)
+            {
+                return fallback;
+            }
+            catch (InvalidOperationException)
+            {
+                return fallback;
+            }
         }
 
         private void OnBrowserTabRequested(object sender, BrowserTabEventArgs e)

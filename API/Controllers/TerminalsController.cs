@@ -107,7 +107,28 @@ namespace MultiTerminal.API.Controllers
                 return Problem(detail: "text is required", statusCode: 400);
 
             var (success, error) = _broker.RequestTerminalInject(
-                name, null, request.Text, "submit");
+                name, null, request.Text, "submit", request.ContinueAfterCompact);
+
+            if (!success)
+                return Problem(detail: error, statusCode: 400);
+
+            return Ok();
+        }
+
+        /// <summary>
+        /// POST /api/terminals/compact-finished — the plugin's SessionStart(compact) hook reports a
+        /// finished compaction for pane <c>docId</c> (ticket c0ebcfd4). MT types a continue prompt
+        /// only if that pane armed one when <c>compact_my_context</c> submitted its <c>/compact</c>;
+        /// otherwise (the Owner's own /compact, an automatic compaction, another pane) nothing happens.
+        /// </summary>
+        [HttpPost("compact-finished")]
+        public IActionResult CompactFinished([FromBody] TerminalCompactFinishedRequest request)
+        {
+            if (request == null)
+                return Problem(detail: "request body is required", statusCode: 400);
+
+            var (success, error) = _broker.RequestCompactContinue(
+                request.AgentName, request.SessionId, request.DocId);
 
             if (!success)
                 return Problem(detail: error, statusCode: 400);
@@ -200,6 +221,16 @@ namespace MultiTerminal.API.Controllers
         public class TerminalSubmitRequest
         {
             public string Text { get; set; }
+
+            /// <summary>True from <c>compact_my_context</c>: continue after this /compact (ticket c0ebcfd4).</summary>
+            public bool ContinueAfterCompact { get; set; }
+        }
+
+        public class TerminalCompactFinishedRequest
+        {
+            public string AgentName { get; set; }
+            public string SessionId { get; set; }
+            public string DocId { get; set; }
         }
     }
 }

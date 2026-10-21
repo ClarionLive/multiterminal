@@ -3789,7 +3789,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Byte cap (c0ebcfd4): over 500 bytes the inject is split into "[1/2] "-prefixed submissions,
         // which turns /compact into a plain message. capCompactCommand keeps it at <= 450 bytes.
         const { text: compactText, trimmed: focusTrimmed, focusBytes } = capCompactCommand(focus);
-        await apiCall(`/api/terminals/${seg(cmpName)}/submit`, "POST", { text: compactText });
+        // continueAfterCompact (ticket c0ebcfd4): MT arms this pane, and when the plugin's
+        // SessionStart(compact) hook reports the compaction finished, types a continue prompt once
+        // the pane is idle. A manual /compact otherwise ends with no new turn.
+        await apiCall(`/api/terminals/${seg(cmpName)}/submit`, "POST", { text: compactText, continueAfterCompact: true });
         const trimNote = focusTrimmed
           ? `\n✂️ Your focus was ${focusBytes} bytes; it was trimmed to fit the 500-byte terminal input limit (longer input is split into separate submissions and breaks /compact). Put details in update_task_continuation instead.`
           : "";
@@ -3797,7 +3800,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // returns OK once the inject is REQUESTED; MainForm fires InjectInputAsync without
         // awaiting, and it can no-op for a stale/renamed/uninitialized terminal). Do not claim
         // it definitely compacted. (Adversary-gate finding; shared clear_my_context reword in 6d406e84.)
-        return { content: [{ type: "text", text: `🗜️ Requested '${compactText}' for '${cmpName}' — submitted best-effort (the inject is fire-and-forget; a stale/renamed terminal or renderer hiccup can silently no-op). If it landed, the terminal compacts at turn end, preserving a summary (not a wipe) — verify on your next turn. Make sure you already wrote continuation notes (update_task_continuation); /compact's summary is lossy and your notes stay authoritative.${trimNote}` }] };
+        return { content: [{ type: "text", text: `🗜️ Requested '${compactText}' for '${cmpName}' — submitted best-effort (the inject is fire-and-forget; a stale/renamed terminal or renderer hiccup can silently no-op). If it landed, the terminal compacts at turn end, preserving a summary (not a wipe) — verify on your next turn. Make sure you already wrote continuation notes (update_task_continuation); /compact's summary is lossy and your notes stay authoritative. After the compaction MultiTerminal types a prompt telling you to continue; you do not need the Owner to.${trimNote}` }] };
       }
 
       case "get_my_active_task": {

@@ -7864,7 +7864,7 @@ namespace MultiTerminal.MCPServer.Services
         /// (task be599e08). Best-effort: the event is raised synchronously, but delivery/injection
         /// is the subscriber's responsibility — a missing terminal is a no-op, not an error here.
         /// </summary>
-        public (bool success, string error) RequestTerminalInject(string agentName, string sessionId, string text, string kind = "clear-trigger")
+        public (bool success, string error) RequestTerminalInject(string agentName, string sessionId, string text, string kind = "clear-trigger", bool continueAfterCompact = false)
         {
             if (string.IsNullOrWhiteSpace(agentName))
                 return (false, "agentName is required");
@@ -7876,7 +7876,33 @@ namespace MultiTerminal.MCPServer.Services
                 AgentName = agentName,
                 SessionId = sessionId,
                 Text = text,
-                Kind = string.IsNullOrEmpty(kind) ? "clear-trigger" : kind
+                Kind = string.IsNullOrEmpty(kind) ? "clear-trigger" : kind,
+                ContinueAfterCompact = continueAfterCompact
+            });
+
+            return (true, null);
+        }
+
+        /// <summary>
+        /// The plugin's SessionStart(compact) hook reports that <paramref name="agentName"/>'s pane
+        /// <paramref name="docId"/> finished compacting (ticket c0ebcfd4). Raises
+        /// <see cref="TerminalInjectRequested"/> with Kind <c>"compact-continue"</c>; MainForm types a
+        /// continue prompt only if that exact pane armed one when it submitted an agent-requested
+        /// <c>/compact</c>, so a compaction nobody asked MT to follow up is a no-op.
+        /// </summary>
+        public (bool success, string error) RequestCompactContinue(string agentName, string sessionId, string docId)
+        {
+            if (string.IsNullOrWhiteSpace(agentName))
+                return (false, "agentName is required");
+            if (string.IsNullOrWhiteSpace(docId))
+                return (false, "docId is required");
+
+            RaiseSafe(TerminalInjectRequested, new TerminalInjectEventArgs
+            {
+                AgentName = agentName,
+                SessionId = sessionId,
+                DocId = docId,
+                Kind = "compact-continue"
             });
 
             return (true, null);
@@ -8617,8 +8643,19 @@ namespace MultiTerminal.MCPServer.Services
         /// presses Enter as a normal prompt submission via the terminal's
         /// InjectInputAsync — used by the self-clear MCP tool to submit "/clear"
         /// (task 1d6e599d). Null/empty is treated as "clear-trigger" for back-compat.
+        /// <c>"compact-continue"</c> (ticket c0ebcfd4): a compaction finished in pane <see cref="DocId"/>;
+        /// type the continue prompt if that pane armed one.
         /// </summary>
         public string Kind { get; set; }
+
+        /// <summary>
+        /// Kind <c>"submit"</c> only: this submission is an agent-requested <c>/compact</c>, so arm the
+        /// pane to continue once the compaction finishes (ticket c0ebcfd4).
+        /// </summary>
+        public bool ContinueAfterCompact { get; set; }
+
+        /// <summary>Kind <c>"compact-continue"</c> only: the pane (MULTITERMINAL_DOC_ID) that compacted.</summary>
+        public string DocId { get; set; }
     }
 
     /// <summary>
