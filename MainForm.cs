@@ -1464,19 +1464,47 @@ namespace MultiTerminal
                 return;
             }
 
+            // Kind=="compact-starting" (ticket c0ebcfd4): the plugin's PreCompact hook names the trigger,
+            // so only a MANUAL compaction can claim the request (see CompactContinueGate).
+            if (string.Equals(e.Kind, "compact-starting", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.Equals(targetDoc.DocId, e.DocId, StringComparison.Ordinal))
+                {
+                    targetDoc.Terminal.NoteCompactionStarting(string.Equals(e.Text, "manual", StringComparison.Ordinal));
+                }
+
+                return;
+            }
+
             if (string.Equals(e.Kind, "submit", StringComparison.OrdinalIgnoreCase))
             {
                 // An agent-requested /compact (compact_my_context) arms THIS pane to continue once the
-                // compaction finishes. Armed before the inject, which only queues the keystrokes.
-                if (e.ContinueAfterCompact && e.Text != null && e.Text.StartsWith("/compact", StringComparison.Ordinal))
+                // compaction finishes. Armed BEFORE the inject, because an idle pane can start compacting
+                // before the inject returns; disarmed again if the inject fails or faults, so a request
+                // that never reached the pane cannot be claimed by a later compaction.
+                bool armCompact = e.ContinueAfterCompact && e.Text != null && e.Text.StartsWith("/compact", StringComparison.Ordinal);
+                var terminal = targetDoc.Terminal;
+                if (armCompact)
                 {
-                    targetDoc.Terminal.ArmCompactContinue();
+                    terminal.ArmCompactContinue();
                 }
 
                 _ = targetDoc.InjectInputAsync(e.Text).ContinueWith(
-                    t => _debugLogService?.Error("MainForm",
-                        $"TerminalInjectRequested(submit) for '{e.AgentName}' faulted: {t.Exception?.GetBaseException().Message}"),
-                    System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);
+                    t =>
+                    {
+                        bool delivered = t.Status == System.Threading.Tasks.TaskStatus.RanToCompletion && t.Result;
+                        if (t.IsFaulted)
+                        {
+                            _debugLogService?.Error("MainForm",
+                                $"TerminalInjectRequested(submit) for '{e.AgentName}' faulted: {t.Exception?.GetBaseException().Message}");
+                        }
+
+                        if (armCompact && !delivered)
+                        {
+                            terminal.DisarmCompactContinue();
+                        }
+                    },
+                    System.Threading.Tasks.TaskScheduler.FromCurrentSynchronizationContext());
                 return;
             }
 
@@ -1505,7 +1533,7 @@ namespace MultiTerminal
             var terminal = targetDoc.Terminal;
             if (!terminal.TryConsumeCompactContinue())
             {
-                _debugLogService?.Trace("MainForm", $"compact-continue for '{e.AgentName}': not armed (Owner's own or automatic compaction); nothing to do");
+                _debugLogService?.Trace("MainForm", $"compact-continue for '{e.AgentName}': not armed, or not a manual compaction; nothing to do");
                 return;
             }
 
@@ -1515,6 +1543,7 @@ namespace MultiTerminal
                 _mcpServer?.Broker?.ActivityFeedService,
                 e.AgentName,
                 paneAlive: () => OnUiThread(() => !terminal.IsDisposed && terminal.IsLiveForInjection, false),
+                lastUserInput: () => OnUiThread(() => terminal.LastUserInputUtc, (DateTime?)null),
                 type: text => OnUiThread(() => terminal.TypeAndSubmitAsync(text), System.Threading.Tasks.Task.CompletedTask),
                 sendEnter: () => OnUiThread(() => terminal.SendEnterAsync(), System.Threading.Tasks.Task.FromResult(false)),
                 log: msg => _debugLogService?.Info("MainForm", msg));

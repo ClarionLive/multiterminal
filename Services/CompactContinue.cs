@@ -15,13 +15,26 @@ namespace MultiTerminal.Services
     /// compaction continues by itself and needs nothing.
     /// </para>
     /// <para>
-    /// Armed when MT submits an agent-requested <c>/compact</c>, consumed by the plugin's
-    /// SessionStart(compact) report. A <c>/compact</c> the Owner typed arms nothing, so it is followed
-    /// by nothing. One gate per pane, held by the pane's <c>TerminalControl</c>, so the flag belongs
-    /// to the pane that compacted and not to whatever later answers to its name.
+    /// <b>Armed</b> when MT submits an agent-requested <c>/compact</c>, and <b>disarmed</b> again if that
+    /// submission fails, so a request that never reached the pane cannot be claimed by a later one.
     /// </para>
-    /// <para>Thread-safe: armed on the UI thread, consumed from the REST event on the UI thread too,
-    /// but nothing guarantees that for a future caller.</para>
+    /// <para>
+    /// <b>Consumed only by a MANUAL compaction.</b> SessionStart(compact) fires for manual and automatic
+    /// compactions alike and does not say which, so the plugin's PreCompact hook reports the trigger
+    /// first (<see cref="NoteCompactionStarting"/>). This matters exactly when the feature is used: an
+    /// agent asks to compact because its context is nearly full, its <c>/compact</c> waits for the turn
+    /// to end, and an automatic compaction can run first, mid-turn. That one must not take the request,
+    /// or the continue prompt is typed while the requested <c>/compact</c> is running and nothing follows
+    /// it. An automatic compaction leaves the request armed for the manual one still to come.
+    /// </para>
+    /// <para>
+    /// Not proof of WHICH manual compaction: one the Owner types within <see cref="Expiry"/> of a
+    /// request whose <c>/compact</c> was submitted but never ran would claim it. The REST routes are
+    /// local and unauthenticated like every MT route (Owner decision), so this is a convenience
+    /// convention, not a security boundary.
+    /// </para>
+    /// <para>One gate per pane, held by the pane's <c>TerminalControl</c>. Locked: nothing guarantees
+    /// that every caller stays on the UI thread.</para>
     /// </remarks>
     internal sealed class CompactContinueGate
     {
@@ -30,19 +43,44 @@ namespace MultiTerminal.Services
 
         private readonly object _lock = new object();
         private DateTime? _armedAtUtc;
+        private bool _manualCompactionStarted;
 
-        /// <summary>Records that the pane's next compaction should be followed by a continue prompt.</summary>
+        /// <summary>Records that the pane's next manual compaction should be followed by a continue prompt.</summary>
         public void Arm(DateTime nowUtc)
         {
             lock (_lock)
             {
                 _armedAtUtc = nowUtc;
+                _manualCompactionStarted = false;
+            }
+        }
+
+        /// <summary>Withdraws the request: its <c>/compact</c> was never submitted.</summary>
+        public void Disarm()
+        {
+            lock (_lock)
+            {
+                _armedAtUtc = null;
+                _manualCompactionStarted = false;
+            }
+        }
+
+        /// <summary>The plugin's PreCompact hook: a compaction is starting, manual or automatic.</summary>
+        public void NoteCompactionStarting(bool manual)
+        {
+            lock (_lock)
+            {
+                if (_armedAtUtc != null)
+                {
+                    _manualCompactionStarted = manual;
+                }
             }
         }
 
         /// <summary>
-        /// True at most once per <see cref="Arm"/>, and only within <see cref="Expiry"/>. An expired
-        /// request is cleared, so it cannot fire later.
+        /// True at most once per <see cref="Arm"/>: only within <see cref="Expiry"/>, and only when the
+        /// compaction that just finished was reported as manual. An expired request is cleared; a request
+        /// met by an automatic compaction stays armed for the manual one.
         /// </summary>
         public bool TryConsume(DateTime nowUtc)
         {
@@ -53,9 +91,22 @@ namespace MultiTerminal.Services
                     return false;
                 }
 
-                _armedAtUtc = null;
                 TimeSpan age = nowUtc - armedAt;
-                return age >= TimeSpan.Zero && age <= Expiry;
+                if (age < TimeSpan.Zero || age > Expiry)
+                {
+                    _armedAtUtc = null;
+                    _manualCompactionStarted = false;
+                    return false;
+                }
+
+                if (!_manualCompactionStarted)
+                {
+                    return false;
+                }
+
+                _armedAtUtc = null;
+                _manualCompactionStarted = false;
+                return true;
             }
         }
     }
@@ -66,7 +117,7 @@ namespace MultiTerminal.Services
         /// <summary>A <c>TURN_END</c> row: the turn is over and the prompt is free.</summary>
         TurnEnded,
 
-        /// <summary>Any other main-thread row (a tool started, finished or failed): the agent is working.</summary>
+        /// <summary>Any other main-thread row (a tool or a build): the agent is working.</summary>
         Working,
     }
 
@@ -85,24 +136,40 @@ namespace MultiTerminal.Services
         /// <summary>A turn started. Finished.</summary>
         Verified,
 
-        /// <summary>No turn started even after the second Enter. Finished; log it.</summary>
+        /// <summary>Typed, but no turn was seen (or it could not be seen safely). Finished without another key; logged.</summary>
         NotVerified,
+
+        /// <summary>Never typed: idle could not be established. Finished; logged with <see cref="CompactContinueSequencer.GiveUpReason"/>.</summary>
+        GaveUp,
     }
 
     /// <summary>Why the prompt was typed when it was. Logged, so a live test can tell which edge fired.</summary>
     internal enum CompactContinueTypeReason
     {
-        /// <summary>Not typed yet.</summary>
+        /// <summary>Not typed.</summary>
         None,
 
         /// <summary>A <c>TURN_END</c> arrived after the compaction finished, with no work after it.</summary>
         TurnEnded,
 
-        /// <summary>No main-thread activity at all for <see cref="CompactContinueTiming.Quiet"/> after the compaction finished.</summary>
+        /// <summary>No main-thread row for <see cref="CompactContinueTiming.Quiet"/> of uninterrupted, successful feed reads.</summary>
         Quiet,
+    }
 
-        /// <summary>The agent was still working at <see cref="CompactContinueTiming.MaxIdleWait"/>; typed anyway, and the verify step decides.</summary>
-        GaveUpWaiting,
+    /// <summary>Why nothing was typed.</summary>
+    internal enum CompactContinueGiveUpReason
+    {
+        /// <summary>Not given up.</summary>
+        None,
+
+        /// <summary>The agent was still working at <see cref="CompactContinueTiming.MaxIdleWait"/>, e.g. blocked on a permission prompt.</summary>
+        StillWorking,
+
+        /// <summary>The activity feed could not be read long enough to prove the pane idle.</summary>
+        FeedUnavailable,
+
+        /// <summary>Someone typed in the pane after the compaction finished; their input is not ours to submit.</summary>
+        OwnerTyping,
     }
 
     /// <summary>Time limits for <see cref="CompactContinueSequencer"/>.</summary>
@@ -112,14 +179,14 @@ namespace MultiTerminal.Services
         public TimeSpan Settle { get; init; } = TimeSpan.FromMilliseconds(1500);
 
         /// <summary>
-        /// No main-thread row at all for this long after the compaction finished counts as idle. The
-        /// common case: <c>/compact</c> runs after the requesting turn ended, so the TURN_END came
-        /// BEFORE the compaction and none follows it.
+        /// No main-thread row for this long, over uninterrupted successful reads, counts as idle. The
+        /// common case: a manual <c>/compact</c> runs only between turns, and the turn's TURN_END came
+        /// BEFORE the compaction, so none follows it.
         /// </summary>
         public TimeSpan Quiet { get; init; } = TimeSpan.FromSeconds(4);
 
-        /// <summary>Longest wait for a working agent to end its turn before typing anyway.</summary>
-        public TimeSpan MaxIdleWait { get; init; } = TimeSpan.FromMinutes(2);
+        /// <summary>Longest wait for idle. Reached without it, nothing is typed.</summary>
+        public TimeSpan MaxIdleWait { get; init; } = TimeSpan.FromMinutes(5);
 
         /// <summary>How long after typing (or after the second Enter) a turn must show activity.</summary>
         public TimeSpan Verify { get; init; } = TimeSpan.FromSeconds(15);
@@ -127,31 +194,39 @@ namespace MultiTerminal.Services
 
     /// <summary>
     /// The idle and verify decisions for the post-compaction continue prompt (ticket c0ebcfd4). Pure:
-    /// it is told what was observed and when, and answers what to do next.
+    /// it is told what was observed and when, and answers what to do next. It FAILS CLOSED: whenever
+    /// idle cannot be shown, nothing is typed, and an extra Enter is sent only when the evidence that
+    /// nothing started is complete.
     /// </summary>
     /// <remarks>
     /// <para>
     /// <b>Why wait for idle.</b> A prompt typed while Claude Code is busy was seen to sit in the input
-    /// box unsubmitted (Charlie's and Frank's panes, 2026-10-19/20). So nothing is typed while the
-    /// agent's main thread is working.
+    /// box unsubmitted (Charlie's and Frank's panes, 2026-10-19/20). Worse, a turn blocked on a
+    /// permission prompt shows a <c>TOOL_START</c> and no <c>TURN_END</c>, and an Enter typed there picks
+    /// the prompt's default. So a working agent is never typed into, however long it works.
     /// </para>
     /// <para>
     /// <b>Idle evidence</b>, from the activity feed the plugin's activity hook writes: a
-    /// <c>TURN_END</c> with no later work, or no main-thread row at all for
-    /// <see cref="CompactContinueTiming.Quiet"/>. Work seen without a later <c>TURN_END</c> means
-    /// busy, which waits up to <see cref="CompactContinueTiming.MaxIdleWait"/>.
+    /// <c>TURN_END</c> with no later work, or no main-thread row for <see cref="CompactContinueTiming.Quiet"/>
+    /// of uninterrupted successful reads (a failed read restarts that window; a feed that cannot be
+    /// read never counts as quiet). Without either by <see cref="CompactContinueTiming.MaxIdleWait"/>,
+    /// it gives up.
     /// </para>
     /// <para>
-    /// <b>Verify.</b> After typing, any main-thread row (a tool or a <c>TURN_END</c>) proves a turn ran.
-    /// If none arrives within <see cref="CompactContinueTiming.Verify"/>, Enter is sent ONCE more, and
-    /// after a second silent window the result is reported as not verified. Never a third Enter.
-    /// A spare Enter on an empty prompt does nothing in Claude Code; a model that thinks longer than
-    /// the window before its first tool gets that harmless extra Enter.
+    /// <b>Verify.</b> After typing, any main-thread row proves a turn ran. If none arrives within
+    /// <see cref="CompactContinueTiming.Verify"/>, Enter is sent ONCE more, but only if the feed was read
+    /// successfully throughout and nobody typed in the pane since: a spare Enter on an empty prompt
+    /// does nothing, on someone's half-typed text it submits it. Never a third Enter.
     /// </para>
     /// <para>
     /// Times are when MT OBSERVED a row, not the row's own timestamp: rows are written by another
     /// process, whose clock this one does not control (the same reason
     /// <see cref="AgentActivityWatcher"/> watermarks by id).
+    /// </para>
+    /// <para>
+    /// Not covered: a turn that is running but has written no row for <see cref="CompactContinueTiming.Quiet"/>
+    /// (the model thinking before its first tool) looks quiet. After a manual compaction no turn is
+    /// running unless something submitted one in those seconds.
     /// </para>
     /// </remarks>
     internal sealed class CompactContinueSequencer
@@ -161,10 +236,13 @@ namespace MultiTerminal.Services
 
         private DateTime? _lastTurnEndUtc;
         private DateTime? _lastWorkUtc;
+        private DateTime? _healthySinceUtc;
+        private DateTime? _lastFeedFailureUtc;
+        private DateTime? _lastUserInputUtc;
         private DateTime? _typedAtUtc;
         private DateTime? _enterResentAtUtc;
         private bool _activitySinceTyped;
-        private bool _done;
+        private CompactContinueStep? _final;
 
         /// <summary>Starts the sequence at the moment MT learned the compaction finished.</summary>
         public CompactContinueSequencer(DateTime finishedAtUtc, CompactContinueTiming timing = null)
@@ -175,6 +253,9 @@ namespace MultiTerminal.Services
 
         /// <summary>Why the prompt was typed, once it has been.</summary>
         public CompactContinueTypeReason TypeReason { get; private set; }
+
+        /// <summary>Why nothing was typed, once the sequence has given up.</summary>
+        public CompactContinueGiveUpReason GiveUpReason { get; private set; }
 
         /// <summary>Records a main-thread row seen at <paramref name="observedAtUtc"/>.</summary>
         public void Observe(CompactContinueSignal signal, DateTime observedAtUtc)
@@ -195,6 +276,29 @@ namespace MultiTerminal.Services
             }
         }
 
+        /// <summary>Records whether a read of the activity feed succeeded.</summary>
+        public void NoteFeedRead(bool ok, DateTime atUtc)
+        {
+            if (ok)
+            {
+                _healthySinceUtc ??= atUtc;
+            }
+            else
+            {
+                _healthySinceUtc = null;
+                _lastFeedFailureUtc = atUtc;
+            }
+        }
+
+        /// <summary>Records the latest keystroke typed into the pane by a person, if any.</summary>
+        public void NoteUserInput(DateTime? atUtc)
+        {
+            if (atUtc is DateTime at && (_lastUserInputUtc == null || at > _lastUserInputUtc))
+            {
+                _lastUserInputUtc = at;
+            }
+        }
+
         /// <summary>Records that the prompt has been typed (and its Enter sent) at <paramref name="nowUtc"/>.</summary>
         public void NoteTyped(DateTime nowUtc) => _typedAtUtc = nowUtc;
 
@@ -204,31 +308,19 @@ namespace MultiTerminal.Services
         /// <summary>What to do at <paramref name="nowUtc"/>.</summary>
         public CompactContinueStep Next(DateTime nowUtc)
         {
-            if (_done)
+            if (_final is CompactContinueStep final)
             {
-                return _activitySinceTyped ? CompactContinueStep.Verified : CompactContinueStep.NotVerified;
+                return final;
             }
 
-            if (_typedAtUtc is DateTime typedAt)
+            return _typedAtUtc is DateTime typedAt ? NextAfterTyping(nowUtc, typedAt) : NextBeforeTyping(nowUtc);
+        }
+
+        private CompactContinueStep NextBeforeTyping(DateTime nowUtc)
+        {
+            if (_lastUserInputUtc is DateTime input && input > _finishedAtUtc)
             {
-                if (_activitySinceTyped)
-                {
-                    _done = true;
-                    return CompactContinueStep.Verified;
-                }
-
-                if (_enterResentAtUtc is DateTime resentAt)
-                {
-                    if (nowUtc - resentAt >= _timing.Verify)
-                    {
-                        _done = true;
-                        return CompactContinueStep.NotVerified;
-                    }
-
-                    return CompactContinueStep.Wait;
-                }
-
-                return nowUtc - typedAt >= _timing.Verify ? CompactContinueStep.SendEnterAgain : CompactContinueStep.Wait;
+                return GiveUp(CompactContinueGiveUpReason.OwnerTyping);
             }
 
             TimeSpan sinceFinished = nowUtc - _finishedAtUtc;
@@ -245,19 +337,56 @@ namespace MultiTerminal.Services
                 return CompactContinueStep.Type;
             }
 
-            if (_lastWorkUtc == null && _lastTurnEndUtc == null && sinceFinished >= _timing.Quiet)
+            if (_lastWorkUtc == null && _lastTurnEndUtc == null && _healthySinceUtc is DateTime healthySince)
             {
-                TypeReason = CompactContinueTypeReason.Quiet;
-                return CompactContinueStep.Type;
+                DateTime quietFrom = healthySince > _finishedAtUtc ? healthySince : _finishedAtUtc;
+                if (nowUtc - quietFrom >= _timing.Quiet)
+                {
+                    TypeReason = CompactContinueTypeReason.Quiet;
+                    return CompactContinueStep.Type;
+                }
             }
 
             if (sinceFinished >= _timing.MaxIdleWait)
             {
-                TypeReason = CompactContinueTypeReason.GaveUpWaiting;
-                return CompactContinueStep.Type;
+                return GiveUp(busy ? CompactContinueGiveUpReason.StillWorking : CompactContinueGiveUpReason.FeedUnavailable);
             }
 
             return CompactContinueStep.Wait;
+        }
+
+        private CompactContinueStep NextAfterTyping(DateTime nowUtc, DateTime typedAt)
+        {
+            if (_activitySinceTyped)
+            {
+                _final = CompactContinueStep.Verified;
+                return CompactContinueStep.Verified;
+            }
+
+            DateTime windowStart = _enterResentAtUtc ?? typedAt;
+            if (nowUtc - windowStart < _timing.Verify)
+            {
+                return CompactContinueStep.Wait;
+            }
+
+            // Nothing seen for a whole window. A second Enter only when that silence is trustworthy
+            // and the input line is still ours.
+            bool feedFailedSinceTyping = _lastFeedFailureUtc is DateTime failed && failed >= typedAt;
+            bool someoneTypedSince = _lastUserInputUtc is DateTime input && input >= typedAt;
+            if (_enterResentAtUtc != null || feedFailedSinceTyping || someoneTypedSince)
+            {
+                _final = CompactContinueStep.NotVerified;
+                return CompactContinueStep.NotVerified;
+            }
+
+            return CompactContinueStep.SendEnterAgain;
+        }
+
+        private CompactContinueStep GiveUp(CompactContinueGiveUpReason reason)
+        {
+            GiveUpReason = reason;
+            _final = CompactContinueStep.GaveUp;
+            return CompactContinueStep.GaveUp;
         }
     }
 
@@ -271,9 +400,13 @@ namespace MultiTerminal.Services
         internal const string ContinuePrompt =
             "Compaction finished. Continue where you left off; your continuation notes on the active task are the authoritative record.";
 
+        /// <summary>Poll interval for the activity feed.</summary>
+        internal static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(500);
+
         private readonly IActivityFeedReader _feed;
         private readonly string _agentName;
         private readonly Func<bool> _paneAlive;
+        private readonly Func<DateTime?> _lastUserInput;
         private readonly Func<string, Task> _type;
         private readonly Func<Task<bool>> _sendEnter;
         private readonly Action<string> _log;
@@ -281,13 +414,11 @@ namespace MultiTerminal.Services
         private readonly Func<TimeSpan, Task> _delay;
         private readonly CompactContinueTiming _timing;
 
-        /// <summary>Poll interval for the activity feed.</summary>
-        internal static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(500);
-
         public CompactContinueRunner(
             IActivityFeedReader feed,
             string agentName,
             Func<bool> paneAlive,
+            Func<DateTime?> lastUserInput,
             Func<string, Task> type,
             Func<Task<bool>> sendEnter,
             Action<string> log,
@@ -298,6 +429,7 @@ namespace MultiTerminal.Services
             _feed = feed;
             _agentName = agentName ?? throw new ArgumentNullException(nameof(agentName));
             _paneAlive = paneAlive ?? throw new ArgumentNullException(nameof(paneAlive));
+            _lastUserInput = lastUserInput ?? (() => null);
             _type = type ?? throw new ArgumentNullException(nameof(type));
             _sendEnter = sendEnter ?? throw new ArgumentNullException(nameof(sendEnter));
             _log = log ?? (_ => { });
@@ -306,11 +438,21 @@ namespace MultiTerminal.Services
             _timing = timing ?? new CompactContinueTiming();
         }
 
-        /// <summary>Runs the sequence to its end. Returns the final step (Verified or NotVerified), or Wait if the pane went away.</summary>
+        /// <summary>
+        /// Runs the sequence to its end. Returns the final step (Verified, NotVerified or GaveUp), or
+        /// Wait if the pane went away.
+        /// </summary>
         public async Task<CompactContinueStep> RunAsync()
         {
+            if (_feed == null)
+            {
+                // Without the feed idle can never be shown, and typing blind is what this class exists to avoid.
+                _log($"compact-continue for '{_agentName}': no activity feed; not typing");
+                return CompactContinueStep.GaveUp;
+            }
+
             var sequencer = new CompactContinueSequencer(_utcNow(), _timing);
-            long watermark = ReadWatermark();
+            long? watermark = null;
 
             while (true)
             {
@@ -320,7 +462,8 @@ namespace MultiTerminal.Services
                     return CompactContinueStep.Wait;
                 }
 
-                watermark = Drain(watermark, sequencer);
+                watermark = Read(watermark, sequencer);
+                sequencer.NoteUserInput(_lastUserInput());
                 CompactContinueStep step = sequencer.Next(_utcNow());
 
                 switch (step)
@@ -342,7 +485,11 @@ namespace MultiTerminal.Services
                         return step;
 
                     case CompactContinueStep.NotVerified:
-                        _log($"compact-continue for '{_agentName}': no turn started after the second Enter; giving up");
+                        _log($"compact-continue for '{_agentName}': typed, but no turn was seen; no further keys sent");
+                        return step;
+
+                    case CompactContinueStep.GaveUp:
+                        _log($"compact-continue for '{_agentName}': not typing ({sequencer.GiveUpReason})");
                         return step;
                 }
 
@@ -350,77 +497,74 @@ namespace MultiTerminal.Services
             }
         }
 
-        private long ReadWatermark()
+        /// <summary>
+        /// One poll. The first successful read only sets the watermark, so nothing written before the
+        /// compaction finished is counted. A failure keeps the watermark, so no row is lost, and tells
+        /// the sequencer, which restarts its quiet window.
+        /// </summary>
+        private long? Read(long? watermark, CompactContinueSequencer sequencer)
         {
-            if (_feed == null) return 0;
-
             try
             {
-                return _feed.GetMaxActivityId();
-            }
-            catch (Exception ex)
-            {
-                // Unreadable feed: the sequencer sees no rows, so it types on the quiet edge and the
-                // verify step then sends one extra Enter at most.
-                _log($"compact-continue for '{_agentName}': activity feed unreadable ({ex.Message}); relying on the quiet window");
-                return long.MaxValue;
-            }
-        }
+                if (watermark is not long after)
+                {
+                    long max = _feed.GetMaxActivityId();
+                    sequencer.NoteFeedRead(true, _utcNow());
+                    return max;
+                }
 
-        private long Drain(long watermark, CompactContinueSequencer sequencer)
-        {
-            if (_feed == null || watermark == long.MaxValue) return watermark;
-
-            try
-            {
-                List<ActivityFeedEntry> rows = _feed.GetActivitiesAfterId(watermark, 200);
-                if (rows == null) return watermark;
-
+                List<ActivityFeedEntry> rows = _feed.GetActivitiesAfterId(after, 200) ?? new List<ActivityFeedEntry>();
                 DateTime now = _utcNow();
+                sequencer.NoteFeedRead(true, now);
+
                 foreach (ActivityFeedEntry row in rows)
                 {
                     if (row == null) continue;
-                    if (row.Id > watermark) watermark = row.Id;
+                    if (row.Id > after) after = row.Id;
 
                     if (Classify(row, _agentName) is CompactContinueSignal signal)
                     {
                         sequencer.Observe(signal, now);
                     }
                 }
+
+                return after;
             }
             catch (Exception ex)
             {
+                sequencer.NoteFeedRead(false, _utcNow());
                 _log($"compact-continue for '{_agentName}': activity read failed ({ex.Message}); will retry");
+                return watermark;
             }
-
-            return watermark;
         }
 
         /// <summary>
         /// What a row says about <paramref name="agentName"/>'s main thread, or null when it says nothing:
         /// another agent's row, a subagent's row (the same rule <see cref="AgentActivityWatcher"/> uses),
-        /// or a row type that is not activity.
+        /// or a row type that is not tool or build activity.
         /// </summary>
+        /// <remarks>
+        /// "Working" is every tool and build type <see cref="ActivityFeedService"/> defines, read from its
+        /// own sets so the two cannot drift. Unlike the attention rail, TOOL_START counts here: for this
+        /// question (is a turn running?) a tool that has started is the strongest evidence there is.
+        /// </remarks>
         internal static CompactContinueSignal? Classify(ActivityFeedEntry row, string agentName)
         {
             // Names compared as the broker compares terminal names: ordinal-ignore-case, untrimmed.
             if (!string.Equals(row.Actor, agentName, StringComparison.OrdinalIgnoreCase)) return null;
             if (AgentActivityWatcher.LooksLikeSubagent(row.DetailsJson)) return null;
 
-            switch ((row.ActivityType ?? string.Empty).ToUpperInvariant())
+            string type = row.ActivityType ?? string.Empty;
+            if (string.Equals(type, "TURN_END", StringComparison.OrdinalIgnoreCase)) return CompactContinueSignal.TurnEnded;
+
+            if (ActivityFeedService.ValidToolTypes.Contains(type)
+                || ActivityFeedService.QuietToolTypes.Contains(type)
+                || ActivityFeedService.ValidBuildTypes.Contains(type))
             {
-                case "TURN_END":
-                    return CompactContinueSignal.TurnEnded;
-                case "TOOL_START":
-                case "TOOL_COMPLETE":
-                case "TOOL_FAILED":
-                case "TOOL_QUIET":
-                case "BUILD_SUCCEEDED":
-                case "BUILD_FAILED":
-                    return CompactContinueSignal.Working;
-                default:
-                    return null;
+                return CompactContinueSignal.Working;
             }
+
+            return null;
         }
     }
 }

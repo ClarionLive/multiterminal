@@ -7884,6 +7884,33 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// The plugin's PreCompact hook reports that a compaction is starting in <paramref name="agentName"/>'s
+        /// pane <paramref name="docId"/>, with Claude Code's <paramref name="trigger"/> ("manual" or "auto")
+        /// (ticket c0ebcfd4). SessionStart(compact) does not say which, and only a manual compaction may
+        /// claim the pane's armed continue request. Raises <see cref="TerminalInjectRequested"/> with Kind
+        /// <c>"compact-starting"</c> and the trigger in <see cref="TerminalInjectEventArgs.Text"/>.
+        /// </summary>
+        public (bool success, string error) RequestCompactStarting(string agentName, string docId, string trigger)
+        {
+            if (string.IsNullOrWhiteSpace(agentName))
+                return (false, "agentName is required");
+            if (string.IsNullOrWhiteSpace(docId))
+                return (false, "docId is required");
+            if (!string.Equals(trigger, "manual", StringComparison.Ordinal) && !string.Equals(trigger, "auto", StringComparison.Ordinal))
+                return (false, "trigger must be 'manual' or 'auto'");
+
+            RaiseSafe(TerminalInjectRequested, new TerminalInjectEventArgs
+            {
+                AgentName = agentName,
+                DocId = docId,
+                Text = trigger,
+                Kind = "compact-starting"
+            });
+
+            return (true, null);
+        }
+
+        /// <summary>
         /// The plugin's SessionStart(compact) hook reports that <paramref name="agentName"/>'s pane
         /// <paramref name="docId"/> finished compacting (ticket c0ebcfd4). Raises
         /// <see cref="TerminalInjectRequested"/> with Kind <c>"compact-continue"</c>; MainForm types a
@@ -8643,6 +8670,8 @@ namespace MultiTerminal.MCPServer.Services
         /// presses Enter as a normal prompt submission via the terminal's
         /// InjectInputAsync — used by the self-clear MCP tool to submit "/clear"
         /// (task 1d6e599d). Null/empty is treated as "clear-trigger" for back-compat.
+        /// <c>"compact-starting"</c> (ticket c0ebcfd4): a compaction is starting in pane <see cref="DocId"/>;
+        /// <see cref="Text"/> is its trigger, "manual" or "auto".
         /// <c>"compact-continue"</c> (ticket c0ebcfd4): a compaction finished in pane <see cref="DocId"/>;
         /// type the continue prompt if that pane armed one.
         /// </summary>
@@ -8654,7 +8683,7 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public bool ContinueAfterCompact { get; set; }
 
-        /// <summary>Kind <c>"compact-continue"</c> only: the pane (MULTITERMINAL_DOC_ID) that compacted.</summary>
+        /// <summary>Kinds <c>"compact-starting"</c> and <c>"compact-continue"</c>: the pane (MULTITERMINAL_DOC_ID) that is compacting.</summary>
         public string DocId { get; set; }
     }
 

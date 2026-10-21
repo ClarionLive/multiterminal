@@ -116,10 +116,30 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
+        /// POST /api/terminals/compact-starting — the plugin's PreCompact hook reports a compaction
+        /// starting in pane <c>docId</c> with Claude Code's trigger, "manual" or "auto" (ticket c0ebcfd4).
+        /// Only a manual one may claim the pane's armed continue request.
+        /// </summary>
+        [HttpPost("compact-starting")]
+        public IActionResult CompactStarting([FromBody] TerminalCompactStartingRequest request)
+        {
+            if (request == null)
+                return Problem(detail: "request body is required", statusCode: 400);
+
+            var (success, error) = _broker.RequestCompactStarting(
+                request.AgentName, request.DocId, request.Trigger);
+
+            if (!success)
+                return Problem(detail: error, statusCode: 400);
+
+            return Ok();
+        }
+
+        /// <summary>
         /// POST /api/terminals/compact-finished — the plugin's SessionStart(compact) hook reports a
         /// finished compaction for pane <c>docId</c> (ticket c0ebcfd4). MT types a continue prompt
-        /// only if that pane armed one when <c>compact_my_context</c> submitted its <c>/compact</c>;
-        /// otherwise (the Owner's own /compact, an automatic compaction, another pane) nothing happens.
+        /// only if that pane armed one when <c>compact_my_context</c> submitted its <c>/compact</c>, and
+        /// the compaction was reported as manual by <c>compact-starting</c>; otherwise nothing happens.
         /// </summary>
         [HttpPost("compact-finished")]
         public IActionResult CompactFinished([FromBody] TerminalCompactFinishedRequest request)
@@ -224,6 +244,13 @@ namespace MultiTerminal.API.Controllers
 
             /// <summary>True from <c>compact_my_context</c>: continue after this /compact (ticket c0ebcfd4).</summary>
             public bool ContinueAfterCompact { get; set; }
+        }
+
+        public class TerminalCompactStartingRequest
+        {
+            public string AgentName { get; set; }
+            public string DocId { get; set; }
+            public string Trigger { get; set; }
         }
 
         public class TerminalCompactFinishedRequest

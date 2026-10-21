@@ -550,6 +550,11 @@ namespace MultiTerminal.Controls
                 _terminal.Write(data);
             }
 
+            if (data != null && data.Length > 0 && data[0] != 0x1B)
+            {
+                LastUserInputUtc = DateTime.UtcNow;
+            }
+
             // Buffer input characters to detect slash commands
             BufferInputForSlashDetection(data);
         }
@@ -660,11 +665,28 @@ namespace MultiTerminal.Controls
             LogTrace("compact-continue armed");
         }
 
+        /// <summary>Withdraws the request because its /compact submission failed.</summary>
+        public void DisarmCompactContinue()
+        {
+            _compactContinueGate.Disarm();
+            LogTrace("compact-continue disarmed (the /compact submission failed)");
+        }
+
+        /// <summary>The plugin's PreCompact hook reported a compaction starting in this pane.</summary>
+        public void NoteCompactionStarting(bool manual) => _compactContinueGate.NoteCompactionStarting(manual);
+
         /// <summary>
-        /// True once per <see cref="ArmCompactContinue"/>, within 10 minutes. False for a compaction
-        /// nobody asked MT to follow up (the Owner's own /compact, or an automatic one).
+        /// True once per <see cref="ArmCompactContinue"/>, within <see cref="CompactContinueGate.Expiry"/>,
+        /// after a manual compaction. False for a compaction nobody asked MT to follow up.
         /// </summary>
         public bool TryConsumeCompactContinue() => _compactContinueGate.TryConsume(DateTime.UtcNow);
+
+        /// <summary>
+        /// When a person last typed into this pane (keyboard data from xterm.js that is not an escape
+        /// sequence, so focus and mouse reports do not count), or null. Text MT types through
+        /// <see cref="TypeInput"/> also arrives this way, so a caller must read it relative to its own typing.
+        /// </summary>
+        public DateTime? LastUserInputUtc { get; private set; }
 
         /// <summary>
         /// Types <paramref name="text"/> and Enter through xterm.js's typing queue, the same path the
