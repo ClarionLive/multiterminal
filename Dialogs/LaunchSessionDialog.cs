@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Models;
@@ -60,6 +61,9 @@ namespace MultiTerminal.Dialogs
         private Font _listFont;
         private Font _listBoldFont;
         private Font _continueContextBoldFont;
+
+        // Item 8: one per list header, painting the strip right of the last column (see HeaderRemainderPainter).
+        private readonly List<HeaderRemainderPainter> _headerPainters = new List<HeaderRemainderPainter>();
 
         private readonly LaunchSessionChoiceModel _model;
         private readonly string _newSessionName;
@@ -326,6 +330,7 @@ namespace MultiTerminal.Dialogs
                 if (e.ColumnIndex != ColSummary) FitSummaryColumn();
             };
             Controls.Add(_sessionList);
+            PaintHeaderRemainder(_sessionList);
             y += listHeight + 10;
 
             // --- Also resume helpers (task 7d20e94c item 5) ---
@@ -383,6 +388,7 @@ namespace MultiTerminal.Dialogs
             _helperList.Enter += (s, e) => _helperList.Invalidate();
             _helperList.Leave += (s, e) => _helperList.Invalidate();
             Controls.Add(_helperList);
+            PaintHeaderRemainder(_helperList);
             y += helperListHeight + 10;
 
             // --- Bottom row ---
@@ -484,6 +490,105 @@ namespace MultiTerminal.Dialogs
             using var pen = new Pen(_gridLine);
             e.Graphics.DrawLine(pen, e.Bounds.Right - 1, e.Bounds.Top + 4, e.Bounds.Right - 1, e.Bounds.Bottom - 5);
             e.Graphics.DrawLine(pen, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
+        }
+
+        /// <summary>
+        /// Item 8: owner drawing covers the column headers only; the header strip right of the last
+        /// column is painted by the native header control, which left a white block on the dark theme
+        /// (the helper list's columns do not fill its width, and a vertical scroll bar can open the same
+        /// gap in the session list). The header is subclassed so that strip is painted in the header
+        /// colours after every native paint, in both themes.
+        /// </summary>
+        private void PaintHeaderRemainder(ListView list)
+        {
+            void Attach()
+            {
+                var header = HeaderRemainderPainter.SendMessage(list.Handle, HeaderRemainderPainter.LVM_GETHEADER, IntPtr.Zero, IntPtr.Zero);
+                if (header == IntPtr.Zero)
+                    return;
+                var painter = new HeaderRemainderPainter(list, this);
+                painter.AssignHandle(header);
+                _headerPainters.Add(painter);
+                list.HandleDestroyed += (s, e) =>
+                {
+                    painter.ReleaseHandle();
+                    _headerPainters.Remove(painter);
+                };
+            }
+
+            if (list.IsHandleCreated)
+                Attach();
+            else
+                list.HandleCreated += (s, e) => Attach();
+        }
+
+        /// <summary>Paints a ListView header's strip right of its last column; see <see cref="PaintHeaderRemainder"/>.</summary>
+        private sealed class HeaderRemainderPainter : NativeWindow
+        {
+            internal const int LVM_GETHEADER = 0x101F;
+            private const int HDM_GETITEMRECT = 0x1207;
+            private const int WM_PAINT = 0x000F;
+
+            private readonly ListView _list;
+            private readonly LaunchSessionDialog _owner;
+
+            public HeaderRemainderPainter(ListView list, LaunchSessionDialog owner)
+            {
+                _list = list;
+                _owner = owner;
+            }
+
+            protected override void WndProc(ref Message m)
+            {
+                base.WndProc(ref m);
+                if (m.Msg == WM_PAINT)
+                    PaintRemainder();
+            }
+
+            private void PaintRemainder()
+            {
+                if (Handle == IntPtr.Zero || !GetClientRect(Handle, out var client))
+                    return;
+
+                // Columns cannot be reordered here, so the last index is the last column on screen.
+                int right = 0;
+                int count = _list.Columns.Count;
+                if (count > 0)
+                {
+                    var item = default(RECT);
+                    if (SendMessage(Handle, HDM_GETITEMRECT, (IntPtr)(count - 1), ref item) != IntPtr.Zero)
+                        right = item.Right;
+                }
+
+                if (right >= client.Right || client.Bottom <= client.Top)
+                    return;
+
+                var strip = Rectangle.FromLTRB(right, client.Top, client.Right, client.Bottom);
+                using var g = Graphics.FromHwnd(Handle);
+                using (var back = new SolidBrush(_owner._headerBack))
+                    g.FillRectangle(back, strip);
+                using var pen = new Pen(_owner._gridLine);
+                g.DrawLine(pen, strip.Left, strip.Bottom - 1, strip.Right, strip.Bottom - 1);
+            }
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct RECT
+            {
+                public int Left;
+                public int Top;
+                public int Right;
+                public int Bottom;
+            }
+
+            [DllImport("user32.dll")]
+            internal static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+            [DllImport("user32.dll")]
+            private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, ref RECT lParam);
+
+            [DllImport("user32.dll")]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            private static extern bool GetClientRect(IntPtr hWnd, out RECT rect);
         }
 
         private void OnDrawSubItem(object sender, DrawListViewSubItemEventArgs e)

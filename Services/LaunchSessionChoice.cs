@@ -619,13 +619,22 @@ namespace MultiTerminal.Services
         /// <see cref="PriorLaunchState.OpenElsewhere"/> (that MT not provably gone, pipeline Run 1) keeps
         /// the flag exactly as <see cref="PriorLaunchState.NoRecord"/> does. A launch of this run that has
         /// not ended is flagged as open. The unknown-pane rule (this run's panes) is never waived.
+        /// Item 8: <see cref="PriorLaunchState.ClosedWithPm"/> (MT closed that helper with its PM) waives
+        /// the flag too, or a helper closed seconds ago would never come back with its PM.
         /// </summary>
+        /// <summary>
+        /// The launch-record states that account for a recent transcript write by a process MT has
+        /// provably lost: it died with a previous run, or MT closed it with its PM (item 8).
+        /// </summary>
+        internal static bool WaivesRecencyFlag(PriorLaunchState prior) =>
+            prior == PriorLaunchState.DiedWithPreviousRun || prior == PriorLaunchState.ClosedWithPm;
+
         private static string MayBeOpenReasonFor(SessionCatalogEntry entry, DateTime? earliestUnknownLaunch, PriorLaunchState prior)
         {
             if (prior == PriorLaunchState.OpenInCurrentRun)
                 return OpenInCurrentRunReason;
 
-            if (entry.Status == SessionCatalogStatus.PossiblyOpenElsewhere && prior != PriorLaunchState.DiedWithPreviousRun)
+            if (entry.Status == SessionCatalogStatus.PossiblyOpenElsewhere && !WaivesRecencyFlag(prior))
                 return "Its transcript was written in the last few minutes, so it may still be open in another window (a ClarionAssistant tab or a plain terminal).";
 
             if (earliestUnknownLaunch.HasValue &&

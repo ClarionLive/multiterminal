@@ -57,6 +57,12 @@ namespace MultiTerminal.Services
         // DocIds and launch ids are GUID strings MT mints: exact by decision.
         private readonly Dictionary<string, CurrentLaunch> _currentLaunchByDoc = new Dictionary<string, CurrentLaunch>(StringComparer.Ordinal);
         private readonly Dictionary<string, string> _pendingSpawnerByDoc = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        // Item 8: child launch id -> the spawner launch it was linked to (only launches still current), and
+        // the launch of a pane whose process exited while the pane stayed open. Both exist only so a PM's
+        // tab close can tell which open helper panes it spawned; the database stays the record.
+        private readonly Dictionary<string, string> _spawnerByLaunch = new Dictionary<string, string>(StringComparer.Ordinal);
+        private readonly Dictionary<string, CurrentLaunch> _exitedLaunchByDoc = new Dictionary<string, CurrentLaunch>(StringComparer.Ordinal);
         private bool _shuttingDown;
 
         public PaneLaunchTracker(IPaneLaunchSink sink)
@@ -99,6 +105,8 @@ namespace MultiTerminal.Services
             {
                 _currentLaunchByDoc.TryGetValue(docId, out previous);
                 _currentLaunchByDoc.Remove(docId);
+                _exitedLaunchByDoc.Remove(docId);
+                if (previous != null) _spawnerByLaunch.Remove(previous.LaunchId);
                 shuttingDown = _shuttingDown;
             }
 
@@ -113,7 +121,10 @@ namespace MultiTerminal.Services
             {
                 _currentLaunchByDoc[docId] = new CurrentLaunch(launchId, launchGeneration);
                 if (_pendingSpawnerByDoc.TryGetValue(docId, out pendingSpawner))
+                {
                     _pendingSpawnerByDoc.Remove(docId);
+                    _spawnerByLaunch[launchId] = pendingSpawner;
+                }
             }
 
             if (pendingSpawner != null)
@@ -153,7 +164,16 @@ namespace MultiTerminal.Services
             {
                 // Only while the pane is still on the launch that was continued.
                 if (_currentLaunchByDoc.TryGetValue(docId, out var now) && ReferenceEquals(now, current))
+                {
                     _currentLaunchByDoc[docId] = new CurrentLaunch(carrying, current.Generation);
+
+                    // The continuation row carries the same spawner link (AdoptPaneLaunchSession copies it).
+                    if (_spawnerByLaunch.TryGetValue(current.LaunchId, out var spawnerOfContinued))
+                    {
+                        _spawnerByLaunch.Remove(current.LaunchId);
+                        _spawnerByLaunch[carrying] = spawnerOfContinued;
+                    }
+                }
             }
         }
 
@@ -179,9 +199,44 @@ namespace MultiTerminal.Services
                 }
 
                 childLaunch = child.LaunchId;
+                _spawnerByLaunch[childLaunch] = spawnerLaunch;
             }
 
             _sink.LinkSpawner(childLaunch, spawnerLaunch);
+        }
+
+        /// <summary>
+        /// The panes whose CURRENT launch was spawned by <paramref name="pmDocId"/>'s launch (task 7d20e94c
+        /// item 8), for "also close its helpers?" when the Owner closes the PM's tab. The PM's launch is
+        /// its current one or, when its process exited and the pane stayed open (Home, claude exiting),
+        /// the launch that just ended: those helpers are still running and still belong to that session.
+        /// Helpers spawned before a <c>/clear</c> belong to the old session and are not listed; a helper
+        /// whose own process exited has no current launch and is not listed (it counts as closed and
+        /// would not be resumed anyway). Empty once MT is shutting down.
+        /// </summary>
+        public IReadOnlyList<string> GetOpenHelperDocIds(string pmDocId)
+        {
+            if (string.IsNullOrEmpty(pmDocId)) return Array.Empty<string>();
+            lock (_lock)
+            {
+                if (_shuttingDown) return Array.Empty<string>();
+                CurrentLaunch pm;
+                if (!_currentLaunchByDoc.TryGetValue(pmDocId, out pm) && !_exitedLaunchByDoc.TryGetValue(pmDocId, out pm))
+                    return Array.Empty<string>();
+
+                var result = new List<string>();
+                foreach (var pair in _currentLaunchByDoc)
+                {
+                    if (string.Equals(pair.Key, pmDocId, StringComparison.Ordinal)) continue;
+                    if (_spawnerByLaunch.TryGetValue(pair.Value.LaunchId, out var spawner)
+                        && string.Equals(spawner, pm.LaunchId, StringComparison.Ordinal))
+                    {
+                        result.Add(pair.Key);
+                    }
+                }
+
+                return result;
+            }
         }
 
         /// <summary>The pane left the dock (the Owner closed it): <c>pane_closed</c>.</summary>
@@ -193,8 +248,27 @@ namespace MultiTerminal.Services
         /// </summary>
         public void OnHelperClosedBySpawner(string docId) => EndCurrent(docId, PaneLaunchEndReason.CloseHelper, forgetPending: false);
 
-        /// <summary>The pane's process exited while the pane stays open: <c>process_exit</c>.</summary>
-        public void OnProcessExited(string docId) => EndCurrent(docId, PaneLaunchEndReason.ProcessExit, forgetPending: false);
+        /// <summary>
+        /// The Owner closed this helper's PM and chose to close its helpers too (item 8):
+        /// <c>closed_with_pm</c>, which stays resumable with the PM. Call it BEFORE closing the pane, as
+        /// for <see cref="OnHelperClosedBySpawner"/>, so it wins over the <c>pane_closed</c> that follows.
+        /// </summary>
+        public void OnHelperClosedWithPm(string docId) => EndCurrent(docId, PaneLaunchEndReason.ClosedWithPm, forgetPending: false);
+
+        /// <summary>
+        /// The pane's process exited while the pane stays open: <c>process_exit</c>. The ended launch is
+        /// remembered for the pane (item 8) so closing its tab can still offer to close its helpers.
+        /// </summary>
+        public void OnProcessExited(string docId)
+        {
+            var ended = EndCurrent(docId, PaneLaunchEndReason.ProcessExit, forgetPending: false);
+            if (ended == null) return;
+            lock (_lock)
+            {
+                if (!_shuttingDown && !_currentLaunchByDoc.ContainsKey(docId))
+                    _exitedLaunchByDoc[docId] = ended;
+            }
+        }
 
         /// <summary>
         /// MT is really exiting (the close was not cancelled) and its panes are about to be stopped: every
@@ -212,19 +286,27 @@ namespace MultiTerminal.Services
             _sink.EndAllForShutdown();
         }
 
-        private void EndCurrent(string docId, string reason, bool forgetPending)
+        // Returns the launch it ended, or null when it ended none.
+        private CurrentLaunch EndCurrent(string docId, string reason, bool forgetPending)
         {
-            if (string.IsNullOrEmpty(docId)) return;
+            if (string.IsNullOrEmpty(docId)) return null;
             CurrentLaunch current;
             lock (_lock)
             {
-                if (forgetPending) _pendingSpawnerByDoc.Remove(docId);
-                if (_shuttingDown) return;
-                if (!_currentLaunchByDoc.TryGetValue(docId, out current)) return;
+                if (forgetPending)
+                {
+                    _pendingSpawnerByDoc.Remove(docId);
+                    _exitedLaunchByDoc.Remove(docId);
+                }
+
+                if (_shuttingDown) return null;
+                if (!_currentLaunchByDoc.TryGetValue(docId, out current)) return null;
                 _currentLaunchByDoc.Remove(docId);
+                _spawnerByLaunch.Remove(current.LaunchId);
             }
 
             _sink.End(current.LaunchId, reason);
+            return current;
         }
 
         /// <summary>The launch a pane runs and its launch generation. Immutable: replaced, never mutated.</summary>

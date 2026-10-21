@@ -57,6 +57,15 @@ namespace MultiTerminal.Services
         /// still finds the helpers that session spawned.
         /// </summary>
         public const string SessionChanged = "session_changed";
+
+        /// <summary>
+        /// The Owner closed the helper's PM pane and answered Yes to "also close its helpers" (task
+        /// 7d20e94c item 8). MT closed the helper's pane itself, so its process is gone, but the helper
+        /// is RESUMABLE with its PM exactly as after <see cref="MtExit"/>: <see cref="PaneLaunchRecorder.GetOpenHelpers"/>
+        /// keeps it, and <see cref="PaneLaunchRecorder.ClassifyPriorLaunch"/> answers
+        /// <see cref="PriorLaunchState.ClosedWithPm"/>, which waives the recent-write flag.
+        /// </summary>
+        public const string ClosedWithPm = "closed_with_pm";
     }
 
     /// <summary>
@@ -88,6 +97,15 @@ namespace MultiTerminal.Services
         /// <see cref="NoRecord"/>, and a helper is skipped as "may be open elsewhere".
         /// </summary>
         OpenElsewhere = 4,
+
+        /// <summary>
+        /// The newest launch ended <c>closed_with_pm</c> (task 7d20e94c item 8), in this run or an earlier
+        /// one: MT closed that helper's pane itself when the Owner closed its PM, and disposing the pane
+        /// terminates its process tree (the same Job Object kill a close_helper or a tab close relies on).
+        /// So a transcript written seconds before is that process, not something outside MT: the recency
+        /// flag is WAIVED, as for <see cref="DiedWithPreviousRun"/>. This run's live set still applies.
+        /// </summary>
+        ClosedWithPm = 5,
     }
 
     /// <summary>An MT process as recorded in <c>mt_runs</c>: its id and its start time (UTC).</summary>
@@ -369,9 +387,11 @@ namespace MultiTerminal.Services
         /// to another session; the helpers it spawned while on this one are still this session's).</item>
         /// <item>Their direct child launches only (no helpers of helpers) that carry a session id other than the PM's.</item>
         /// <item>Per helper session, the newest child launch.</item>
-        /// <item>Kept only while open: not ended (a crash) or ended by <see cref="PaneLaunchEndReason.MtExit"/>.
+        /// <item>Kept only while resumable: not ended (a crash), or ended by <see cref="PaneLaunchEndReason.MtExit"/>
+        /// or <see cref="PaneLaunchEndReason.ClosedWithPm"/> (item 8: closed together with its PM).
         /// <c>pane_closed</c>, <c>close_helper</c>, <c>process_exit</c> and <c>session_changed</c> are closed.</item>
-        /// <item>Dropped when any LATER launch of the same helper session, spawned by anyone, ended closed.</item>
+        /// <item>Dropped when any LATER launch of the same helper session, spawned by anyone, ended closed
+        /// (a later <c>closed_with_pm</c> or <c>mt_exit</c> is not closed).</item>
         /// </list>
         /// </summary>
         public IReadOnlyList<OpenHelper> GetOpenHelpers(string pmSessionId, int max = 6)
@@ -388,7 +408,7 @@ namespace MultiTerminal.Services
                                 && !string.Equals(c.SessionId, pmSessionId, StringComparison.Ordinal))
                     .GroupBy(c => c.SessionId, StringComparer.Ordinal)
                     .Select(g => g.OrderByDescending(c => c.Seq).First())
-                    .Where(IsOpen)
+                    .Where(IsResumable)
                     .OrderByDescending(c => c.Seq)
                     .ToList();
 
@@ -397,7 +417,7 @@ namespace MultiTerminal.Services
                 {
                     if (result.Count >= max) break;
                     bool closedLater = _db.GetPaneLaunchesBySession(child.SessionId)
-                        .Any(l => l.Seq > child.Seq && !IsOpen(l));
+                        .Any(l => l.Seq > child.Seq && !IsResumable(l));
                     if (closedLater) continue;
 
                     result.Add(new OpenHelper
@@ -470,6 +490,10 @@ namespace MultiTerminal.Services
                 .FirstOrDefault();
             if (newest == null) return PriorLaunchState.NoRecord;
 
+            // Item 8: MT itself closed this helper with its PM, so no process runs it, in this run or any.
+            if (newest.EndedAt != null && string.Equals(newest.EndReason, PaneLaunchEndReason.ClosedWithPm, StringComparison.Ordinal))
+                return PriorLaunchState.ClosedWithPm;
+
             bool currentRun = !string.IsNullOrEmpty(currentRunId)
                 && string.Equals(newest.MtRunId, currentRunId, StringComparison.Ordinal);
             if (currentRun)
@@ -510,6 +534,14 @@ namespace MultiTerminal.Services
         private static bool IsOpen(PaneLaunchRecord launch)
             => launch.EndedAt == null
                || string.Equals(launch.EndReason, PaneLaunchEndReason.MtExit, StringComparison.Ordinal);
+
+        /// <summary>
+        /// Resumable with its PM (item 8): open as <see cref="IsOpen"/> says, or closed together with its PM
+        /// (<see cref="PaneLaunchEndReason.ClosedWithPm"/>), which the Owner was told brings it back.
+        /// </summary>
+        private static bool IsResumable(PaneLaunchRecord launch)
+            => IsOpen(launch)
+               || string.Equals(launch.EndReason, PaneLaunchEndReason.ClosedWithPm, StringComparison.Ordinal);
 
         private void Log(string message)
         {

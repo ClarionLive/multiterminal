@@ -1882,7 +1882,17 @@ namespace MultiTerminal
                     // BEFORE Close (task 7d20e94c): the launch ends close_helper, and the pane_closed
                     // that Close raises through OnDockContentRemoved finds no open launch left.
                     _paneLaunches?.OnHelperClosedBySpawner(docId);
-                    doc.Close();
+
+                    // Item 8: a close_helper close never asks about the closed pane's own helpers.
+                    _panesClosedByMt.Add(docId);
+                    try
+                    {
+                        doc.Close();
+                    }
+                    finally
+                    {
+                        _panesClosedByMt.Remove(docId);
+                    }
 
                     // Pipeline Run 1 (Codex adversary): do not report "closed" on the strength of Close()
                     // alone. OnDockContentRemoved only QUEUES the Dispose that kills the process tree, so
@@ -6498,6 +6508,99 @@ namespace MultiTerminal
         {
             doc.LaunchBegan += OnPaneLaunchBegan;
             doc.ClaudeSessionAdopted += OnPaneClaudeSessionAdopted;
+            doc.FormClosing += OnPaneFormClosing;
+        }
+
+        // Item 8: panes MT is closing itself (close_helper, closed with their PM), which never ask about
+        // their own helpers, and the PM panes whose "also close helpers?" question is on screen.
+        private readonly HashSet<string> _panesClosedByMt = new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> _helperClosePromptOpen = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// The Owner is closing a pane (task 7d20e94c item 8). Every close of a docked pane goes through
+        /// <c>Form.Close()</c> (the tab's ✕ via DockPanelSuite's <c>DockContentHandler.Close</c>, the tab
+        /// menu's Close / Close All / Close all but this), so FormClosing is the one cancellable
+        /// point BEFORE the pane leaves the dock. When this pane's launch spawned helper panes that are
+        /// still open, ask once whether to close them too: Yes ends each helper's launch
+        /// <c>closed_with_pm</c> first (so it comes back when this session is resumed) and closes it; No
+        /// closes only this pane; Cancel keeps this pane open. Never asked during MT's shutdown, for a pane
+        /// MT itself is closing, or for a pane with no open helper panes. A pane whose own process already
+        /// exited (Home, claude ended) is still asked about: its helpers are what the Owner would lose.
+        /// </summary>
+        private void OnPaneFormClosing(object sender, FormClosingEventArgs e)
+        {
+            if (sender is not TerminalDocument pm || e == null || e.Cancel || _paneLaunches == null)
+                return;
+            if (_paneLaunches.IsShuttingDown || _panesClosedByMt.Contains(pm.DocId))
+                return;
+            if (_helperClosePromptOpen.Contains(pm.DocId))
+            {
+                // A second close gesture while the question is showing (nested message pump): ignore it.
+                e.Cancel = true;
+                return;
+            }
+
+            var helperDocIds = _paneLaunches.GetOpenHelperDocIds(pm.DocId);
+            if (helperDocIds.Count == 0)
+                return;
+
+            var helpers = _dockPanel.Contents.OfType<TerminalDocument>()
+                .Where(d => d != pm && !d.IsDisposed && helperDocIds.Contains(d.DocId, StringComparer.Ordinal))
+                .ToList();
+            if (helpers.Count == 0)
+                return;
+
+            DialogResult answer;
+            _helperClosePromptOpen.Add(pm.DocId);
+            try
+            {
+                answer = MessageBox.Show(
+                    this,
+                    HelperCloseWithPm.Question(pm.CustomTitle, helpers.Select(h => h.CustomTitle).ToList()),
+                    "Close helpers too?",
+                    MessageBoxButtons.YesNoCancel,
+                    MessageBoxIcon.Question,
+                    MessageBoxDefaultButton.Button1);
+            }
+            finally
+            {
+                _helperClosePromptOpen.Remove(pm.DocId);
+            }
+
+            if (answer == DialogResult.Cancel)
+            {
+                e.Cancel = true;
+                return;
+            }
+
+            // MT may have begun exiting while the question was up; its shutdown pass owns every pane now.
+            if (answer != DialogResult.Yes || _paneLaunches.IsShuttingDown)
+                return;
+
+            foreach (var helper in helpers)
+            {
+                if (helper.IsDisposed)
+                    continue;
+                _debugLogService?.Info("MainForm", $"Closing helper '{helper.CustomTitle}' (docId={helper.DocId}) with its PM '{pm.CustomTitle}' (task 7d20e94c item 8)");
+
+                // End FIRST, as close_helper does: the pane_closed its Close raises then finds no open launch.
+                _paneLaunches.OnHelperClosedWithPm(helper.DocId);
+                _panesClosedByMt.Add(helper.DocId);
+                try
+                {
+                    helper.Close();
+                    if (!helper.IsDisposed)
+                        helper.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    _debugLogService?.Error("MainForm", $"Closing helper {helper.DocId} with its PM failed: {ex.Message}");
+                }
+                finally
+                {
+                    _panesClosedByMt.Remove(helper.DocId);
+                }
+            }
         }
 
         private void OnPaneLaunchBegan(object sender, PaneLaunchBeganEventArgs e)

@@ -38,7 +38,7 @@ session may be open elsewhere), **Where** (project folder / worktree `<id>`), **
 **Summary** (fills the remaining width). Font is the dialog's +2pt, rows ~1.6x the text height (a
 1px-wide `SmallImageList` sets the row height). Double-click or Enter on a row resumes it; while the
 list has focus Enter is "Resume selected", not the dialog default. Header, rows and selection are
-drawn from the `TerminalTheme`, so a new column is an owner-draw change, not just a `Columns.Add`.
+drawn from the `TerminalTheme`, so a new column is an owner-draw change, not just a `Columns.Add`. The header strip right of the last column is not part of owner drawing (the native header paints it white); `HeaderRemainderPainter` subclasses both lists' headers and repaints it in the header colours after each native paint (task 7d20e94c item 8).
 
 **Context** is the context in use at the session's last main-thread assistant turn, read in
 `SessionCatalog` from the transcript tail (`TryReadContextUsage`): `message.usage.input_tokens +
@@ -107,7 +107,8 @@ fallback.
 Resuming a PM session also reopens the helper panes it had open when it last ended. Owner decisions:
 Continue mode (no dialog) resumes all of them and reports what it skipped; a helper whose Claude
 process exited while its pane stayed open counts as CLOSED; one level only (no helpers of helpers),
-at most 6. A new session never resumes helpers.
+at most 6. A new session never resumes helpers. Closing a PM's tab can close its helpers with it,
+and they come back when the PM is resumed (item 8, below).
 
 ### The launch record
 
@@ -122,6 +123,7 @@ and session ids. MainForm writes it only through `Services/PaneLaunchTracker`:
 | `ClaudeSessionAdopted` | same | `session_id` of the pane's current launch; a session CHANGE inside the launch (`/clear`, a fork) continues it on a new row, see below. Dropped when stale: the event is posted, so MainForm drops it unless the pane still holds that session, and the tracker drops it unless its launch generation is the current launch's |
 | spawn | `OnSpawnRequested`, inside the Invoke after `AddNewTerminal` | `spawner_launch_id` = the PROVEN spawner pane's (nonce, never the typed name) current launch |
 | close_helper | `OnSpawnedPaneCloseRequested`, BEFORE `doc.Close()` | `close_helper`; the `pane_closed` that Close raises then finds no open launch |
+| PM tab closed, Owner answers Yes to "also close its helpers" (item 8) | `OnPaneFormClosing`, BEFORE each helper's `Close()` | each helper's launch `closed_with_pm`; their `pane_closed`, then the PM's own `pane_closed` as usual |
 | pane removed from the dock | `OnDockContentRemoved` | `pane_closed` |
 | process exit, pane left open | `OnTerminalExited` | `process_exit` |
 | MT exits | `OnFormClosing`, right after the exit confirmation | every open row of this run `mt_exit`; see the guard below |
@@ -150,7 +152,7 @@ writes no adoption at all, so no continuation is opened after `mt_exit` was writ
 
 **Threading.** Every caller is on the UI thread today (LaunchBegan is raised there; the adopted and
 exited events are posted there; the spawn and close callbacks Invoke onto it). That is the callers'
-accident, not the class's property, so the tracker's two maps are under a lock; the SQLite writes
+accident, not the class's property, so the tracker's maps are under a lock; the SQLite writes
 happen outside it.
 
 ### The shutdown guard, and why it is first
@@ -164,6 +166,39 @@ session save and the pane teardown. It marks every open launch of this run `mt_e
 the session-save pass's re-triggered `Close()` does nothing twice. A second close that is cancelled
 after the confirmation (nothing does that today) would leave the tracker silent for the rest of the
 run.
+
+### Closing a PM closes its helpers (item 8)
+
+The Owner often cannot exit all of MT (other terminals are working), so closing the PM's tab and then
+each helper's tab used to end every helper `pane_closed`, and the resumed PM offered none. Now, when
+a PM pane is closed, MT asks once (a plain `MessageBox`, like the exit confirmation): "Also close
+Alice's 2 helpers (TestA, TestB)? They'll come back when you resume Alice." (`HelperCloseWithPm.Question`).
+
+- **Where.** `TerminalDocument.FormClosing`, subscribed in `WirePaneLaunchRecording`
+  (`MainForm.OnPaneFormClosing`). Every close of a docked pane goes through `Form.Close()` (the tab's
+  ✕ via DockPanelSuite's `DockContentHandler.Close`, the tab menu's Close / Close All / Close all but
+  this), so this is the one cancellable point BEFORE the pane leaves the dock;
+  `OnDockContentRemoved` is too late to cancel.
+- **Which helpers.** `PaneLaunchTracker.GetOpenHelperDocIds(pm)`: the panes whose CURRENT launch is
+  linked to the PM's current launch (the tracker mirrors the spawner link per launch, carried across a
+  helper's own `/clear`), filtered to panes still in the dock. Helpers spawned before the PM's `/clear`
+  belong to the old session and are not offered; a helper whose process exited is closed already.
+- **Yes** (default): each helper's launch is ended `closed_with_pm` FIRST (first end wins), then the
+  pane is closed and disposed as `close_helper` does; then the PM closes normally. **No**: only the PM
+  closes; helpers keep running (and their later tab close is a normal `pane_closed`). **Cancel**: the
+  PM stays open.
+- **Not asked** during MT's shutdown (`IsShuttingDown`), for a pane MT is closing itself
+  (`close_helper`, a helper being closed with its PM: `_panesClosedByMt`), or when no helper pane is
+  open. A second close gesture while the question is up is swallowed.
+- **Decision: a PM whose own process already exited is still asked.** Home or claude ending leaves
+  the pane open with its launch ended `process_exit`; the tracker keeps that ended launch for the
+  pane until it relaunches or closes, because the helpers are still running and still belong to
+  that session, and they are what the Owner would lose.
+
+`closed_with_pm` is resumable wherever `mt_exit` is: `GetOpenHelpers` keeps a child ended so, and a
+LATER launch of the same helper session ended `closed_with_pm` does not count as "closed later" (a
+later `pane_closed` still does). Its prior-launch state is `ClosedWithPm` (next section), so a helper
+closed seconds ago is not skipped by the recency flag.
 
 ### Choosing and resuming
 
@@ -206,6 +241,7 @@ recorder's `MtRunId`; pure rule `ClassifyPriorLaunch`):
 | previous run, still open (crash) or `mt_exit`, and that MT process provably gone | `DiedWithPreviousRun` | recency flag WAIVED: that process died with that MT |
 | previous run, still open or `mt_exit`, MT process NOT provably gone (alive, never recorded, unreadable) | `OpenElsewhere` | PM: recency flag applies as for `NoRecord`; helper: skipped as "may still be open elsewhere" whatever the transcript's age |
 | this run, not ended | `OpenInCurrentRun` | flagged open (PM: confirm; helper: skipped as already open) |
+| ended `closed_with_pm`, any run (item 8) | `ClosedWithPm` | recency flag WAIVED: MT closed that pane itself, and disposing it terminates its process tree. Without this a helper closed with its PM seconds ago would be skipped as "may be open elsewhere" |
 | anything else (ended this run, or closed in an earlier run) | `Ended` | recency flag applies as before |
 
 **Fail-closed on the previous run** (pipeline Run 1). Each recorder writes its MT process id and
@@ -218,6 +254,9 @@ the whole process, so a new run cannot start while the old one lives; and every 
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` job (`ConPtyTerminal.CreateJobAndAssignProcess`), so the panes die
 with MT even on a crash. Neither is airtight (the guard fails open, `Local\` does not cover another
 Windows session, the job assignment is best-effort), which is why the probe decides.
+`ClosedWithPm` rests on the same job kill (`TerminalDocument.Dispose` stops the terminal, which
+terminates its job), with no probe: the close happened in the run that wrote the row, and a helper
+the job assignment missed is the same best-effort gap as above.
 
 It applies to both the PM's offer (`LaunchSessionChoiceModel`'s `priorLaunch` argument, asked once per
 offered session in `LoadLaunchSessionChoices`) and each helper (`HelperResume.Check`'s `prior`). The
@@ -229,6 +268,12 @@ session resumed in a CA tab after an `mt_exit` is also unflagged; that is accept
 was always advisory and a quick relaunch after an exit is the case this feature exists for.
 
 ### Known gaps
+
+- Item 8's question is asked from `FormClosing`, which is executed live only: no test drives a
+  DockPanelSuite tab close. The tracker's choice of helpers, the end-reason order and the resume rules
+  are unit-tested (`ClosedWithPmTests`).
+- A form whose handle was never created closes by `Dispose` without `FormClosing`, so it is not asked
+  about; every visible pane has a handle.
 
 - Only sessions launched after this shipped have rows; older helpers are never offered.
 - A pane whose session id MT never learns (a project statusLine that bypasses MT's) has no

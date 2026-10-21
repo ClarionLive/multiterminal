@@ -62,7 +62,9 @@ namespace MultiTerminal.Services
         /// still offers it and does not flag it "may be open elsewhere" (there is no dialog to confirm
         /// with, so a flagged helper is skipped). <paramref name="prior"/> is the launch record's word on
         /// its last process: <see cref="PriorLaunchState.DiedWithPreviousRun"/> waives the recent-write
-        /// flag (that process died with the last MT, which is the restart this feature exists for), and
+        /// flag (that process died with the last MT, which is the restart this feature exists for), and so
+        /// does <see cref="PriorLaunchState.ClosedWithPm"/> (item 8: MT closed it with its PM, maybe
+        /// seconds ago), and
         /// <see cref="PriorLaunchState.OpenInCurrentRun"/> skips it as already open, and
         /// <see cref="PriorLaunchState.OpenElsewhere"/> (a previous run left it open and that MT is not
         /// provably gone) skips it as "may still be open elsewhere"; <see cref="LaunchSessionChoiceModel.RecheckResume"/> passes; and its cwd validates
@@ -157,6 +159,33 @@ namespace MultiTerminal.Services
             }
 
             return sb.ToString();
+        }
+    }
+
+    /// <summary>
+    /// The question MT asks when the Owner closes a PM pane whose helper panes are still open (task
+    /// 7d20e94c item 8). Pure, so its wording is tested; MainForm decides when to ask and acts on it.
+    /// </summary>
+    public static class HelperCloseWithPm
+    {
+        /// <summary>
+        /// "Also close Alice's 2 helpers (TestA, TestB)? ...", with what each button does. Blank names
+        /// read "(unnamed)", so the question never lists an empty name.
+        /// </summary>
+        public static string Question(string pmName, IReadOnlyList<string> helperNames)
+        {
+            string pm = string.IsNullOrWhiteSpace(pmName) ? "this terminal" : pmName.Trim();
+            var names = (helperNames ?? Array.Empty<string>())
+                .Select(n => string.IsNullOrWhiteSpace(n) ? "(unnamed)" : n.Trim())
+                .ToList();
+            string helpers = names.Count == 1
+                ? $"helper {names[0]}"
+                : $"{names.Count} helpers ({string.Join(", ", names)})";
+            string them = names.Count == 1 ? "It" : "They";
+            return $"Also close {pm}'s {helpers}? {them}'ll come back when you resume {pm}.\n\n" +
+                   $"Yes: close {(names.Count == 1 ? "it" : "them")} too.\n" +
+                   $"No: close only {pm}; {(names.Count == 1 ? "the helper keeps" : "the helpers keep")} running.\n" +
+                   $"Cancel: keep {pm} open.";
         }
     }
 }
