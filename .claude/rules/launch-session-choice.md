@@ -4,7 +4,8 @@ Task **ec2ed636** (2026-10-17). Read this before changing `MainForm.OnStartScree
 `SessionCatalog`, `LaunchSessionChoiceModel`, `ClaudeSessionTracker` or the `--resume` argument in
 `LaunchCommandBuilder`. Task **7d20e94c** added helpers resuming with their PM (last section); read
 that before changing a pane close path, `MainForm.OnFormClosing`, `AddNewTerminal`'s resume/pin
-parameters or `pane_launches`.
+parameters or `pane_launches`. Task **3e1c09b8** added the restore offer at MT startup (final section);
+read that before changing `RestoreSession`, `TryChooseLaunchSession` or `ResumeHelpersFor`.
 
 ## What the Owner sees
 
@@ -294,3 +295,46 @@ was always advisory and a quick relaunch after an exit is the case this feature 
 - The resume happens on the UI thread, one helper after another (each a catalog lookup and a pane).
 - Launches recorded by a run before `mt_runs` existed read as `OpenElsewhere` to every later run (their
   helpers are skipped once, as "may be open elsewhere").
+
+## Restore at startup (task 3e1c09b8)
+
+When MT starts after a run that ended (clean exit OR crash) with Claude terminals open, one dialog
+(`Dialogs/StartupRestoreDialog`) lists them, all ticked: "The following terminals were open when you
+closed MultiTerminal. Would you like to resume the checked sessions?" Buttons: Resume N terminals /
+Don't restore (closing the window is Don't restore). It replaced ticket f7897fa1's plan.
+
+**Source: the launch record, not settings.** `SessionTerminals` and layout.xml are written only on a
+clean exit and carry no session id. `PaneLaunchRecorder.GetPreviousRunOpenPanes`:
+- the previous run is the `mt_runs` row recorded just BEFORE this run (`TaskDatabase.GetPreviousMtRunId`),
+  never "the newest run that launched something", so after a Don't restore the next start offers nothing;
+- read only when that run's MT process is provably gone (same fail-closed probe as `ClassifyPriorLaunch`);
+- pure rule `SelectRestorable`: per pane (DocId) its newest launch by `seq`, kept when still open or
+  `mt_exit`, kind `claude`, with a session id; one pane per session; a pane's parent is the kept pane
+  with the spawner row's DocId (so a PM's `/clear` continuation keeps its helpers); one level only.
+
+**Rows (`Services/StartupRestore.cs`, pure, `StartupRestoreTests`).** Top-level panes need a registered
+project (the resume validates the cwd against its root); one without is not listed, nor are its helpers.
+Helpers are indented under their PM and use the PM's project. Unticking a PM unticks and disables its
+helpers; a helper comes back only with its PM. Not listed: Home panes, PowerShell and Codex panes.
+
+**The launch path is the ordinary one.** `MainForm.OfferStartupRestore` (posted from `Shown` after
+`RestoreSession`) shows the dialog, then `RunStartupRestore`:
+1. Each ticked PM is checked with `HelperResume.Check` (no one to confirm "may be open elsewhere" with,
+   so a flagged session is skipped), then a `PresetLaunchChoice` is stored for the pane and
+   `OnStartScreenProjectLaunched` runs; `TryChooseLaunchSession` consumes the preset instead of the
+   dialog. So the profile decision, `ValidateResumeCwd`, `RecheckResume`, name registration and
+   `--resume` are exactly a launch dialog resume's. The ticked helpers go through `QueueHelperResume`.
+2. Placement (`StartupRestorePlacement.Match`): a session goes into the restored Home pane whose title
+   equals its name (ordinal-ignore-case, untrimmed), else a new pane. A helper is created by
+   `AddNewTerminal` as before and then moved into its restored pane's dock pane (`MoveIntoRestoredPane`).
+3. Restored panes nobody went into are closed (`PanesToClose`, `CloseUnusedRestorePanes`, which never
+   closes a started pane or the last terminal pane); when nothing came back, the first stays, so MT
+   opens on ONE Home pane.
+4. One summary lists the PMs not resumed; each PM's helper summary is the existing one.
+
+**Known gaps.**
+- The layout restore still pairs layout.xml panes with `SessionTerminals` by POSITION (finding in
+  f7897fa1); a pane that layout.xml lacks gets a new pane, so it comes back, but not in its old place.
+- After a crash layout.xml is from the last CLEAN exit, so name matching may miss.
+- A PM whose launch is refused shows that launch's own message box as well as the summary line.
+- Executed live only: no test drives the dialog, the preset launch or the pane moves.

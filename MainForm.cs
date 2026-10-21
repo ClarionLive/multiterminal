@@ -208,6 +208,9 @@ namespace MultiTerminal
                 _debugLogService?.Trace("MainForm", "===== SHOWN EVENT FIRED =====");
                 ShowOwnerProfileDialogIfNeeded();
                 RestoreSession();
+                // Task 3e1c09b8: offer the Claude terminals the previous run had open. Posted so the
+                // restored panes are laid out first and this handler's other work is not held by a modal.
+                BeginInvoke(new Action(OfferStartupRestore));
                 StartWorktreeJanitor();
                 StartIdleRemoteModeWatcher();
                 // Posted, not called: a modal dialog here would hold the rest of this handler's work.
@@ -4634,6 +4637,17 @@ namespace MultiTerminal
             chosenName = null;
             helpersToResume = Array.Empty<OpenHelper>();
 
+            // Task 3e1c09b8: the startup restore already chose for this pane (one session, its name and
+            // its ticked helpers); it is used once. Everything after the choice is the ordinary launch.
+            if (_presetLaunchChoices.Remove(doc.DocId, out var preset))
+            {
+                resume = preset.Candidate;
+                chosenName = preset.Name;
+                helpersToResume = preset.Helpers;
+                _debugLogService?.Info("LaunchSession", $"Project '{project.Name}': startup restore resumes {resume?.Entry.SessionId} as '{chosenName}' with {helpersToResume.Count} helper(s)");
+                return resume != null;
+            }
+
             bool shiftHeld = (Control.ModifierKeys & Keys.Shift) == Keys.Shift;
             var decision = LaunchSessionChoiceModel.Decide(
                 kind == TerminalKind.ClaudeCode, shiftHeld, project.LaunchMode, () => LoadLaunchSessionChoices(project, doc));
@@ -4720,6 +4734,7 @@ namespace MultiTerminal
                         || !string.Equals(pmDoc.LastLaunchArgs?.ResumeSessionId, pmSessionId, StringComparison.OrdinalIgnoreCase))
                     {
                         _debugLogService?.Warning("LaunchSession", $"Helper resume for session {pmSessionId} not run: the PM pane is no longer running that launch.");
+                        CloseUnusedRestorePanes(TakeHelperPlacement(pmDoc.DocId));
                         return;
                     }
 
@@ -4820,9 +4835,25 @@ namespace MultiTerminal
         private HelperResumeReport ResumeHelpersFor(TerminalDocument pmDoc, Models.Project project, IReadOnlyList<OpenHelper> helpers)
         {
             var report = new HelperResumeReport();
-            if (pmDoc == null || pmDoc.IsDisposed || project == null || helpers == null || helpers.Count == 0)
+            // Task 3e1c09b8: at a startup restore, a helper's restored Home pane (by name) is where it goes.
+            var placement = pmDoc == null ? null : TakeHelperPlacement(pmDoc.DocId);
+            try
+            {
+                if (pmDoc == null || pmDoc.IsDisposed || project == null || helpers == null || helpers.Count == 0)
+                    return report;
+                ResumeHelpersInto(pmDoc, project, helpers, placement, report);
                 return report;
+            }
+            finally
+            {
+                // A placement pane the helper did not move into (skipped, failed) is an unused Home pane.
+                CloseUnusedRestorePanes(placement);
+            }
+        }
 
+        private void ResumeHelpersInto(TerminalDocument pmDoc, Models.Project project, IReadOnlyList<OpenHelper> helpers,
+            IReadOnlyDictionary<string, TerminalDocument> placement, HelperResumeReport report)
+        {
             string pmName = pmDoc.OriginalAgentName ?? pmDoc.CustomTitle;
             string projectRoot = GetLaunchableProjectRoot(project);
             SessionCatalog catalog = null;
@@ -4916,6 +4947,9 @@ namespace MultiTerminal
                     report.AddResumed(resolvedName);
                     if (!string.Equals(resolvedName, helperName, StringComparison.OrdinalIgnoreCase))
                         report.AddRenamed(helperName, resolvedName);
+
+                    if (placement != null && helper?.SessionId != null && placement.TryGetValue(helper.SessionId, out var restoredPane))
+                        MoveIntoRestoredPane(helperDocId, restoredPane);
                 }
                 catch (Exception ex)
                 {
@@ -4931,8 +4965,275 @@ namespace MultiTerminal
                 pmDoc.FocusTerminal();
                 _lastActiveTerminal = pmDoc;
             }
+        }
 
-            return report;
+        // ---- Startup restore (task 3e1c09b8) ----
+
+        /// <summary>A launch choice made before the launch: the startup restore's, consumed by <see cref="TryChooseLaunchSession"/>.</summary>
+        private sealed class PresetLaunchChoice
+        {
+            public PresetLaunchChoice(LaunchSessionCandidate candidate, string name, IReadOnlyList<OpenHelper> helpers)
+            {
+                Candidate = candidate;
+                Name = name;
+                Helpers = helpers ?? Array.Empty<OpenHelper>();
+            }
+
+            public LaunchSessionCandidate Candidate { get; }
+            public string Name { get; }
+            public IReadOnlyList<OpenHelper> Helpers { get; }
+        }
+
+        // Keyed by the pane's DocId. UI thread only (set and consumed inside one synchronous launch).
+        private readonly Dictionary<string, PresetLaunchChoice> _presetLaunchChoices = new Dictionary<string, PresetLaunchChoice>(StringComparer.Ordinal);
+
+        // PM DocId -> (helper session id -> the restored Home pane that helper goes into). Taken once by
+        // ResumeHelpersFor, or by QueueHelperResume when the helpers are not resumed.
+        private readonly Dictionary<string, Dictionary<string, TerminalDocument>> _restoreHelperPlacement =
+            new Dictionary<string, Dictionary<string, TerminalDocument>>(StringComparer.Ordinal);
+
+        private Dictionary<string, TerminalDocument> TakeHelperPlacement(string pmDocId)
+            => pmDocId != null && _restoreHelperPlacement.Remove(pmDocId, out var placement) ? placement : null;
+
+        /// <summary>
+        /// Task 3e1c09b8: after the layout restore, offers the Claude terminals the previous MT run had open
+        /// when it exited or crashed (<see cref="PaneLaunchRecorder.GetPreviousRunOpenPanes"/>), all ticked.
+        /// Nothing to offer: nothing happens, and the restored panes stay as they are.
+        /// </summary>
+        private void OfferStartupRestore()
+        {
+            try
+            {
+                if (IsDisposed || _paneLaunchRecorder == null)
+                    return;
+
+                var panes = _paneLaunchRecorder.GetPreviousRunOpenPanes();
+                if (panes.Count == 0)
+                    return;
+
+                var model = new StartupRestoreModel(panes, id => _sharedProjectDatabase?.GetRichProject(id)?.Name);
+                foreach (var pane in model.NotListed)
+                    _debugLogService?.Info("StartupRestore", $"Not offered: '{pane.TerminalName}' ({pane.SessionId}) has no registered project to resume in");
+                if (model.IsEmpty)
+                    return;
+
+                using (var dialog = new Dialogs.StartupRestoreDialog(model, _currentTheme))
+                {
+                    // Anything but Resume unticks every row (the dialog's contract), so this is Don't restore.
+                    dialog.ShowDialog(this);
+                }
+
+                RunStartupRestore(model);
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("StartupRestore", $"Startup restore failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Resumes the ticked sessions. Each PM goes into the restored Home pane that has its name (else a
+        /// new pane) through the ordinary project launch (<see cref="OnStartScreenProjectLaunched"/>, with
+        /// the choice preset), so the profile decision, the cwd validation, the pre-launch recheck and the
+        /// name registration are exactly a launch dialog resume's; its ticked helpers follow through
+        /// <see cref="ResumeHelpersFor"/>, each into its own restored pane by name. Restored panes nobody
+        /// went into are closed; when nothing came back, one Home pane stays (Owner decision).
+        /// </summary>
+        private void RunStartupRestore(StartupRestoreModel model)
+        {
+            var restoredPanes = _gridManager.GetTerminalDocuments()
+                .Where(d => !d.IsDisposed && !d.IsTerminalStarted && d.IsStartScreenVisible)
+                .ToList();
+            var selected = model.SelectedTopLevel;
+
+            // Names in restore order: each PM, then its ticked helpers.
+            var names = new List<string>();
+            foreach (var pm in selected)
+            {
+                names.Add(pm.Pane.TerminalName);
+                names.AddRange(StartupRestoreModel.SelectedHelpers(pm).Select(h => h.Pane.TerminalName));
+            }
+            var match = StartupRestorePlacement.Match(restoredPanes.Select(d => d.CustomTitle).ToList(), names);
+
+            var used = new List<int>();
+            var skipped = new List<string>();
+            bool anyRestored = false;
+            int next = 0;
+            foreach (var pm in selected)
+            {
+                int? pmPane = match[next++];
+                var helpers = StartupRestoreModel.SelectedHelpers(pm);
+                var helperPanes = helpers.Select(_ => match[next++]).ToList();
+
+                var placement = new Dictionary<string, TerminalDocument>(StringComparer.OrdinalIgnoreCase);
+                for (int i = 0; i < helpers.Count; i++)
+                {
+                    if (helperPanes[i] is int index && !string.IsNullOrEmpty(helpers[i].Pane.SessionId))
+                        placement[helpers[i].Pane.SessionId] = restoredPanes[index];
+                }
+
+                var target = pmPane is int pmIndex ? restoredPanes[pmIndex] : null;
+                if (!RestorePm(pm, helpers, target, placement, skipped))
+                    continue;
+
+                anyRestored = true;
+                if (pmPane is int usedPm) used.Add(usedPm);
+                used.AddRange(helperPanes.Where(p => p.HasValue).Select(p => p.Value)); // the helper resume closes or fills them
+            }
+
+            foreach (int index in StartupRestorePlacement.PanesToClose(restoredPanes.Count, used, anyRestored))
+                CloseUnusedRestorePanes(new[] { restoredPanes[index] });
+
+            _debugLogService?.Info("StartupRestore", $"Restore: {selected.Count} chosen, {selected.Count - skipped.Count} started, {skipped.Count} skipped");
+            if (skipped.Count > 0)
+            {
+                MessageBox.Show(this,
+                    "These terminals were not resumed:\n\n" + string.Join("\n", skipped.Select(s => "• " + s)),
+                    "Restore terminals", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+
+        /// <summary>
+        /// Resumes one PM (and queues its helpers) in <paramref name="target"/>, or in a new pane when
+        /// there is none. The checks are the helper resume's (<see cref="HelperResume.Check"/>): the record
+        /// says the previous run's process is gone, so there is nobody to confirm "may be open elsewhere"
+        /// with and a flagged session is skipped. False when it did not start.
+        /// </summary>
+        private bool RestorePm(StartupRestoreEntry pm, IReadOnlyList<StartupRestoreEntry> helpers, TerminalDocument target,
+            Dictionary<string, TerminalDocument> helperPlacement, List<string> skipped)
+        {
+            string name = pm.Pane.TerminalName;
+            string display = pm.DisplayName;
+            TerminalDocument doc = null;
+            bool createdPane = false;
+            try
+            {
+                var project = _sharedProjectDatabase?.GetRichProject(pm.Pane.ProjectId);
+                string projectRoot = project == null ? null : GetLaunchableProjectRoot(project);
+                if (projectRoot == null)
+                {
+                    skipped.Add($"{display}: its project folder could not be found");
+                    return false;
+                }
+
+                var live = CollectLiveSessionStates(null);
+                var catalog = CreateSessionCatalog();
+                var entry = catalog.TryGetEntry(projectRoot, pm.Pane.SessionId, LaunchSessionChoiceModel.LiveSessionIdsOf(live), DateTime.UtcNow);
+                var check = HelperResume.Check(
+                    ToOpenHelper(pm.Pane), entry, live, projectRoot,
+                    TryGetTranscriptWriteUtc,
+                    Directory.Exists,
+                    _paneLaunchRecorder?.GetPriorLaunchState(pm.Pane.SessionId) ?? PriorLaunchState.NoRecord);
+                if (!check.CanResume)
+                {
+                    _debugLogService?.Info("StartupRestore", $"'{name}' ({pm.Pane.SessionId}) skipped: {check.SkipReason}");
+                    skipped.Add($"{display}: {check.SkipReason}");
+                    return false;
+                }
+
+                doc = target;
+                if (doc == null || doc.IsDisposed)
+                {
+                    var (_, docId) = AddNewTerminal();
+                    doc = _dockPanel.Contents.OfType<TerminalDocument>().FirstOrDefault(d => d.DocId == docId);
+                    createdPane = doc != null;
+                    if (doc == null)
+                    {
+                        skipped.Add($"{display}: its pane could not be created");
+                        return false;
+                    }
+                }
+
+                if (helperPlacement.Count > 0)
+                    _restoreHelperPlacement[doc.DocId] = helperPlacement;
+                _presetLaunchChoices[doc.DocId] = new PresetLaunchChoice(check.Candidate, name, helpers.Select(h => ToOpenHelper(h.Pane)).ToList());
+                try
+                {
+                    OnStartScreenProjectLaunched(doc, new StartScreenLaunchEventArgs(project.Id, TerminalKindHelper.ClaudeCodeValue));
+                }
+                finally
+                {
+                    // A launch refused before it reached the choice (a profile refusal) leaves it unused.
+                    _presetLaunchChoices.Remove(doc.DocId);
+                }
+
+                bool started = !doc.IsDisposed && doc.IsTerminalStarted
+                    && string.Equals(doc.LastLaunchArgs?.ResumeSessionId, pm.Pane.SessionId, StringComparison.OrdinalIgnoreCase);
+                if (started)
+                    return true;
+
+                skipped.Add($"{display}: it did not start (see the message shown for it, or the debug log)");
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("StartupRestore", $"'{name}' failed: {ex.Message}");
+                skipped.Add($"{display}: resuming it failed ({ex.Message.TrimEnd('.')})");
+            }
+
+            // Not started: its helpers' panes and a pane made just for it are unused.
+            CloseUnusedRestorePanes(doc == null ? null : TakeHelperPlacement(doc.DocId));
+            if (createdPane)
+                CloseUnusedRestorePanes(new[] { doc });
+            return false;
+        }
+
+        private static OpenHelper ToOpenHelper(RestorablePane pane) => new OpenHelper
+        {
+            SessionId = pane.SessionId,
+            TerminalName = pane.TerminalName,
+            Cwd = pane.Cwd,
+            ProjectId = pane.ProjectId,
+            Kind = Services.PaneLaunchKind.Claude,
+        };
+
+        /// <summary>
+        /// Puts a resumed helper's new pane where its restored Home pane is (the same dock pane, just before
+        /// it); the restored pane, still on its start screen, is closed afterwards with the other unused ones.
+        /// </summary>
+        private void MoveIntoRestoredPane(string newDocId, TerminalDocument restored)
+        {
+            try
+            {
+                var newDoc = _dockPanel.Contents.OfType<TerminalDocument>().FirstOrDefault(d => d.DocId == newDocId);
+                var pane = restored?.Pane;
+                if (newDoc == null || restored.IsDisposed || pane == null || pane.IsDisposed || newDoc.Pane == pane)
+                    return;
+                newDoc.Show(pane, restored);
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Warning("StartupRestore", $"Moving a resumed helper into its restored pane failed: {ex.Message}");
+            }
+        }
+
+        private void CloseUnusedRestorePanes(Dictionary<string, TerminalDocument> placement)
+            => CloseUnusedRestorePanes(placement?.Values);
+
+        /// <summary>
+        /// Closes restored panes that are still unused Home panes. Never one that started something, and
+        /// never the last terminal pane (MT always keeps one).
+        /// </summary>
+        private void CloseUnusedRestorePanes(IEnumerable<TerminalDocument> panes)
+        {
+            if (panes == null)
+                return;
+            foreach (var doc in panes.ToList())
+            {
+                try
+                {
+                    if (doc == null || doc.IsDisposed || doc.IsTerminalStarted || !doc.IsStartScreenVisible)
+                        continue;
+                    if (_gridManager.GetTerminalDocuments().Count(d => !d.IsDisposed) <= 1)
+                        return;
+                    doc.Close();
+                    if (!doc.IsDisposed && doc.DockPanel == null)
+                        doc.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    _debugLogService?.Warning("StartupRestore", $"Closing an unused restored pane failed: {ex.Message}");
+                }
+            }
         }
 
         /// <summary>

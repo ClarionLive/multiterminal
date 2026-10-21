@@ -225,6 +225,31 @@ namespace MultiTerminal.Services
     }
 
     /// <summary>
+    /// A Claude pane the previous MT run still had open when it ended (task 3e1c09b8), as returned by
+    /// <see cref="PaneLaunchRecorder.GetPreviousRunOpenPanes"/>.
+    /// </summary>
+    public sealed class RestorablePane
+    {
+        /// <summary>The pane's current launch row (<c>pane_launches.id</c>).</summary>
+        public string LaunchId { get; set; }
+
+        /// <summary>The pane's DocId in the previous run. Only meaningful for matching panes of that run.</summary>
+        public string DocId { get; set; }
+
+        public string TerminalName { get; set; }
+        public string ProjectId { get; set; }
+        public string Cwd { get; set; }
+        public string SessionId { get; set; }
+        public long Seq { get; set; }
+
+        /// <summary>
+        /// The <see cref="LaunchId"/> of the offered pane that spawned this one, or null when it is
+        /// top-level (spawned by nothing, or by a pane that is not offered).
+        /// </summary>
+        public string ParentLaunchId { get; set; }
+    }
+
+    /// <summary>
     /// Records pane launches in <c>pane_launches</c> and answers "which helpers did this PM session
     /// leave open" (task 7d20e94c). Never throws: every failure is logged and turned into a null,
     /// false or empty result, because every caller is on a UI or launch path.
@@ -525,6 +550,112 @@ namespace MultiTerminal.Services
             }
 
             return gone ? PriorLaunchState.DiedWithPreviousRun : PriorLaunchState.OpenElsewhere;
+        }
+
+        /// <summary>
+        /// The Claude panes the PREVIOUS MT run had open when it ended (task 3e1c09b8): its launches
+        /// still open (a crash) or ended <c>mt_exit</c> (a clean exit), offered at startup for restore.
+        /// The previous run is the one recorded just before this one (<see cref="TaskDatabase.GetPreviousMtRunId"/>),
+        /// and it is read only when its MT process is provably gone, the same fail-closed rule as
+        /// <see cref="ClassifyPriorLaunch"/>: a process that may still run them must not have its
+        /// sessions resumed a second time. Empty on any failure.
+        /// </summary>
+        public IReadOnlyList<RestorablePane> GetPreviousRunOpenPanes()
+        {
+            try
+            {
+                string previousRun = _db.GetPreviousMtRunId(MtRunId);
+                if (string.IsNullOrEmpty(previousRun)) return Array.Empty<RestorablePane>();
+                if (!IsRunProvablyGone(previousRun))
+                {
+                    Log($"Restore offer skipped: the previous MT run {previousRun} is not provably gone.");
+                    return Array.Empty<RestorablePane>();
+                }
+                return SelectRestorable(_db.GetPaneLaunchesForRun(previousRun));
+            }
+            catch (Exception ex)
+            {
+                Log($"Reading the previous run's open panes failed: {ex.Message}");
+                return Array.Empty<RestorablePane>();
+            }
+        }
+
+        /// <summary>
+        /// The pure rule behind <see cref="GetPreviousRunOpenPanes"/>, over ONE run's launch rows:
+        /// <list type="number">
+        /// <item>Per pane (DocId; a row with none stands alone), only its newest launch by
+        /// <see cref="PaneLaunchRecord.Seq"/>: an earlier launch was replaced by it ("Launch as", a
+        /// <c>/clear</c> continuation).</item>
+        /// <item>Kept when that launch is still open or ended <c>mt_exit</c>; any close
+        /// (<c>pane_closed</c>, <c>close_helper</c>, <c>process_exit</c>, <c>closed_with_pm</c>,
+        /// <c>session_changed</c>) means the pane was not running it at the end.</item>
+        /// <item>Kind <c>claude</c> with a session id: nothing else can be resumed.</item>
+        /// <item>One pane per session (the newest), so a session is never offered twice.</item>
+        /// <item><see cref="RestorablePane.ParentLaunchId"/>: the kept pane whose DocId is the DocId of
+        /// the spawner launch's row. The pane, not the exact row: a PM that ran <c>/clear</c> after
+        /// spawning is on a continuation row, and its helper is still its helper.</item>
+        /// </list>
+        /// Returned oldest first (by <see cref="PaneLaunchRecord.Seq"/>).
+        /// </summary>
+        public static IReadOnlyList<RestorablePane> SelectRestorable(IEnumerable<PaneLaunchRecord> runLaunches)
+        {
+            var rows = (runLaunches ?? Enumerable.Empty<PaneLaunchRecord>()).Where(l => l != null).ToList();
+            var byId = new Dictionary<string, PaneLaunchRecord>(StringComparer.Ordinal);
+            foreach (var row in rows)
+            {
+                if (!string.IsNullOrEmpty(row.Id))
+                    byId[row.Id] = row;
+            }
+
+            var kept = rows
+                .GroupBy(l => string.IsNullOrEmpty(l.DocId) ? "\0" + l.Id : l.DocId, StringComparer.Ordinal)
+                .Select(g => g.OrderByDescending(l => l.Seq).First())
+                .Where(l => IsOpen(l)
+                            && string.Equals(l.Kind, PaneLaunchKind.Claude, StringComparison.Ordinal)
+                            && !string.IsNullOrEmpty(l.SessionId))
+                .GroupBy(l => l.SessionId, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.OrderByDescending(l => l.Seq).First())
+                .OrderBy(l => l.Seq)
+                .ToList();
+
+            var keptByDoc = kept
+                .Where(l => !string.IsNullOrEmpty(l.DocId))
+                .ToDictionary(l => l.DocId, StringComparer.Ordinal);
+
+            var result = new List<RestorablePane>();
+            foreach (var launch in kept)
+            {
+                string parent = null;
+                if (!string.IsNullOrEmpty(launch.SpawnerLaunchId)
+                    && byId.TryGetValue(launch.SpawnerLaunchId, out var spawnerRow)
+                    && !string.IsNullOrEmpty(spawnerRow.DocId)
+                    && !string.Equals(spawnerRow.DocId, launch.DocId, StringComparison.Ordinal)
+                    && keptByDoc.TryGetValue(spawnerRow.DocId, out var spawnerPane))
+                {
+                    parent = spawnerPane.Id;
+                }
+
+                result.Add(new RestorablePane
+                {
+                    LaunchId = launch.Id,
+                    DocId = launch.DocId,
+                    TerminalName = launch.TerminalName,
+                    ProjectId = launch.ProjectId,
+                    Cwd = launch.Cwd,
+                    SessionId = launch.SessionId,
+                    Seq = launch.Seq,
+                    ParentLaunchId = parent,
+                });
+            }
+
+            // One level, as for the PM resume: a helper of a helper comes back on its own.
+            var nested = new HashSet<string>(result.Where(p => p.ParentLaunchId != null).Select(p => p.LaunchId), StringComparer.Ordinal);
+            foreach (var pane in result)
+            {
+                if (pane.ParentLaunchId != null && nested.Contains(pane.ParentLaunchId))
+                    pane.ParentLaunchId = null;
+            }
+            return result;
         }
 
         /// <summary>The end reasons that mean this run saw the launch's process end or ended it itself.</summary>

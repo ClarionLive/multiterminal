@@ -8169,6 +8169,41 @@ namespace MultiTerminal.Services
             return results;
         }
 
+        /// <summary>
+        /// The MT run recorded immediately before <paramref name="currentRunId"/> (task 3e1c09b8): the
+        /// newest <c>mt_runs</c> row older than the current run's own row, or, when the current run
+        /// recorded none, the newest row that is not it. Null when there is none. Deliberately the run
+        /// just before, not the newest run that launched anything, so a run that restored nothing is
+        /// itself the "previous run" the next start looks at.
+        /// </summary>
+        public string GetPreviousMtRunId(string currentRunId)
+        {
+            using var gate = LockConn();
+            using var cmd = new SQLiteCommand(@"
+                SELECT run_id FROM mt_runs
+                WHERE run_id <> @current
+                  AND (NOT EXISTS (SELECT 1 FROM mt_runs WHERE run_id = @current)
+                       OR recorded_at < (SELECT recorded_at FROM mt_runs WHERE run_id = @current))
+                ORDER BY recorded_at DESC
+                LIMIT 1", _connection);
+            cmd.Parameters.AddWithValue("@current", currentRunId ?? string.Empty);
+            return cmd.ExecuteScalar() as string;
+        }
+
+        /// <summary>Every launch row of one MT run, oldest first (by <c>seq</c>).</summary>
+        public List<PaneLaunchRecord> GetPaneLaunchesForRun(string mtRunId)
+        {
+            var results = new List<PaneLaunchRecord>();
+            if (string.IsNullOrEmpty(mtRunId)) return results;
+            using var gate = LockConn();
+            using var cmd = new SQLiteCommand(
+                "SELECT " + PaneLaunchColumns + " FROM pane_launches WHERE mt_run_id = @run ORDER BY seq", _connection);
+            cmd.Parameters.AddWithValue("@run", mtRunId);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read()) results.Add(ReadPaneLaunch(reader));
+            return results;
+        }
+
         private static string FormatPaneLaunchTime(DateTime value)
             => (value.Kind == DateTimeKind.Utc ? value : value.ToUniversalTime()).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
 
