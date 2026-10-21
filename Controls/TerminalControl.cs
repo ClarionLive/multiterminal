@@ -685,8 +685,9 @@ namespace MultiTerminal.Controls
         }
 
         /// <summary>
-        /// When the armed request's <c>/compact</c> finished submitting, or null. Keystrokes after it (less
-        /// its own Enter) mean someone is using the input line, which accepts typing during the compaction.
+        /// When the armed request's <c>/compact</c> finished submitting (its own Enter already sent), or
+        /// null. Keystrokes after it mean someone is using the input line, which accepts typing during
+        /// the compaction.
         /// </summary>
         public DateTime? CompactSubmittedUtc { get; private set; }
 
