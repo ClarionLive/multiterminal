@@ -4998,24 +4998,30 @@ namespace MultiTerminal
         /// <summary>
         /// Task 3e1c09b8: after the layout restore, offers the Claude terminals the previous MT run had open
         /// when it exited or crashed (<see cref="PaneLaunchRecorder.GetPreviousRunOpenPanes"/>), all ticked.
-        /// Nothing to offer: nothing happens, and the restored panes stay as they are.
+        /// Nothing to offer (or the offer could not be read): the restored Home panes collapse to one, as
+        /// when nothing is restored from the dialog (Owner decision, 2026-10-21).
         /// </summary>
         private void OfferStartupRestore()
         {
+            if (IsDisposed)
+                return;
             try
             {
-                if (IsDisposed || _paneLaunchRecorder == null)
-                    return;
-
-                var panes = _paneLaunchRecorder.GetPreviousRunOpenPanes();
+                var panes = _paneLaunchRecorder?.GetPreviousRunOpenPanes() ?? Array.Empty<RestorablePane>();
                 if (panes.Count == 0)
+                {
+                    CollapseToOneHomePane();
                     return;
+                }
 
                 var model = new StartupRestoreModel(panes, id => _sharedProjectDatabase?.GetRichProject(id)?.Name);
                 foreach (var pane in model.NotListed)
                     _debugLogService?.Info("StartupRestore", $"Not offered: '{pane.TerminalName}' ({pane.SessionId}) has no registered project to resume in");
                 if (model.IsEmpty)
+                {
+                    CollapseToOneHomePane();
                     return;
+                }
 
                 using (var dialog = new Dialogs.StartupRestoreDialog(model, _currentTheme))
                 {
@@ -5028,7 +5034,28 @@ namespace MultiTerminal
             catch (Exception ex)
             {
                 _debugLogService?.Error("StartupRestore", $"Startup restore failed: {ex.Message}");
+                try
+                {
+                    CollapseToOneHomePane();
+                }
+                catch (Exception collapseEx)
+                {
+                    _debugLogService?.Error("StartupRestore", $"Collapsing the restored panes failed: {collapseEx.Message}");
+                }
             }
+        }
+
+        /// <summary>The restored panes still on their Home screen, in dock order.</summary>
+        private List<TerminalDocument> GetRestoredHomePanes() => _gridManager.GetTerminalDocuments()
+            .Where(d => !d.IsDisposed && !d.IsTerminalStarted && d.IsStartScreenVisible)
+            .ToList();
+
+        /// <summary>Nothing came back: every restored Home pane but the first closes.</summary>
+        private void CollapseToOneHomePane()
+        {
+            var restoredPanes = GetRestoredHomePanes();
+            CloseUnusedRestorePanes(StartupRestorePlacement.PanesToClose(restoredPanes.Count, Array.Empty<int>(), anySessionRestored: false)
+                .Select(i => restoredPanes[i]));
         }
 
         /// <summary>
@@ -5041,9 +5068,7 @@ namespace MultiTerminal
         /// </summary>
         private void RunStartupRestore(StartupRestoreModel model)
         {
-            var restoredPanes = _gridManager.GetTerminalDocuments()
-                .Where(d => !d.IsDisposed && !d.IsTerminalStarted && d.IsStartScreenVisible)
-                .ToList();
+            var restoredPanes = GetRestoredHomePanes();
             var selected = model.SelectedTopLevel;
 
             // Names in restore order: each PM, then its ticked helpers.
@@ -5081,8 +5106,7 @@ namespace MultiTerminal
                 used.AddRange(helperPanes.Where(p => p.HasValue).Select(p => p.Value)); // the helper resume closes or fills them
             }
 
-            foreach (int index in StartupRestorePlacement.PanesToClose(restoredPanes.Count, used, anyRestored))
-                CloseUnusedRestorePanes(new[] { restoredPanes[index] });
+            CloseUnusedRestorePanes(StartupRestorePlacement.PanesToClose(restoredPanes.Count, used, anyRestored).Select(i => restoredPanes[i]));
 
             _debugLogService?.Info("StartupRestore", $"Restore: {selected.Count} chosen, {selected.Count - skipped.Count} started, {skipped.Count} skipped");
             if (skipped.Count > 0)

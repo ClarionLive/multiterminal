@@ -329,7 +329,9 @@ helpers; a helper comes back only with its PM. Not listed: Home panes, PowerShel
    `AddNewTerminal` as before and then moved into its restored pane's dock pane (`MoveIntoRestoredPane`).
 3. Restored panes nobody went into are closed (`PanesToClose`, `CloseUnusedRestorePanes`, which never
    closes a started pane or the last terminal pane); when nothing came back, the first stays, so MT
-   opens on ONE Home pane.
+   opens on ONE Home pane. The same collapse (`CollapseToOneHomePane`) runs when there is nothing to
+   offer at all (no open Claude pane in the previous run, a previous run not provably gone, every pane
+   without a registered project, or a failed read): no dialog, one Home pane (Owner decision 2026-10-21).
 4. One summary lists the PMs not resumed; each PM's helper summary is the existing one.
 
 **Known gaps.**
