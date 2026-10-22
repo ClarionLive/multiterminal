@@ -2824,6 +2824,7 @@ namespace MultiTerminal.Docking
         {
             if (_startScreen == null) return;
             _isStartScreenVisible = true;
+            HideRestoringNotice();
 
             // Hide terminal area to prevent WebView2 HWND Z-order conflicts
             _terminalAgentSplitter.Visible = false;
@@ -2855,11 +2856,55 @@ namespace MultiTerminal.Docking
             if (_startScreen == null) return;
             _isStartScreenVisible = false;
             _startScreen.Visible = false;
+            HideRestoringNotice();
 
             // Re-show terminal area (hidden by ShowStartScreen to fix WebView2 Z-order)
             _terminalAgentSplitter.Visible = true;
             if (_statusBarSplitter != null) _statusBarSplitter.Visible = true;
             _statusBar.Visible = true;
+        }
+
+        private static readonly Font RestoringNoticeFont = new Font("Segoe UI", 14f);
+#pragma warning disable CA2213 // Added to Controls, so the base Form.Dispose disposes it.
+        private Label _restoringNotice;
+#pragma warning restore CA2213
+
+        /// <summary>
+        /// Task 3e1c09b8: a plain message in place of the Home screen while the startup restore launches this
+        /// pane ("Restoring Alice…"). A launch made while MT's database is busy (the startup code-graph
+        /// reindex) holds the UI thread for seconds, so the message is painted synchronously
+        /// (<see cref="Control.Refresh"/>) before the launch starts. A WinForms label rather than a message to
+        /// the start screen's page: the WebView2 window ignores WinForms z-order, and a posted page message
+        /// would only arrive after the UI thread is free again. Removed by <see cref="ShowStartScreen"/> (the
+        /// launch failed) and <see cref="HideStartScreen"/> (the terminal started).
+        /// </summary>
+        public void ShowRestoringNotice(string text)
+        {
+            if (_restoringNotice == null)
+            {
+                _restoringNotice = new Label
+                {
+                    Dock = DockStyle.Fill,
+                    AutoSize = false,
+                    TextAlign = ContentAlignment.MiddleCenter,
+                    Font = RestoringNoticeFont,
+                    UseMnemonic = false,
+                };
+                Controls.Add(_restoringNotice);
+            }
+
+            _restoringNotice.Text = text;
+            _restoringNotice.BackColor = _currentTheme?.Background ?? SystemColors.Window;
+            _restoringNotice.ForeColor = _currentTheme?.Foreground ?? SystemColors.WindowText;
+            if (_startScreen != null) _startScreen.Visible = false;
+            _restoringNotice.Visible = true;
+            _restoringNotice.BringToFront();
+            _restoringNotice.Refresh();
+        }
+
+        private void HideRestoringNotice()
+        {
+            if (_restoringNotice != null) _restoringNotice.Visible = false;
         }
 
         /// <summary>

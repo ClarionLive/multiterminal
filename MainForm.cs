@@ -5080,6 +5080,39 @@ namespace MultiTerminal
             }
             var match = StartupRestorePlacement.Match(restoredPanes.Select(d => d.CustomTitle).ToList(), names);
 
+            // Feedback first (Owner live test): a launch made while the startup code-graph reindex holds the
+            // database blocks the UI thread for seconds in its registration writes, so every pane that is about
+            // to be restored says so before the first launch starts, and the cursor waits.
+            for (int i = 0; i < names.Count; i++)
+            {
+                if (match[i] is int index)
+                    restoredPanes[index].ShowRestoringNotice($"Restoring {SessionCatalog.ToDisplayText(names[i]) ?? "terminal"}…");
+            }
+            var previousCursor = Cursor.Current;
+            UseWaitCursor = true;
+            Cursor.Current = Cursors.WaitCursor;
+            List<string> skipped;
+            try
+            {
+                skipped = RunStartupRestoreLaunches(model, restoredPanes, match);
+            }
+            finally
+            {
+                UseWaitCursor = false;
+                Cursor.Current = previousCursor;
+            }
+
+            if (skipped.Count > 0)
+            {
+                MessageBox.Show(this,
+                    "These terminals were not resumed:\n\n" + string.Join("\n", skipped.Select(s => "• " + s)),
+                    "Restore terminals", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+
+        private List<string> RunStartupRestoreLaunches(StartupRestoreModel model, List<TerminalDocument> restoredPanes, int?[] match)
+        {
+            var selected = model.SelectedTopLevel;
             var used = new List<int>();
             var skipped = new List<string>();
             bool anyRestored = false;
@@ -5108,13 +5141,19 @@ namespace MultiTerminal
 
             CloseUnusedRestorePanes(StartupRestorePlacement.PanesToClose(restoredPanes.Count, used, anyRestored).Select(i => restoredPanes[i]));
 
-            _debugLogService?.Info("StartupRestore", $"Restore: {selected.Count} chosen, {selected.Count - skipped.Count} started, {skipped.Count} skipped");
-            if (skipped.Count > 0)
+            // A restored pane nobody went into that was kept (MT keeps one) goes back to its Home screen,
+            // instead of saying "Restoring" for a launch that did not happen. Helper panes in `used` keep
+            // their message: their resume is still queued.
+            var usedSet = new HashSet<int>(used);
+            for (int i = 0; i < restoredPanes.Count; i++)
             {
-                MessageBox.Show(this,
-                    "These terminals were not resumed:\n\n" + string.Join("\n", skipped.Select(s => "• " + s)),
-                    "Restore terminals", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                var pane = restoredPanes[i];
+                if (!usedSet.Contains(i) && !pane.IsDisposed && !pane.IsTerminalStarted)
+                    pane.ShowStartScreen();
             }
+
+            _debugLogService?.Info("StartupRestore", $"Restore: {selected.Count} chosen, {selected.Count - skipped.Count} started, {skipped.Count} skipped");
+            return skipped;
         }
 
         /// <summary>
@@ -5166,6 +5205,7 @@ namespace MultiTerminal
                         skipped.Add($"{display}: its pane could not be created");
                         return false;
                     }
+                    doc.ShowRestoringNotice($"Restoring {display}…");
                 }
 
                 if (helperPlacement.Count > 0)
@@ -5194,7 +5234,10 @@ namespace MultiTerminal
                 skipped.Add($"{display}: resuming it failed ({ex.Message.TrimEnd('.')})");
             }
 
-            // Not started: its helpers' panes and a pane made just for it are unused.
+            // Not started: its helpers' panes and a pane made just for it are unused. A pane that stays (the
+            // last one) goes back to its Home screen instead of keeping the "Restoring" message.
+            if (doc != null && !doc.IsDisposed && !doc.IsTerminalStarted)
+                doc.ShowStartScreen();
             CloseUnusedRestorePanes(doc == null ? null : TakeHelperPlacement(doc.DocId));
             if (createdPane)
                 CloseUnusedRestorePanes(new[] { doc });

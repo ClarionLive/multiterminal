@@ -333,6 +333,11 @@ helpers; a helper comes back only with its PM. Not listed: Home panes, PowerShel
    offer at all (no open Claude pane in the previous run, a previous run not provably gone, every pane
    without a registered project, or a failed read): no dialog, one Home pane (Owner decision 2026-10-21).
 4. One summary lists the PMs not resumed; each PM's helper summary is the existing one.
+5. Feedback (Owner live test): before the first launch every pane about to be restored shows "Restoring
+   <name>…" (`TerminalDocument.ShowRestoringNotice`, a WinForms label painted synchronously in place of
+   the start screen, removed by `ShowStartScreen`/`HideStartScreen`) and the cursor waits. Needed because
+   a launch made while the startup code-graph reindex holds the database freezes the UI thread for ~14s
+   in its registration writes (ticket bb1d9481 is the cure; the notice only makes the wait visible).
 
 **Known gaps.**
 - The layout restore still pairs layout.xml panes with `SessionTerminals` by POSITION (finding in
