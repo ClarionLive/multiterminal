@@ -1,0 +1,822 @@
+#nullable enable
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using MultiTerminal.Models;
+using RepoWatchState = MultiTerminal.MCPServer.Models.RepoWatchState;
+
+namespace MultiTerminal.Services
+{
+    /// <summary>
+    /// What <see cref="RepoActivityService"/> needs from the app (in production, MainForm). Every member is
+    /// called from thread-pool threads, so an implementation must be safe to call off the UI thread.
+    /// </summary>
+    public interface IRepoActivityHost
+    {
+        /// <summary>The projects with <see cref="Project.IsRepoWatchEnabled"/>.</summary>
+        IReadOnlyList<Project> GetWatchedProjects();
+
+        /// <summary>The project's current settings, or null when it no longer exists.</summary>
+        Project? GetProject(string projectId);
+
+        /// <summary>True while a terminal pane is open on this project.</summary>
+        bool HasOpenPane(string projectId);
+
+        /// <summary>
+        /// The token of the project's source control account when that account is a GitHub one, else null.
+        /// Never logged, never put in a message.
+        /// </summary>
+        string? GetGitHubToken(Project project);
+    }
+
+    /// <summary>The one GitHub call the service makes; <see cref="GitHubRestClient"/> in production.</summary>
+    public interface IRepoIssuesClient
+    {
+        /// <summary>See <see cref="GitHubRestClient.GetOpenIssuesAsync"/>.</summary>
+        Task<RepoIssuesResult> GetOpenIssuesAsync(string owner, string repo, string? token, string? etag, CancellationToken ct = default);
+    }
+
+    /// <summary>
+    /// Decides WHEN each watched project's GitHub repositories are checked, and WHAT counts as new
+    /// (task df58b35d, GitHub #53).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Which repositories.</b> The project's "Repositories" setting when it lists any; otherwise every
+    /// github.com remote of the project folder (a fork has two); otherwise the project's Git URL when it
+    /// is a github.com one; otherwise none, shown as NoRepos.
+    /// </para>
+    /// <para>
+    /// <b>When.</b> Once for every watched project at <see cref="Start"/>, and again whenever a project is
+    /// launched (<see cref="NotifyProjectLaunched"/>). After that a 60s tick checks a project only while a
+    /// pane is open on it and only when its interval has passed since its last check. Interval 0 means
+    /// "startup and launch only", never on the tick. Without a token GitHub allows 60 requests an hour, so
+    /// an unauthenticated project is never checked on the tick more often than every 15 minutes.
+    /// <see cref="CheckNowAsync"/> (the user's "Check now") ignores both the interval and that floor.
+    /// </para>
+    /// <para>
+    /// <b>Rate limits.</b> A rate-limited repository is not asked again before the time GitHub gave, by
+    /// any path, "Check now" included: asking early only extends the penalty. The backoff is held in
+    /// memory; after a restart the startup sweep asks once and learns it again.
+    /// </para>
+    /// <para>
+    /// <b>No overlap.</b> At most one check per project is in flight; a second request for the same
+    /// project joins the one running. Projects are checked independently, so a slow one does not hold up
+    /// another, and a tick that finds the previous one still scheduling does nothing.
+    /// </para>
+    /// <para>
+    /// <b>What is new.</b> Issue and PR numbers share one increasing sequence per repository, so "seen" is a
+    /// high-water mark: an open item is new when its number is above it. The first successful check of a
+    /// repository sets the mark to the current maximum, so a newly watched repository reports nothing as
+    /// new; <see cref="MarkAllSeen"/> raises it. A 304 keeps the stored list; a failure keeps the previous
+    /// list too, so the last known items stay visible next to the error.
+    /// </para>
+    /// <para>
+    /// Nothing escapes the timer or a fire-and-forget launch check: failures are logged through the
+    /// injected logger and the next check tries again. The token is never logged.
+    /// <c>MULTITERMINAL_REPO_WATCH</c> = <c>0</c>/<c>false</c>/<c>off</c>/<c>no</c>/<c>disabled</c> turns
+    /// the whole service off.
+    /// </para>
+    /// </remarks>
+    public sealed class RepoActivityService : IDisposable
+    {
+        /// <summary>How often the tick runs.</summary>
+        internal static readonly TimeSpan TickInterval = TimeSpan.FromSeconds(60);
+
+        /// <summary>The shortest tick interval for a project with no token (GitHub allows 60 requests an hour).</summary>
+        internal const int UnauthenticatedFloorMinutes = 15;
+
+        /// <summary>When a rate-limited answer gives no retry time.</summary>
+        private static readonly TimeSpan FallbackBackoff = TimeSpan.FromSeconds(60);
+
+        private const string EnvVar = "MULTITERMINAL_REPO_WATCH";
+
+        private readonly IRepoActivityHost _host;
+        private readonly TaskDatabase _db;
+        private readonly IRepoIssuesClient _client;
+        private readonly Func<string, CancellationToken, Task<IReadOnlyList<GitRemoteRepo>>> _readRemotes;
+        private readonly Func<DateTimeOffset> _utcNow;
+        private readonly Action<string>? _log;
+
+        private readonly CancellationTokenSource _stop = new();
+        private readonly CancellationToken _stopToken;
+
+        // Guards every dictionary below and every ProjectRuntime's fields. Held only briefly, never across an await.
+        private readonly object _gate = new();
+        private readonly Dictionary<string, Task> _inFlight = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, DateTimeOffset> _lastCheckStarted = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, ProjectRuntime> _runtime = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, DateTime> _backoffUntil = new(StringComparer.Ordinal);
+
+        private Timer? _timer;
+        private int _ticking;
+        private volatile bool _disposed;
+
+        public RepoActivityService(
+            IRepoActivityHost host,
+            TaskDatabase db,
+            IRepoIssuesClient client,
+            Func<string, CancellationToken, Task<IReadOnlyList<GitRemoteRepo>>>? readRemotes = null,
+            Func<DateTimeOffset>? utcNow = null,
+            Action<string>? log = null)
+        {
+            _host = host ?? throw new ArgumentNullException(nameof(host));
+            _db = db ?? throw new ArgumentNullException(nameof(db));
+            _client = client ?? throw new ArgumentNullException(nameof(client));
+            _readRemotes = readRemotes ?? GitRemoteReader.GetGitHubRemotesAsync;
+            _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
+            _log = log;
+            _stopToken = _stop.Token;
+        }
+
+        /// <summary>
+        /// Raised after any check completes (success or failure), when a check starts (Checking), and on
+        /// <see cref="MarkAllSeen"/>. Raised on whatever thread did the work: subscribers that touch UI
+        /// must marshal to the UI thread themselves.
+        /// </summary>
+        public event EventHandler<RepoActivityChangedEventArgs>? RepoActivityChanged;
+
+        /// <summary>True while the tick timer is armed: after a <see cref="Start"/> that was not refused, before <see cref="Dispose"/>.</summary>
+        public bool IsRunning => !_disposed && Volatile.Read(ref _timer) != null;
+
+        /// <summary>True when <c>MULTITERMINAL_REPO_WATCH</c> turns the service off.</summary>
+        public static bool IsDisabled()
+        {
+            string? raw = Environment.GetEnvironmentVariable(EnvVar);
+            if (string.IsNullOrWhiteSpace(raw)) return false;
+
+            switch (raw.Trim().ToLowerInvariant())
+            {
+                case "0":
+                case "false":
+                case "off":
+                case "no":
+                case "disabled":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>Runs the startup sweep and arms the 60s tick. Safe to call more than once; later calls are ignored.</summary>
+        public void Start()
+        {
+            if (_disposed || Volatile.Read(ref _timer) != null) return;
+
+            if (IsDisabled())
+            {
+                Log($"RepoActivityService disabled by {EnvVar}.");
+                return;
+            }
+
+            var timer = new Timer(_ => OnTimer(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            if (Interlocked.CompareExchange(ref _timer, timer, null) != null)
+            {
+                timer.Dispose();
+                return;
+            }
+
+            Log("RepoActivityService started.");
+            _ = Task.Run(StartupSweepAsync);
+            timer.Change(TickInterval, TickInterval);
+        }
+
+        /// <summary>A project was launched: check it now (fire and forget; joins a check already running for it).</summary>
+        public void NotifyProjectLaunched(string projectId)
+        {
+            _ = ScheduleLaunchCheck(projectId);
+        }
+
+        /// <summary>
+        /// The user's "Check now": checks the project immediately, ignoring its interval and the
+        /// unauthenticated floor, but not a rate-limit backoff. Joins a check already running for it.
+        /// Never throws for a check failure (the outcome is in <see cref="GetSummary"/>); only
+        /// <paramref name="ct"/> cancels the wait, not the check.
+        /// </summary>
+        public Task CheckNowAsync(string projectId, CancellationToken ct = default)
+        {
+            if (_disposed || IsDisabled() || string.IsNullOrWhiteSpace(projectId)) return Task.CompletedTask;
+            return StartCheck(projectId).WaitAsync(ct);
+        }
+
+        /// <summary>The project's activity from memory and the database. Never touches the network or git.</summary>
+        public RepoActivitySummary GetSummary(string projectId)
+        {
+            Project? project = string.IsNullOrWhiteSpace(projectId) ? null : SafeGetProject(projectId);
+            bool disabled = IsDisabled();
+            if (project == null || !project.IsRepoWatchEnabled || disabled)
+            {
+                return new RepoActivitySummary
+                {
+                    ProjectId = projectId ?? string.Empty,
+                    Watching = false,
+                    State = RepoActivityState.Disabled,
+                    Reason = disabled
+                        ? $"Repository watching is turned off by {EnvVar}."
+                        : project == null
+                            ? "The project was not found."
+                            : "Watching issues and pull requests is off for this project.",
+                };
+            }
+
+            bool checking;
+            HashSet<string>? pending;
+            IReadOnlyList<GitHubRepoRef>? resolved;
+            lock (_gate)
+            {
+                if (_runtime.TryGetValue(projectId, out var rt))
+                {
+                    checking = rt.Checking;
+                    pending = rt.PendingRepos == null ? null : new HashSet<string>(rt.PendingRepos, StringComparer.Ordinal);
+                    resolved = rt.ResolvedRepos;
+                }
+                else
+                {
+                    checking = false;
+                    pending = null;
+                    resolved = null;
+                }
+            }
+
+            var states = _db.GetRepoWatchStates(projectId)
+                .ToDictionary(s => s.Repo, StringComparer.Ordinal);
+
+            // The settings list is cheap and always current; the folder's remotes are known only from the
+            // last check; before any check this run, whatever was stored by an earlier one.
+            IReadOnlyList<string> names = RepoWatchSettings.ParseRepos(project.RepoWatchRepos);
+            bool noRepos = false;
+            if (names.Count == 0)
+            {
+                if (resolved != null)
+                {
+                    names = resolved.Select(r => r.FullName).ToList();
+                    noRepos = names.Count == 0;
+                }
+                else
+                {
+                    names = states.Keys.ToList();
+                }
+            }
+
+            var repos = new List<RepoActivityRepo>(names.Count);
+            foreach (string name in names)
+            {
+                string key = TaskDatabase.NormalizeWatchedRepo(name);
+                states.TryGetValue(key, out var state);
+                bool repoChecking = checking && (pending == null || pending.Contains(key));
+                repos.Add(BuildRepo(projectId, name, key, state, repoChecking));
+            }
+
+            var entries = repos.SelectMany(r => r.Items).ToList();
+            var (aggregate, reason) = Aggregate(repos, noRepos, checking);
+            return new RepoActivitySummary
+            {
+                ProjectId = projectId,
+                Watching = true,
+                State = aggregate,
+                Reason = reason,
+                OpenIssues = entries.Count(e => !e.Item.IsPullRequest),
+                OpenPullRequests = entries.Count(e => e.Item.IsPullRequest),
+                NewCount = entries.Count(e => e.IsNew),
+                Truncated = repos.Any(r => r.Truncated),
+                LastCheckedUtc = repos.Max(r => r.LastCheckedUtc),
+                Repos = repos,
+            };
+        }
+
+        /// <summary>
+        /// The user has seen everything listed now: raises each repository's seen mark to the highest number
+        /// currently known for it, then raises <see cref="RepoActivityChanged"/>.
+        /// </summary>
+        public void MarkAllSeen(string projectId)
+        {
+            if (string.IsNullOrWhiteSpace(projectId)) return;
+            try
+            {
+                foreach (var repo in GetSummary(projectId).Repos)
+                {
+                    if (repo.Items.Count > 0)
+                    {
+                        _db.MarkRepoSeen(projectId, repo.FullName, repo.Items.Max(e => e.Item.Number));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"RepoActivityService could not mark project {projectId} as seen: {ex.Message}");
+            }
+
+            RaiseChanged(projectId);
+        }
+
+        /// <inheritdoc />
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+
+            Interlocked.Exchange(ref _timer, null)?.Dispose();
+            _stop.Cancel();
+            _stop.Dispose();
+        }
+
+        /// <summary>
+        /// One tick: starts a check of every watched project that is due (see the class summary) and
+        /// returns a task that completes when those checks do. Never throws. Internal so tests drive it
+        /// instead of the timer.
+        /// </summary>
+        internal Task TickAsync()
+        {
+            if (_disposed || Interlocked.Exchange(ref _ticking, 1) == 1) return Task.CompletedTask;
+
+            var started = new List<Task>();
+            try
+            {
+                DateTimeOffset now = _utcNow();
+                foreach (var project in _host.GetWatchedProjects() ?? Array.Empty<Project>())
+                {
+                    if (project == null || string.IsNullOrWhiteSpace(project.Id) || !project.IsRepoWatchEnabled) continue;
+
+                    int interval = project.RepoWatchIntervalMinutes;
+                    if (interval <= 0) continue; // startup and launch only
+                    if (!_host.HasOpenPane(project.Id)) continue;
+                    if (SafeGetToken(project) == null) interval = Math.Max(interval, UnauthenticatedFloorMinutes);
+
+                    bool due;
+                    lock (_gate)
+                    {
+                        due = !_lastCheckStarted.TryGetValue(project.Id, out var last)
+                              || now - last >= TimeSpan.FromMinutes(interval);
+                    }
+
+                    if (due) started.Add(StartCheck(project.Id));
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"RepoActivityService tick failed, will retry next tick: {ex.Message}");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _ticking, 0);
+            }
+
+            return Task.WhenAll(started);
+        }
+
+        /// <summary>Checks every watched project once, whether or not a pane is open. Never throws.</summary>
+        internal Task StartupSweepAsync()
+        {
+            var started = new List<Task>();
+            try
+            {
+                foreach (var project in _host.GetWatchedProjects() ?? Array.Empty<Project>())
+                {
+                    if (project != null && !string.IsNullOrWhiteSpace(project.Id) && project.IsRepoWatchEnabled)
+                    {
+                        started.Add(StartCheck(project.Id));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"RepoActivityService startup sweep failed: {ex.Message}");
+            }
+
+            return Task.WhenAll(started);
+        }
+
+        /// <summary><see cref="NotifyProjectLaunched"/>, returning the check so tests can wait for it.</summary>
+        internal Task ScheduleLaunchCheck(string projectId)
+        {
+            if (_disposed || IsDisabled() || string.IsNullOrWhiteSpace(projectId)) return Task.CompletedTask;
+            return StartCheck(projectId);
+        }
+
+        private void OnTimer()
+        {
+            // The checks the tick starts finish on their own; RunCheckAsync never faults.
+            _ = TickAsync();
+        }
+
+        /// <summary>Starts a check of the project, or returns the one already in flight.</summary>
+        private Task StartCheck(string projectId)
+        {
+            lock (_gate)
+            {
+                if (_disposed) return Task.CompletedTask;
+                if (_inFlight.TryGetValue(projectId, out var running)) return running;
+
+                _lastCheckStarted[projectId] = _utcNow();
+                // RunCheckAsync's finally takes _gate to remove this entry, so it cannot run before the add below.
+                var task = Task.Run(() => RunCheckAsync(projectId));
+                _inFlight[projectId] = task;
+                return task;
+            }
+        }
+
+        private async Task RunCheckAsync(string projectId)
+        {
+            bool raise = false;
+            try
+            {
+                var project = _host.GetProject(projectId);
+                if (project == null || !project.IsRepoWatchEnabled) return;
+
+                SetChecking(projectId, checking: true, pending: null);
+                raise = true;
+                RaiseChanged(projectId);
+
+                var repos = await ResolveReposAsync(project).ConfigureAwait(false);
+                lock (_gate)
+                {
+                    var rt = GetRuntime(projectId);
+                    rt.ResolvedRepos = repos;
+                    rt.PendingRepos = new HashSet<string>(repos.Select(r => TaskDatabase.NormalizeWatchedRepo(r.FullName)), StringComparer.Ordinal);
+                }
+
+                if (repos.Count == 0) return;
+
+                string? token = SafeGetToken(project);
+                foreach (var repo in repos)
+                {
+                    _stopToken.ThrowIfCancellationRequested();
+                    string key = TaskDatabase.NormalizeWatchedRepo(repo.FullName);
+                    try
+                    {
+                        if (!IsBackedOff(projectId, key))
+                        {
+                            await CheckRepoAsync(project, repo, key, token).ConfigureAwait(false);
+                        }
+                    }
+                    catch (OperationCanceledException) when (_stopToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"RepoActivityService check of {repo.FullName} for project {project.Name} failed: {ex.Message}");
+                        TrySave(projectId, repo.FullName, "error", "The check failed inside MultiTerminal; see the debug log.");
+                    }
+                    finally
+                    {
+                        lock (_gate)
+                        {
+                            GetRuntime(projectId).PendingRepos?.Remove(key);
+                        }
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (_stopToken.IsCancellationRequested)
+            {
+                // Disposed while checking.
+            }
+            catch (Exception ex)
+            {
+                Log($"RepoActivityService check of project {projectId} failed: {ex.Message}");
+            }
+            finally
+            {
+                SetChecking(projectId, checking: false, pending: null);
+                lock (_gate)
+                {
+                    _inFlight.Remove(projectId);
+                }
+
+                if (raise && !_disposed) RaiseChanged(projectId);
+            }
+        }
+
+        private async Task CheckRepoAsync(Project project, GitHubRepoRef repo, string key, string? token)
+        {
+            var stored = _db.GetRepoWatchState(project.Id, repo.FullName);
+            var result = await _client.GetOpenIssuesAsync(repo.Owner, repo.Name, token, stored?.ETag, _stopToken).ConfigureAwait(false)
+                         ?? new RepoIssuesResult { Status = RepoIssuesStatus.Failed, Message = "No answer from the GitHub client." };
+            DateTime now = _utcNow().UtcDateTime;
+
+            switch (result.Status)
+            {
+                case RepoIssuesStatus.Ok:
+                    var items = result.Items ?? Array.Empty<RepoActivityItem>();
+                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, result.ETag, now, "ok", null, JsonSerializer.Serialize(items));
+                    _db.InitializeRepoSeenIfUnset(project.Id, repo.FullName, items.Count == 0 ? 0 : items.Max(i => i.Number));
+                    ClearBackoff(project.Id, key);
+                    break;
+
+                case RepoIssuesStatus.NotModified:
+                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, result.ETag, now, "ok", null, null);
+                    ClearBackoff(project.Id, key);
+                    break;
+
+                case RepoIssuesStatus.RateLimited:
+                    DateTime until = result.RetryAfterUtc ?? now + FallbackBackoff;
+                    lock (_gate)
+                    {
+                        _backoffUntil[BackoffKey(project.Id, key)] = until;
+                    }
+
+                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, null, now, "rate_limited", result.Message, null);
+                    Log($"RepoActivityService: {repo.FullName} rate-limited until {until:u}.");
+                    break;
+
+                case RepoIssuesStatus.Unauthorized:
+                case RepoIssuesStatus.NotFound:
+                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, null, now, "no_access", result.Message, null);
+                    Log($"RepoActivityService: {repo.FullName}: {result.Message}");
+                    break;
+
+                default:
+                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, null, now, "error", result.Message, null);
+                    Log($"RepoActivityService: {repo.FullName}: {result.Message}");
+                    break;
+            }
+        }
+
+        /// <summary>The settings list, else the folder's github.com remotes, else the Git URL, else none.</summary>
+        private async Task<IReadOnlyList<GitHubRepoRef>> ResolveReposAsync(Project project)
+        {
+            var listed = new List<GitHubRepoRef>();
+            foreach (string name in RepoWatchSettings.ParseRepos(project.RepoWatchRepos))
+            {
+                if (GitHubRepoRef.TryParseFullName(name, out var parsed)) listed.Add(parsed);
+            }
+
+            if (listed.Count > 0) return listed;
+
+            string? folder = string.IsNullOrWhiteSpace(project.SourcePath) ? project.Path : project.SourcePath;
+            if (!string.IsNullOrWhiteSpace(folder))
+            {
+                IReadOnlyList<GitRemoteRepo>? remotes = null;
+                try
+                {
+                    remotes = await _readRemotes(folder, _stopToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (_stopToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    Log($"RepoActivityService could not read the git remotes of project {project.Name}: {ex.Message}");
+                }
+
+                var seen = new HashSet<GitHubRepoRef>();
+                var fromRemotes = (remotes ?? Array.Empty<GitRemoteRepo>()).Select(r => r.Repo).Where(seen.Add).ToList();
+                if (fromRemotes.Count > 0) return fromRemotes;
+            }
+
+            return GitHubRepoRef.TryParse(project.GitRepoUrl, out var fromUrl)
+                ? new[] { fromUrl }
+                : Array.Empty<GitHubRepoRef>();
+        }
+
+        private RepoActivityRepo BuildRepo(string projectId, string fullName, string key, RepoWatchState? state, bool checking)
+        {
+            var items = ReadSnapshot(state?.SnapshotJson, fullName);
+            long? seen = state?.SeenMaxNumber;
+            var entries = items
+                .Select(i => new RepoActivityEntry(i, seen.HasValue && i.Number > seen.Value, UrlFor(fullName, i)))
+                .OrderByDescending(e => e.IsNew)
+                .ThenByDescending(e => e.Item.Number)
+                .ToList();
+
+            RepoActivityState repoState;
+            string? reason;
+            if (checking)
+            {
+                repoState = RepoActivityState.Checking;
+                reason = "Checking now.";
+            }
+            else if (state?.LastCheckedAt == null)
+            {
+                repoState = RepoActivityState.NeverChecked;
+                reason = "Not checked yet.";
+            }
+            else
+            {
+                switch (state.LastStatus)
+                {
+                    case "ok":
+                        repoState = RepoActivityState.Ok;
+                        reason = null;
+                        break;
+                    case "rate_limited":
+                        repoState = RepoActivityState.RateLimited;
+                        reason = state.LastMessage ?? "GitHub's rate limit was reached.";
+                        DateTime? until = GetBackoff(projectId, key);
+                        if (until.HasValue) reason += $" Next try after {until.Value.ToLocalTime():HH:mm}.";
+                        break;
+                    case "no_access":
+                        repoState = RepoActivityState.NoAccess;
+                        reason = state.LastMessage ?? "GitHub refused access to this repository.";
+                        break;
+                    default:
+                        repoState = RepoActivityState.Error;
+                        reason = state.LastMessage ?? "The last check failed.";
+                        break;
+                }
+            }
+
+            return new RepoActivityRepo
+            {
+                FullName = fullName,
+                State = repoState,
+                Reason = reason,
+                LastCheckedUtc = state?.LastCheckedAt,
+                Truncated = items.Count >= GitHubRestClient.PageSize,
+                Items = entries,
+            };
+        }
+
+        private static (RepoActivityState State, string? Reason) Aggregate(List<RepoActivityRepo> repos, bool noRepos, bool checking)
+        {
+            if (repos.Count == 0)
+            {
+                if (noRepos)
+                {
+                    return (RepoActivityState.NoRepos,
+                        "No GitHub repository to watch: list one in the project settings, or give the project folder a github.com remote.");
+                }
+
+                return checking
+                    ? (RepoActivityState.Checking, "Checking now.")
+                    : (RepoActivityState.NeverChecked, "Not checked yet.");
+            }
+
+            var problems = repos.Where(r => ProblemRank(r.State) > 0).OrderByDescending(r => ProblemRank(r.State)).ToList();
+            if (problems.Count > 0)
+            {
+                var worst = problems[0];
+                string reason = $"{worst.FullName}: {worst.Reason}";
+                if (problems.Count > 1) reason += $" (+{problems.Count - 1} more)";
+                return (worst.State, reason);
+            }
+
+            if (repos.Any(r => r.State == RepoActivityState.Ok)) return (RepoActivityState.Ok, null);
+            if (repos.Any(r => r.State == RepoActivityState.Checking)) return (RepoActivityState.Checking, "Checking now.");
+            return (RepoActivityState.NeverChecked, "Not checked yet.");
+        }
+
+        /// <summary>How bad a failed state is; 0 for a state that is not a failure.</summary>
+        private static int ProblemRank(RepoActivityState state) => state switch
+        {
+            RepoActivityState.NoAccess => 3,
+            RepoActivityState.Error => 2,
+            RepoActivityState.RateLimited => 1,
+            _ => 0,
+        };
+
+        private static string UrlFor(string fullName, RepoActivityItem item)
+            => item.HtmlUrl
+               ?? $"https://github.com/{fullName}/{(item.IsPullRequest ? "pull" : "issues")}/{item.Number}";
+
+        private IReadOnlyList<RepoActivityItem> ReadSnapshot(string? json, string fullName)
+        {
+            if (string.IsNullOrEmpty(json)) return Array.Empty<RepoActivityItem>();
+            try
+            {
+                var items = JsonSerializer.Deserialize<List<RepoActivityItem>>(json);
+                return items == null ? Array.Empty<RepoActivityItem>() : items.Where(i => i != null).ToList();
+            }
+            catch (JsonException ex)
+            {
+                Log($"RepoActivityService: the stored list for {fullName} could not be read: {ex.Message}");
+                return Array.Empty<RepoActivityItem>();
+            }
+        }
+
+        private void SetChecking(string projectId, bool checking, HashSet<string>? pending)
+        {
+            lock (_gate)
+            {
+                var rt = GetRuntime(projectId);
+                rt.Checking = checking;
+                rt.PendingRepos = pending;
+            }
+        }
+
+        /// <summary>Caller holds <see cref="_gate"/>.</summary>
+        private ProjectRuntime GetRuntime(string projectId)
+        {
+            if (!_runtime.TryGetValue(projectId, out var rt))
+            {
+                rt = new ProjectRuntime();
+                _runtime[projectId] = rt;
+            }
+
+            return rt;
+        }
+
+        private static string BackoffKey(string projectId, string repoKey) => projectId + "\n" + repoKey;
+
+        private bool IsBackedOff(string projectId, string repoKey)
+        {
+            DateTime? until = GetBackoff(projectId, repoKey);
+            return until.HasValue && until.Value > _utcNow().UtcDateTime;
+        }
+
+        private DateTime? GetBackoff(string projectId, string repoKey)
+        {
+            lock (_gate)
+            {
+                return _backoffUntil.TryGetValue(BackoffKey(projectId, repoKey), out var until) ? until : null;
+            }
+        }
+
+        private void ClearBackoff(string projectId, string repoKey)
+        {
+            lock (_gate)
+            {
+                _backoffUntil.Remove(BackoffKey(projectId, repoKey));
+            }
+        }
+
+        private void TrySave(string projectId, string repo, string status, string message)
+        {
+            try
+            {
+                _db.SaveRepoWatchFetch(projectId, repo, null, _utcNow().UtcDateTime, status, message, null);
+            }
+            catch (Exception ex)
+            {
+                Log($"RepoActivityService could not record the failure for {repo}: {ex.Message}");
+            }
+        }
+
+        private Project? SafeGetProject(string projectId)
+        {
+            try
+            {
+                return _host.GetProject(projectId);
+            }
+            catch (Exception ex)
+            {
+                Log($"RepoActivityService could not read project {projectId}: {ex.Message}");
+                return null;
+            }
+        }
+
+        private string? SafeGetToken(Project project)
+        {
+            try
+            {
+                string? token = _host.GetGitHubToken(project);
+                return string.IsNullOrWhiteSpace(token) ? null : token;
+            }
+            catch (Exception ex)
+            {
+                // The exception type only: a credential-store message is not worth the risk of quoting.
+                Log($"RepoActivityService could not read the GitHub token for project {project.Name} ({ex.GetType().Name}); checking without one.");
+                return null;
+            }
+        }
+
+        private void RaiseChanged(string projectId)
+        {
+            var handlers = RepoActivityChanged;
+            if (handlers == null) return;
+
+            var args = new RepoActivityChangedEventArgs(projectId);
+            foreach (EventHandler<RepoActivityChangedEventArgs> handler in handlers.GetInvocationList())
+            {
+                try
+                {
+                    handler(this, args);
+                }
+                catch (Exception ex)
+                {
+                    Log($"RepoActivityService: a RepoActivityChanged subscriber failed: {ex.Message}");
+                }
+            }
+        }
+
+        private void Log(string message)
+        {
+            // Runs on timer and pool threads; a logger torn down at shutdown must not take the process with it.
+            try
+            {
+                _log?.Invoke(message);
+            }
+            catch
+            {
+                // Nothing useful can be done with a failure to log.
+            }
+        }
+
+        /// <summary>A project's in-memory check state. Every field is guarded by <see cref="_gate"/>.</summary>
+        private sealed class ProjectRuntime
+        {
+            public bool Checking;
+
+            /// <summary>The repositories of the running check not finished yet; null = all of them (still resolving).</summary>
+            public HashSet<string>? PendingRepos;
+
+            /// <summary>The repositories the last check resolved; null = not resolved this run.</summary>
+            public IReadOnlyList<GitHubRepoRef>? ResolvedRepos;
+        }
+    }
+}

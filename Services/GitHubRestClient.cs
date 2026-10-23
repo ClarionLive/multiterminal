@@ -93,7 +93,7 @@ namespace MultiTerminal.Services
     /// <para><b>No network in tests:</b> the internal constructor takes the message handler, the
     /// timeout and the clock.</para>
     /// </summary>
-    public sealed class GitHubRestClient : IDisposable
+    public sealed class GitHubRestClient : IDisposable, IRepoIssuesClient
     {
         /// <summary>Items per page requested, GitHub's maximum.</summary>
         public const int PageSize = 100;
