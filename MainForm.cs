@@ -4597,10 +4597,6 @@ namespace MultiTerminal
                     resumeSessionId: resumeSession?.Entry.SessionId, launchKind: Services.PaneLaunchKind.From(kind));
                 _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] After StartTerminal: doc.CustomTitle='{doc.CustomTitle}' doc.TabText='{doc.TabText}' doc.Text='{doc.Text}'");
 
-                // Apply current font size
-                float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
-                doc.SetFontSize(terminalFontSize);
-
                 doc.Activate();
                 doc.FocusTerminal();
                 _lastActiveTerminal = doc;
@@ -5439,9 +5435,6 @@ namespace MultiTerminal
 
                 doc.StartTerminal(dir, terminalName, claudeProfile: claudeProfile, launchKind: Services.PaneLaunchKind.PowerShell);
 
-                float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
-                doc.SetFontSize(terminalFontSize);
-
                 doc.Activate();
                 doc.FocusTerminal();
                 _lastActiveTerminal = doc;
@@ -5550,9 +5543,6 @@ namespace MultiTerminal
                 // prompt, with no session-start menu, for the default and for a named agent alike.
                 doc.StartTerminal(workingDir, terminalName, launch.AutoRunCommand, isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath, claudeProfile: claudeProfile,
                     launchKind: Services.PaneLaunchKind.Claude, launchQuietStart: true);
-
-                float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
-                doc.SetFontSize(terminalFontSize);
 
                 doc.Activate();
                 doc.FocusTerminal();
@@ -5763,8 +5753,6 @@ namespace MultiTerminal
                     projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile2, taskWorktreePath: taskWorktreePath2,
                     claudeProfile: claudeProfile2, launchKind: Services.PaneLaunchKind.From(terminalKind));
 
-                float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
-                sourceDoc.SetFontSize(terminalFontSize);
                 sourceDoc.Activate();
                 sourceDoc.FocusTerminal();
                 _lastActiveTerminal = sourceDoc;
