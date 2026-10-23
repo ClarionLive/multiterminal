@@ -9700,6 +9700,11 @@ namespace MultiTerminal
         private void OnPaneRepoActivityRequested(object sender, string projectId)
         {
             if (string.IsNullOrEmpty(projectId)) return;
+
+            // A click on the badge while the list is open: the press already closed it, so this click
+            // only closes.
+            if (RepoActivityMenu.JustClosedByOutsideClick()) return;
+
             if (_repoActivity == null)
             {
                 OpenProjectSettings(projectId);

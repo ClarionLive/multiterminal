@@ -254,6 +254,11 @@ namespace MultiTerminal.Controls
                 menu.Items.Add(item);
             }
 
+            // A click on a terminal or any other WebView2 never reaches the menu's own click-away
+            // handling, so this closes it instead. The press that closes it may be on the badge itself,
+            // whose click then arrives here: that click only closes (see ShouldSuppressReopen).
+            OutsideClickMenuCloser.Attach(menu, () => _lastOutsideCloseTicks = Environment.TickCount64);
+
             // The menu is built per click; release it and the header font once it closes.
             menu.Closed += (s, e) => menu.BeginInvoke(new Action(() =>
             {
@@ -262,6 +267,23 @@ namespace MultiTerminal.Controls
             }));
             menu.Show(Cursor.Position);
         }
+
+        /// <summary>How long after a click-away closes the list a badge click is taken as that same click.</summary>
+        internal const long ReopenSuppressMs = 400;
+
+        private static long _lastOutsideCloseTicks = long.MinValue / 2;
+
+        /// <summary>
+        /// True when the list was closed by a press outside it in the last <see cref="ReopenSuppressMs"/>.
+        /// The close fires on the press and the badge's click on the release, so without this a click on
+        /// the badge while the list is open would close it and immediately open it again.
+        /// </summary>
+        internal static bool ShouldSuppressReopen(long nowTicks, long lastOutsideCloseTicks) =>
+            nowTicks - lastOutsideCloseTicks < ReopenSuppressMs;
+
+        /// <summary><see cref="ShouldSuppressReopen(long, long)"/> against the last real close.</summary>
+        internal static bool JustClosedByOutsideClick() =>
+            ShouldSuppressReopen(Environment.TickCount64, _lastOutsideCloseTicks);
 
         private static void OpenUrl(string? url, string? repoFullName, Action<string>? log)
         {

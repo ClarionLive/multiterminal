@@ -486,6 +486,50 @@ namespace MultiTerminal.Tests
             return body;
         }
 
+        // ---- Click-away (Owner live test 2026-10-23: the list stayed open over a WebView2) ----------
+
+        [Fact]
+        public void The_press_that_opened_the_list_does_not_close_it()
+        {
+            bool armed = false;
+
+            // Still held when the menu appears, and outside it: not a click away.
+            Assert.False(OutsideClickMenuCloser.Step(ref armed, anyButtonDown: true, cursorOverMenu: false));
+            Assert.False(armed);
+            Assert.False(OutsideClickMenuCloser.Step(ref armed, anyButtonDown: true, cursorOverMenu: false));
+
+            // Released: armed, and the release itself closes nothing.
+            Assert.False(OutsideClickMenuCloser.Step(ref armed, anyButtonDown: false, cursorOverMenu: false));
+            Assert.True(armed);
+        }
+
+        [Fact]
+        public void A_press_outside_closes_the_list_and_a_press_on_it_does_not()
+        {
+            bool armed = true;
+            Assert.False(OutsideClickMenuCloser.Step(ref armed, anyButtonDown: true, cursorOverMenu: true));
+            Assert.True(OutsideClickMenuCloser.Step(ref armed, anyButtonDown: true, cursorOverMenu: false));
+        }
+
+        [Fact]
+        public void Nothing_pressed_never_closes_the_list()
+        {
+            bool armed = true;
+            Assert.False(OutsideClickMenuCloser.Step(ref armed, anyButtonDown: false, cursorOverMenu: false));
+            Assert.False(OutsideClickMenuCloser.Step(ref armed, anyButtonDown: false, cursorOverMenu: true));
+        }
+
+        [Theory]
+        [InlineData(0, true)]
+        [InlineData(RepoActivityMenu.ReopenSuppressMs - 1, true)]
+        [InlineData(RepoActivityMenu.ReopenSuppressMs, false)]
+        [InlineData(5000, false)]
+        public void A_badge_click_right_after_a_click_away_only_closes(long msSinceClose, bool suppressed)
+        {
+            const long closedAt = 1_000_000;
+            Assert.Equal(suppressed, RepoActivityMenu.ShouldSuppressReopen(closedAt + msSinceClose, closedAt));
+        }
+
         private static string BalancedBodyAfter(string src, string anchor, string what)
         {
             int start = src.IndexOf(anchor, StringComparison.Ordinal);
