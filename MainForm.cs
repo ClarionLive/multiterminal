@@ -9588,6 +9588,7 @@ namespace MultiTerminal
                     _repoActivityClient,
                     log: msg => _debugLogService?.Info("RepoActivity", msg));
                 service.RepoActivityChanged += OnRepoActivityChanged;
+                _mcpServer.Broker.ProjectSettingsChanged += OnBrokerProjectSettingsChanged;
 
                 _repoActivityHost = host;
                 _repoActivity = service;
@@ -9627,6 +9628,23 @@ namespace MultiTerminal
             try
             {
                 BeginInvoke(new Action(() => ApplyRepoActivityBadge(e.ProjectId, badge)));
+            }
+            catch (InvalidOperationException)
+            {
+                // The handle went away between the check and BeginInvoke: the form is closing.
+            }
+        }
+
+        /// <summary>
+        /// A project's settings changed through the REST route (<c>update_project</c>), raised on a request
+        /// thread: the same refresh and recheck as a settings-form save, on the UI thread.
+        /// </summary>
+        private void OnBrokerProjectSettingsChanged(object sender, string projectId)
+        {
+            if (string.IsNullOrEmpty(projectId) || IsDisposed || !IsHandleCreated) return;
+            try
+            {
+                BeginInvoke(new Action(() => RefreshRepoActivityAfterSettingsSaved(projectId)));
             }
             catch (InvalidOperationException)
             {

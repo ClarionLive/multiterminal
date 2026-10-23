@@ -521,7 +521,8 @@ namespace MultiTerminal.Services
                     }
                     catch (Exception ex)
                     {
-                        Log($"RepoActivityService check of {repo.FullName} for project {project.Name} failed: {ex.Message}");
+                        // An exception message is not ours to vouch for: it may echo a request header.
+                        Log($"RepoActivityService check of {repo.FullName} for project {project.Name} failed: {GitHubRestClient.Scrub(ex.Message, token)}");
                         TrySave(projectId, repo.FullName, RepoWatchStatus.Error, "The check failed inside MultiTerminal; see the debug log.");
                     }
                     finally
@@ -568,6 +569,9 @@ namespace MultiTerminal.Services
                          ?? new RepoIssuesResult { Status = RepoIssuesStatus.Failed, Message = "No answer from the GitHub client." };
             DateTime now = _utcNow().UtcDateTime;
 
+            // Stored and shown to the user, so scrubbed here whatever the client did.
+            string? message = result.Message == null ? null : GitHubRestClient.Scrub(result.Message, token);
+
             switch (result.Status)
             {
                 case RepoIssuesStatus.Ok:
@@ -589,19 +593,19 @@ namespace MultiTerminal.Services
                         _backoffUntil[BackoffKey(project.Id, key)] = until;
                     }
 
-                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, null, now, RepoWatchStatus.RateLimited, result.Message, null);
+                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, null, now, RepoWatchStatus.RateLimited, message, null);
                     Log($"RepoActivityService: {repo.FullName} rate-limited until {until:u}.");
                     break;
 
                 case RepoIssuesStatus.Unauthorized:
                 case RepoIssuesStatus.NotFound:
-                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, null, now, RepoWatchStatus.NoAccess, result.Message, null);
-                    Log($"RepoActivityService: {repo.FullName}: {result.Message}");
+                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, null, now, RepoWatchStatus.NoAccess, message, null);
+                    Log($"RepoActivityService: {repo.FullName}: {message}");
                     break;
 
                 default:
-                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, null, now, RepoWatchStatus.Error, result.Message, null);
-                    Log($"RepoActivityService: {repo.FullName}: {result.Message}");
+                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, null, now, RepoWatchStatus.Error, message, null);
+                    Log($"RepoActivityService: {repo.FullName}: {message}");
                     break;
             }
         }

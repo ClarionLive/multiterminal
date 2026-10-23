@@ -14,6 +14,7 @@ Subscribe in MainForm or panels for UI updates:
 - `TasksUpdated`, `TaskClaimed`
 - `ActivityRecorded`, `InboxUpdated`, `PlanUpdated`
 - `ProjectsUpdated`, `ProfilesUpdated`
+- `ProjectSettingsChanged` — `EventHandler<string>`, the project id only, raised via `NotifyProjectSettingsChanged` (RaiseSafe) by `PATCH /api/projects/{id}` (`update_project`) when it wrote a repo-watch field or the Git URL (task df58b35d). MainForm marshals it to the UI thread and runs the same refresh and recheck as a settings-form save (`RefreshRepoActivityAfterSettingsSaved`). The settings form itself does not raise it; it calls that refresh directly.
 - `HelperSessionUpdated`, `HelperMessageLogged`
 - `OfficeAgentSpawned`, `OfficeAgentDeparted`
 - `AgentPanelCloseRequested`, `ReportSaved`

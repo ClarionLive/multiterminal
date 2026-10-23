@@ -407,7 +407,7 @@ namespace MultiTerminal.Services
         /// Backstop for the rule in the class summary: no message built here should contain the token,
         /// but an exception message is not ours to vouch for.
         /// </summary>
-        private static string Scrub(string message, string? token) =>
+        internal static string Scrub(string message, string? token) =>
             string.IsNullOrEmpty(token) ? message : message.Replace(token, "***", StringComparison.Ordinal);
     }
 }

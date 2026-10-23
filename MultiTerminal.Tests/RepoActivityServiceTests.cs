@@ -633,8 +633,11 @@ namespace MultiTerminal.Tests
         [Fact]
         public async Task A_throwing_client_is_logged_as_an_error_and_never_logs_the_token()
         {
+            // The exception message CONTAINS the token (as one echoing a request header might), so the
+            // last assertion fails unless the service scrubs it. It used not to: the old version of this
+            // test threw a message without the token and passed for that reason alone (d270f9dc finding 5).
             var project = AddProject("p1", repos: "owner/repo", token: "ghp_SECRET_TOKEN_VALUE");
-            _client.Respond = (_, _) => throw new InvalidOperationException("client blew up");
+            _client.Respond = (_, _) => throw new InvalidOperationException("client blew up: Authorization: Bearer ghp_SECRET_TOKEN_VALUE");
             using var svc = NewService();
 
             await svc.ScheduleLaunchCheck(project.Id).WaitAsync(Bound);
@@ -643,6 +646,24 @@ namespace MultiTerminal.Tests
             Assert.Contains(_log, l => l.Contains("client blew up", StringComparison.Ordinal));
             Assert.Equal("ghp_SECRET_TOKEN_VALUE", _client.Calls.Single().Token);
             Assert.DoesNotContain(_log, l => l.Contains("SECRET", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public async Task A_client_message_carrying_the_token_is_neither_logged_nor_stored()
+        {
+            var project = AddProject("p1", repos: "owner/repo", token: "ghp_SECRET_TOKEN_VALUE");
+            _client.Respond = (_, _) => new RepoIssuesResult
+            {
+                Status = RepoIssuesStatus.Failed,
+                Message = "upstream said: token ghp_SECRET_TOKEN_VALUE rejected",
+            };
+            using var svc = NewService();
+
+            await svc.ScheduleLaunchCheck(project.Id).WaitAsync(Bound);
+
+            Assert.DoesNotContain(_log, l => l.Contains("SECRET", StringComparison.Ordinal));
+            Assert.DoesNotContain("SECRET", _db.GetRepoWatchState(project.Id, "owner/repo")!.LastMessage, StringComparison.Ordinal);
+            Assert.DoesNotContain("SECRET", svc.GetSummary(project.Id).Reason ?? string.Empty, StringComparison.Ordinal);
         }
 
         // ── Events, switches ─────────────────────────────────────────────────
@@ -706,6 +727,21 @@ namespace MultiTerminal.Tests
             svc.Dispose();
             Assert.False(svc.IsRunning);
         }
+
+        // ── update_project triggers a recheck (d270f9dc checklist item) ──────
+
+        [Theory]
+        [InlineData("repoWatchEnabled", true)]
+        [InlineData("repoWatchIntervalMin", true)]
+        [InlineData("RepoWatchRepos", true)]
+        [InlineData("repo_watch_repos", true)]
+        [InlineData("gitRepoUrl", true)]
+        [InlineData("git_repo_url", true)]
+        [InlineData("gitDefaultBranch", false)]
+        [InlineData("claudeProfile", false)]
+        [InlineData("name", false)]
+        public void The_rest_route_rechecks_for_exactly_the_fields_that_decide_what_is_watched(string field, bool expected)
+            => Assert.Equal(expected, MultiTerminal.API.Controllers.ProjectContextController.IsRepoWatchField(field));
 
         // ── Forgetting projects no longer watched (d270f9dc finding 8) ───────
 

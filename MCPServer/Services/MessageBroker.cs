@@ -6981,6 +6981,20 @@ namespace MultiTerminal.MCPServer.Services
         public void NotifyProjectsChanged() => BroadcastProjectUpdate();
 
         /// <summary>
+        /// One project's settings were changed by a writer outside the settings form, today the REST
+        /// route behind <c>update_project</c> (task df58b35d): carries only the project id. MainForm
+        /// treats it like a settings-form save, so a change to what the project watches on GitHub is
+        /// rechecked at once rather than at the next tick or launch.
+        /// </summary>
+        public event EventHandler<string> ProjectSettingsChanged;
+
+        /// <summary>Raises <see cref="ProjectSettingsChanged"/> (resilient dispatch).</summary>
+        public void NotifyProjectSettingsChanged(string projectId)
+        {
+            if (!string.IsNullOrEmpty(projectId)) RaiseSafe(ProjectSettingsChanged, projectId);
+        }
+
+        /// <summary>
         /// The project settings form committed a new name and/or description to the project row itself
         /// (ticket e20e2ce0), inside its own transaction. This brings the broker's cached project, the folder's
         /// project.json and the activity feed in line with the STORED row. It writes nothing to the database,
