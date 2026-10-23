@@ -1003,7 +1003,7 @@ begin
   if not IsNodeInstalled then
   begin
     NodeMsg := 'Node.js was not detected on this system.' + #13#10 + #13#10 +
-               'Node.js 24+ is required for:' + #13#10 +
+               'Node.js 24 is required for:' + #13#10 +
                '  - MCP Server (agent tool interface)' + #13#10 +
                '  - Claude Code hooks (activity tracking)' + #13#10 + #13#10 +
                'You can install Node.js from https://nodejs.org' + #13#10 + #13#10 +
@@ -1017,14 +1017,15 @@ begin
   end
   else
   begin
-    // GH #50: the plugin's hooks use the bundled better-sqlite3, built for Node 24. On an older
-    // node the MCP server still works, but the hooks that record activity cannot open the database.
-    // 0 means the version could not be read; say nothing rather than guess.
+    // GH #50: the plugin's hooks use the bundled better-sqlite3, a native binary built for Node 24,
+    // which loads on no other major version (older OR newer). The MCP server still works, but the
+    // hooks that record activity cannot open the database. 0 means the version could not be read;
+    // say nothing rather than guess.
     NodeMajor := GetNodeMajorVersion;
-    if (NodeMajor > 0) and (NodeMajor < 24) then
+    if (NodeMajor > 0) and (NodeMajor <> 24) then
     begin
-      NodeMsg := 'Node.js ' + IntToStr(NodeMajor) + ' was detected. MultiTerminal needs Node.js 24 or later.' + #13#10 + #13#10 +
-                 'With an older Node.js the agent tools still work, but the Claude Code hooks' + #13#10 +
+      NodeMsg := 'Node.js ' + IntToStr(NodeMajor) + ' was detected. MultiTerminal needs Node.js 24.' + #13#10 + #13#10 +
+                 'With another Node.js version the agent tools still work, but the Claude Code hooks' + #13#10 +
                  'cannot open MultiTerminal''s database, so these stop working:' + #13#10 +
                  '  - the Activity feed' + #13#10 +
                  '  - clearing Attention cards when an agent moves on' + #13#10 +

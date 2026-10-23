@@ -74,6 +74,10 @@ each other without Claude Code's development channel.
 - **Header and Home.** Browse All, New Project, Just Claude, Open PowerShell and
   Launch Project are header pills, and the M menu is an HTML popup. Settings >
   General picks list or cards for Home; Browse All remembers a 3-column sort.
+- **Launch Claude offers to create a missing folder** instead of refusing it, on
+  a local drive only (GH #44, PR #48 by Mark Sarson).
+- **BUILDING.md**: how to build and run MultiTerminal from source on a clean
+  machine (PR #49 by Mark Sarson).
 - **Smaller additions:** a clear (x) button in every search box, and an app icon
   for MT and its installer (GH #36).
 
@@ -105,6 +109,11 @@ each other without Claude Code's development channel.
 
 ### Fixed
 
+- **MT terminals ignored your user settings and user plugins** (GH #52, reported
+  by bill-atchison). MT passed `--setting-sources` twice, and Claude Code keeps
+  only the last one, so only project settings loaded.
+- **Ctrl+wheel zoom did nothing in a Claude pane** once Claude turned on mouse
+  tracking, and a restored font size was reset (PR #45 by Mark Sarson).
 - **Messages reported as delivered that never arrived** (GH #7); empty message
   bodies are now rejected.
 - **The Terminals list kept showing sessions that had quit.**
@@ -126,6 +135,10 @@ each other without Claude Code's development channel.
 
 ### Upgrade notes
 
+- **Node.js 24 is required** (GH #50, reported by Mark Sarson). The plugin's hooks use a database binary
+  built for Node 24; on any other major version the activity feed, Attention
+  clearing and session state stop working. The installer now checks the version
+  and warns.
 - **Existing projects run under the Default profile** until you choose one in the
   project settings form. Default never sets `CLAUDE_CONFIG_DIR`, so nothing moves.
 - **The first start after upgrading offers no restore**: 2.1.0 recorded no session

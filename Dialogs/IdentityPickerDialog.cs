@@ -665,7 +665,7 @@ namespace MultiTerminal.Dialogs
 
         /// <summary>
         /// Pure: what the Launch Claude dialog does with the typed working folder (GH #44). Only a
-        /// fully qualified path on an existing local drive is offered for creation; a UNC path is not,
+        /// fully qualified path on an existing local drive is offered for creation; a UNC path is not (a mapped network drive such as Z: counts as a local drive),
         /// so the dialog never creates folders on a network share the user may not have meant.
         /// </summary>
         internal static WorkingFolderCheck ClassifyWorkingFolder(string folder, Func<string, bool> directoryExists)

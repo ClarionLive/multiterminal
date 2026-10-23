@@ -170,7 +170,7 @@ claude plugin install multiterminal@multiterminal-marketplace
 
 # Later, to pull updates
 claude plugin marketplace update multiterminal-marketplace</code></pre>
-        <p>Or use the interactive <code>/plugin</code> menu inside Claude Code and pick <strong>multiterminal</strong> from the <code>multiterminal-marketplace</code> source. Requirements: a <strong>recent Claude Code version</strong> — one that supports the args-array hook form (<code>args: string[]</code>) and plugin channels, <strong>Node.js 24+</strong> on <code>PATH</code> (hooks and the MCP server run under Node; the bundled DB binary the hooks use is built for Node 24, so on an older Node the activity feed, Attention clearing and session state stop working), and for that DB binary, a <strong>win32-x64</strong> runtime (other platforms work after a one-line <code>npm rebuild</code>).</p>
+        <p>Or use the interactive <code>/plugin</code> menu inside Claude Code and pick <strong>multiterminal</strong> from the <code>multiterminal-marketplace</code> source. Requirements: a <strong>recent Claude Code version</strong> — one that supports the args-array hook form (<code>args: string[]</code>) and plugin channels, <strong>Node.js 24</strong> on <code>PATH</code> (hooks and the MCP server run under Node; the bundled DB binary the hooks use is built for Node 24, so on any other major version the activity feed, Attention clearing and session state stop working), and for that DB binary, a <strong>win32-x64</strong> runtime (other platforms work after a one-line <code>npm rebuild</code>).</p>
 
         <h2 id="relationship">Plugin vs. the desktop app</h2>
         <p>MultiTerminal has two halves that work together:</p>

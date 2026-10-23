@@ -26,7 +26,7 @@ The installer checks for these and warns if missing:
 | **Windows 10/11 (x64)** | Host OS | -- |
 | **.NET 8 Desktop Runtime + ASP.NET Core** | Application runtime. If not detected, installer bundles all runtime DLLs (self-contained mode). | [dotnet.microsoft.com](https://dotnet.microsoft.com/download/dotnet/8.0) |
 | **Claude Code CLI** | MCP servers and hooks require `~/.claude.json` to exist. Must be installed and run at least once. | `npm install -g @anthropic-ai/claude-code` |
-| **Node.js 24+** | MCP server, hooks, and post-install scripts. The hooks' bundled database binary is built for Node 24; on an older Node the activity feed, Attention clearing and session state stop working. | [nodejs.org](https://nodejs.org/) |
+| **Node.js 24** | MCP server, hooks, and post-install scripts. The hooks' bundled database binary is built for Node 24; on any other major version the activity feed, Attention clearing and session state stop working. | [nodejs.org](https://nodejs.org/) |
 | **WebView2 Runtime** | UI panels (pre-installed on Windows 11; may need manual install on Windows 10). | [developer.microsoft.com](https://developer.microsoft.com/microsoft-edge/webview2/) |
 
 ---
