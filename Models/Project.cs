@@ -222,6 +222,36 @@ namespace MultiTerminal.Models
         public string SourceControlAccountId { get; set; }
 
         /// <summary>
+        /// "Watch issues and pull requests" (ticket df58b35d, GitHub #53). SQLite-only
+        /// (<c>projects.repo_watch_enabled</c>), not carried by project.json and not named by the
+        /// SaveRichProject UPSERT, so a project.json re-save can neither reset nor write it. Null reads
+        /// as OFF; use <see cref="IsRepoWatchEnabled"/>. Written through ProjectDatabase.UpdateProjectField.
+        /// </summary>
+        public bool? RepoWatchEnabled { get; set; }
+
+        /// <summary><see cref="RepoWatchEnabled"/> with null read as off.</summary>
+        public bool IsRepoWatchEnabled => RepoWatchEnabled == true;
+
+        /// <summary>
+        /// How often, in minutes, the repositories are checked (<c>projects.repo_watch_interval_min</c>):
+        /// one of <see cref="RepoWatchSettings.AllowedIntervals"/>, 0 meaning only at startup and when the
+        /// project is launched. Null reads as <see cref="RepoWatchSettings.DefaultIntervalMinutes"/>; use
+        /// <see cref="RepoWatchIntervalMinutes"/>. SQLite-only, like <see cref="RepoWatchEnabled"/>.
+        /// </summary>
+        public int? RepoWatchIntervalMin { get; set; }
+
+        /// <summary><see cref="RepoWatchIntervalMin"/> with null read as the default.</summary>
+        public int RepoWatchIntervalMinutes => RepoWatchIntervalMin ?? RepoWatchSettings.DefaultIntervalMinutes;
+
+        /// <summary>
+        /// The repositories to watch (<c>projects.repo_watch_repos</c>), stored normalized as
+        /// <c>owner/repo, owner/repo</c> by <see cref="RepoWatchSettings.TryNormalizeRepos"/>. Null = every
+        /// GitHub remote of the project folder. Read the list with <see cref="RepoWatchSettings.ParseRepos"/>.
+        /// SQLite-only, like <see cref="RepoWatchEnabled"/>.
+        /// </summary>
+        public string RepoWatchRepos { get; set; }
+
+        /// <summary>
         /// Name of the Claude Code config profile this project's terminals launch under (ticket c8ee0eec,
         /// GitHub #21). The profile NAME, never a path, so a machine with the profile in a different
         /// folder still matches. Null or blank = the implicit Default profile. Resolve it with

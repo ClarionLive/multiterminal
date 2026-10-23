@@ -244,6 +244,11 @@
             <div class="field"><label for="f-gitDefaultBranch">Default branch</label><input type="text" id="f-gitDefaultBranch" data-field="gitDefaultBranch" placeholder="main"></div>
             <div class="field"><label>Auto-commit</label><label class="check"><input type="checkbox" data-field="gitAutoCommit"> Commit agent changes automatically</label></div>
             <div class="field"><label for="f-sourceControlAccountId">Source control account</label><select id="f-sourceControlAccountId" data-field="sourceControlAccountId" data-options="sourceAccounts" data-none="(none)"></select></div>
+            <h3>Repository activity</h3>
+            <div class="field"><label>Watch</label><label class="check"><input type="checkbox" data-field="repoWatchEnabled"> Watch issues and pull requests</label></div>
+            <div class="field"><label for="f-repoWatchIntervalMin">Check every</label><select id="f-repoWatchIntervalMin" data-field="repoWatchIntervalMin" data-options="repoWatchIntervals"></select></div>
+            <div class="field"><label for="f-repoWatchRepos">Repositories</label><input type="text" id="f-repoWatchRepos" data-field="repoWatchRepos" placeholder="owner/repo, owner/repo">
+                <div class="hint">Leave empty to watch every GitHub remote of this project's folder.</div></div>
         </section>
 
         <section id="agents">
