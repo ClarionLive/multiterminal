@@ -430,9 +430,14 @@ namespace MultiTerminal.AttentionPanel
                && string.Equals(state.ToString(), c.State, StringComparison.Ordinal)
                && AttentionStates.IsBlocking(state);
 
-        /// <summary>Attention first's rank: blocked, then everyone else, then offline.</summary>
-        private static int Rank(AttentionCard c)
-            => IsBlocked(c) ? 0 : (c.State == nameof(AttentionState.Offline) ? 2 : 1);
+        /// <summary>
+        /// Attention first's rank: blocked, then Your turn (task 3d51315b), then everyone else, then
+        /// offline. The same order as the panel's own <c>rank()</c> for the flat view.
+        /// </summary>
+        internal static int Rank(AttentionCard c)
+            => IsBlocked(c) ? 0
+               : c.State == nameof(AttentionState.YourTurn) ? 1
+               : c.State == nameof(AttentionState.Offline) ? 3 : 2;
 
         /// <summary>The Attention-first comparison for single cards: rank, longest in state, input order.</summary>
         private static int CompareCards(AttentionCard a, int ia, AttentionCard b, int ib)

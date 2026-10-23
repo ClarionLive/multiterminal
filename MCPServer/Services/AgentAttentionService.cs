@@ -156,6 +156,12 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public bool RaisedAtTurnEnd { get; set; }
 
+        /// <summary>
+        /// When the owner last submitted a prompt in this agent's pane (task 3d51315b), or null. A turn
+        /// end observed before it has been answered and must not re-raise the card.
+        /// </summary>
+        public DateTime? OwnerRepliedAtUtc { get; set; }
+
         /// <summary>True when the state is one the owner is actually being waited on for.</summary>
         public bool IsBlocking =>
             State == AttentionState.BlockedQuestion ||
@@ -911,6 +917,18 @@ namespace MultiTerminal.MCPServer.Services
                     return false;
                 }
 
+                // A turn that ended BEFORE the owner's reply has been answered (pipeline run 1,
+                // debugger). Turn ends are polled, replies are not, so a quick reply can land between
+                // the Stop hook writing its row and this poll reading it. Applied, it would put "Your
+                // turn" back on an agent that is working on the reply, with a question read from the
+                // transcript as it is NOW, which may already belong to the new turn.
+                if (existing != null
+                    && existing.OwnerRepliedAtUtc is DateTime replied
+                    && observedAtUtc <= replied)
+                {
+                    return false;
+                }
+
                 string question = NullIfBlank(chatQuestion);
                 bool changed = UpsertLocked(sessionKey, e =>
                 {
@@ -959,17 +977,25 @@ namespace MultiTerminal.MCPServer.Services
 
             lock (_lock)
             {
-                var entry = _entries.Values
-                    .Where(e => string.Equals(e.AgentName, agentName, StringComparison.OrdinalIgnoreCase))
-                    .OrderByDescending(e => e.EnteredAtUtc)
+                // OwnedBy, the ownership rule every other by-name lookup here uses: a name-keyed entry
+                // can carry a null AgentName (pipeline run 1, debugger).
+                var owned = _entries
+                    .Where(kv => OwnedBy(kv.Key, kv.Value, agentName))
+                    .OrderByDescending(kv => kv.Value.EnteredAtUtc)
                     .FirstOrDefault();
-                if (entry == null) return false;
+                if (owned.Value == null) return false;
+
+                string key = owned.Key;
+                var entry = owned.Value;
+
+                // Recorded whatever the state, so a turn end that this poll has not read yet cannot
+                // re-raise the card after the reply (see NoteTurnEnded).
+                entry.OwnerRepliedAtUtc = UtcNow();
 
                 bool waitingAtTurnEnd = entry.State == AttentionState.YourTurn
                     || (entry.State == AttentionState.BlockedQuestion && entry.RaisedAtTurnEnd);
                 if (!waitingAtTurnEnd) return false;
 
-                string key = _entries.First(kv => ReferenceEquals(kv.Value, entry)).Key;
                 return UpsertLocked(key, e =>
                 {
                     e.State = AttentionState.Working;
@@ -979,6 +1005,42 @@ namespace MultiTerminal.MCPServer.Services
                     e.PendingToolUseId = null;
                     RecordActivityLine(e, "You replied", UtcNow());
                 });
+            }
+        }
+
+        /// <summary>
+        /// Upgrades a Your turn to the question its turn ended on, found only on a later read of the
+        /// transcript (pipeline run 1, adversary: the Stop hook's row can be read before the turn's
+        /// last line is written). Applies only while the entry is still that same episode.
+        /// </summary>
+        /// <param name="sessionKey">The entry's key.</param>
+        /// <param name="blockSeq">The episode the turn end started; any later episode wins.</param>
+        /// <param name="question">The question now found.</param>
+        /// <returns>True if the state changed.</returns>
+        public bool UpgradeTurnEndToQuestion(string sessionKey, long blockSeq, string question)
+        {
+            question = NullIfBlank(question);
+            if (string.IsNullOrWhiteSpace(sessionKey) || question == null) return false;
+
+            lock (_lock)
+            {
+                if (!_entries.TryGetValue(sessionKey, out var e)
+                    || e.State != AttentionState.YourTurn
+                    || !e.RaisedAtTurnEnd
+                    || e.BlockSeq != blockSeq)
+                {
+                    return false;
+                }
+
+                // Not a new episode: the beacon the owner may have acknowledged becomes the alarm for
+                // the same turn end. The state changes, so the panel's acknowledgement (keyed on the
+                // state) expires and the alarm shouts, which is the point of upgrading.
+                return UpsertLocked(sessionKey, x =>
+                {
+                    x.State = AttentionState.BlockedQuestion;
+                    x.Detail = question;
+                    x.DetailIsQuestionText = true;
+                }, evidenceAtUtc: UtcNow());
             }
         }
 
@@ -1360,6 +1422,7 @@ namespace MultiTerminal.MCPServer.Services
             BlockSeq = e.BlockSeq,
             DetailIsQuestionText = e.DetailIsQuestionText,
             RaisedAtTurnEnd = e.RaisedAtTurnEnd,
+            OwnerRepliedAtUtc = e.OwnerRepliedAtUtc,
         };
 
         /// <summary>

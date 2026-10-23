@@ -557,6 +557,16 @@ namespace MultiTerminal.Controls
 
             // Buffer input characters to detect slash commands
             BufferInputForSlashDetection(data);
+
+            try
+            {
+                for (int n = _promptSubmit.Feed(data); n > 0; n--)
+                    PromptSubmitted?.Invoke(this, EventArgs.Empty);
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("TerminalControl", $"PromptSubmitted handler error: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -596,17 +606,13 @@ namespace MultiTerminal.Controls
         private bool _inEscapeSequence; // true immediately after ESC, before we know the sequence type
         private bool _inCsiSequence;    // true inside a CSI sequence (ESC[ ... final_byte)
 
-        // Whether the input line has had text since the last Enter (task 3d51315b). Separate from
-        // _inputLineBuffer on purpose: that buffer is for slash-command matching and is cleared by
-        // every escape sequence (an arrow key, a bracketed paste's own markers) and past 200
-        // characters, so it reads empty for a pasted or long reply. Only Enter and Ctrl+C reset this.
-        private bool _lineHasText;
+        // Separate from _inputLineBuffer on purpose (task 3d51315b): that buffer is for slash-command
+        // matching and is cleared by every escape sequence (an arrow key, a bracketed paste's own
+        // markers) and past 200 characters, so it reads empty for a pasted or long reply.
+        private readonly PromptSubmitDetector _promptSubmit = new PromptSubmitDetector();
 
         /// <summary>
-        /// The person submitted a prompt: Enter on an input line that had text typed or pasted into
-        /// it since the previous Enter (task 3d51315b). Arrow keys and Enter alone, which is how a
-        /// menu such as AskUserQuestion is answered, do not raise it. MT's own typing through
-        /// <see cref="TypeAndSubmitAsync"/> does, which is right: that is a prompt too.
+        /// The person submitted a prompt (task 3d51315b); the rules are <see cref="PromptSubmitDetector"/>'s.
         /// </summary>
         public event EventHandler PromptSubmitted;
 
@@ -648,12 +654,6 @@ namespace MultiTerminal.Controls
                         string line = _inputLineBuffer.ToString().Trim();
                         _inputLineBuffer.Clear();
 
-                        if (_lineHasText)
-                        {
-                            _lineHasText = false;
-                            PromptSubmitted?.Invoke(this, EventArgs.Empty);
-                        }
-
                         string disarmLog = _startupDetector.NotifyLineSubmitted(line);
                         if (disarmLog != null) LogTrace(disarmLog);
 
@@ -675,15 +675,9 @@ namespace MultiTerminal.Controls
                     else if (b == 0x03) // Ctrl+C — reset buffer
                     {
                         _inputLineBuffer.Clear();
-                        _lineHasText = false;
-                    }
-                    else if (b >= 0x80) // UTF-8 byte of a non-ASCII character
-                    {
-                        _lineHasText = true;
                     }
                     else if (b >= 0x20 && b < 0x7F) // Printable ASCII
                     {
-                        _lineHasText = true;
                         _inputLineBuffer.Append((char)b);
                         // Safety: don't let buffer grow unbounded
                         if (_inputLineBuffer.Length > 200)

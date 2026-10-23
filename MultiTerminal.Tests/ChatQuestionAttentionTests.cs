@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using MultiTerminal.AttentionPanel;
+using MultiTerminal.Controls;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
 using Xunit;
@@ -100,6 +101,24 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void A_transcript_that_ends_in_a_tool_call_or_result_has_no_final_text_yet()
+        {
+            // The Stop hook's row can be read before the turn's last line is written. Walking past
+            // the tool result would land on a question from the middle of the turn (pipeline run 1).
+            var lines = new List<string>
+            {
+                OwnerPrompt("fix it"),
+                Assistant("Is it the cache? Checking."),
+                AssistantToolUse(),
+                ToolResult(),
+            };
+            Assert.Null(ChatQuestionDetector.FinalAssistantText(lines));
+
+            lines.RemoveAt(lines.Count - 1);
+            Assert.Null(ChatQuestionDetector.FinalAssistantText(lines));
+        }
+
+        [Fact]
         public void A_torn_line_is_skipped_not_fatal()
         {
             var lines = new List<string> { Assistant("Ready to deploy?"), "{\"type\":\"assist" };
@@ -157,15 +176,17 @@ namespace MultiTerminal.Tests
             Directory.CreateDirectory(Path.GetDirectoryName(liveCopy));
             try
             {
-                File.WriteAllText(oldCopy, "{}");
-                File.WriteAllText(liveCopy, "{}");
-                File.SetLastWriteTimeUtc(oldCopy, DateTime.UtcNow.AddHours(-1));
-                File.SetLastWriteTimeUtc(liveCopy, DateTime.UtcNow);
+                File.WriteAllText(oldCopy, "{\"type\":\"user\",\"timestamp\":\"2026-10-23T10:00:00.000Z\"}\n");
+                File.WriteAllText(liveCopy, "{\"type\":\"user\",\"timestamp\":\"2026-10-23T11:00:00.000Z\"}\n");
 
+                // The stale copy has the NEWER modified time (a sync tool touched it): the entries
+                // inside decide, not the file system (pipeline run 1, adversary).
+                File.SetLastWriteTimeUtc(oldCopy, DateTime.UtcNow);
+                File.SetLastWriteTimeUtc(liveCopy, DateTime.UtcNow.AddHours(-1));
                 Assert.Equal(liveCopy, ChatQuestionDetector.FindTranscript(sid, new[] { root }));
 
                 // And it follows the writes, rather than remembering an earlier answer.
-                File.SetLastWriteTimeUtc(oldCopy, DateTime.UtcNow.AddMinutes(5));
+                File.AppendAllText(oldCopy, "{\"type\":\"user\",\"timestamp\":\"2026-10-23T12:00:00.000Z\"}\n");
                 Assert.Equal(oldCopy, ChatQuestionDetector.FindTranscript(sid, new[] { root }));
             }
             finally
@@ -273,6 +294,65 @@ namespace MultiTerminal.Tests
             svc.ApplyNotification(Notification("permission_prompt"));
             Assert.False(svc.NoteOwnerReplied("Alice"));
             Assert.True(svc.Get(Session).IsBlocking);
+        }
+
+        [Fact]
+        public void A_turn_end_older_than_the_owners_reply_does_not_bring_the_card_back()
+        {
+            // The turn end is polled; the reply is not. A quick reply lands between the Stop hook's
+            // row and the poll that reads it (pipeline run 1, debugger).
+            var svc = Seeded();
+            DateTime turnEnd = DateTime.UtcNow.AddSeconds(-1);
+            svc.NoteOwnerReplied("Alice");
+
+            Assert.False(svc.NoteTurnEnded(Session, turnEnd, isSubagent: false, chatQuestion: "Push?"));
+            Assert.Equal(AttentionState.Working, svc.Get(Session).State);
+
+            // A turn that ends after the reply still counts.
+            Assert.True(svc.NoteTurnEnded(Session, DateTime.UtcNow.AddSeconds(1), isSubagent: false));
+            Assert.Equal(AttentionState.YourTurn, svc.Get(Session).State);
+        }
+
+        [Fact]
+        public void The_reply_reaches_a_card_keyed_by_the_agents_name()
+        {
+            // NoteTurnEnded can create an entry keyed by the NAME, with no AgentName on it; the reply
+            // uses the same ownership rule as every other by-name lookup (pipeline run 1, debugger).
+            var svc = new AgentAttentionService();
+            svc.NoteTurnEnded("Alice", DateTime.UtcNow, isSubagent: false);
+            Assert.Null(svc.Get("Alice").AgentName);
+
+            Assert.True(svc.NoteOwnerReplied("alice"));
+            Assert.Equal(AttentionState.Working, svc.Get("Alice").State);
+        }
+
+        [Fact]
+        public void A_late_question_upgrades_only_the_same_turn_end()
+        {
+            var svc = Seeded();
+            svc.NoteTurnEnded(Session, DateTime.UtcNow.AddSeconds(1), isSubagent: false);
+            long seq = svc.Get(Session).BlockSeq;
+
+            Assert.False(svc.UpgradeTurnEndToQuestion(Session, seq + 1, "Wrong episode?"));
+            Assert.True(svc.UpgradeTurnEndToQuestion(Session, seq, "Should I push it?"));
+
+            var e = svc.Get(Session);
+            Assert.Equal(AttentionState.BlockedQuestion, e.State);
+            Assert.Equal("Should I push it?", e.Detail);
+            Assert.True(e.RaisedAtTurnEnd);
+
+            svc.NoteObservedActivity(Session, DateTime.UtcNow.AddSeconds(5), isSubagent: false, agentName: "Alice", activitySummary: "Bash: x");
+            Assert.False(svc.UpgradeTurnEndToQuestion(Session, svc.Get(Session).BlockSeq, "Too late?"));
+        }
+
+        [Fact]
+        public void The_team_view_ranks_your_turn_between_blocked_and_calm_cards()
+        {
+            int Rank(string state) => AttentionTeamLayout.Rank(new AttentionCard { State = state });
+
+            Assert.True(Rank("BlockedQuestion") < Rank("YourTurn"));
+            Assert.True(Rank("YourTurn") < Rank("Idle"));
+            Assert.True(Rank("Idle") < Rank("Offline"));
         }
 
         [Fact]
@@ -392,6 +472,88 @@ namespace MultiTerminal.Tests
             _watcher.Poll();
 
             Assert.Equal(AttentionState.YourTurn, _attention.Get(Session).State);
+        }
+
+        [Fact]
+        public void A_question_written_after_the_turn_end_was_read_is_picked_up_on_the_recheck()
+        {
+            // Pipeline run 1 (adversary): the row can be read before the final line is written.
+            Assert.True(_watcher.Prime());
+            Seed();
+            _answer = null;
+            TurnEnd();
+            _watcher.Poll();
+            Assert.Equal(AttentionState.YourTurn, _attention.Get(Session).State);
+
+            _answer = "Should I push it?";
+            _watcher.RecheckTurnEnds(DateTime.UtcNow);                       // not due yet
+            Assert.Equal(AttentionState.YourTurn, _attention.Get(Session).State);
+
+            _watcher.RecheckTurnEnds(DateTime.UtcNow + AgentActivityWatcher.TurnEndRecheckDelays[0]);
+            var e = _attention.Get(Session);
+            Assert.Equal(AttentionState.BlockedQuestion, e.State);
+            Assert.Equal("Should I push it?", e.Detail);
+        }
+
+        [Fact]
+        public void The_recheck_does_not_raise_a_question_once_the_agent_has_moved_on()
+        {
+            Assert.True(_watcher.Prime());
+            Seed();
+            _answer = null;
+            TurnEnd();
+            _watcher.Poll();
+
+            _attention.NoteOwnerReplied(Agent);
+            _answer = "A question from the NEXT turn?";
+            _watcher.RecheckTurnEnds(DateTime.UtcNow + TimeSpan.FromMinutes(1));
+
+            Assert.Equal(AttentionState.Working, _attention.Get(Session).State);
+        }
+    }
+
+    public class PromptSubmitDetectorTests
+    {
+        private static int Feed(PromptSubmitDetector d, string s) => d.Feed(System.Text.Encoding.UTF8.GetBytes(s));
+
+        [Fact]
+        public void Typed_text_and_enter_is_one_prompt()
+        {
+            var d = new PromptSubmitDetector();
+            Assert.Equal(0, Feed(d, "yes, go"));
+            Assert.Equal(1, Feed(d, "\r"));
+        }
+
+        [Fact]
+        public void Enter_alone_and_menu_navigation_are_not_prompts()
+        {
+            var d = new PromptSubmitDetector();
+            Assert.Equal(0, Feed(d, "\r"));
+            Assert.Equal(0, Feed(d, "\u001b[B\u001b[B\r"));
+        }
+
+        [Fact]
+        public void A_multi_line_paste_is_one_prompt_when_it_is_sent_not_at_its_first_line_break()
+        {
+            var d = new PromptSubmitDetector();
+            Assert.Equal(0, Feed(d, "\u001b[200~line one\rline two\rline three\u001b[201~"));
+            Assert.Equal(1, Feed(d, "\r"));
+        }
+
+        [Fact]
+        public void A_backslash_enter_is_a_newline_not_a_prompt()
+        {
+            var d = new PromptSubmitDetector();
+            Assert.Equal(0, Feed(d, "first\\\r"));
+            Assert.Equal(1, Feed(d, "second\r"));
+        }
+
+        [Fact]
+        public void Ctrl_c_clears_the_line_and_non_ascii_text_counts()
+        {
+            var d = new PromptSubmitDetector();
+            Assert.Equal(0, Feed(d, "abc\u0003\r"));
+            Assert.Equal(1, Feed(d, "café\r"));
         }
     }
 }

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 
@@ -250,6 +251,8 @@ namespace MultiTerminal.MCPServer.Services
 
                 if (!Prime()) return;
 
+                RecheckTurnEnds(DateTime.UtcNow);
+
                 List<ActivityFeedEntry> rows = _feed.GetActivitiesAfterId(_watermark, _batchLimit);
                 if (rows == null || rows.Count == 0) return;
 
@@ -334,7 +337,26 @@ namespace MultiTerminal.MCPServer.Services
 
             if (turnEnded)
             {
-                _attention.NoteTurnEnded(sessionKey, observedAt, isSubagent: false, chatQuestion: AskedAtTurnEnd(row.DetailsJson));
+                string sid = SessionIdOf(row.DetailsJson);
+                string question = AskedAtTurnEnd(sid);
+                _attention.NoteTurnEnded(sessionKey, observedAt, isSubagent: false, chatQuestion: question);
+
+                // No question found may only mean the final message is not in the transcript yet
+                // (pipeline run 1, adversary): the Stop hook's row can be read before Claude Code
+                // has written the turn's last line. Look again shortly, and upgrade the SAME episode
+                // if a question has appeared; never on a later one.
+                if (question == null && _turnEndQuestion != null && !string.IsNullOrWhiteSpace(sid))
+                {
+                    var entry = _attention.Get(sessionKey);
+                    if (entry != null && entry.State == AttentionState.YourTurn)
+                    {
+                        lock (_pendingTurnEnds)
+                        {
+                            _pendingTurnEnds.Add(new PendingTurnEnd(sessionKey, sid, entry.BlockSeq, DateTime.UtcNow));
+                        }
+                    }
+                }
+
                 return;
             }
 
@@ -375,31 +397,104 @@ namespace MultiTerminal.MCPServer.Services
                 activitySummary: row.Summary);
         }
 
-        /// <summary>
-        /// The question the turn ended on, read through <see cref="_turnEndQuestion"/> with the
-        /// row's own <c>session_id</c> (task 3d51315b). Null on any failure: the turn end then reads
-        /// as Your turn, which still beacons, rather than as a question nobody asked.
-        /// </summary>
-        private string AskedAtTurnEnd(string detailsJson)
+        /// <summary>The row's <c>session_id</c>, or null.</summary>
+        private static string SessionIdOf(string detailsJson)
         {
-            if (_turnEndQuestion == null || string.IsNullOrWhiteSpace(detailsJson)) return null;
+            if (string.IsNullOrWhiteSpace(detailsJson)) return null;
 
             try
             {
                 using var doc = JsonDocument.Parse(detailsJson);
-                if (doc.RootElement.ValueKind != JsonValueKind.Object
-                    || !doc.RootElement.TryGetProperty("session_id", out var sid)
-                    || sid.ValueKind != JsonValueKind.String)
-                {
-                    return null;
-                }
+                return doc.RootElement.ValueKind == JsonValueKind.Object
+                       && doc.RootElement.TryGetProperty("session_id", out var sid)
+                       && sid.ValueKind == JsonValueKind.String
+                    ? sid.GetString()
+                    : null;
+            }
+            catch (JsonException)
+            {
+                return null;
+            }
+        }
 
-                return _turnEndQuestion(sid.GetString());
+        /// <summary>
+        /// The question the session's turn ended on, read through <see cref="_turnEndQuestion"/>
+        /// (task 3d51315b). Null on any failure: the turn end then reads as Your turn, which still
+        /// beacons, rather than as a question nobody asked.
+        /// </summary>
+        private string AskedAtTurnEnd(string sessionId)
+        {
+            if (_turnEndQuestion == null || string.IsNullOrWhiteSpace(sessionId)) return null;
+
+            try
+            {
+                return _turnEndQuestion(sessionId);
             }
             catch (Exception ex)
             {
-                _log?.Invoke($"Turn-end question lookup failed: {ex.Message}");
+                Log($"Turn-end question lookup failed: {ex.Message}");
                 return null;
+            }
+        }
+
+        /// <summary>When a turn end that found no question is read again, measured from the first read.</summary>
+        internal static readonly TimeSpan[] TurnEndRecheckDelays = { TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(10) };
+
+        private sealed class PendingTurnEnd
+        {
+            public PendingTurnEnd(string sessionKey, string sessionId, long blockSeq, DateTime firstReadUtc)
+            {
+                SessionKey = sessionKey;
+                SessionId = sessionId;
+                BlockSeq = blockSeq;
+                FirstReadUtc = firstReadUtc;
+            }
+
+            public string SessionKey { get; }
+            public string SessionId { get; }
+            public long BlockSeq { get; }
+            public DateTime FirstReadUtc { get; }
+            public int Rechecks { get; set; }
+        }
+
+        private readonly List<PendingTurnEnd> _pendingTurnEnds = new List<PendingTurnEnd>();
+
+        /// <summary>
+        /// Reads again each turn end whose first read found no question and whose recheck is due,
+        /// and upgrades that same episode to a question if one is there now. Runs at the start of
+        /// every poll; <paramref name="nowUtc"/> is a parameter so a test can drive the delays.
+        /// </summary>
+        internal void RecheckTurnEnds(DateTime nowUtc)
+        {
+            List<PendingTurnEnd> due;
+            lock (_pendingTurnEnds)
+            {
+                if (_pendingTurnEnds.Count == 0) return;
+                due = _pendingTurnEnds
+                    .Where(p => nowUtc - p.FirstReadUtc >= TurnEndRecheckDelays[Math.Min(p.Rechecks, TurnEndRecheckDelays.Length - 1)])
+                    .ToList();
+            }
+
+            foreach (var p in due)
+            {
+                // A later episode (the agent moved on, or ended another turn) retires the recheck:
+                // the question it might find now belongs to that later turn, not this one.
+                var entry = _attention.Get(p.SessionKey);
+                bool stillThisEpisode = entry != null
+                                        && entry.State == AttentionState.YourTurn
+                                        && entry.BlockSeq == p.BlockSeq;
+
+                string question = stillThisEpisode ? AskedAtTurnEnd(p.SessionId) : null;
+                if (question != null)
+                {
+                    _attention.UpgradeTurnEndToQuestion(p.SessionKey, p.BlockSeq, question);
+                }
+
+                p.Rechecks++;
+                if (!stillThisEpisode || question != null || p.Rechecks >= TurnEndRecheckDelays.Length)
+                {
+                    lock (_pendingTurnEnds) _pendingTurnEnds.Remove(p);
+                }
             }
         }
 

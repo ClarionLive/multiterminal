@@ -61,21 +61,23 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// The most recently written <c>&lt;root&gt;\projects\&lt;any folder&gt;\&lt;sessionId&gt;.jsonl</c>
-        /// under any root. Null for an id that is not a plain id (it becomes a file name, so nothing
-        /// else may reach the path) or that no root holds.
+        /// The live copy of <c>&lt;root&gt;\projects\&lt;any folder&gt;\&lt;sessionId&gt;.jsonl</c> under any
+        /// root. Null for an id that is not a plain id (it becomes a file name, so nothing else may
+        /// reach the path) or that no root holds.
         /// </summary>
         /// <remarks>
         /// Searched on every call and never cached: after EnterWorktree, Claude Code goes on writing
-        /// the same session id under the worktree's folder, and the copy left in the old folder stops
-        /// growing. A cached path would keep reading that stale copy. The newest write is the live one.
+        /// the same session id under the worktree's folder (measured: it MOVES the file, so there is
+        /// normally one copy). When there is more than one, the copy whose newest entry is latest wins,
+        /// by the entries' own timestamps rather than the file's modified time, which a copy, a restore
+        /// or a sync tool can change without adding anything (pipeline run 1, adversary). The modified
+        /// time only breaks a tie between copies whose entries say nothing.
         /// </remarks>
         internal static string FindTranscript(string sessionId, IEnumerable<string> roots)
         {
             if (string.IsNullOrWhiteSpace(sessionId) || !SessionIdShape.IsMatch(sessionId)) return null;
 
-            string best = null;
-            DateTime bestWrite = DateTime.MinValue;
+            var candidates = new List<string>();
             foreach (string root in roots ?? Enumerable.Empty<string>())
             {
                 string projects = Path.Combine(root, "projects");
@@ -84,18 +86,23 @@ namespace MultiTerminal.Services
                 foreach (string folder in Directory.EnumerateDirectories(projects))
                 {
                     string candidate = Path.Combine(folder, sessionId + ".jsonl");
-                    if (!File.Exists(candidate)) continue;
-
-                    DateTime written = File.GetLastWriteTimeUtc(candidate);
-                    if (best == null || written > bestWrite)
-                    {
-                        best = candidate;
-                        bestWrite = written;
-                    }
+                    if (File.Exists(candidate)) candidates.Add(candidate);
                 }
             }
 
-            return best;
+            if (candidates.Count <= 1) return candidates.FirstOrDefault();
+
+            return candidates
+                .Select(c => new
+                {
+                    Path = c,
+                    Latest = LatestTimestamp(ReadTailLines(c, TailBytes)) ?? DateTime.MinValue,
+                    Written = File.GetLastWriteTimeUtc(c),
+                })
+                .OrderByDescending(c => c.Latest)
+                .ThenByDescending(c => c.Written)
+                .First()
+                .Path;
         }
 
         /// <summary>The complete lines in the last <paramref name="maxBytes"/> of a file.</summary>
@@ -125,10 +132,13 @@ namespace MultiTerminal.Services
         /// The text of the final main-thread assistant message of the LAST turn, or null.
         /// </summary>
         /// <remarks>
-        /// Walks back from the end. A real owner prompt (a main-thread user line that is not a tool
-        /// result and not a meta line) ends the walk: text before it belongs to an earlier turn, and
-        /// a turn that ended without text (Escape) must not inherit the previous turn's question.
-        /// Sidechain lines are a subagent's and say nothing about what the agent asked the owner.
+        /// Walks back from the end to the LAST main-thread message, and only that message decides:
+        /// assistant text is the answer; anything else (an owner prompt, a tool call, a tool result)
+        /// means the turn did not end on text, or its final line is not written yet. Looking further
+        /// back was wrong both ways (pipeline run 1, debugger and adversary): past a tool result it
+        /// reached a sentence from the middle of the turn, and past an owner prompt the previous
+        /// turn's question. Sidechain lines (a subagent's), meta lines (hook context) and lines with
+        /// no message are skipped.
         /// </remarks>
         internal static string FinalAssistantText(IReadOnlyList<string> lines)
         {
@@ -145,19 +155,22 @@ namespace MultiTerminal.Services
                     var root = doc.RootElement;
                     if (root.ValueKind != JsonValueKind.Object) continue;
                     if (root.TryGetProperty("isSidechain", out var side) && side.ValueKind == JsonValueKind.True) continue;
+                    if (root.TryGetProperty("isMeta", out var meta) && meta.ValueKind == JsonValueKind.True) continue;
 
                     string type = root.TryGetProperty("type", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() : null;
+                    if (type != "assistant" && type != "user") continue;
                     if (!root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object) continue;
                     message.TryGetProperty("content", out var content);
 
                     if (type == "assistant")
                     {
+                        // Text first or nothing: a final thinking or tool-call line means the turn's
+                        // last text is not there (yet), and the watcher reads again shortly.
                         string text = LastText(content);
-                        if (!string.IsNullOrWhiteSpace(text)) return text;
-                        continue;
+                        return string.IsNullOrWhiteSpace(text) ? null : text;
                     }
 
-                    if (type == "user" && IsOwnerPrompt(root, content)) return null;
+                    return null;
                 }
                 catch (JsonException)
                 {
@@ -222,23 +235,33 @@ namespace MultiTerminal.Services
             return last;
         }
 
-        private static bool IsOwnerPrompt(JsonElement root, JsonElement content)
+        /// <summary>The latest <c>timestamp</c> on any line, or null.</summary>
+        internal static DateTime? LatestTimestamp(IReadOnlyList<string> lines)
         {
-            if (root.TryGetProperty("isMeta", out var meta) && meta.ValueKind == JsonValueKind.True) return false;
-            if (content.ValueKind == JsonValueKind.String) return true;
-            if (content.ValueKind != JsonValueKind.Array) return false;
+            if (lines == null) return null;
 
-            foreach (var block in content.EnumerateArray())
+            for (int i = lines.Count - 1; i >= 0; i--)
             {
-                if (block.ValueKind == JsonValueKind.Object
-                    && block.TryGetProperty("type", out var bt) && bt.ValueKind == JsonValueKind.String
-                    && bt.GetString() == "tool_result")
+                if (string.IsNullOrWhiteSpace(lines[i])) continue;
+                try
                 {
-                    return false;
+                    using var doc = JsonDocument.Parse(lines[i]);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object
+                        && doc.RootElement.TryGetProperty("timestamp", out var ts)
+                        && ts.ValueKind == JsonValueKind.String
+                        && DateTime.TryParse(ts.GetString(), System.Globalization.CultureInfo.InvariantCulture,
+                            System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var at))
+                    {
+                        return at;
+                    }
+                }
+                catch (JsonException)
+                {
+                    // Keep looking at earlier lines.
                 }
             }
 
-            return true;
+            return null;
         }
     }
 }
