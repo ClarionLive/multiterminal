@@ -297,6 +297,42 @@
             pointer-events: none;
         }
 
+        /* Repository activity badge (task df58b35d): open issues / PRs of the project's GitHub repos */
+        .repo-badge {
+            flex-shrink: 0;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            height: 28px;
+            padding: 0 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            background: transparent;
+            color: var(--text-secondary);
+            font-family: var(--font-family);
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            user-select: none;
+            transition: all 0.15s ease;
+        }
+
+        .repo-badge:hover {
+            background: var(--bg-panel);
+            color: var(--text-primary);
+            border-color: var(--text-muted);
+        }
+
+        .repo-badge.hidden { display: none; }
+        .repo-badge.dim { opacity: 0.5; }
+
+        .repo-badge .rb-new {
+            padding: 0 5px;
+            border-radius: 3px;
+            background: #6366f1;
+            color: white;
+        }
+
         .home-button svg {
             width: 14px;
             height: 14px;
@@ -571,6 +607,7 @@
                     <div class="hud-toggle-thumb"></div>
                 </div>
             </div>
+            <button class="repo-badge hidden" id="repo-activity-badge" title="" onclick="onRepoActivityClick()"></button>
             <button class="home-button" id="project-settings-button" title="This pane is not in a registered project" disabled onclick="onProjectSettingsClick()">
                 <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.03 7.03 0 0 0-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.48.41l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.48.48 0 0 0-.59.22L2.74 8.87a.48.48 0 0 0 .12.61l2.03 1.58c-.04.31-.07.63-.07.94s.02.63.06.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>
             </button>
@@ -641,6 +678,45 @@
             var btn = document.getElementById('project-settings-button');
             btn.disabled = !available;
             btn.title = available ? 'Project settings' : 'This pane is not in a registered project';
+        }
+
+        function onRepoActivityClick() {
+            postMessage('repoActivityClick', {});
+        }
+
+        // The repository badge (task df58b35d). badge is null (hide) or
+        // { issues, prs, newCount, truncated, state, tooltip, dim }; issues/prs are null when there is
+        // no list to count. Built with textContent only: the tooltip carries text from GitHub's answer.
+        function setRepoActivity(badge) {
+            var el = document.getElementById('repo-activity-badge');
+            if (!el) return;
+            while (el.firstChild) el.removeChild(el.firstChild);
+            if (!badge) {
+                el.classList.add('hidden');
+                el.title = '';
+                return;
+            }
+
+            var plus = badge.truncated ? '+' : '';
+            function count(n) {
+                return (typeof n === 'number' && isFinite(n)) ? String(Math.max(0, Math.floor(n))) + plus : '–';
+            }
+            function addSpan(cls, text) {
+                var span = document.createElement('span');
+                span.className = cls;
+                span.textContent = text;
+                el.appendChild(span);
+            }
+
+            addSpan('rb-issues', '⊙ ' + count(badge.issues));
+            addSpan('rb-prs', '⇄ ' + count(badge.prs));
+            if (typeof badge.newCount === 'number' && badge.newCount > 0) {
+                addSpan('rb-new', '+' + Math.floor(badge.newCount));
+            }
+            el.classList.toggle('dim', !!badge.dim);
+            el.dataset.state = typeof badge.state === 'string' ? badge.state : '';
+            el.title = typeof badge.tooltip === 'string' ? badge.tooltip : '';
+            el.classList.remove('hidden');
         }
 
         function onHudToggleClick() {
@@ -977,6 +1053,9 @@
                         setRemoteMode(data.split(':')[1] === 'true');
                     } else if (data.startsWith('projectSettings:')) {
                         setProjectSettingsAvailable(data.split(':')[1] === 'true');
+                    } else if (data.startsWith('repoActivity:')) {
+                        var raJson = data.substring('repoActivity:'.length);
+                        setRepoActivity(raJson === 'null' ? null : JSON.parse(raJson));
                     }
                 }
             });
