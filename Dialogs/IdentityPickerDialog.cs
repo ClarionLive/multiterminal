@@ -233,6 +233,26 @@ namespace MultiTerminal.Dialogs
         /// <summary>Test seam: the identity list's background, to prove the theme reached it inside the layout.</summary>
         internal System.Drawing.Color IdentityListBackColor => _identityList.BackColor;
 
+        /// <summary>
+        /// Test seam (release 3.0.0 merge): the layout row of each selection-mode section, by name ("identity",
+        /// "folder", "profile", "profileNote", "recent"), or -1 when the control is absent or not a row of the
+        /// layout table. The profile section was written with fixed positions (c8ee0eec) before ae3d0193 made the
+        /// dialog a resizable table; this is how a test sees that it became rows of that table.
+        /// </summary>
+        internal int SectionRow(string section)
+        {
+            Control control = section switch
+            {
+                "identity" => _identityList,
+                "folder" => _folderTextBox,
+                "profile" => _profileCombo,
+                "profileNote" => _profileNote,
+                "recent" => _recentList,
+                _ => null,
+            };
+            return control?.Parent is TableLayoutPanel table ? table.GetRow(control) : -1;
+        }
+
         private void BuildSelectionLayout(string defaultFolder, List<string> recentFolders)
         {
             // Resizable (ticket ae3d0193): a docked TableLayoutPanel whose two list rows are percent-sized,

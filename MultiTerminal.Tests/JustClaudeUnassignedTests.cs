@@ -104,6 +104,40 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void The_Claude_profile_choice_is_rows_of_the_resizable_layout_between_the_folder_and_the_recents()
+        {
+            // Release 3.0.0 merge: c8ee0eec wrote this section with fixed Locations; ae3d0193 turned the
+            // dialog into a resizable TableLayoutPanel. Controls with fixed Locations added to the form itself
+            // would sit at -1 here (not rows of the table) and overlap the growing lists.
+            var recent = Path.GetTempPath().TrimEnd('\\');
+            var rows = OnSta(() =>
+            {
+                using var dialog = new IdentityPickerDialog(null, new List<string>(Named), TerminalTheme.Dark,
+                    isSelectionMode: true, Environment.CurrentDirectory, new List<string> { recent },
+                    new[] { "Default", "Work" }, _ => null, _ => "a note");
+                return new[] { "identity", "folder", "profile", "profileNote", "recent" }.Select(dialog.SectionRow).ToArray();
+            });
+
+            Assert.DoesNotContain(-1, rows);
+            Assert.Equal(rows.OrderBy(r => r), rows); // identity < folder < profile < note < recent
+            Assert.Equal(rows.Length, rows.Distinct().Count());
+        }
+
+        [Fact]
+        public void With_one_Claude_profile_there_is_no_profile_choice()
+        {
+            var row = OnSta(() =>
+            {
+                using var dialog = new IdentityPickerDialog(null, new List<string>(Named), TerminalTheme.Dark,
+                    isSelectionMode: true, Environment.CurrentDirectory, new List<string>(),
+                    new[] { "Default" }, _ => null, _ => null);
+                return dialog.SectionRow("profile");
+            });
+
+            Assert.Equal(-1, row);
+        }
+
+        [Fact]
         public void Conflict_dialog_does_not_offer_Unassigned()
         {
             // The conflict picker swaps an in-use team lead for an alternative NAME; the placeholder is not one.
