@@ -5,6 +5,143 @@ All notable changes to MultiTerminal are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] — 2026-10-22
+
+Major release: Claude profiles keep work and personal projects apart, and
+sessions now survive a relaunch: resume a past session at project launch, bring a
+PM's helpers back with it, and restore every open terminal when MT starts again.
+The Project pane is replaced by a project settings form, and terminals now talk to
+each other without Claude Code's development channel.
+
+### Added
+
+- **Claude profiles.** A profile names a Claude Code config folder
+  (`CLAUDE_CONFIG_DIR`), and each project chooses one, so work and personal
+  accounts never mix. Every pane, helper and agent in a project's folders runs
+  under its profile, and a missing or mismatched profile refuses the launch with a
+  message instead of quietly falling back to Default.
+- **Settings > Claude Profiles.** Add a profile by name only (its folder,
+  `%USERPROFILE%\.claude-<name>`, is created for you), see Signed in / Needs
+  sign-in on each row, and press Sign in to log that profile in from a plain
+  console. Session history, the token meter and agent teams follow each pane's
+  profile. The installer can also put the MT plugin in a shared folder (GH #23).
+- **Resume a past session at project launch.** Launching a Claude project asks:
+  New session, Continue last (with context used, agent, age and summary), or pick
+  one of the last ~15 sessions, helper and worktree sessions included, with an
+  editable name. Shift+click always starts new. A per-project Launch mode (ask,
+  always new, always continue) is set from "Don't ask again" or project settings.
+- **Helpers resume with their PM.** Resuming a PM session reopens the helper panes
+  it had open when it last ended (up to 6), each ticked under "Also resume
+  helpers". Closing a PM's tab asks once whether to close its helpers too; they
+  come back when the PM is resumed.
+- **Restore terminals at startup.** After MT exits or crashes with Claude terminals
+  open, the next start lists them (helpers nested under their PM, all ticked) and
+  resumes the checked sessions into their old panes, showing "Restoring <name>…"
+  while it works. With nothing to restore MT opens on a single Home pane.
+- **Project settings form.** The gear on a terminal's status bar, a Home card or a
+  Browse All row opens one form for every project setting, from General and Launch
+  to Git, Agents and Danger zone. A save never overwrites changes made elsewhere and
+  says when a setting only applies at the next launch.
+- **Notes for the Owner from agents.** Agents can leave notes with
+  `add_project_note` / `list_project_notes`, optionally in a category. The Notes
+  tab has a collapsible left rail with pinned notes, folding categories, search and
+  a right-click menu, plus an unread count on the tab. Agents never edit your notes.
+- **Attention pane.** A card for every session: what it is doing, who is waiting
+  on you and for how long, its project and context used, with the 5h/7d quota
+  left in the header and configurable activity and alarm styles.
+- **Attention pane By team grouping.** Each PM card has its helpers listed under
+  it, a team with anyone blocked goes to the top, and a PM card says "<helper>
+  needs you". The grouping survives a restart, text meets 4.5:1 contrast in both
+  themes, and Ctrl+wheel zoom is remembered.
+- **Compaction continue.** When an agent compacts itself with `compact_my_context`,
+  MT types a continue into that pane once the compaction finishes, so the agent
+  picks up its work. A compaction you start yourself is left alone.
+- **Helpers you can spawn and close.** New `spawn_helper` MCP tool opens a helper
+  pane that collects its job with `get_my_spawn_job`, so a job is never lost to a
+  helper that was not listening yet. `close_helper` lets a PM close the helpers it
+  spawned, and no other pane.
+- **Plan tab.** The HUD draws a ticket's checklist as a dependency graph with a
+  plain explanation of each step on hover. The Tasks pane gets its own two-tab HUD
+  (Tasks, Plan) that follows the selected card.
+- **Quiet start.** A per-project setting that skips the session-start menu and the
+  "initializing..." kick on launch (GH #34). Just Claude always starts quiet.
+- **Terminal input.** Shift+Enter inserts a newline, every paste is a bracketed
+  paste, right-click copies or pastes, a clipboard image pastes as a file path, and
+  Shift+F10 opens the terminal menu (GH #22, #24).
+- **GitHub bot identity for agents.** A one-click GitHub App registration lets
+  agents' `git push` and `gh` act as the bot instead of as you, with a short-lived
+  token per command and each comment signed with the agent's name.
+- **Header and Home.** Browse All, New Project, Just Claude, Open PowerShell and
+  Launch Project are header pills, and the M menu is an HTML popup. Settings >
+  General picks list or cards for Home; Browse All remembers a 3-column sort.
+- **Smaller additions:** a clear (x) button in every search box, and an app icon
+  for MT and its installer (GH #36).
+
+### Changed
+
+- **The Project pane is gone**, replaced by the project settings form. The Project
+  Manager and Edit Project dialogs are retired too; Browse All takes over their
+  project list, pin and version columns, New Project and delete.
+- **Messaging no longer uses Claude Code's development channel.** MT writes
+  messages straight into a live session, launches each terminal under its own name
+  so the board name is the address, and stops auto-answering the channel dialog.
+  Received messages start with `[MultiTerminal message from X to Y]`, and
+  `send_message` defaults the sender to the session's own name.
+- **ClarionAssistant tabs join MT messaging** and can send and receive by name.
+- **Launch names.** A project with no team lead launches under the project name
+  (TestB, TestB-2...) instead of "Unassigned". Just Claude offers "Unassigned"
+  first and by default, gives each launch its own unique non-team name, and has a
+  bigger resizable dialog.
+- **Tab titles say the role**, for example "Alice - MultiTerminal (PM)".
+- **A new terminal always docks**, never as a tiny floating window, so "Max Tabs
+  per Grid" is removed. Grid Layout adds Home tabs, not named PowerShells.
+- **The header's agent-name strip is removed** (GH #27).
+- **New Project on a folder that already has a project asks** (open, rename,
+  choose another folder) instead of overwriting it.
+- **The MCP config is repaired before every launch** when missing or broken, and
+  left untouched when it works. MT warns at startup when its terminals would start
+  without the agent tools.
+- **Source-control tokens are no longer handed out by the local REST API.**
+
+### Fixed
+
+- **Messages reported as delivered that never arrived** (GH #7); empty message
+  bodies are now rejected.
+- **The Terminals list kept showing sessions that had quit.**
+- **Database writes that waited indefinitely** while the code graph reindexed now
+  give up after a bounded wait, and a config file with a repeated key no longer
+  crashes startup.
+- **A crash from the Debug panel** updating its list off the UI thread.
+- **HUD zoom reset on every launch** for six of the seven tabs; each tab now keeps
+  its own zoom, and the saved HUD split is restored.
+- **Panels opened light while the app was dark.**
+- **`update_checklist` erased checklist fields** it did not name.
+- **The Inbox panel stranded most of the unread backlog**, and the dashboard badge
+  could show another user's unread count (GH #6).
+- **A closed terminal's late activity brought back an unnamed Attention card.**
+- **Switch Project's search box reversed typed text.**
+- **Text boxes in Settings and New Project clipped their text.**
+- **`get_task_detail` and `get_my_active_task` now include the task description**
+  (GH #13).
+
+### Upgrade notes
+
+- **Existing projects run under the Default profile** until you choose one in the
+  project settings form. Default never sets `CLAUDE_CONFIG_DIR`, so nothing moves.
+- **The first start after upgrading offers no restore**: 2.1.0 recorded no session
+  ids, so MT opens on one Home pane. Restore works from the next exit or crash on,
+  and only sessions launched under 3.0.0 can bring their helpers back.
+- **A saved layout that contained the Project pane** simply drops it.
+- **The installer no longer writes the agent-teams setting**; MT sets
+  `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` on every launch instead.
+
+### Known issues
+
+- **A launch in the first minute after MT starts can freeze the window for several
+  seconds** while the code graph reindexes your projects (always after an
+  upgrade). The startup restore shows "Restoring <name>…" meanwhile; the freeze
+  itself is being fixed.
+
 ## [2.1.0] — 2026-07-18
 
 Feature release: phone/remote workflow, a proactive worktree janitor with human
