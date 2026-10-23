@@ -257,7 +257,7 @@ namespace MultiTerminal.Terminal
                     // serve a stale copy of the document on the same file:// URL.
                     string baseUri = new Uri(htmlPath).AbsoluteUri;
                     long bust = File.GetLastWriteTimeUtc(htmlPath).Ticks;
-                    string navUri = baseUri + "?v=" + bust;
+                    string navUri = BuildTerminalPageUri(baseUri, bust, Environment.OSVersion.Version.Build);
                     _webView.CoreWebView2.Navigate(navUri);
                 }
                 else
@@ -272,6 +272,24 @@ namespace MultiTerminal.Terminal
                 ShowError("Failed to initialize WebView2: " + ex.Message);
             }
         }
+
+        /// <summary>
+        /// The terminal page's URL: <c>?v=</c> busts WebView2's cache (the file's mtime) and
+        /// <c>&amp;winbuild=</c> is the Windows build number, which the page hands to xterm.js as
+        /// <c>windowsPty.buildNumber</c> so xterm applies its ConPTY-specific handling (GitHub #51).
+        /// The page builds the terminal on load, before any host message, so it has to arrive with the URL.
+        /// A build of 0 or less (unknown) is left out and the page falls back to xterm's defaults.
+        /// </summary>
+        internal static string BuildTerminalPageUri(string baseUri, long cacheBust, int windowsBuild)
+        {
+            string uri = baseUri + "?v=" + cacheBust.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (windowsBuild > 0)
+                uri += "&" + WindowsBuildParam + "=" + windowsBuild.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return uri;
+        }
+
+        /// <summary>The query parameter terminal.html's <c>readWindowsPty</c> reads. A string contract across files.</summary>
+        internal const string WindowsBuildParam = "winbuild";
 
         private string GetTerminalHtmlPath()
         {

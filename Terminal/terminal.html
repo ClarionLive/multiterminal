@@ -113,11 +113,24 @@
         let currentFontSize = 10;
         let isInitialized = false;
 
+        // The Windows build number the host puts in the URL (&winbuild=). Tells xterm.js it is talking
+        // to ConPTY, which changes how it handles reflow on resize (GitHub #51). Missing or not a
+        // positive whole number: leave windowsPty unset, xterm's default behaviour.
+        function readWindowsPty() {
+            try {
+                const raw = new URLSearchParams(window.location.search).get('winbuild');
+                const build = raw && /^[0-9]{1,6}$/.test(raw) ? parseInt(raw, 10) : 0;
+                return build > 0 ? { backend: 'conpty', buildNumber: build } : undefined;
+            } catch (e) {
+                return undefined;
+            }
+        }
+
         // Initialize terminal
         function initTerminal(themeName = 'dark') {
             const container = document.getElementById('terminal-container');
 
-            term = new Terminal({
+            const options = {
                 cursorBlink: false,
                 cursorStyle: 'block',
                 fontFamily: '"Cascadia Mono", Consolas, "Courier New", monospace',
@@ -128,7 +141,10 @@
                 convertEol: false,
                 letterSpacing: -1,
                 lineHeight: 1
-            });
+            };
+            const windowsPty = readWindowsPty();
+            if (windowsPty) options.windowsPty = windowsPty;
+            term = new Terminal(options);
 
             // Load addons
             fitAddon = new FitAddon.FitAddon();
