@@ -8,7 +8,6 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using MultiTerminal.MCPServer.Services;
@@ -107,9 +106,6 @@ namespace MultiTerminal.Services
         private static readonly TimeSpan FallbackRetryDelay = TimeSpan.FromSeconds(60);
 
         private static readonly HttpClient SharedHttp = new() { Timeout = DefaultTimeout };
-
-        private static readonly Regex ItemPathPattern = new(
-            @"^(issues|pull)/([0-9]+)$", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
         private readonly HttpClient _http;
         private readonly bool _ownsHttp;
@@ -305,26 +301,34 @@ namespace MultiTerminal.Services
         /// <c>https://github.com/{owner}/{repo}/(issues|pull)/{number}</c> (case-insensitive) for this
         /// item's own number. Anything else (another host, another repository, a query, a fragment, a
         /// different number) is null: the value is opened in a browser, and it came from the network.
+        /// The rule itself is <see cref="GitHubRepoRef.IsItemUrl"/>.
         /// </summary>
         internal static string? SafeHtmlUrl(string? url, string owner, string repo, long number)
+            => GitHubRepoRef.TryParseFullName($"{owner}/{repo}", out var repoRef) && repoRef.IsItemUrl(url, number)
+                ? url
+                : null;
+
+        /// <summary>
+        /// An item read back from the stored snapshot, cleaned exactly as a fresh one from the API is:
+        /// title, author and labels through <see cref="SessionCatalog.ToDisplayText"/> with the same
+        /// caps, and the link kept only if it is this item's page. The snapshot is a database column any
+        /// local process can write, so what it holds is not trusted just because MT wrote it first.
+        /// </summary>
+        internal static RepoActivityItem CleanStored(RepoActivityItem item, GitHubRepoRef repo) => new()
         {
-            if (string.IsNullOrEmpty(url))
-                return null;
-
-            var prefix = $"https://github.com/{owner}/{repo}/";
-            if (!url.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                return null;
-
-            var match = ItemPathPattern.Match(url.Substring(prefix.Length));
-            if (!match.Success
-                || !long.TryParse(match.Groups[2].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var n)
-                || n != number)
-            {
-                return null;
-            }
-
-            return url;
-        }
+            Number = item.Number,
+            Title = SessionCatalog.ToDisplayText(item.Title, TitleMaxChars) ?? "(no title)",
+            Author = SessionCatalog.ToDisplayText(item.Author) ?? "unknown",
+            CreatedAtUtc = item.CreatedAtUtc,
+            IsPullRequest = item.IsPullRequest,
+            IsDraft = item.IsDraft,
+            HtmlUrl = repo.IsItemUrl(item.HtmlUrl, item.Number) ? item.HtmlUrl : null,
+            Labels = (item.Labels ?? Array.Empty<string>())
+                .Select(l => SessionCatalog.ToDisplayText(l, LabelMaxChars))
+                .Where(l => l != null)
+                .Select(l => l!)
+                .ToList(),
+        };
 
         private static IReadOnlyList<string> ParseLabels(JsonElement el)
         {

@@ -426,5 +426,39 @@ namespace MultiTerminal.Tests
             Assert.Equal("https://github.com/o/r/pull/7", item.HtmlUrl);
             Assert.Equal(new[] { "x", "y" }, item.Labels);
         }
+
+        [Fact]
+        public void A_stored_item_is_cleaned_again_when_read_back()
+        {
+            // As if a local process wrote the snapshot column directly: a right-to-left override and a
+            // zero-width space in the text, and a link to another repository.
+            var stored = new RepoActivityItem
+            {
+                Number = 5,
+                Title = "Fix ‮gnp.exe‬ login",
+                Author = "eve​",
+                HtmlUrl = "https://github.com/evil/repo/issues/5",
+                Labels = new[] { "bug‮", "​" },
+            };
+            Assert.True(GitHubRepoRef.TryParseFullName("o/r", out var repo));
+
+            var clean = GitHubRestClient.CleanStored(stored, repo);
+
+            Assert.DoesNotContain('‮', clean.Title);
+            Assert.DoesNotContain('​', clean.Author);
+            Assert.Null(clean.HtmlUrl);
+            Assert.Equal(new[] { "bug" }, clean.Labels);
+            Assert.Equal(5, clean.Number);
+        }
+
+        [Fact]
+        public void A_stored_item_keeps_its_own_link()
+        {
+            Assert.True(GitHubRepoRef.TryParseFullName("o/r", out var repo));
+            var clean = GitHubRestClient.CleanStored(
+                new RepoActivityItem { Number = 7, Title = "t", Author = "a", IsPullRequest = true, HtmlUrl = "https://github.com/o/r/pull/7" },
+                repo);
+            Assert.Equal("https://github.com/o/r/pull/7", clean.HtmlUrl);
+        }
     }
 }

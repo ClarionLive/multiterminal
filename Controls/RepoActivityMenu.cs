@@ -6,7 +6,6 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.Linq;
-using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using MultiTerminal.Models;
 using MultiTerminal.Services;
@@ -59,29 +58,18 @@ namespace MultiTerminal.Controls
         /// <summary>Titles longer than this are cut, with an ellipsis.</summary>
         internal const int MaxTitleLength = 70;
 
-        private static readonly Regex AllowedPathPattern = new(
-            @"^/(?:(?:issues|pull)/[0-9]{1,18}|issues|pulls)$",
-            RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
-
         /// <summary>
-        /// True only for <c>https://github.com/{owner}/{repo}</c> followed by exactly <c>/issues/{n}</c>,
-        /// <c>/pull/{n}</c>, <c>/issues</c> or <c>/pulls</c>, where owner/repo is <paramref name="repoFullName"/>
-        /// (case-insensitive). The prefix comparison is on the raw string, so a user-info part, a port,
-        /// another host (<c>github.com.evil.com</c>) or scheme cannot pass; the anchored remainder rules
-        /// out a query, a fragment, an escape or a dot segment. The URL is opened with the shell, and the
-        /// item URLs came from the network.
+        /// The last gate before the shell opens a link: true only for a github.com page of
+        /// <paramref name="repoFullName"/> (<see cref="GitHubRepoRef.IsPageUrl"/>: <c>/issues/{n}</c>,
+        /// <c>/pull/{n}</c>, <c>/issues</c> or <c>/pulls</c>). Checked again at click time, because the item
+        /// URLs came from the network.
         /// </summary>
         internal static bool IsAllowedRepoUrl(string? url, string? repoFullName)
-        {
-            if (string.IsNullOrEmpty(url) || !GitHubRepoRef.TryParseFullName(repoFullName, out var repo))
-                return false;
+            => GitHubRepoRef.TryParseFullName(repoFullName, out var repo) && repo.IsPageUrl(url);
 
-            string prefix = $"https://github.com/{repo.Owner}/{repo.Name}";
-            if (!url.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                return false;
-
-            return AllowedPathPattern.IsMatch(url.Substring(prefix.Length));
-        }
+        // Empty (a disabled row) for a name that does not parse.
+        private static string PageUrl(string fullName, Func<GitHubRepoRef, string> page)
+            => GitHubRepoRef.TryParseFullName(fullName, out var repo) ? page(repo) : string.Empty;
 
         /// <summary>The list for <paramref name="summary"/>. Pure: no UI, no I/O.</summary>
         internal static IReadOnlyList<RepoActivityMenuEntry> BuildEntries(RepoActivitySummary? summary, DateTime nowUtc)
@@ -127,7 +115,7 @@ namespace MultiTerminal.Controls
 
                 if (repo.Items.Count > MaxItemsPerRepo || repo.Truncated)
                 {
-                    string more = $"https://github.com/{repo.FullName}/issues";
+                    string more = PageUrl(repo.FullName, r => r.IssuesUrl);
                     entries.Add(new RepoActivityMenuEntry("More on GitHub…", RepoActivityMenuAction.OpenUrl, more,
                         Enabled: IsAllowedRepoUrl(more, repo.FullName), Repo: repo.FullName));
                 }
@@ -149,8 +137,8 @@ namespace MultiTerminal.Controls
             foreach (var repo in summary.Repos)
             {
                 string suffix = several ? $" ({repo.FullName})" : string.Empty;
-                string issues = $"https://github.com/{repo.FullName}/issues";
-                string pulls = $"https://github.com/{repo.FullName}/pulls";
+                string issues = PageUrl(repo.FullName, r => r.IssuesUrl);
+                string pulls = PageUrl(repo.FullName, r => r.PullsUrl);
                 entries.Add(new RepoActivityMenuEntry("Open issues on GitHub" + suffix, RepoActivityMenuAction.OpenUrl, issues,
                     Enabled: IsAllowedRepoUrl(issues, repo.FullName), Repo: repo.FullName));
                 entries.Add(new RepoActivityMenuEntry("Open pull requests on GitHub" + suffix, RepoActivityMenuAction.OpenUrl, pulls,

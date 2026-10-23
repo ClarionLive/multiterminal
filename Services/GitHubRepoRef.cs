@@ -1,5 +1,7 @@
 #nullable enable
 using System;
+using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace MultiTerminal.Services
 {
@@ -152,6 +154,74 @@ namespace MultiTerminal.Services
                 Name is null ? 0 : StringComparer.OrdinalIgnoreCase.GetHashCode(Name));
 
         public override string ToString() => FullName;
+
+        // ---- github.com pages of this repository: the one URL rule, used to build links, to keep
+        // ---- an html_url from the API, and as the menu's last gate before the shell opens a link.
+
+        private static readonly Regex PagePathPattern = new(
+            @"^/(?:(?:issues|pull)/([0-9]{1,18})|issues|pulls)$",
+            RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+        /// <summary><c>https://github.com/{owner}/{name}</c>.</summary>
+        public string WebUrl => $"https://github.com/{FullName}";
+
+        /// <summary>The repository's issue list.</summary>
+        public string IssuesUrl => WebUrl + "/issues";
+
+        /// <summary>The repository's pull request list.</summary>
+        public string PullsUrl => WebUrl + "/pulls";
+
+        /// <summary>One issue (<c>/issues/{n}</c>) or pull request (<c>/pull/{n}</c>).</summary>
+        public string ItemUrl(long number, bool isPullRequest)
+            => $"{WebUrl}/{(isPullRequest ? "pull" : "issues")}/{number.ToString(CultureInfo.InvariantCulture)}";
+
+        /// <summary>
+        /// True only for <see cref="WebUrl"/> followed by exactly <c>/issues/{n}</c>, <c>/pull/{n}</c>,
+        /// <c>/issues</c> or <c>/pulls</c> (case-insensitive). The prefix comparison is on the raw string,
+        /// so a user-info part, a port, another host (<c>github.com.evil.com</c>) or scheme cannot pass; the
+        /// anchored remainder rules out a query, a fragment, an escape or a dot segment.
+        /// </summary>
+        public bool IsPageUrl(string? url) => TryMatchPage(url, out _);
+
+        /// <summary>
+        /// True only for this repository's issue or pull request page for exactly <paramref name="number"/>.
+        /// An html_url from the API is kept only when this holds: it is opened in a browser, and it came
+        /// from the network.
+        /// </summary>
+        public bool IsItemUrl(string? url, long number) => TryMatchPage(url, out long? n) && n == number;
+
+        private bool TryMatchPage(string? url, out long? itemNumber)
+        {
+            itemNumber = null;
+            if (string.IsNullOrEmpty(url) || Owner is null || Name is null)
+            {
+                return false;
+            }
+
+            string prefix = WebUrl;
+            if (!url.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            var match = PagePathPattern.Match(url.Substring(prefix.Length));
+            if (!match.Success)
+            {
+                return false;
+            }
+
+            if (match.Groups[1].Success)
+            {
+                if (!long.TryParse(match.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out long n))
+                {
+                    return false;
+                }
+
+                itemNumber = n;
+            }
+
+            return true;
+        }
 
         /// <summary>
         /// Splits <c>[user@]host[:port]/path</c>. The user part is everything before the LAST

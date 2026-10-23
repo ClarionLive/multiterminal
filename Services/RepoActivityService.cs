@@ -762,17 +762,25 @@ namespace MultiTerminal.Services
             _ => 0,
         };
 
+        // Empty (a disabled menu row) only for a name that does not parse, which ReadSnapshot has already excluded.
         private static string UrlFor(string fullName, RepoActivityItem item)
             => item.HtmlUrl
-               ?? $"https://github.com/{fullName}/{(item.IsPullRequest ? "pull" : "issues")}/{item.Number}";
+               ?? (GitHubRepoRef.TryParseFullName(fullName, out var repo) ? repo.ItemUrl(item.Number, item.IsPullRequest) : string.Empty);
 
+        /// <summary>
+        /// The stored list, each item cleaned again (<see cref="GitHubRestClient.CleanStored"/>): the
+        /// column is not trusted just because this service wrote it.
+        /// </summary>
         private IReadOnlyList<RepoActivityItem> ReadSnapshot(string? json, string fullName)
         {
-            if (string.IsNullOrEmpty(json)) return Array.Empty<RepoActivityItem>();
+            if (string.IsNullOrEmpty(json) || !GitHubRepoRef.TryParseFullName(fullName, out var repo))
+                return Array.Empty<RepoActivityItem>();
             try
             {
                 var items = JsonSerializer.Deserialize<List<RepoActivityItem>>(json);
-                return items == null ? Array.Empty<RepoActivityItem>() : items.Where(i => i != null).ToList();
+                return items == null
+                    ? Array.Empty<RepoActivityItem>()
+                    : items.Where(i => i != null).Select(i => GitHubRestClient.CleanStored(i, repo)).ToList();
             }
             catch (JsonException ex)
             {

@@ -16,6 +16,53 @@ namespace MultiTerminal.Tests
     /// </summary>
     public sealed class GitHubRepoRefTests
     {
+        // ---- The one github.com page rule (IsPageUrl / IsItemUrl / ItemUrl) ----------------------
+
+        [Theory]
+        [InlineData("https://github.com/ClarionLive/multiterminal/issues/53", true)]
+        [InlineData("https://github.com/clarionlive/MULTITERMINAL/pull/56", true)]
+        [InlineData("https://github.com/ClarionLive/multiterminal/issues", true)]
+        [InlineData("https://github.com/ClarionLive/multiterminal/pulls", true)]
+        [InlineData("https://github.com/ClarionLive/multiterminal", false)]
+        [InlineData("https://github.com/ClarionLive/multiterminal/issues/53?x=1", false)]
+        [InlineData("https://github.com/ClarionLive/multiterminal/issues/53#c", false)]
+        [InlineData("https://github.com/ClarionLive/multiterminal/issues/../../evil", false)]
+        [InlineData("https://github.com/ClarionLive/multiterminalX/issues/1", false)]
+        [InlineData("https://github.com.evil.com/ClarionLive/multiterminal/issues/1", false)]
+        [InlineData("https://user@github.com/ClarionLive/multiterminal/issues/1", false)]
+        [InlineData("http://github.com/ClarionLive/multiterminal/issues/1", false)]
+        [InlineData("https://github.com/ClarionLive/multiterminal/issues/1234567890123456789", false)]
+        [InlineData("", false)]
+        [InlineData(null, false)]
+        public void Only_this_repos_issue_and_pull_pages_are_its_pages(string? url, bool expected)
+        {
+            Assert.True(GitHubRepoRef.TryParseFullName("ClarionLive/multiterminal", out var repo));
+            Assert.Equal(expected, repo.IsPageUrl(url));
+        }
+
+        [Theory]
+        [InlineData("https://github.com/o/r/issues/7", 7, true)]
+        [InlineData("https://github.com/o/r/pull/7", 7, true)]
+        [InlineData("https://github.com/o/r/issues/7", 8, false)]
+        [InlineData("https://github.com/o/r/issues", 7, false)]
+        public void An_item_url_must_carry_that_items_number(string url, long number, bool expected)
+        {
+            Assert.True(GitHubRepoRef.TryParseFullName("o/r", out var repo));
+            Assert.Equal(expected, repo.IsItemUrl(url, number));
+        }
+
+        [Fact]
+        public void Built_links_pass_the_rule_they_are_checked_against()
+        {
+            Assert.True(GitHubRepoRef.TryParseFullName("o/r", out var repo));
+            Assert.Equal("https://github.com/o/r/issues/3", repo.ItemUrl(3, isPullRequest: false));
+            Assert.Equal("https://github.com/o/r/pull/4", repo.ItemUrl(4, isPullRequest: true));
+            Assert.True(repo.IsItemUrl(repo.ItemUrl(4, true), 4));
+            Assert.True(repo.IsPageUrl(repo.IssuesUrl));
+            Assert.True(repo.IsPageUrl(repo.PullsUrl));
+            Assert.False(default(GitHubRepoRef).IsPageUrl("https://github.com//issues"));
+        }
+
         [Theory]
         [InlineData("https://github.com/ClarionLive/multiterminal")]
         [InlineData("https://github.com/ClarionLive/multiterminal.git")]
