@@ -9730,17 +9730,30 @@ namespace MultiTerminal
                 return;
             }
 
+            // Read on the UI thread now: the badge's position is the one at this click.
+            _ = ShowRepoActivityListAsync(
+                _repoActivity, projectId, _currentTheme.IsDark, (sender as TerminalDocument)?.LastRepoActivityBadgeScreenBounds);
+        }
+
+        /// <summary>
+        /// Builds the summary off the UI thread (database reads and a clean-up of every stored item, up to
+        /// 100 per repository), then shows the list back on it.
+        /// </summary>
+        private async Task ShowRepoActivityListAsync(
+            Services.RepoActivityService service, string projectId, bool isDark, Rectangle? badgeScreenBounds)
+        {
             try
             {
-                var service = _repoActivity;
+                var summary = await Task.Run(() => service.GetSummary(projectId));
+                if (IsDisposed) return;
                 RepoActivityMenu.Show(
-                    service.GetSummary(projectId),
-                    _currentTheme.IsDark,
+                    summary,
+                    isDark,
                     markAllSeen: () => service.MarkAllSeen(projectId),
                     checkNow: () => _ = CheckRepoActivityNowAsync(service, projectId),
                     openProjectSettings: () => OpenProjectSettings(projectId),
                     log: msg => _debugLogService?.Warning("RepoActivity", msg),
-                    badgeScreenBounds: (sender as TerminalDocument)?.LastRepoActivityBadgeScreenBounds);
+                    badgeScreenBounds: badgeScreenBounds);
             }
             catch (Exception ex)
             {

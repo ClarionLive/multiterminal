@@ -151,14 +151,18 @@ namespace MultiTerminal.API.Controllers
         /// <summary>
         /// The fields that decide which GitHub repositories a project watches, and whether: the three
         /// repo-watch settings and the Git URL (the fallback when there is no list and no remote), in
-        /// either spelling <c>UpdateProjectField</c> accepts.
+        /// either spelling <c>UpdateProjectField</c> accepts. Exact names, not a prefix, so a field added
+        /// later does not trigger a recheck just by its name.
         /// </summary>
-        internal static bool IsRepoWatchField(string field) =>
-            field != null
-            && (field.StartsWith("repoWatch", System.StringComparison.OrdinalIgnoreCase)
-                || field.StartsWith("repo_watch_", System.StringComparison.OrdinalIgnoreCase)
-                || string.Equals(field, "gitRepoUrl", System.StringComparison.OrdinalIgnoreCase)
-                || string.Equals(field, "git_repo_url", System.StringComparison.OrdinalIgnoreCase));
+        private static readonly HashSet<string> RepoWatchFields = new(System.StringComparer.OrdinalIgnoreCase)
+        {
+            "repoWatchEnabled", "repo_watch_enabled",
+            "repoWatchIntervalMin", "repo_watch_interval_min",
+            "repoWatchRepos", "repo_watch_repos",
+            "gitRepoUrl", "git_repo_url",
+        };
+
+        internal static bool IsRepoWatchField(string field) => field != null && RepoWatchFields.Contains(field);
 
         private static bool IsClaudeProfileField(string field) =>
             string.Equals(field, "claudeProfile", System.StringComparison.OrdinalIgnoreCase)

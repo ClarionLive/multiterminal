@@ -587,7 +587,7 @@ namespace MultiTerminal.Services
                     break;
 
                 case RepoIssuesStatus.RateLimited:
-                    DateTime until = result.RetryAfterUtc ?? now + GitHubRestClient.FallbackRetryDelay;
+                    DateTime until = BackoffUntil(result.RetryAfterUtc, now);
                     lock (_gate)
                     {
                         _backoffUntil[BackoffKey(project.Id, key)] = until;
@@ -806,6 +806,22 @@ namespace MultiTerminal.Services
         }
 
         private static string BackoffKey(string projectId, string repoKey) => projectId + "\n" + repoKey;
+
+        /// <summary>The longest a rate limit may pause a repository. GitHub's own reset window is an hour.</summary>
+        internal static readonly TimeSpan MaxBackoff = TimeSpan.FromHours(1);
+
+        /// <summary>
+        /// When a rate-limited repository may be tried again: the time GitHub gave, or
+        /// <see cref="GitHubRestClient.FallbackRetryDelay"/> when it gave none, but never later than
+        /// <see cref="MaxBackoff"/> from now. A wrong or far-future reset (the backoff lives only in memory)
+        /// would otherwise stop that repository's checks until MT restarts.
+        /// </summary>
+        internal static DateTime BackoffUntil(DateTime? retryAfterUtc, DateTime nowUtc)
+        {
+            DateTime until = retryAfterUtc ?? nowUtc + GitHubRestClient.FallbackRetryDelay;
+            DateTime latest = nowUtc + MaxBackoff;
+            return until > latest ? latest : until;
+        }
 
         /// <summary>
         /// Drops in-memory state that can no longer matter, so the maps do not grow with every project

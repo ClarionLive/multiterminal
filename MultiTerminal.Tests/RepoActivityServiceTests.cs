@@ -737,11 +737,61 @@ namespace MultiTerminal.Tests
         [InlineData("repo_watch_repos", true)]
         [InlineData("gitRepoUrl", true)]
         [InlineData("git_repo_url", true)]
+        [InlineData("repo_watch_interval_min", true)]
         [InlineData("gitDefaultBranch", false)]
         [InlineData("claudeProfile", false)]
         [InlineData("name", false)]
-        public void The_rest_route_rechecks_for_exactly_the_fields_that_decide_what_is_watched(string field, bool expected)
+        [InlineData("repoWatchSomethingAddedLater", false)]
+        [InlineData("repo_watch_", false)]
+        [InlineData("", false)]
+        [InlineData(null, false)]
+        public void The_rest_route_rechecks_for_exactly_the_fields_that_decide_what_is_watched(string? field, bool expected)
             => Assert.Equal(expected, MultiTerminal.API.Controllers.ProjectContextController.IsRepoWatchField(field));
+
+        // ── Rate-limit backoff is capped (review follow-up) ──────────────────
+
+        [Fact]
+        public void A_backoff_is_GitHubs_time_when_it_is_within_the_cap()
+        {
+            var now = T0.UtcDateTime;
+            Assert.Equal(now.AddMinutes(20), RepoActivityService.BackoffUntil(now.AddMinutes(20), now));
+        }
+
+        [Fact]
+        public void A_far_future_reset_is_capped_at_one_hour()
+        {
+            var now = T0.UtcDateTime;
+            Assert.Equal(now + RepoActivityService.MaxBackoff, RepoActivityService.BackoffUntil(now.AddDays(30), now));
+            Assert.Equal(TimeSpan.FromHours(1), RepoActivityService.MaxBackoff);
+        }
+
+        [Fact]
+        public void No_reset_time_waits_the_fallback()
+        {
+            var now = T0.UtcDateTime;
+            Assert.Equal(now + GitHubRestClient.FallbackRetryDelay, RepoActivityService.BackoffUntil(null, now));
+        }
+
+        [Fact]
+        public async Task A_bogus_reset_from_the_client_pauses_the_repo_for_at_most_an_hour()
+        {
+            var project = AddProject("p1", repos: "owner/repo");
+            _client.Respond = (_, _) => new RepoIssuesResult
+            {
+                Status = RepoIssuesStatus.RateLimited,
+                RetryAfterUtc = T0.UtcDateTime.AddYears(5),
+                Message = "rate limited",
+            };
+            using var svc = NewService();
+            await svc.CheckNowAsync(project.Id).WaitAsync(Bound);
+            Assert.Single(_client.Calls);
+
+            _client.Respond = (_, _) => Ok(Item(1));
+            _now = T0.AddMinutes(61);
+            await svc.CheckNowAsync(project.Id).WaitAsync(Bound);
+
+            Assert.Equal(2, _client.Calls.Count);
+        }
 
         // ── Forgetting projects no longer watched (d270f9dc finding 8) ───────
 
