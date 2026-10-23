@@ -118,6 +118,28 @@ namespace MultiTerminal.Services
             return TryParsePath(path, out repo);
         }
 
+        /// <summary>
+        /// Parses exactly <c>owner/repo</c> as a person types it (not a URL; no <c>.git</c> or trailing
+        /// <c>/</c> is removed). The one owner/name rule, shared with <see cref="RepoWatchSettings"/>.
+        /// </summary>
+        public static bool TryParseFullName(string? fullName, out GitHubRepoRef repo)
+        {
+            repo = default;
+            if (string.IsNullOrEmpty(fullName))
+            {
+                return false;
+            }
+
+            string[] parts = fullName.Split('/');
+            if (parts.Length != 2 || !IsValidOwner(parts[0]) || !IsValidName(parts[1]))
+            {
+                return false;
+            }
+
+            repo = new GitHubRepoRef(parts[0], parts[1]);
+            return true;
+        }
+
         public bool Equals(GitHubRepoRef other)
             => StringComparer.OrdinalIgnoreCase.Equals(Owner, other.Owner)
                && StringComparer.OrdinalIgnoreCase.Equals(Name, other.Name);

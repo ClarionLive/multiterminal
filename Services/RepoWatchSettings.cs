@@ -22,9 +22,6 @@ namespace MultiTerminal.Services
         /// <summary>The intervals the form offers. 0 = check only at startup and when the project is launched.</summary>
         public static readonly IReadOnlyList<int> AllowedIntervals = new[] { 0, 5, 15, 30, 60 };
 
-        private const int MaxOwnerLength = 39;
-        private const int MaxRepoLength = 100;
-
         private static readonly char[] Separators = { ',', ' ', '\t', '\r', '\n' };
 
         /// <summary>
@@ -94,54 +91,10 @@ namespace MultiTerminal.Services
                          .ToList();
         }
 
-        /// <summary>True when <paramref name="value"/> is exactly <c>owner/repo</c> under GitHub's naming rules.</summary>
-        public static bool IsOwnerRepo(string? value)
-        {
-            if (string.IsNullOrEmpty(value))
-                return false;
-            int slash = value.IndexOf('/', StringComparison.Ordinal);
-            if (slash < 0 || value.IndexOf('/', slash + 1) >= 0)
-                return false;
-            return IsOwner(value.Substring(0, slash)) && IsRepo(value.Substring(slash + 1));
-        }
-
-        // GitHub user/organization names: letters, digits and single hyphens, not at either end, at most 39.
-        private static bool IsOwner(string owner)
-        {
-            if (owner.Length == 0 || owner.Length > MaxOwnerLength)
-                return false;
-            if (owner[0] == '-' || owner[owner.Length - 1] == '-')
-                return false;
-            for (int i = 0; i < owner.Length; i++)
-            {
-                char c = owner[i];
-                if (c == '-')
-                {
-                    if (owner[i - 1] == '-')
-                        return false;
-                }
-                else if (!IsAsciiLetterOrDigit(c))
-                {
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        // GitHub repository names: letters, digits, '-', '_' and '.', at most 100, and not "." or "..".
-        private static bool IsRepo(string repo)
-        {
-            if (repo.Length == 0 || repo.Length > MaxRepoLength || repo == "." || repo == "..")
-                return false;
-            foreach (char c in repo)
-            {
-                if (!IsAsciiLetterOrDigit(c) && c != '-' && c != '_' && c != '.')
-                    return false;
-            }
-            return true;
-        }
-
-        private static bool IsAsciiLetterOrDigit(char c) =>
-            (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+        /// <summary>
+        /// True when <paramref name="value"/> is exactly <c>owner/repo</c> under GitHub's naming rules.
+        /// The rule itself is <see cref="GitHubRepoRef.TryParseFullName"/>, so remotes and typed entries agree.
+        /// </summary>
+        public static bool IsOwnerRepo(string? value) => GitHubRepoRef.TryParseFullName(value, out _);
     }
 }
