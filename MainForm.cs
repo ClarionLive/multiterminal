@@ -112,6 +112,11 @@ namespace MultiTerminal
         /// </remarks>
         private MCPServer.Services.AgentActivityWatcher _agentActivityWatcher;
         private MCPServer.Services.TerminalLivenessReaper _terminalLivenessReaper;
+        // GitHub issues/PRs of watched projects, for the status bar badge (task df58b35d). Null until
+        // StartRepoActivityService; the host's open-pane snapshot is refreshed on the UI thread.
+        private Services.RepoActivityService _repoActivity;
+        private Services.RepoActivityHost _repoActivityHost;
+        private Services.GitHubRestClient _repoActivityClient;
         private FilePreviewPanel.FilePreviewPanelDocument _filePreviewPanel;
         private ToolStripButton _filePreviewPanelButton;
 #pragma warning restore CA2213
@@ -1053,6 +1058,10 @@ namespace MultiTerminal
                         // Disconnects terminals whose Claude process died without a teardown, so the
                         // event-driven panels drop them too (task d1151661 item 3).
                         StartTerminalLivenessReaper();
+
+                        // Checks watched projects' GitHub issues and PRs for the status bar badge (task
+                        // df58b35d). Here because it needs the broker's TaskDb, which exists by now.
+                        StartRepoActivityService();
 
                         // Wire terminal stream resolver: resolves any terminal identifier
                         // (terminal ID, DocId, or agent name) to its ConPtyTerminal instance
@@ -4176,6 +4185,9 @@ namespace MultiTerminal
             doc.StartScreenNewProjectRequested += OnStartScreenNewProject;
             doc.StartScreenProjectDeleteRequested += OnStartScreenProjectDeleteRequested;
             doc.ProjectSettingsRequested += (s, projectId) => OpenProjectSettings(projectId);
+            // Repository activity badge (task df58b35d): its click, and a pane's project changing.
+            doc.RepoActivityRequested += OnPaneRepoActivityRequested;
+            doc.SettingsProjectIdChanged += OnPaneSettingsProjectIdChanged;
         }
 
         /// <summary>
@@ -4311,6 +4323,39 @@ namespace MultiTerminal
             {
                 doc.RefreshStartScreenProjects();
                 doc.UpdateStatusBar();
+            }
+
+            RefreshRepoActivityAfterSettingsSaved(projectId);
+        }
+
+        /// <summary>
+        /// Repository watching may just have been turned on or off, or its repositories changed (task
+        /// df58b35d): show the new badge state on that project's panes, and when watching is on and a
+        /// repository has never been checked, check now instead of waiting for the next tick or launch.
+        /// </summary>
+        private void RefreshRepoActivityAfterSettingsSaved(string projectId)
+        {
+            if (_repoActivity == null || string.IsNullOrEmpty(projectId)) return;
+            try
+            {
+                var summary = _repoActivity.GetSummary(projectId);
+                if (summary.Watching
+                    && (summary.State == Models.RepoActivityState.NeverChecked
+                        || summary.Repos.Any(r => r.State == Models.RepoActivityState.NeverChecked)))
+                {
+                    _repoActivity.NotifyProjectLaunched(projectId);
+                }
+
+                var badge = RepoActivityBadge.From(summary);
+                foreach (var doc in _dockPanel.Contents.OfType<TerminalDocument>().ToList())
+                {
+                    if (!doc.IsDisposed && string.Equals(doc.SettingsProjectId, projectId, StringComparison.Ordinal))
+                        doc.SetRepoActivity(badge);
+                }
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Warning("RepoActivity", $"Refresh after settings save failed for project {projectId}: {ex.Message}");
             }
         }
 
@@ -4600,6 +4645,10 @@ namespace MultiTerminal
                 doc.Activate();
                 doc.FocusTerminal();
                 _lastActiveTerminal = doc;
+
+                // The launch has happened (StartTerminal throws on failure, into the catch below): check the
+                // project's GitHub issues and PRs now (task df58b35d). Fire and forget; never throws.
+                _repoActivity?.NotifyProjectLaunched(project.Id);
 
                 // Task 7d20e94c item 6: a RESUMED PM brings back the helpers it left open (the ticked ones
                 // from the dialog, or all of them in Continue mode). A new session never does. Posted, so
@@ -7344,6 +7393,9 @@ namespace MultiTerminal
             // first, and nothing is written once MT is shutting down.
             _paneLaunches?.OnPaneClosed(doc.DocId);
 
+            // Its project may have no pane left: stop the repository tick for it (task df58b35d).
+            RefreshRepoActivityOpenPanes(doc);
+
             // Drop it from the terminal -> doc map.
             lock (_terminalDocMapLock)
             {
@@ -7733,6 +7785,14 @@ namespace MultiTerminal
                 await Task.Delay(3000);
                 Environment.Exit(0);
             });
+
+            // Stop the repository watcher before the MCP server and its TaskDb go: stops its timer and
+            // cancels any GitHub request in flight (task df58b35d). Idempotent; Dispose(bool) repeats it.
+            try
+            {
+                _repoActivity?.Dispose();
+            }
+            catch { }
 
             // Stop HTTP webhook service (cancel, don't wait for listener task)
             try
@@ -9494,6 +9554,172 @@ namespace MultiTerminal
         }
 
         /// <summary>
+        /// Starts the watcher of projects' GitHub issues and pull requests (task df58b35d, GitHub #53) and
+        /// hooks its changes to the status bar badges. Needs the broker's TaskDb (repo_watch_state), so it
+        /// runs after the MCP server is created, next to the liveness reaper. Disposed in OnFormClosing.
+        /// </summary>
+        private void StartRepoActivityService()
+        {
+            try
+            {
+                if (_repoActivity != null) return;
+
+                var taskDb = _mcpServer?.Broker?.TaskDb;
+                if (taskDb == null || _sharedProjectDatabase == null)
+                {
+                    _debugLogService?.Warning("RepoActivity", "Not started: task or project database unavailable.");
+                    return;
+                }
+
+                var host = Services.RepoActivityHost.Create(
+                    _sharedProjectDatabase,
+                    msg => _debugLogService?.Warning("RepoActivity", msg));
+                _repoActivityClient = new Services.GitHubRestClient();
+                var service = new Services.RepoActivityService(
+                    host,
+                    taskDb,
+                    _repoActivityClient,
+                    log: msg => _debugLogService?.Info("RepoActivity", msg));
+                service.RepoActivityChanged += OnRepoActivityChanged;
+
+                _repoActivityHost = host;
+                _repoActivity = service;
+
+                // Seed the open-pane set and show the stored counts on panes opened before this ran, then
+                // start (the startup sweep reads the set). Start itself does nothing on the UI thread.
+                if (IsHandleCreated && !IsDisposed)
+                {
+                    BeginInvoke(new Action(() =>
+                    {
+                        RefreshRepoActivityOpenPanes(null);
+                        foreach (var doc in _dockPanel.Contents.OfType<TerminalDocument>().ToList())
+                            PushRepoActivityBadge(doc);
+                        service.Start();
+                    }));
+                }
+                else
+                {
+                    service.Start();
+                }
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("RepoActivity", $"Failed to start: {ex.Message}");
+            }
+        }
+
+        /// <summary>Raised off the UI thread by the service: refresh the badge of every pane on that project.</summary>
+        private void OnRepoActivityChanged(object sender, Models.RepoActivityChangedEventArgs e)
+        {
+            if (e == null || string.IsNullOrEmpty(e.ProjectId) || IsDisposed || !IsHandleCreated) return;
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    if (IsDisposed || _dockPanel == null) return;
+                    var badge = BuildRepoActivityBadge(e.ProjectId);
+                    foreach (var doc in _dockPanel.Contents.OfType<TerminalDocument>().ToList())
+                    {
+                        if (!doc.IsDisposed && string.Equals(doc.SettingsProjectId, e.ProjectId, StringComparison.Ordinal))
+                            doc.SetRepoActivity(badge);
+                    }
+                }));
+            }
+            catch (InvalidOperationException)
+            {
+                // The handle went away between the check and BeginInvoke: the form is closing.
+            }
+        }
+
+        /// <summary>The badge for <paramref name="projectId"/>, or null (hidden) when not watched or unavailable.</summary>
+        private RepoActivityBadge BuildRepoActivityBadge(string projectId)
+        {
+            if (_repoActivity == null || string.IsNullOrEmpty(projectId)) return null;
+            try
+            {
+                return RepoActivityBadge.From(_repoActivity.GetSummary(projectId));
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Warning("RepoActivity", $"Badge for project {projectId} not built: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>Shows the pane's project badge (hidden when it has no project). UI thread.</summary>
+        private void PushRepoActivityBadge(TerminalDocument doc)
+        {
+            if (doc == null || doc.IsDisposed || _repoActivity == null) return;
+            doc.SetRepoActivity(BuildRepoActivityBadge(doc.SettingsProjectId));
+        }
+
+        /// <summary>
+        /// Recomputes which projects have a pane open, for <see cref="Services.RepoActivityHost.HasOpenPane"/>.
+        /// UI thread: it reads the dock. <paramref name="leaving"/> is a pane being removed right now.
+        /// </summary>
+        private void RefreshRepoActivityOpenPanes(TerminalDocument leaving)
+        {
+            if (_repoActivityHost == null || _dockPanel == null) return;
+            _repoActivityHost.SetOpenPaneProjects(
+                _dockPanel.Contents.OfType<TerminalDocument>()
+                    .Where(d => d != leaving && !d.IsDisposed)
+                    .Select(d => d.SettingsProjectId));
+        }
+
+        /// <summary>A pane's project changed: refresh the open-pane set and show that project's badge.</summary>
+        private void OnPaneSettingsProjectIdChanged(object sender, EventArgs e)
+        {
+            if (!(sender is TerminalDocument doc)) return;
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => OnPaneSettingsProjectIdChanged(sender, e)));
+                return;
+            }
+
+            RefreshRepoActivityOpenPanes(null);
+            PushRepoActivityBadge(doc);
+        }
+
+        /// <summary>The badge was clicked: the project's issue/PR list under the cursor.</summary>
+        private void OnPaneRepoActivityRequested(object sender, string projectId)
+        {
+            if (string.IsNullOrEmpty(projectId)) return;
+            if (_repoActivity == null)
+            {
+                OpenProjectSettings(projectId);
+                return;
+            }
+
+            try
+            {
+                var service = _repoActivity;
+                RepoActivityMenu.Show(
+                    service.GetSummary(projectId),
+                    _currentTheme.IsDark,
+                    markAllSeen: () => service.MarkAllSeen(projectId),
+                    checkNow: () => _ = CheckRepoActivityNowAsync(service, projectId),
+                    openProjectSettings: () => OpenProjectSettings(projectId),
+                    log: msg => _debugLogService?.Warning("RepoActivity", msg));
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("RepoActivity", $"Could not show the list for project {projectId}: {ex.Message}");
+            }
+        }
+
+        private async Task CheckRepoActivityNowAsync(Services.RepoActivityService service, string projectId)
+        {
+            try
+            {
+                await service.CheckNowAsync(projectId).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("RepoActivity", $"Check now failed for project {projectId}: {ex.Message}");
+            }
+        }
+
+        /// <summary>
         /// The shared placeholder name every restored/anonymous terminal carries until its agent
         /// registers a real one. Not an identity: the broker itself skips profile creation for it.
         /// </summary>
@@ -10288,6 +10514,9 @@ namespace MultiTerminal
                 _agentActivityWatcher?.Dispose();
                 // Before the broker state and profile DB its sweep writes (task d1151661).
                 _terminalLivenessReaper?.Dispose();
+                // Before the project database its host reads (task df58b35d); already done in OnFormClosing.
+                _repoActivity?.Dispose();
+                _repoActivityClient?.Dispose();
                 // Dispose the coordinator after the watcher that uses it, before the DB it indexes.
                 _mcpServer?.Broker?.CodeGraphIndexCoordinator?.Dispose();
                 _sessionIndexingService?.Dispose();

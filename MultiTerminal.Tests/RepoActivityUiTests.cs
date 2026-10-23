@@ -346,6 +346,78 @@ namespace MultiTerminal.Tests
             Assert.True(missing.Count == 0, "statusbar.html's setRepoActivity() never reads: " + string.Join(", ", missing));
         }
 
+        // ── RepoActivityHost ─────────────────────────────────────────────────
+
+        [Fact]
+        public void Host_sends_only_a_github_account_s_token_and_reads_no_other()
+        {
+            int reads = 0;
+            string? Read()
+            {
+                reads++;
+                return " tok ";
+            }
+
+            Assert.Equal("tok", Services.RepoActivityHost.TokenFor(new SourceControlAccount { Provider = "GitHub " }, Read));
+            Assert.Equal(1, reads);
+
+            Assert.Null(Services.RepoActivityHost.TokenFor(new SourceControlAccount { Provider = "bitbucket" }, Read));
+            Assert.Null(Services.RepoActivityHost.TokenFor(null, Read));
+            Assert.Equal(1, reads);
+
+            Assert.Null(Services.RepoActivityHost.TokenFor(new SourceControlAccount { Provider = "github" }, () => "  "));
+        }
+
+        [Fact]
+        public void Host_token_lookup_fails_to_null_and_needs_an_account_id()
+        {
+            int lookups = 0;
+            var host = new Services.RepoActivityHost(
+                () => Array.Empty<Project>(),
+                _ => null,
+                id =>
+                {
+                    lookups++;
+                    throw new InvalidOperationException("store unavailable");
+                });
+
+            Assert.Null(host.GetGitHubToken(new Project { Id = "p", Name = "P", SourceControlAccountId = null }));
+            Assert.Equal(0, lookups);
+            Assert.Null(host.GetGitHubToken(new Project { Id = "p", Name = "P", SourceControlAccountId = "acc1" }));
+            Assert.Equal(1, lookups);
+        }
+
+        [Fact]
+        public void Host_open_panes_are_the_last_snapshot_given()
+        {
+            var host = new Services.RepoActivityHost(() => Array.Empty<Project>(), _ => null, _ => (null, () => null));
+
+            Assert.False(host.HasOpenPane("p1"));
+            host.SetOpenPaneProjects(new[] { "p1", null, string.Empty, "p2" });
+            Assert.True(host.HasOpenPane("p1"));
+            Assert.True(host.HasOpenPane("p2"));
+            Assert.False(host.HasOpenPane("P1"));
+
+            host.SetOpenPaneProjects(new[] { "p2" });
+            Assert.False(host.HasOpenPane("p1"));
+            Assert.False(host.HasOpenPane(string.Empty));
+        }
+
+        [Fact]
+        public void Host_lists_only_watched_projects()
+        {
+            var projects = new List<Project>
+            {
+                new() { Id = "a", Name = "A", RepoWatchEnabled = true },
+                new() { Id = "b", Name = "B", RepoWatchEnabled = false },
+            };
+            var host = new Services.RepoActivityHost(() => projects, id => projects.FirstOrDefault(p => p.Id == id), _ => (null, () => null));
+
+            Assert.Equal(new[] { "a" }, host.GetWatchedProjects().Select(p => p.Id));
+            Assert.Equal("B", host.GetProject("b")!.Name);
+            Assert.Null(host.GetProject(" "));
+        }
+
         // ── Helpers ──────────────────────────────────────────────────────────
 
         private static RepoActivitySummary Summary(
