@@ -236,12 +236,12 @@ namespace MultiTerminal.Models
         /// How often, in minutes, the repositories are checked (<c>projects.repo_watch_interval_min</c>):
         /// one of <see cref="RepoWatchSettings.AllowedIntervals"/>, 0 meaning only at startup and when the
         /// project is launched. Null reads as <see cref="RepoWatchSettings.DefaultIntervalMinutes"/>; use
-        /// <see cref="RepoWatchIntervalMinutes"/>. SQLite-only, like <see cref="RepoWatchEnabled"/>.
+        /// <see cref="EffectiveRepoWatchIntervalMinutes"/>. SQLite-only, like <see cref="RepoWatchEnabled"/>.
         /// </summary>
         public int? RepoWatchIntervalMin { get; set; }
 
         /// <summary><see cref="RepoWatchIntervalMin"/> with null read as the default.</summary>
-        public int RepoWatchIntervalMinutes => RepoWatchIntervalMin ?? RepoWatchSettings.DefaultIntervalMinutes;
+        public int EffectiveRepoWatchIntervalMinutes => RepoWatchIntervalMin ?? RepoWatchSettings.DefaultIntervalMinutes;
 
         /// <summary>
         /// The repositories to watch (<c>projects.repo_watch_repos</c>), stored normalized as

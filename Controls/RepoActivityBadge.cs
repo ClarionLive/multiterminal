@@ -75,7 +75,7 @@ namespace MultiTerminal.Controls
                     tooltip = hasList ? counts + " — checking now" : "Checking now.";
                     break;
                 default:
-                    string reason = string.IsNullOrWhiteSpace(summary.Reason) ? DefaultReason(summary.State) : summary.Reason!;
+                    string reason = string.IsNullOrWhiteSpace(summary.Reason) ? RepoActivityReasons.For(summary.State) : summary.Reason!;
                     tooltip = hasList ? counts + LastChecked(summary.LastCheckedUtc, now) + "\n" + reason : reason;
                     break;
             }
@@ -139,15 +139,6 @@ namespace MultiTerminal.Controls
 
         private static string Plural(int n, string one, string many)
             => n.ToString(CultureInfo.InvariantCulture) + " " + (n == 1 ? one : many);
-
-        private static string DefaultReason(RepoActivityState state) => state switch
-        {
-            RepoActivityState.NeverChecked => "Not checked yet.",
-            RepoActivityState.NoRepos => "No GitHub repository found for this project.",
-            RepoActivityState.NoAccess => "No access to the repository: check the project's source control account.",
-            RepoActivityState.RateLimited => "Rate limited by GitHub.",
-            _ => "The last check failed.",
-        };
 
         // A reason is built by the service from GitHub's answer or an exception message. It never holds
         // the token (the client scrubs it), but a network exception can name an address; the badge does

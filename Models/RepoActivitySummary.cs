@@ -36,6 +36,27 @@ namespace MultiTerminal.Models
         Disabled,
     }
 
+    /// <summary>
+    /// The one default wording for each <see cref="RepoActivityState"/>, used when nothing more specific
+    /// is known (GitHub's own message, when there is one, is shown instead). The service and the badge
+    /// both read it, so the tooltip and the list can never describe the same state two ways.
+    /// </summary>
+    public static class RepoActivityReasons
+    {
+        public static string For(RepoActivityState state) => state switch
+        {
+            RepoActivityState.Ok => string.Empty,
+            RepoActivityState.Checking => "Checking now.",
+            RepoActivityState.NeverChecked => "Not checked yet.",
+            RepoActivityState.NoRepos =>
+                "No GitHub repository to watch: list one in the project settings, or give the project folder a github.com remote.",
+            RepoActivityState.NoAccess => "GitHub refused access to this repository.",
+            RepoActivityState.RateLimited => "GitHub's rate limit was reached.",
+            RepoActivityState.Disabled => "Watching issues and pull requests is off for this project.",
+            _ => "The last check failed.",
+        };
+    }
+
     /// <summary>One open issue or pull request as the status bar shows it.</summary>
     public sealed class RepoActivityEntry
     {

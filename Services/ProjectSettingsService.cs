@@ -430,7 +430,7 @@ namespace MultiTerminal.Services
                 case "sourceControlAccountId": return p.SourceControlAccountId;
                 case "changeLog": return p.ChangeLog;
                 case "repoWatchEnabled": return p.IsRepoWatchEnabled ? "true" : "false";
-                case "repoWatchIntervalMin": return p.RepoWatchIntervalMinutes.ToString(CultureInfo.InvariantCulture);
+                case "repoWatchIntervalMin": return p.EffectiveRepoWatchIntervalMinutes.ToString(CultureInfo.InvariantCulture);
                 case "repoWatchRepos": return p.RepoWatchRepos;
                 default: throw new ArgumentOutOfRangeException(nameof(field), field, "Not an editable project field.");
             }

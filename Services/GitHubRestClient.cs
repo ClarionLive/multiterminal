@@ -102,8 +102,11 @@ namespace MultiTerminal.Services
         private const int LabelMaxChars = 50;
         private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(15);
 
-        /// <summary>When a rate-limited response says nothing about when to retry.</summary>
-        private static readonly TimeSpan FallbackRetryDelay = TimeSpan.FromSeconds(60);
+        /// <summary>
+        /// When a rate-limited response says nothing about when to retry. Also the service's wait for an
+        /// <see cref="IRepoIssuesClient"/> that reports a rate limit without a time: one value, one place.
+        /// </summary>
+        internal static readonly TimeSpan FallbackRetryDelay = TimeSpan.FromSeconds(60);
 
         private static readonly HttpClient SharedHttp = new() { Timeout = DefaultTimeout };
 

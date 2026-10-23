@@ -547,7 +547,7 @@ namespace MultiTerminal.Tests
             Assert.Null(stored.RepoWatchIntervalMin);
             Assert.Null(stored.RepoWatchRepos);
             Assert.False(stored.IsRepoWatchEnabled);
-            Assert.Equal(15, stored.RepoWatchIntervalMinutes);
+            Assert.Equal(15, stored.EffectiveRepoWatchIntervalMinutes);
             Assert.Equal("false", ProjectSettingsService.ReadField(stored, "repoWatchEnabled"));
             Assert.Equal("15", ProjectSettingsService.ReadField(stored, "repoWatchIntervalMin"));
         }

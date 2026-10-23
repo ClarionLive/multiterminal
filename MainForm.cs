@@ -4344,20 +4344,14 @@ namespace MultiTerminal
             if (_repoActivity == null || string.IsNullOrEmpty(projectId)) return;
             try
             {
-                var summary = _repoActivity.GetSummary(projectId);
-                if (summary.Watching) _repoActivity.NotifySettingsChanged(projectId);
-
-                var badge = RepoActivityBadge.From(summary);
-                foreach (var doc in _dockPanel.Contents.OfType<TerminalDocument>().ToList())
-                {
-                    if (!doc.IsDisposed && string.Equals(doc.SettingsProjectId, projectId, StringComparison.Ordinal))
-                        doc.SetRepoActivity(badge);
-                }
+                _repoActivity.NotifySettingsChanged(projectId);
             }
             catch (Exception ex)
             {
-                _debugLogService?.Warning("RepoActivity", $"Refresh after settings save failed for project {projectId}: {ex.Message}");
+                _debugLogService?.Warning("RepoActivity", $"Recheck after settings save failed for project {projectId}: {ex.Message}");
             }
+
+            ApplyRepoActivityBadge(projectId, BuildRepoActivityBadge(projectId));
         }
 
         /// <summary>
@@ -9621,26 +9615,33 @@ namespace MultiTerminal
             }
         }
 
-        /// <summary>Raised off the UI thread by the service: refresh the badge of every pane on that project.</summary>
+        /// <summary>
+        /// Raised off the UI thread by the service, at a check's start and end: build that project's badge
+        /// here, on the raising thread (the summary is database reads and a JSON parse per repo), and hand
+        /// only the finished badge to the UI thread.
+        /// </summary>
         private void OnRepoActivityChanged(object sender, Models.RepoActivityChangedEventArgs e)
         {
             if (e == null || string.IsNullOrEmpty(e.ProjectId) || IsDisposed || !IsHandleCreated) return;
+            var badge = BuildRepoActivityBadge(e.ProjectId);
             try
             {
-                BeginInvoke(new Action(() =>
-                {
-                    if (IsDisposed || _dockPanel == null) return;
-                    var badge = BuildRepoActivityBadge(e.ProjectId);
-                    foreach (var doc in _dockPanel.Contents.OfType<TerminalDocument>().ToList())
-                    {
-                        if (!doc.IsDisposed && string.Equals(doc.SettingsProjectId, e.ProjectId, StringComparison.Ordinal))
-                            doc.SetRepoActivity(badge);
-                    }
-                }));
+                BeginInvoke(new Action(() => ApplyRepoActivityBadge(e.ProjectId, badge)));
             }
             catch (InvalidOperationException)
             {
                 // The handle went away between the check and BeginInvoke: the form is closing.
+            }
+        }
+
+        /// <summary>Shows <paramref name="badge"/> on every pane on <paramref name="projectId"/>. UI thread.</summary>
+        private void ApplyRepoActivityBadge(string projectId, RepoActivityBadge badge)
+        {
+            if (IsDisposed || _dockPanel == null) return;
+            foreach (var doc in _dockPanel.Contents.OfType<TerminalDocument>().ToList())
+            {
+                if (!doc.IsDisposed && string.Equals(doc.SettingsProjectId, projectId, StringComparison.Ordinal))
+                    doc.SetRepoActivity(badge);
             }
         }
 

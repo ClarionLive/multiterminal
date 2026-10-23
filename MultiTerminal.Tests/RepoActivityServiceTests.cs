@@ -707,6 +707,74 @@ namespace MultiTerminal.Tests
             Assert.False(svc.IsRunning);
         }
 
+        // ── Forgetting projects no longer watched (d270f9dc finding 8) ───────
+
+        [Fact]
+        public async Task A_tick_forgets_a_project_whose_watching_was_turned_off()
+        {
+            var keep = AddProject("p1", repos: "owner/keep");
+            var drop = AddProject("p2", repos: "owner/drop");
+            using var svc = NewService();
+            await svc.CheckNowAsync(keep.Id).WaitAsync(Bound);
+            await svc.CheckNowAsync(drop.Id).WaitAsync(Bound);
+            Assert.Equal(2, svc.RememberedCounts().Projects);
+
+            drop.RepoWatchEnabled = false;
+            await svc.TickAsync().WaitAsync(Bound);
+
+            Assert.Equal(1, svc.RememberedCounts().Projects);
+        }
+
+        [Fact]
+        public async Task A_tick_forgets_a_deleted_project()
+        {
+            var gone = AddProject("p1", repos: "owner/repo");
+            using var svc = NewService();
+            await svc.CheckNowAsync(gone.Id).WaitAsync(Bound);
+            Assert.Equal(1, svc.RememberedCounts().Projects);
+
+            _host.Projects.TryRemove(gone.Id, out _);
+            await svc.TickAsync().WaitAsync(Bound);
+
+            Assert.Equal(0, svc.RememberedCounts().Projects);
+        }
+
+        [Fact]
+        public async Task An_expired_backoff_is_forgotten_and_a_live_one_is_kept()
+        {
+            var project = AddProject("p1", repos: "owner/repo");
+            _client.Respond = (_, _) => new RepoIssuesResult
+            {
+                Status = RepoIssuesStatus.RateLimited,
+                RetryAfterUtc = T0.UtcDateTime.AddMinutes(10),
+                Message = "rate limited",
+            };
+            using var svc = NewService();
+            await svc.CheckNowAsync(project.Id).WaitAsync(Bound);
+
+            // Turned off inside the rate limit: the backoff must survive so turning it on again cannot
+            // call GitHub before the reset.
+            project.RepoWatchEnabled = false;
+            await svc.TickAsync().WaitAsync(Bound);
+            Assert.Equal(1, svc.RememberedCounts().Backoffs);
+
+            _now = T0.AddMinutes(11);
+            await svc.TickAsync().WaitAsync(Bound);
+            Assert.Equal(0, svc.RememberedCounts().Backoffs);
+        }
+
+        [Fact]
+        public async Task A_settings_change_on_an_unwatched_project_calls_nothing()
+        {
+            var project = AddProject("p1", repos: "owner/repo", enabled: false);
+            using var svc = NewService();
+
+            await svc.ScheduleSettingsCheck(project.Id).WaitAsync(Bound);
+
+            Assert.Empty(_client.Calls);
+            Assert.Equal(0, svc.RememberedCounts().Projects);
+        }
+
         // ── Helpers ──────────────────────────────────────────────────────────
 
         private RepoActivityService NewService()

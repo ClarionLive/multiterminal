@@ -101,9 +101,23 @@ namespace MultiTerminal.Tests
             Assert.Null(never.PullRequests);
             Assert.Equal("Not checked yet.", never.Tooltip);
 
+            // With no reason given, the badge falls back to the shared wording, the same text the list shows.
             var noRepos = RepoActivityBadge.From(Summary(RepoActivityState.NoRepos, reason: null), Now)!;
             Assert.Null(noRepos.Issues);
-            Assert.Equal("No GitHub repository found for this project.", noRepos.Tooltip);
+            Assert.Equal(RepoActivityReasons.For(RepoActivityState.NoRepos), noRepos.Tooltip);
+            Assert.StartsWith("No GitHub repository to watch", noRepos.Tooltip, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void Every_failure_state_has_a_default_wording_and_Ok_has_none()
+        {
+            foreach (RepoActivityState state in Enum.GetValues(typeof(RepoActivityState)))
+            {
+                if (state == RepoActivityState.Ok)
+                    Assert.Equal(string.Empty, RepoActivityReasons.For(state));
+                else
+                    Assert.False(string.IsNullOrWhiteSpace(RepoActivityReasons.For(state)), state.ToString());
+            }
         }
 
         [Fact]

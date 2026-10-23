@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using MultiTerminal.Models;
 using RepoWatchState = MultiTerminal.MCPServer.Models.RepoWatchState;
+using RepoWatchStatus = MultiTerminal.MCPServer.Models.RepoWatchStatus;
 
 namespace MultiTerminal.Services
 {
@@ -90,9 +91,6 @@ namespace MultiTerminal.Services
 
         /// <summary>The shortest tick interval for a project with no token (GitHub allows 60 requests an hour).</summary>
         internal const int UnauthenticatedFloorMinutes = 15;
-
-        /// <summary>When a rate-limited answer gives no retry time.</summary>
-        private static readonly TimeSpan FallbackBackoff = TimeSpan.FromSeconds(60);
 
         private const string EnvVar = "MULTITERMINAL_REPO_WATCH";
 
@@ -357,11 +355,15 @@ namespace MultiTerminal.Services
             try
             {
                 DateTimeOffset now = _utcNow();
-                foreach (var project in _host.GetWatchedProjects() ?? Array.Empty<Project>())
-                {
-                    if (project == null || string.IsNullOrWhiteSpace(project.Id) || !project.IsRepoWatchEnabled) continue;
+                var projects = (_host.GetWatchedProjects() ?? Array.Empty<Project>())
+                    .Where(p => p != null && !string.IsNullOrWhiteSpace(p.Id) && p.IsRepoWatchEnabled)
+                    .ToList();
+                ForgetUnwatched(projects.Select(p => p.Id).ToHashSet(StringComparer.Ordinal), now.UtcDateTime);
 
-                    int interval = project.RepoWatchIntervalMinutes;
+                foreach (var project in projects)
+                {
+
+                    int interval = project.EffectiveRepoWatchIntervalMinutes;
                     if (interval <= 0) continue; // startup and launch only
                     if (!_host.HasOpenPane(project.Id)) continue;
                     if (SafeGetToken(project) == null) interval = Math.Max(interval, UnauthenticatedFloorMinutes);
@@ -424,6 +426,10 @@ namespace MultiTerminal.Services
         internal Task ScheduleSettingsCheck(string projectId)
         {
             if (_disposed || IsDisabled() || string.IsNullOrWhiteSpace(projectId)) return Task.CompletedTask;
+
+            // Watching was just turned off (or the project is gone): nothing to check. The next tick
+            // forgets its in-memory state.
+            if (SafeGetProject(projectId) is not { IsRepoWatchEnabled: true }) return Task.CompletedTask;
             Task running;
             lock (_gate)
             {
@@ -516,7 +522,7 @@ namespace MultiTerminal.Services
                     catch (Exception ex)
                     {
                         Log($"RepoActivityService check of {repo.FullName} for project {project.Name} failed: {ex.Message}");
-                        TrySave(projectId, repo.FullName, "error", "The check failed inside MultiTerminal; see the debug log.");
+                        TrySave(projectId, repo.FullName, RepoWatchStatus.Error, "The check failed inside MultiTerminal; see the debug log.");
                     }
                     finally
                     {
@@ -566,35 +572,35 @@ namespace MultiTerminal.Services
             {
                 case RepoIssuesStatus.Ok:
                     var items = result.Items ?? Array.Empty<RepoActivityItem>();
-                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, result.ETag, now, "ok", null, JsonSerializer.Serialize(items));
+                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, result.ETag, now, RepoWatchStatus.Ok, null, JsonSerializer.Serialize(items));
                     _db.InitializeRepoSeenIfUnset(project.Id, repo.FullName, items.Count == 0 ? 0 : items.Max(i => i.Number));
                     ClearBackoff(project.Id, key);
                     break;
 
                 case RepoIssuesStatus.NotModified:
-                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, result.ETag, now, "ok", null, null);
+                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, result.ETag, now, RepoWatchStatus.Ok, null, null);
                     ClearBackoff(project.Id, key);
                     break;
 
                 case RepoIssuesStatus.RateLimited:
-                    DateTime until = result.RetryAfterUtc ?? now + FallbackBackoff;
+                    DateTime until = result.RetryAfterUtc ?? now + GitHubRestClient.FallbackRetryDelay;
                     lock (_gate)
                     {
                         _backoffUntil[BackoffKey(project.Id, key)] = until;
                     }
 
-                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, null, now, "rate_limited", result.Message, null);
+                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, null, now, RepoWatchStatus.RateLimited, result.Message, null);
                     Log($"RepoActivityService: {repo.FullName} rate-limited until {until:u}.");
                     break;
 
                 case RepoIssuesStatus.Unauthorized:
                 case RepoIssuesStatus.NotFound:
-                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, null, now, "no_access", result.Message, null);
+                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, null, now, RepoWatchStatus.NoAccess, result.Message, null);
                     Log($"RepoActivityService: {repo.FullName}: {result.Message}");
                     break;
 
                 default:
-                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, null, now, "error", result.Message, null);
+                    _db.SaveRepoWatchFetch(project.Id, repo.FullName, null, now, RepoWatchStatus.Error, result.Message, null);
                     Log($"RepoActivityService: {repo.FullName}: {result.Message}");
                     break;
             }
@@ -681,36 +687,25 @@ namespace MultiTerminal.Services
             if (checking)
             {
                 repoState = RepoActivityState.Checking;
-                reason = "Checking now.";
+                reason = RepoActivityReasons.For(repoState);
             }
             else if (state?.LastCheckedAt == null)
             {
                 repoState = RepoActivityState.NeverChecked;
-                reason = "Not checked yet.";
+                reason = RepoActivityReasons.For(repoState);
             }
             else
             {
-                switch (state.LastStatus)
+                repoState = state.LastStatus switch
                 {
-                    case "ok":
-                        repoState = RepoActivityState.Ok;
-                        reason = null;
-                        break;
-                    case "rate_limited":
-                        repoState = RepoActivityState.RateLimited;
-                        reason = state.LastMessage ?? "GitHub's rate limit was reached.";
-                        DateTime? until = GetBackoff(projectId, key);
-                        if (until.HasValue) reason += $" Next try after {until.Value.ToLocalTime():HH:mm}.";
-                        break;
-                    case "no_access":
-                        repoState = RepoActivityState.NoAccess;
-                        reason = state.LastMessage ?? "GitHub refused access to this repository.";
-                        break;
-                    default:
-                        repoState = RepoActivityState.Error;
-                        reason = state.LastMessage ?? "The last check failed.";
-                        break;
-                }
+                    RepoWatchStatus.Ok => RepoActivityState.Ok,
+                    RepoWatchStatus.RateLimited => RepoActivityState.RateLimited,
+                    RepoWatchStatus.NoAccess => RepoActivityState.NoAccess,
+                    _ => RepoActivityState.Error,
+                };
+                reason = repoState == RepoActivityState.Ok ? null : state.LastMessage ?? RepoActivityReasons.For(repoState);
+                if (repoState == RepoActivityState.RateLimited && GetBackoff(projectId, key) is DateTime until)
+                    reason += $" Next try after {until.ToLocalTime():HH:mm}.";
             }
 
             return new RepoActivityRepo
@@ -728,15 +723,10 @@ namespace MultiTerminal.Services
         {
             if (repos.Count == 0)
             {
-                if (noRepos)
-                {
-                    return (RepoActivityState.NoRepos,
-                        "No GitHub repository to watch: list one in the project settings, or give the project folder a github.com remote.");
-                }
-
-                return checking
-                    ? (RepoActivityState.Checking, "Checking now.")
-                    : (RepoActivityState.NeverChecked, "Not checked yet.");
+                var none = noRepos ? RepoActivityState.NoRepos
+                    : checking ? RepoActivityState.Checking
+                    : RepoActivityState.NeverChecked;
+                return (none, RepoActivityReasons.For(none));
             }
 
             var problems = repos.Where(r => ProblemRank(r.State) > 0).OrderByDescending(r => ProblemRank(r.State)).ToList();
@@ -749,8 +739,8 @@ namespace MultiTerminal.Services
             }
 
             if (repos.Any(r => r.State == RepoActivityState.Ok)) return (RepoActivityState.Ok, null);
-            if (repos.Any(r => r.State == RepoActivityState.Checking)) return (RepoActivityState.Checking, "Checking now.");
-            return (RepoActivityState.NeverChecked, "Not checked yet.");
+            var idle = repos.Any(r => r.State == RepoActivityState.Checking) ? RepoActivityState.Checking : RepoActivityState.NeverChecked;
+            return (idle, RepoActivityReasons.For(idle));
         }
 
         /// <summary>How bad a failed state is; 0 for a state that is not a failure.</summary>
@@ -812,6 +802,38 @@ namespace MultiTerminal.Services
         }
 
         private static string BackoffKey(string projectId, string repoKey) => projectId + "\n" + repoKey;
+
+        /// <summary>
+        /// Drops in-memory state that can no longer matter, so the maps do not grow with every project
+        /// ever watched: the last-check time and runtime of any project not in <paramref name="watchedIds"/>
+        /// (deleted, or watching turned off) unless a check of it is still running, and every rate-limit
+        /// backoff that has expired. An unexpired backoff is kept even for an unwatched project, so turning
+        /// watching off and on again cannot call GitHub inside a rate limit.
+        /// </summary>
+        internal void ForgetUnwatched(IReadOnlySet<string> watchedIds, DateTime nowUtc)
+        {
+            lock (_gate)
+            {
+                foreach (var id in _lastCheckStarted.Keys.Concat(_runtime.Keys).Distinct(StringComparer.Ordinal).ToList())
+                {
+                    if (watchedIds.Contains(id) || _inFlight.ContainsKey(id)) continue;
+                    _lastCheckStarted.Remove(id);
+                    _runtime.Remove(id);
+                }
+
+                foreach (var entry in _backoffUntil.Where(b => b.Value <= nowUtc).ToList())
+                    _backoffUntil.Remove(entry.Key);
+            }
+        }
+
+        /// <summary>For tests: how many projects and backoffs the service still remembers.</summary>
+        internal (int Projects, int Backoffs) RememberedCounts()
+        {
+            lock (_gate)
+            {
+                return (_lastCheckStarted.Keys.Concat(_runtime.Keys).Distinct(StringComparer.Ordinal).Count(), _backoffUntil.Count);
+            }
+        }
 
         private bool IsBackedOff(string projectId, string repoKey)
         {
