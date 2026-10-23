@@ -196,15 +196,14 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
-        public void Setting_sources_are_repeated_not_comma_joined()
+        public void Setting_sources_are_one_quoted_flag_not_repeated()
         {
-            // Pins the CLI 2.1.168 workaround documented on BuildSettingSourcesFlags: the comma form is
-            // mis-parsed and fails with "Invalid setting source: user project". A future tidy-up toward
-            // the comma form would look like a simplification and would break every launch.
-            string flags = LaunchCommandBuilder.BuildSettingSourcesFlags("user,project");
+            // GH #52: the flag is last-wins, so the old repeated form kept only "project" and dropped
+            // user settings and plugins. The quotes keep pwsh -Command from turning the comma list into
+            // an array ("Invalid setting source: user project").
+            string flags = LaunchCommandBuilder.BuildSettingSourcesFlags("user, project");
 
-            Assert.Equal(" --setting-sources user --setting-sources project", flags);
-            Assert.DoesNotContain("user,project", flags, StringComparison.Ordinal);
+            Assert.Equal(" --setting-sources 'user,project'", flags);
         }
     }
 }

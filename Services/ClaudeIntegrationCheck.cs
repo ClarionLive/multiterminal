@@ -112,7 +112,7 @@ namespace MultiTerminal.Services
                     : "• The MultiTerminal Claude Code plugin was not found in any of these locations:"
                       + string.Concat(expectedPluginDirs.Select(d => "\n   " + d)));
             if (problems.Contains(Problem.NodeMissing))
-                lines.Add("• Node.js was not found on MultiTerminal's PATH. The agent tools need Node.js 18 or later "
+                lines.Add("• Node.js was not found on MultiTerminal's PATH. The agent tools need Node.js 24 or later "
                           + "(https://nodejs.org). If you installed it after starting MultiTerminal, restart MultiTerminal.");
 
             if (problems.Contains(Problem.McpServerMissing) || problems.Contains(Problem.PluginMissing))

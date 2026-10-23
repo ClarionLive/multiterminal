@@ -137,7 +137,7 @@ claude --add-dir <mt-source> --settings <settings.local.json> --mcp-config <mcp.
 
 **Now** (what `LaunchCommandBuilder.BuildFlags` emits; checked against source 2026-09-29, ticket 0ff1b520 item 16):
 ```
-claude --plugin-dir '<plugin>' --mcp-config '<%APPDATA%\multiterminal\.mcp.json>' [--settings <forced statusline> --setting-sources user,project] --dangerously-skip-permissions; exit
+claude --plugin-dir '<plugin>' --mcp-config '<%APPDATA%\multiterminal\.mcp.json>' [--settings <forced statusline> --setting-sources 'user,project'] --dangerously-skip-permissions; exit
 ```
 
 > ⚠️ The "Before" line above is history. Its `--channels server:multiterminal-channel` form is **not** what

@@ -374,22 +374,25 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Builds the <c>--setting-sources</c> flags from a comma-separated source list.
-        /// <para><b>Why not just pass the comma string?</b> Claude Code 2.1.168 has a regression:
-        /// although <c>--help</c> documents <c>--setting-sources</c> as a "comma-separated list",
-        /// the multi-value comma form is mis-parsed — the comma is collapsed to a space and the
-        /// whole token is validated as one source, so <c>--setting-sources user,project</c> fails
-        /// with <c>Invalid setting source: user project</c>. Single values still parse, and
-        /// REPEATING the flag once per source works. So we emit one <c>--setting-sources</c> per
-        /// source (e.g. <c>--setting-sources user --setting-sources project</c>) regardless of how
-        /// many sources are requested. Returns a leading-space-prefixed string ready to append.</para>
+        /// Builds the <c>--setting-sources</c> flag from a comma-separated source list.
+        /// <para>Emits ONE flag with the list single-quoted (<c>--setting-sources 'user,project'</c>).
+        /// The flag is last-wins: repeating it (<c>--setting-sources user --setting-sources project</c>)
+        /// keeps only <c>project</c>, so user settings and user plugins are silently ignored (GH #52).
+        /// The quotes are needed because the pane runs the command through <c>pwsh -Command</c>, where an
+        /// unquoted <c>user,project</c> is an array that reaches claude as <c>user project</c> and fails
+        /// with <c>Invalid setting source: user project</c>. Returns a leading-space-prefixed string
+        /// ready to append.</para>
         /// </summary>
-        public static string BuildSettingSourcesFlags(string commaSeparatedSources) =>
-            string.IsNullOrWhiteSpace(commaSeparatedSources)
-                ? string.Empty
-                : string.Concat(commaSeparatedSources
-                    .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
-                    .Select(s => $" --setting-sources {s.Trim()}"));
+        public static string BuildSettingSourcesFlags(string commaSeparatedSources)
+        {
+            if (string.IsNullOrWhiteSpace(commaSeparatedSources)) return string.Empty;
+            var sources = commaSeparatedSources
+                .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(s => s.Trim())
+                .Where(s => s.Length > 0)
+                .ToArray();
+            return sources.Length == 0 ? string.Empty : $" --setting-sources '{string.Join(",", sources)}'";
+        }
 
         /// <summary>
         /// The value MT asks its terminals to use for Claude Code's <c>crossSessionInbound</c>
