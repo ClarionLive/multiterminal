@@ -15,6 +15,10 @@ A Windows desktop app (.NET 8 / WinForms / WebView2) for running and coordinatin
 - **Session Persistence**: Resume sessions and maintain identity across restarts
 - **Startup Context Injection**: Automatic task/plan context provided to terminals at session start
 
+## Building from source
+
+Cloned or forked the repository? **[BUILDING.md](BUILDING.md)** covers prerequisites (including the Node.js version), building, first run, installing the Claude Code plugin, and running the tests. To install MT rather than build it, see [DEPLOYMENT-GUIDE.md](DEPLOYMENT-GUIDE.md).
+
 ## Documentation
 
 Full documentation is available online at [clarionlive.github.io/multiterminal](https://clarionlive.github.io/multiterminal/html/index.html). The same HTML site ships with the app under `docs/html/` — open it any time from the **Help** button (❓) in the toolbar, immediately right of History.
