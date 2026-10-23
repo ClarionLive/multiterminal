@@ -14,8 +14,8 @@ namespace MultiTerminal.Services
     /// <item>projects come from <see cref="ProjectDatabase"/>, whose every connection-touching method takes
     /// its own lock;</item>
     /// <item>"is a pane open on this project" reads an immutable snapshot that MainForm replaces on the UI
-    /// thread (<see cref="SetOpenPaneProjects"/>) whenever a pane's project changes or a pane leaves the
-    /// dock, so this side never enumerates controls;</item>
+    /// thread (<see cref="SetOpenPaneProjects"/>) whenever a pane's project changes, a pane's terminal
+    /// starts or exits, or a pane leaves the dock, so this side never enumerates controls;</item>
     /// <item>the token is read per call through a short-lived <see cref="SourceControlAccountService"/>
     /// (it opens its own connection), and only for an account whose provider is <c>github</c>.</item>
     /// </list>
@@ -70,6 +70,16 @@ namespace MultiTerminal.Services
 
             _openPaneProjects = set;
         }
+
+        /// <summary>
+        /// The project a pane keeps "open" for the tick, or null when it keeps none (pipeline Run 1): only a
+        /// pane whose terminal is running counts. A pane back on its start screen keeps its
+        /// <c>SettingsProjectId</c> (the settings gear depends on it), but nothing runs there, so it must not
+        /// keep the project's repositories polled. MainForm passes <c>TerminalDocument.IsDisposed</c>,
+        /// <c>IsTerminalStarted</c> and <c>SettingsProjectId</c>.
+        /// </summary>
+        internal static string? OpenPaneProject(bool isDisposed, bool isTerminalStarted, string? settingsProjectId)
+            => !isDisposed && isTerminalStarted && !string.IsNullOrEmpty(settingsProjectId) ? settingsProjectId : null;
 
         /// <inheritdoc />
         public IReadOnlyList<Project> GetWatchedProjects()

@@ -403,6 +403,17 @@ namespace MultiTerminal.Tests
             Assert.False(host.HasOpenPane(string.Empty));
         }
 
+        [Theory]
+        [InlineData(false, true, "p1", "p1")]   // a running terminal on a project
+        [InlineData(false, false, "p1", null)]  // back on the start screen: keeps its gear, not the tick
+        [InlineData(true, true, "p1", null)]    // disposed
+        [InlineData(false, true, null, null)]   // no project
+        [InlineData(false, true, "", null)]
+        public void Only_a_running_pane_keeps_its_project_open(bool disposed, bool started, string? projectId, string? expected)
+        {
+            Assert.Equal(expected, Services.RepoActivityHost.OpenPaneProject(disposed, started, projectId));
+        }
+
         [Fact]
         public void Host_lists_only_watched_projects()
         {

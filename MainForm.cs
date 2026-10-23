@@ -7284,6 +7284,11 @@ namespace MultiTerminal
         {
             if (e == null) return;
             _paneLaunches?.OnLaunchBegan(e.DocId, e.TerminalName, e.ProjectId, e.WorkingDirectory, e.Kind, e.ResumeSessionId, e.LaunchGeneration);
+
+            // The pane's terminal runs now, so its project counts as open for the repository tick (task
+            // df58b35d). A relaunch on the same project leaves SettingsProjectId unchanged and so raises
+            // no SettingsProjectIdChanged; this is the trigger that covers it. Raised on the UI thread.
+            RefreshRepoActivityOpenPanes(null);
         }
 
         /// <summary>
@@ -7357,6 +7362,13 @@ namespace MultiTerminal
                     foreach (var key in keysToRemove)
                         _terminalDocMap.Remove(key);
                 }
+
+                // The pane is back on its start screen with nothing running: it no longer keeps its project's
+                // repositories polled (task df58b35d). It reads the dock, so on the UI thread.
+                if (!InvokeRequired)
+                    RefreshRepoActivityOpenPanes(null);
+                else if (IsHandleCreated && !IsDisposed)
+                    BeginInvoke(new Action(() => RefreshRepoActivityOpenPanes(null)));
             }
         }
 
@@ -9657,14 +9669,17 @@ namespace MultiTerminal
         /// <summary>
         /// Recomputes which projects have a pane open, for <see cref="Services.RepoActivityHost.HasOpenPane"/>.
         /// UI thread: it reads the dock. <paramref name="leaving"/> is a pane being removed right now.
+        /// Only a pane whose terminal is running counts (<see cref="Services.RepoActivityHost.OpenPaneProject"/>),
+        /// so it is also recomputed when a launch begins (OnPaneLaunchBegan) and when a terminal exits or is
+        /// stopped back to the start screen (OnTerminalExited), as well as on a project change and a pane close.
         /// </summary>
         private void RefreshRepoActivityOpenPanes(TerminalDocument leaving)
         {
             if (_repoActivityHost == null || _dockPanel == null) return;
             _repoActivityHost.SetOpenPaneProjects(
                 _dockPanel.Contents.OfType<TerminalDocument>()
-                    .Where(d => d != leaving && !d.IsDisposed)
-                    .Select(d => d.SettingsProjectId));
+                    .Where(d => d != leaving)
+                    .Select(d => Services.RepoActivityHost.OpenPaneProject(d.IsDisposed, d.IsTerminalStarted, d.SettingsProjectId)));
         }
 
         /// <summary>A pane's project changed: refresh the open-pane set and show that project's badge.</summary>
