@@ -205,7 +205,13 @@ namespace MultiTerminal.Services
                 ("claude_profile",     "TEXT"),
                 // No DEFAULT: NULL reads as 'ask' (task ec2ed636), so every existing project keeps
                 // prompting. Project.ParseLaunchMode maps NULL/unknown to Ask.
-                ("launch_mode",        "TEXT")
+                ("launch_mode",        "TEXT"),
+                // Repository watch (ticket df58b35d, GitHub #53). No DEFAULTs: NULL enabled reads as off,
+                // NULL interval as RepoWatchSettings.DefaultIntervalMinutes, NULL repos as every GitHub
+                // remote of the project folder. SQLite-only; SaveRichProject does not name them.
+                ("repo_watch_enabled",      "INTEGER"),
+                ("repo_watch_interval_min", "INTEGER"),
+                ("repo_watch_repos",        "TEXT")
             };
 
             foreach (var (colName, colDef) in newColumns)
@@ -424,7 +430,8 @@ namespace MultiTerminal.Services
             "build_command", "deploy_command", "launch_command", "project_type", "current_version",
             "change_log", "icon", "icon_color", "git_repo_url", "git_default_branch", "git_auto_commit",
             "is_pinned", "status", "created_by", "last_opened_at", "team_lead", "default_terminal",
-            "source_control_account_id", "quiet_start", "claude_profile"
+            "source_control_account_id", "quiet_start", "claude_profile",
+            "repo_watch_enabled", "repo_watch_interval_min", "repo_watch_repos"
         };
 
         // Map camelCase JS field names to snake_case SQLite column names.
@@ -444,12 +451,15 @@ namespace MultiTerminal.Services
             ["sourceControlAccountId"] = "source_control_account_id",
             ["quietStart"] = "quiet_start",
             ["claudeProfile"] = "claude_profile",
+            ["repoWatchEnabled"] = "repo_watch_enabled",
+            ["repoWatchIntervalMin"] = "repo_watch_interval_min",
+            ["repoWatchRepos"] = "repo_watch_repos",
         };
 
         // Fields that map to INTEGER 0/1 booleans in the database.
         private static readonly HashSet<string> _booleanProjectFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "git_auto_commit", "is_pinned", "quiet_start"
+            "git_auto_commit", "is_pinned", "quiet_start", "repo_watch_enabled"
         };
 
         /// <summary>
@@ -495,6 +505,21 @@ namespace MultiTerminal.Services
             {
                 // Blank or "Default" clears the column, the same as SetClaudeProfile.
                 paramValue = (object)NormalizeClaudeProfileName(value) ?? DBNull.Value;
+            }
+            else if (string.Equals(fieldName, "repo_watch_interval_min", StringComparison.OrdinalIgnoreCase))
+            {
+                // Only an allowed interval is stored (ticket df58b35d); blank clears it to the default.
+                // This is also update_project's route, which has no other validation.
+                if (!RepoWatchSettings.TryParseInterval(value, out int? minutes, out _))
+                    return false;
+                paramValue = minutes.HasValue ? (object)minutes.Value : DBNull.Value;
+            }
+            else if (string.Equals(fieldName, "repo_watch_repos", StringComparison.OrdinalIgnoreCase))
+            {
+                // Stored normalized ("owner/repo, owner/repo") or NULL; anything else is refused.
+                if (!RepoWatchSettings.TryNormalizeRepos(value, out string repos, out _))
+                    return false;
+                paramValue = (object)repos ?? DBNull.Value;
             }
             else
             {
@@ -648,7 +673,7 @@ namespace MultiTerminal.Services
                            launch_command, project_type, current_version, change_log, is_pinned,
                            icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
                            team_lead, default_terminal, source_control_account_id, status, quiet_start,
-                           claude_profile, launch_mode
+                           claude_profile, launch_mode, repo_watch_enabled, repo_watch_interval_min, repo_watch_repos
                     FROM projects
                     WHERE id = @id
                 ";
@@ -681,7 +706,7 @@ namespace MultiTerminal.Services
                            launch_command, project_type, current_version, change_log, is_pinned,
                            icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
                            team_lead, default_terminal, source_control_account_id, status, quiet_start,
-                           claude_profile, launch_mode
+                           claude_profile, launch_mode, repo_watch_enabled, repo_watch_interval_min, repo_watch_repos
                     FROM projects
                     ORDER BY is_pinned DESC, created_at DESC
                 ";
@@ -765,6 +790,8 @@ namespace MultiTerminal.Services
             // let a stale file value replace a profile changed since (the re-savers above), and a
             // terminal would then launch under the wrong account with nothing said. An existing
             // row's profile changes only through SetClaudeProfile / UpdateProjectField.
+            // launch_mode and the repo_watch_* columns (ticket df58b35d) are not named here at all: they
+            // are SQLite-only settings with their own writers, so a re-save can neither reset nor write them.
             lock (_dbLock)
             {
                 const string sql = @"
@@ -1029,7 +1056,10 @@ namespace MultiTerminal.Services
                 QuietStart = reader.IsDBNull(27) ? (bool?)null : reader.GetInt32(27) == 1,
                 ClaudeProfile = reader.IsDBNull(28) ? null : reader.GetString(28),
                 LaunchMode = MultiTerminal.Models.Project.ParseLaunchMode(
-                    reader.IsDBNull(29) ? null : reader.GetString(29))
+                    reader.IsDBNull(29) ? null : reader.GetString(29)),
+                RepoWatchEnabled = reader.IsDBNull(30) ? (bool?)null : reader.GetInt32(30) == 1,
+                RepoWatchIntervalMin = reader.IsDBNull(31) ? (int?)null : reader.GetInt32(31),
+                RepoWatchRepos = reader.IsDBNull(32) ? null : reader.GetString(32)
             };
         }
 

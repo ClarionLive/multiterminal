@@ -41,7 +41,7 @@ namespace MultiTerminal.ProjectSettings
             foreach (var name in ProjectSettingsService.EditableFields)
             {
                 string value = ProjectSettingsService.ReadField(project, name);
-                if (name == "isPinned" || name == "quietStart" || name == "gitAutoCommit")
+                if (name == "isPinned" || name == "quietStart" || name == "gitAutoCommit" || name == "repoWatchEnabled")
                     fields[name] = value == "true";
                 else
                     fields[name] = value ?? string.Empty;
@@ -82,6 +82,11 @@ namespace MultiTerminal.ProjectSettings
                         new { value = Project.LaunchModeToStorage(ProjectLaunchMode.New), label = "Always start a new session" },
                         new { value = Project.LaunchModeToStorage(ProjectLaunchMode.Continue), label = "Always continue the last session" },
                     },
+                    repoWatchIntervals = RepoWatchSettings.AllowedIntervals.Select(m => new
+                    {
+                        value = m.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        label = IntervalLabel(m),
+                    }),
                     terminals = new[]
                     {
                         new { value = TerminalKindHelper.ClaudeCodeValue, label = "Claude Code" },
@@ -95,6 +100,14 @@ namespace MultiTerminal.ProjectSettings
             };
             return JsonSerializer.Serialize(message, JsonOptions);
         }
+
+        /// <summary>The "Check every" label for an interval in <see cref="RepoWatchSettings.AllowedIntervals"/>.</summary>
+        internal static string IntervalLabel(int minutes) => minutes switch
+        {
+            0 => "At startup and launch only",
+            60 => "1 hour",
+            _ => minutes.ToString(System.Globalization.CultureInfo.InvariantCulture) + " minutes",
+        };
 
         private static string FormatDate(DateTime value) =>
             value == default ? "" : value.ToLocalTime().ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture);

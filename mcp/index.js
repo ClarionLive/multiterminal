@@ -1532,7 +1532,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "update_project",
-        description: "Update one or more project fields. Accepts a fields object with camelCase keys (e.g., deployPath, buildCommand, projectType, description, icon, iconColor, teamLead, gitRepoUrl, gitDefaultBranch, gitAutoCommit, currentVersion, isPinned).",
+        description: "Update one or more project fields. Accepts a fields object with camelCase keys (e.g., deployPath, buildCommand, projectType, description, icon, iconColor, teamLead, gitRepoUrl, gitDefaultBranch, gitAutoCommit, currentVersion, isPinned, repoWatchEnabled, repoWatchIntervalMin, repoWatchRepos). repoWatchEnabled is true/false (watch the project's GitHub issues and pull requests); repoWatchIntervalMin is one of 0 (at startup and launch only), 5, 15, 30, 60 (blank = 15); repoWatchRepos is a comma-separated owner/repo list (blank = every GitHub remote of the project folder). An invalid value is rejected.",
         inputSchema: {
           type: "object",
           properties: {
