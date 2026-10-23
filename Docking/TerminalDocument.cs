@@ -425,6 +425,22 @@ namespace MultiTerminal.Docking
         public string SettingsProjectId { get; private set; }
 
         /// <summary>
+        /// <see cref="SettingsProjectId"/> took a different value (task df58b35d). Raised on the UI thread
+        /// from <see cref="UpdateStatusBar"/>; MainForm then pushes that project's repository badge and
+        /// refreshes which projects have an open pane.
+        /// </summary>
+        public event EventHandler SettingsProjectIdChanged;
+
+        /// <summary>
+        /// The repository activity badge on this pane's status bar was clicked (task df58b35d). Carries
+        /// <see cref="SettingsProjectId"/>; not raised when the pane has none.
+        /// </summary>
+        public event EventHandler<string> RepoActivityRequested;
+
+        /// <summary>Screen bounds of the repository badge at its last click, or null (see the status bar).</summary>
+        public Rectangle? LastRepoActivityBadgeScreenBounds => _statusBar?.LastRepoActivityBadgeScreenBounds;
+
+        /// <summary>
         /// Function to retrieve available identity names for the "Launch as..." menu.
         /// Set by MainForm to provide identity list.
         /// </summary>
@@ -879,6 +895,11 @@ namespace MultiTerminal.Docking
             {
                 if (!string.IsNullOrEmpty(SettingsProjectId))
                     ProjectSettingsRequested?.Invoke(this, SettingsProjectId);
+            };
+            _statusBar.RepoActivityRequested += (s, e) =>
+            {
+                if (!string.IsNullOrEmpty(SettingsProjectId))
+                    RepoActivityRequested?.Invoke(this, SettingsProjectId);
             };
             _statusBar.OpenFolderRequested += OnOpenFolderRequested;
             _statusBar.HudToggleRequested += (s, e) =>
@@ -3166,6 +3187,15 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
+        /// Shows (or, with null, hides) the repository activity badge on this pane's status bar (task df58b35d).
+        /// UI thread only.
+        /// </summary>
+        public void SetRepoActivity(MultiTerminal.Controls.RepoActivityBadge badge)
+        {
+            _statusBar?.SetRepoActivity(badge);
+        }
+
+        /// <summary>
         /// Updates the status bar with current terminal information.
         /// </summary>
         public void UpdateStatusBar()
@@ -3290,8 +3320,11 @@ namespace MultiTerminal.Docking
             }
             HeaderProjectName = projectName;
             HeaderWorkingOnProject = workingOn;
+            string previousSettingsProjectId = SettingsProjectId;
             SettingsProjectId = projectId ?? _launchProjectId;
             _statusBar.SetProjectSettingsAvailable(!string.IsNullOrEmpty(SettingsProjectId));
+            if (!string.Equals(previousSettingsProjectId, SettingsProjectId, StringComparison.Ordinal))
+                SettingsProjectIdChanged?.Invoke(this, EventArgs.Empty);
 
             _debugLogService?.Trace("TerminalDocument", $"UpdateStatusBar: Calling _statusBar.UpdateStatus with:");
             _debugLogService?.Trace("TerminalDocument", $"  - terminalName: '{terminalName}'");

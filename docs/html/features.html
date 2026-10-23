@@ -162,7 +162,7 @@
             <li><strong>General</strong> &mdash; name, description, type, status, version, icon, colour, pinned, created by, plus dates and stats</li>
             <li><strong>Launch</strong> &mdash; Claude profile, default terminal, quiet start, team lead, launch command. Profile, default terminal, quiet start and launch command apply to terminals started afterwards; running terminals keep what they started with</li>
             <li><strong>Paths</strong> &mdash; the project folder (read-only, with Copy and Open folder), source, deploy and build-output paths, and other named paths</li>
-            <li><strong>Build &amp; Deploy</strong>, <strong>Git</strong> (repo URL, default branch, auto-commit, source control account)</li>
+            <li><strong>Build &amp; Deploy</strong>, <strong>Git</strong> (repo URL, default branch, auto-commit, source control account, and <a href="#repo-activity">Repository activity</a>)</li>
             <li><strong>Agents</strong> &mdash; project agents and specialist agents</li>
             <li><strong>MCP &amp; Skills</strong> &mdash; MCP servers (with <strong>Sync MCP config</strong>) and skills</li>
             <li><strong>Prompts</strong>, <strong>Change Log</strong></li>
@@ -170,6 +170,23 @@
           </ul>
           <p>Changes are kept until you click <strong>Save</strong>; closing with unsaved changes asks first.</p>
           <p>The list of all projects is the Start Screen's <strong>Browse All</strong> view (also reachable from the header's Browse All Projects). Each row shows Pin and Version columns and the project's path, and has a settings gear, a delete button (with a choice to also delete the project config), and a launch caret for picking Claude Code or Codex for one launch. <strong>New Project</strong> is on the same view.</p>
+        </div>
+
+        <!-- Repository activity -->
+        <h3 id="repo-activity">Repository Activity (GitHub issues and PRs)</h3>
+        <div class="card">
+          <p><strong>Turned on in:</strong> project settings &rarr; <strong>Git</strong> &rarr; <strong>Repository activity</strong> &nbsp;|&nbsp; <strong>Shown on:</strong> the status bar of every terminal in that project, next to the settings gear</p>
+          <p>Shows how many issues and pull requests are open on the project's GitHub repositories, and which are new since you last looked.</p>
+          <ul>
+            <li><strong>Watch issues and pull requests</strong> &mdash; off by default, per project.</li>
+            <li><strong>Check every</strong> &mdash; how often to check while a terminal is open on the project. Every project is also checked when MultiTerminal starts and whenever it is launched; <em>At startup and launch only</em> never checks on the timer.</li>
+            <li><strong>Repositories</strong> &mdash; <code>owner/repo</code>, comma-separated. Left empty, every github.com remote of the project folder is watched (a fork has two), else the project's Repository URL.</li>
+          </ul>
+          <p><strong>The badge</strong> reads <code>&#8857; 3 &nbsp;&#8644; 1</code> (open issues, open pull requests) with a highlighted <code>+2</code> when something is new; a <code>+</code> after the counts means the list was a full page of 100, so there may be more. Hover for the details and when it was last checked. A dimmed badge means the counts may be stale or missing: not checked yet, no GitHub repository found, no access, rate limited, or the last check failed; the tooltip says which.</p>
+          <p><strong>Click the badge</strong> for the list: each repository, then its open items, new ones first and marked &#9679; (<code>#53 [PR] Title &mdash; author, 2d</code>). Clicking an item opens it on github.com. Below are <strong>Mark all seen</strong>, <strong>Check now</strong>, and links to the repository's issue and pull request lists. With no repository found it offers <strong>Project settings&hellip;</strong> instead. Only github.com pages of the watched repository are ever opened from this list.</p>
+          <p><strong>What counts as new:</strong> the first check of a repository marks everything already open as seen, so turning watching on reports nothing as new. After that, anything opened later is new until you click <strong>Mark all seen</strong>.</p>
+          <p><strong>Authentication:</strong> when the project's <strong>Source control account</strong> is a GitHub account with a token, that token is used (needed for a private repository). Otherwise GitHub is asked without one, which it allows 60 times an hour, so an unauthenticated project is checked on the timer at most every 15 minutes. A rate-limited repository is not asked again before the time GitHub gives, not even by Check now.</p>
+          <p><strong>Turning it off for the whole app:</strong> set the environment variable <code>MULTITERMINAL_REPO_WATCH</code> to <code>0</code>, <code>false</code>, <code>off</code>, <code>no</code> or <code>disabled</code> before starting MultiTerminal.</p>
         </div>
 
         <!-- Profile Panel -->

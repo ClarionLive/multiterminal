@@ -30,6 +30,8 @@ namespace MultiTerminal.Controls
         private string _lastTokenMeterJson;
         private bool? _lastRemoteMode;
         private bool _lastProjectSettingsAvailable;
+        // The repository badge payload (task df58b35d): null = never set, "null" = hidden. Replayed on ready.
+        private string _lastRepoActivityJson;
         // Set true when JS confirms (acks) it actually rendered the statusline rows. Lets the poll keep
         // re-pushing until confirmed, so a raced/dropped delivery self-heals. NOT a bounded retry — it
         // converges on the ack; absent an ack it costs one idempotent 2s re-push (cheap). The ack is
@@ -71,6 +73,58 @@ namespace MultiTerminal.Controls
         /// Event fired when the user clicks the project settings gear next to Home (ticket e20e2ce0).
         /// </summary>
         public event EventHandler ProjectSettingsRequested;
+
+        /// <summary>
+        /// The message that sets the repository badge (task df58b35d): <c>repoActivity:{json}</c>, or
+        /// <c>repoActivity:null</c> to hide it. statusbar.html matches this exact prefix; RepoActivityUiTests pins it.
+        /// </summary>
+        internal const string RepoActivityMessagePrefix = "repoActivity:";
+
+        /// <summary>The message type statusbar.html posts when the repository badge is clicked (pinned like the prefix).</summary>
+        internal const string RepoActivityClickType = "repoActivityClick";
+
+        /// <summary>
+        /// Event fired when the user clicks the repository activity badge (task df58b35d).
+        /// </summary>
+        public event EventHandler RepoActivityRequested;
+
+        /// <summary>
+        /// Where the badge was on screen at its last click, or null when the page did not say (task
+        /// df58b35d, Owner live test: the list opened on another monitor). Set just before
+        /// <see cref="RepoActivityRequested"/> is raised.
+        /// </summary>
+        public Rectangle? LastRepoActivityBadgeScreenBounds { get; private set; }
+
+        /// <summary>
+        /// Reads the badge rectangle a click message carries (device pixels of the WebView). False when a
+        /// field is missing or not a whole number, or when the rectangle is empty or not inside
+        /// <paramref name="client"/>: the page is trusted, but a value that cannot be the badge must not
+        /// place the menu.
+        /// </summary>
+        internal static bool TryReadBadgeRect(JsonElement root, Size client, out Rectangle rect)
+        {
+            rect = Rectangle.Empty;
+            if (!TryInt(root, "left", out int left) || !TryInt(root, "top", out int top)
+                || !TryInt(root, "width", out int width) || !TryInt(root, "height", out int height))
+            {
+                return false;
+            }
+
+            var candidate = new Rectangle(left, top, width, height);
+            if (width <= 0 || height <= 0 || !new Rectangle(Point.Empty, client).Contains(candidate))
+            {
+                return false;
+            }
+
+            rect = candidate;
+            return true;
+
+            static bool TryInt(JsonElement e, string name, out int value)
+            {
+                value = 0;
+                return e.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.Number && p.TryGetInt32(out value);
+            }
+        }
 
         /// <summary>
         /// Event fired when the user clicks the Open Folder button on the status bar.
@@ -292,6 +346,8 @@ namespace MultiTerminal.Controls
                         if (_lastRemoteMode.HasValue)
                             SendMessage($"remoteMode:{(_lastRemoteMode.Value ? "true" : "false")}");
                         SendMessage($"projectSettings:{(_lastProjectSettingsAvailable ? "true" : "false")}");
+                        if (_lastRepoActivityJson != null)
+                            SendMessage(RepoActivityMessagePrefix + _lastRepoActivityJson);
 
                         Ready?.Invoke(this, EventArgs.Empty);
                     }
@@ -327,6 +383,15 @@ namespace MultiTerminal.Controls
                     {
                         _debugLogService?.Trace("TerminalStatusBar", "Project settings gear clicked");
                         ProjectSettingsRequested?.Invoke(this, EventArgs.Empty);
+                    }
+                    else if (type == RepoActivityClickType)
+                    {
+                        _debugLogService?.Trace("TerminalStatusBar", "Repository activity badge clicked");
+                        LastRepoActivityBadgeScreenBounds =
+                            _webView != null && TryReadBadgeRect(root, _webView.ClientSize, out var badge)
+                                ? _webView.RectangleToScreen(badge)
+                                : null;
+                        RepoActivityRequested?.Invoke(this, EventArgs.Empty);
                     }
                     else if (type == "hudToggle")
                     {
@@ -510,6 +575,17 @@ namespace MultiTerminal.Controls
             _lastProjectSettingsAvailable = available;
             if (_isInitialized)
                 SendMessage($"projectSettings:{(available ? "true" : "false")}");
+        }
+
+        /// <summary>
+        /// Shows the project's GitHub issue/PR badge, or hides it when <paramref name="badge"/> is null
+        /// (task df58b35d). Remembered and replayed on 'ready', like <see cref="SetProjectSettingsAvailable"/>.
+        /// </summary>
+        public void SetRepoActivity(RepoActivityBadge badge)
+        {
+            _lastRepoActivityJson = RepoActivityBadge.ToJson(badge);
+            if (_isInitialized)
+                SendMessage(RepoActivityMessagePrefix + _lastRepoActivityJson);
         }
 
         /// <summary>

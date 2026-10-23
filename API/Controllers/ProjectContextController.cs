@@ -119,12 +119,14 @@ namespace MultiTerminal.API.Controllers
             var rejected = new List<string>();
 
             bool claudeProfileWritten = false;
+            bool repoWatchWritten = false;
             foreach (var kvp in request.Fields)
             {
                 if (_projectDb.UpdateProjectField(projectId, kvp.Key, kvp.Value))
                 {
                     updated.Add(kvp.Key);
                     claudeProfileWritten |= IsClaudeProfileField(kvp.Key);
+                    repoWatchWritten |= IsRepoWatchField(kvp.Key);
                 }
                 else
                 {
@@ -138,8 +140,29 @@ namespace MultiTerminal.API.Controllers
             if (claudeProfileWritten)
                 SyncProjectJsonClaudeProfile(projectId);
 
+            // What the project watches on GitHub may have changed: recheck now, as a settings-form save
+            // does (task df58b35d), instead of at the next tick or launch.
+            if (repoWatchWritten)
+                _broker?.NotifyProjectSettingsChanged(projectId);
+
             return Ok(new { updated, rejected });
         }
+
+        /// <summary>
+        /// The fields that decide which GitHub repositories a project watches, and whether: the three
+        /// repo-watch settings and the Git URL (the fallback when there is no list and no remote), in
+        /// either spelling <c>UpdateProjectField</c> accepts. Exact names, not a prefix, so a field added
+        /// later does not trigger a recheck just by its name.
+        /// </summary>
+        private static readonly HashSet<string> RepoWatchFields = new(System.StringComparer.OrdinalIgnoreCase)
+        {
+            "repoWatchEnabled", "repo_watch_enabled",
+            "repoWatchIntervalMin", "repo_watch_interval_min",
+            "repoWatchRepos", "repo_watch_repos",
+            "gitRepoUrl", "git_repo_url",
+        };
+
+        internal static bool IsRepoWatchField(string field) => field != null && RepoWatchFields.Contains(field);
 
         private static bool IsClaudeProfileField(string field) =>
             string.Equals(field, "claudeProfile", System.StringComparison.OrdinalIgnoreCase)

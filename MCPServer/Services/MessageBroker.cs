@@ -6868,6 +6868,11 @@ namespace MultiTerminal.MCPServer.Services
             try { CodeGraphIndexCoordinator?.ClearProject(projectName); }
             catch (Exception ex) { LogError($"Failed to clear code graph for project {projectName}: {ex.Message}"); }
 
+            // Best-effort: drop the project's GitHub repo watch state (task df58b35d). Lives in TaskDatabase,
+            // not one of ProjectDatabase's child tables, so the row delete above does not reach it.
+            try { _taskDb.DeleteRepoWatchStates(projectId); }
+            catch (Exception ex) { LogError($"Failed to clear repo watch state for project {projectId}: {ex.Message}"); }
+
             BroadcastProjectUpdate();
 
             // Record activity for the feed
@@ -6974,6 +6979,20 @@ namespace MultiTerminal.MCPServer.Services
         /// project tables directly and then calls this so listeners refresh.
         /// </summary>
         public void NotifyProjectsChanged() => BroadcastProjectUpdate();
+
+        /// <summary>
+        /// One project's settings were changed by a writer outside the settings form, today the REST
+        /// route behind <c>update_project</c> (task df58b35d): carries only the project id. MainForm
+        /// treats it like a settings-form save, so a change to what the project watches on GitHub is
+        /// rechecked at once rather than at the next tick or launch.
+        /// </summary>
+        public event EventHandler<string> ProjectSettingsChanged;
+
+        /// <summary>Raises <see cref="ProjectSettingsChanged"/> (resilient dispatch).</summary>
+        public void NotifyProjectSettingsChanged(string projectId)
+        {
+            if (!string.IsNullOrEmpty(projectId)) RaiseSafe(ProjectSettingsChanged, projectId);
+        }
 
         /// <summary>
         /// The project settings form committed a new name and/or description to the project row itself

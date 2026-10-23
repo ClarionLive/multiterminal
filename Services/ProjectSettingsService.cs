@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using MultiTerminal.Models;
 
@@ -141,11 +142,12 @@ namespace MultiTerminal.Services
             "isPinned", "createdBy", "claudeProfile", "launchMode", "defaultTerminal", "quietStart", "teamLead",
             "launchCommand", "sourcePath", "deployPath", "buildOutputPath", "buildCommand", "deployCommand",
             "gitRepoUrl", "gitDefaultBranch", "gitAutoCommit", "sourceControlAccountId", "changeLog",
+            "repoWatchEnabled", "repoWatchIntervalMin", "repoWatchRepos",
         };
 
         private static readonly HashSet<string> BooleanFields = new HashSet<string>(StringComparer.Ordinal)
         {
-            "isPinned", "quietStart", "gitAutoCommit",
+            "isPinned", "quietStart", "gitAutoCommit", "repoWatchEnabled",
         };
 
         private readonly ProjectDatabase _db;
@@ -172,6 +174,10 @@ namespace MultiTerminal.Services
             var unknown = update.Fields.Keys.Where(k => !EditableFields.Contains(k)).ToList();
             if (unknown.Count > 0)
                 return ProjectSettingsSaveResult.Fail($"These settings cannot be saved here: {string.Join(", ", unknown)}");
+
+            string fieldError = ValidateFields(update.Fields);
+            if (fieldError != null)
+                return ProjectSettingsSaveResult.Fail(fieldError);
 
             var normalized = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var pair in update.Fields)
@@ -369,6 +375,14 @@ namespace MultiTerminal.Services
                     return Project.LaunchModeToStorage(Project.ParseLaunchMode(value));
                 case "currentVersion":
                     return string.IsNullOrWhiteSpace(value) ? "0.1.0" : value;
+                case "repoWatchIntervalMin":
+                    // Blank reads as the default, the same as a NULL column, so an untouched form is unchanged.
+                    // A value ValidateFields would refuse is returned as sent; it never reaches a write.
+                    return RepoWatchSettings.TryParseInterval(value, out int? minutes, out _)
+                        ? (minutes ?? RepoWatchSettings.DefaultIntervalMinutes).ToString(CultureInfo.InvariantCulture)
+                        : value;
+                case "repoWatchRepos":
+                    return RepoWatchSettings.TryNormalizeRepos(value, out string repos, out _) ? repos : value;
                 default:
                     // A blank optional field is stored as null, as EditProjectDialog did.
                     return string.IsNullOrWhiteSpace(value) ? null : value;
@@ -415,6 +429,9 @@ namespace MultiTerminal.Services
                 case "gitAutoCommit": return p.GitAutoCommit ? "true" : "false";
                 case "sourceControlAccountId": return p.SourceControlAccountId;
                 case "changeLog": return p.ChangeLog;
+                case "repoWatchEnabled": return p.IsRepoWatchEnabled ? "true" : "false";
+                case "repoWatchIntervalMin": return p.EffectiveRepoWatchIntervalMinutes.ToString(CultureInfo.InvariantCulture);
+                case "repoWatchRepos": return p.RepoWatchRepos;
                 default: throw new ArgumentOutOfRangeException(nameof(field), field, "Not an editable project field.");
             }
         }
@@ -448,6 +465,19 @@ namespace MultiTerminal.Services
             {
                 result.Warnings.Add($"The project.json in '{current.Path}' was not updated: {ex.Message}");
             }
+        }
+
+        // Scalar values with a fixed form (ticket df58b35d). Checked on the values as sent, before anything is
+        // normalized or written, so a bad one fails the whole save with a message the form shows.
+        private static string ValidateFields(Dictionary<string, string> fields)
+        {
+            if (fields.TryGetValue("repoWatchIntervalMin", out var interval)
+                && !RepoWatchSettings.TryParseInterval(interval, out _, out var intervalError))
+                return intervalError;
+            if (fields.TryGetValue("repoWatchRepos", out var repos)
+                && !RepoWatchSettings.TryNormalizeRepos(repos, out _, out var reposError))
+                return reposError;
+            return null;
         }
 
         // ── Child tables ───────────────────────────────────────────────────────────

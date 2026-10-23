@@ -58,6 +58,58 @@ namespace MultiTerminal.Tests
             Assert.Equal("dark", doc.RootElement.GetProperty("theme").GetString());
         }
 
+        /// <summary>
+        /// Repository watch (ticket df58b35d): the checkbox loads as a boolean (null reads as off), the interval
+        /// select loads 15 for a NULL column, and the select's options are exactly the allowed intervals, each a
+        /// value the save accepts.
+        /// Falsified: making ProjectSettingsService.ReadField return the raw nullable interval turned this red at
+        /// the "15" assertion (and An_untouched_form_save_writes_nothing, where the NULL column then counted as
+        /// changed against the form's 15).
+        /// </summary>
+        [Fact]
+        public void Load_carries_repository_watch_fields_and_the_interval_choices()
+        {
+            var json = ProjectSettingsPayload.BuildLoad(SampleProject(), null, new ProjectSettingsOptions(), isDark: true);
+            using var doc = JsonDocument.Parse(json);
+            var fields = doc.RootElement.GetProperty("fields");
+
+            Assert.Equal(JsonValueKind.False, fields.GetProperty("repoWatchEnabled").ValueKind);
+            Assert.Equal("15", fields.GetProperty("repoWatchIntervalMin").GetString());
+            Assert.Equal("", fields.GetProperty("repoWatchRepos").GetString());
+
+            var choices = doc.RootElement.GetProperty("options").GetProperty("repoWatchIntervals").EnumerateArray()
+                .Select(o => (Value: o.GetProperty("value").GetString(), Label: o.GetProperty("label").GetString())).ToList();
+            Assert.Equal(new[] { "0", "5", "15", "30", "60" }, choices.Select(c => c.Value));
+            Assert.Equal("At startup and launch only", choices[0].Label);
+            Assert.Equal("1 hour", choices[4].Label);
+            Assert.All(choices, c => Assert.True(RepoWatchSettings.TryParseInterval(c.Value, out int? m, out _) && m.HasValue));
+
+            var stored = SampleProject();
+            stored.RepoWatchEnabled = true;
+            stored.RepoWatchIntervalMin = 0;
+            stored.RepoWatchRepos = "o/r";
+            using var doc2 = JsonDocument.Parse(ProjectSettingsPayload.BuildLoad(stored, null, new ProjectSettingsOptions(), isDark: false));
+            var fields2 = doc2.RootElement.GetProperty("fields");
+            Assert.Equal(JsonValueKind.True, fields2.GetProperty("repoWatchEnabled").ValueKind);
+            Assert.Equal("0", fields2.GetProperty("repoWatchIntervalMin").GetString());
+            Assert.Equal("o/r", fields2.GetProperty("repoWatchRepos").GetString());
+        }
+
+        /// <summary>
+        /// The interval select names the option list the payload sends; a typo here leaves it empty with no error.
+        /// Falsified: data-options="repoWatchInterval" on the page turned this red.
+        /// </summary>
+        [Fact]
+        public void The_interval_select_uses_the_options_the_payload_sends()
+        {
+            var m = Regex.Match(Page(), @"<select[^>]*data-field=""repoWatchIntervalMin""[^>]*data-options=""([A-Za-z]+)""");
+            Assert.True(m.Success, "The repoWatchIntervalMin select was not found on the page.");
+            var json = ProjectSettingsPayload.BuildLoad(SampleProject(), null, new ProjectSettingsOptions(), isDark: true);
+            using var doc = JsonDocument.Parse(json);
+            Assert.True(doc.RootElement.GetProperty("options").TryGetProperty(m.Groups[1].Value, out _),
+                $"The page asks for options '{m.Groups[1].Value}', which the load message does not carry.");
+        }
+
         [Fact]
         public void Save_parses_booleans_lists_and_absent_lists()
         {

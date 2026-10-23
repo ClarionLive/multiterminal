@@ -535,6 +535,152 @@ namespace MultiTerminal.Tests
             Assert.Equal(normalized, ProjectSettingsService.NormalizeValue("launchMode", sent));
         }
 
+        // ── Repository watch (ticket df58b35d, GitHub #53) ──────────────────────────
+
+        [Fact]
+        public void Repository_watch_settings_are_null_on_a_new_project_and_read_as_off_15_and_every_remote()
+        {
+            var p = Seed();
+            var stored = _db.GetRichProject(p.Id);
+
+            Assert.Null(stored.RepoWatchEnabled);
+            Assert.Null(stored.RepoWatchIntervalMin);
+            Assert.Null(stored.RepoWatchRepos);
+            Assert.False(stored.IsRepoWatchEnabled);
+            Assert.Equal(15, stored.EffectiveRepoWatchIntervalMinutes);
+            Assert.Equal("false", ProjectSettingsService.ReadField(stored, "repoWatchEnabled"));
+            Assert.Equal("15", ProjectSettingsService.ReadField(stored, "repoWatchIntervalMin"));
+        }
+
+        [Fact]
+        public void Repository_watch_settings_round_trip_through_save_and_reload()
+        {
+            var p = Seed();
+
+            var on = _service.Save(UpdateFor(p,
+                ("repoWatchEnabled", "true"),
+                ("repoWatchIntervalMin", "0"),
+                ("repoWatchRepos", " ClarionLive/multiterminal  msarson/Other,clarionlive/MULTITERMINAL ")));
+
+            Assert.True(on.Success, on.Error);
+            Assert.False(on.AppliesAtNextLaunch);
+            var stored = _db.GetRichProject(p.Id);
+            Assert.True(stored.RepoWatchEnabled);
+            Assert.Equal(0, stored.RepoWatchIntervalMin);
+            Assert.Equal("ClarionLive/multiterminal, msarson/Other", stored.RepoWatchRepos);
+            Assert.Single(_db.GetAllRichProjects(), x => x.Id == p.Id && x.RepoWatchIntervalMin == 0 && x.RepoWatchEnabled == true);
+
+            var off = _service.Save(UpdateFor(p,
+                ("repoWatchEnabled", "false"),
+                ("repoWatchIntervalMin", "60"),
+                ("repoWatchRepos", "")));
+
+            Assert.True(off.Success, off.Error);
+            stored = _db.GetRichProject(p.Id);
+            Assert.False(stored.RepoWatchEnabled);   // an explicit off, not NULL
+            Assert.Equal(60, stored.RepoWatchIntervalMin);
+            Assert.Null(stored.RepoWatchRepos);
+        }
+
+        [Theory]
+        [InlineData("repoWatchIntervalMin", "7", "0, 5, 15, 30, 60")]
+        [InlineData("repoWatchRepos", "good/one, a/b/c", "'a/b/c'")]
+        [InlineData("repoWatchRepos", "-bad/x", "'-bad/x'")]
+        [InlineData("repoWatchRepos", "https://github.com/o/r", "'https://github.com/o/r'")]
+        public void A_bad_repository_watch_value_rejects_the_whole_save_with_a_message(string field, string value, string inMessage)
+        {
+            var p = Seed();
+            var result = _service.Save(UpdateFor(p, ("buildCommand", "dotnet build"), (field, value)));
+
+            Assert.False(result.Success);
+            Assert.False(result.Conflict);
+            Assert.Contains(inMessage, result.Error, StringComparison.Ordinal);
+            var stored = _db.GetRichProject(p.Id);
+            Assert.Null(stored.BuildCommand);
+            Assert.Null(stored.RepoWatchIntervalMin);
+            Assert.Null(stored.RepoWatchRepos);
+            Assert.Equal(0, _host.NotifyCount);
+        }
+
+        /// <summary>
+        /// update_project (REST PATCH) writes through UpdateProjectField with no settings-service validation in
+        /// front of it, so the single-field writer refuses a bad value itself and stores a good one normalized.
+        /// Falsified: skipping the interval branch in UpdateProjectField stored "7" (red at the first assertion).
+        /// </summary>
+        [Fact]
+        public void The_single_field_writer_refuses_a_bad_value_and_normalizes_a_good_one()
+        {
+            var p = Seed();
+
+            Assert.False(_db.UpdateProjectField(p.Id, "repoWatchIntervalMin", "7"));
+            Assert.False(_db.UpdateProjectField(p.Id, "repoWatchRepos", "a/b/c"));
+            Assert.Null(_db.GetRichProject(p.Id).RepoWatchIntervalMin);
+            Assert.Null(_db.GetRichProject(p.Id).RepoWatchRepos);
+
+            Assert.True(_db.UpdateProjectField(p.Id, "repoWatchIntervalMin", "30"));
+            Assert.True(_db.UpdateProjectField(p.Id, "repoWatchRepos", "a/b  A/B c/d"));
+            Assert.True(_db.UpdateProjectField(p.Id, "repoWatchEnabled", "true"));
+            var stored = _db.GetRichProject(p.Id);
+            Assert.Equal(30, stored.RepoWatchIntervalMin);
+            Assert.Equal("a/b, c/d", stored.RepoWatchRepos);
+            Assert.True(stored.RepoWatchEnabled);
+
+            Assert.True(_db.UpdateProjectField(p.Id, "repoWatchIntervalMin", ""));
+            Assert.Null(_db.GetRichProject(p.Id).RepoWatchIntervalMin);
+        }
+
+        /// <summary>
+        /// The three settings are SQLite-only: the save does not write them to project.json, and a re-save of
+        /// the row from project.json (what ChangelogService and VersioningService do) leaves them as they were.
+        /// Falsified twice: writing a "repoWatchRepos" key in ProjectService.SerializeProjectJson turned the
+        /// DoesNotContain red, and setting the three columns to NULL in SaveRichProject's ON CONFLICT branch
+        /// turned the RepoWatchEnabled assertion after the re-save red.
+        /// </summary>
+        [Fact]
+        public void Repository_watch_settings_are_not_in_project_json_and_survive_a_resave_from_it()
+        {
+            var p = Seed();
+            var result = _service.Save(UpdateFor(p,
+                ("repoWatchEnabled", "true"),
+                ("repoWatchIntervalMin", "5"),
+                ("repoWatchRepos", "o/r"),
+                ("isPinned", "true")));   // a project.json field, so the file IS rewritten by this save
+            Assert.True(result.Success, result.Error);
+            Assert.True(_projectService.LoadProject(_projectDir).IsPinned); // precondition: the file was written
+
+            string json = ProjectJsonText();
+            Assert.DoesNotContain("repoWatch", json, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("repo_watch", json, StringComparison.OrdinalIgnoreCase);
+
+            var fromJson = _projectService.LoadProject(_projectDir);
+            Assert.Null(fromJson.RepoWatchEnabled);   // precondition: the re-save really carries no values
+            _projectService.SaveProject(fromJson);
+
+            var stored = _db.GetRichProject(p.Id);
+            Assert.True(stored.RepoWatchEnabled);
+            Assert.Equal(5, stored.RepoWatchIntervalMin);
+            Assert.Equal("o/r", stored.RepoWatchRepos);
+        }
+
+        /// <summary>
+        /// The form's round trip with repository watch values stored: loaded, saved back untouched, nothing is
+        /// written. (The NULL case is <see cref="An_untouched_form_save_writes_nothing"/>.)
+        /// </summary>
+        [Fact]
+        public void An_untouched_form_save_with_repository_watch_values_writes_nothing()
+        {
+            var p = Seed();
+            _db.UpdateProjectField(p.Id, "repoWatchEnabled", "true");
+            _db.UpdateProjectField(p.Id, "repoWatchIntervalMin", "30");
+            _db.UpdateProjectField(p.Id, "repoWatchRepos", "o/r, p/q");
+            var loaded = Snapshot(p);
+
+            var result = _service.Save(FormSave(loaded));
+
+            Assert.True(result.Success, result.Error);
+            Assert.Empty(result.ChangedFields);
+        }
+
         private sealed class StubHost : IProjectSettingsHost
         {
             public List<(string Id, string PreviousName)> Renames { get; } = new List<(string, string)>();
