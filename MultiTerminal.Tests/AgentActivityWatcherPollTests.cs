@@ -144,7 +144,7 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
-        public void Turn_end_is_the_escape_edge_and_lands_on_idle()
+        public void Turn_end_is_the_escape_edge_and_lands_on_your_turn()
         {
             Assert.True(_watcher.Prime());
             Block();
@@ -152,8 +152,9 @@ namespace MultiTerminal.Tests
             Row("TURN_END", "Turn ended", MainThread(string.Empty));
             _watcher.Poll();
 
+            // Your turn since task 3d51315b (was Idle): still not a block.
             var e = Entry();
-            Assert.Equal(AttentionState.Idle, e.State);
+            Assert.Equal(AttentionState.YourTurn, e.State);
             Assert.False(e.IsBlocking);
         }
 

@@ -92,6 +92,7 @@ namespace MultiTerminal.MCPServer.Services
         private readonly IActivityFeedReader _feed;
         private readonly AgentAttentionService _attention;
         private readonly Action<string> _log;
+        private readonly Func<string, string> _turnEndQuestion;
         private readonly int _pollMs;
         private readonly int _batchLimit;
 
@@ -118,11 +119,17 @@ namespace MultiTerminal.MCPServer.Services
         /// <param name="feed">Source of activity rows.</param>
         /// <param name="attention">The state machine to feed. Sole owner of the attention cache.</param>
         /// <param name="log">Optional logger; failures are reported here rather than thrown.</param>
-        public AgentActivityWatcher(IActivityFeedReader feed, AgentAttentionService attention, Action<string> log = null)
+        /// <param name="turnEndQuestion">
+        /// Session id to the question that session's last turn ended on, or null (task 3d51315b;
+        /// MainForm passes <c>ChatQuestionDetector.FindQuestionForSession</c>). Omitted, every turn
+        /// end reads as Your turn.
+        /// </param>
+        public AgentActivityWatcher(IActivityFeedReader feed, AgentAttentionService attention, Action<string> log = null, Func<string, string> turnEndQuestion = null)
         {
             _feed = feed ?? throw new ArgumentNullException(nameof(feed));
             _attention = attention ?? throw new ArgumentNullException(nameof(attention));
             _log = log;
+            _turnEndQuestion = turnEndQuestion;
 
             _pollMs = ReadEnvInt("MULTITERMINAL_ATTENTION_POLL_MS", 2000, 250, 60000);
             _batchLimit = ReadEnvInt("MULTITERMINAL_ATTENTION_BATCH", 200, 10, 2000);
@@ -327,7 +334,7 @@ namespace MultiTerminal.MCPServer.Services
 
             if (turnEnded)
             {
-                _attention.NoteTurnEnded(sessionKey, observedAt, isSubagent: false);
+                _attention.NoteTurnEnded(sessionKey, observedAt, isSubagent: false, chatQuestion: AskedAtTurnEnd(row.DetailsJson));
                 return;
             }
 
@@ -366,6 +373,34 @@ namespace MultiTerminal.MCPServer.Services
                 toolUseId: null,
                 agentName: agent,
                 activitySummary: row.Summary);
+        }
+
+        /// <summary>
+        /// The question the turn ended on, read through <see cref="_turnEndQuestion"/> with the
+        /// row's own <c>session_id</c> (task 3d51315b). Null on any failure: the turn end then reads
+        /// as Your turn, which still beacons, rather than as a question nobody asked.
+        /// </summary>
+        private string AskedAtTurnEnd(string detailsJson)
+        {
+            if (_turnEndQuestion == null || string.IsNullOrWhiteSpace(detailsJson)) return null;
+
+            try
+            {
+                using var doc = JsonDocument.Parse(detailsJson);
+                if (doc.RootElement.ValueKind != JsonValueKind.Object
+                    || !doc.RootElement.TryGetProperty("session_id", out var sid)
+                    || sid.ValueKind != JsonValueKind.String)
+                {
+                    return null;
+                }
+
+                return _turnEndQuestion(sid.GetString());
+            }
+            catch (Exception ex)
+            {
+                _log?.Invoke($"Turn-end question lookup failed: {ex.Message}");
+                return null;
+            }
         }
 
         /// <summary>

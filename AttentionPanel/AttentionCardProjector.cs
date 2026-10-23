@@ -138,6 +138,13 @@ namespace MultiTerminal.AttentionPanel
                         : null;
                 }
 
+                // A helper's turn end is addressed to its PM, not the owner (task 3d51315b), so its
+                // card keeps reading "Finished and idle" with no beacon. Display only: the entry keeps
+                // YourTurn, and a question a helper asks in chat still reads as a question.
+                var shownState = e.State == AttentionState.YourTurn && team?.Role == AttentionTeamRoles.Helper
+                    ? AttentionState.Idle
+                    : e.State;
+
                 cards.Add(new AttentionCard
                 {
                     Id = e.SessionId,
@@ -145,8 +152,8 @@ namespace MultiTerminal.AttentionPanel
                     Color = string.IsNullOrWhiteSpace(color) ? DefaultColor : color,
                     Project = project,
                     WorkingOn = string.IsNullOrWhiteSpace(workingOn) ? null : workingOn,
-                    State = e.State.ToString(),
-                    ObservedVerb = Verb(e.State),
+                    State = shownState.ToString(),
+                    ObservedVerb = Verb(shownState),
                     ObservedDetail = DetailFor(e),
 
                     // Derived from the SAME decision as ObservedDetail, never computed alongside
@@ -205,6 +212,7 @@ namespace MultiTerminal.AttentionPanel
                 case AttentionState.BlockedUnknown: return "Waiting on you";
                 case AttentionState.Working: return "Working";
                 case AttentionState.Idle: return "Finished and idle";
+                case AttentionState.YourTurn: return "Your turn";
                 case AttentionState.Offline: return "Disconnected";
                 default: return "Nothing observed yet";
             }

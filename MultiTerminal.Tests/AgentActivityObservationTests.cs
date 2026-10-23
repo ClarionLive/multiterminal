@@ -56,13 +56,15 @@ namespace MultiTerminal.Tests
 
             svc.NoteTurnEnded(Session, DateTime.UtcNow.AddSeconds(5), isSubagent: false);
 
+            // Your turn since task 3d51315b (was Idle): the owner dismissed the prompt, and the agent
+            // is now waiting for their next one. Still not a block.
             var after = svc.Get(Session);
-            Assert.Equal(AttentionState.Idle, after.State);
+            Assert.Equal(AttentionState.YourTurn, after.State);
             Assert.False(after.IsBlocking);
         }
 
         /// <summary>
-        /// Idle is not a block, so it must not pulse — the same rule that keeps <c>idle_prompt</c>
+        /// A turn end is not a block, so it must not pulse — the same rule that keeps <c>idle_prompt</c>
         /// quiet. An alert that fires for every agent that ever finished work is an alert nobody
         /// reads.
         /// </summary>

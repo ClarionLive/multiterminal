@@ -32,11 +32,24 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         BlockedUnknown,
 
-        /// <summary>Turn ended, nothing pending. NOT a block: the owner is not being waited on.</summary>
+        /// <summary>
+        /// Nothing pending. NOT a block. Since task 3d51315b a main-thread turn end is
+        /// <see cref="YourTurn"/>, so this is reached only from Claude Code's <c>idle_prompt</c>
+        /// on a card that was not already waiting for the owner.
+        /// </summary>
         Idle,
 
         /// <summary>The host process is gone.</summary>
         Offline,
+
+        /// <summary>
+        /// The main thread's turn ended and the agent is waiting for the owner's next prompt
+        /// (task 3d51315b). NOT a block: nothing will fail if nobody answers, so it never counts
+        /// toward the rail's number and gets the soft beacon, not the alarm. A turn that ended on a
+        /// question in chat is <see cref="BlockedQuestion"/> instead.
+        /// </summary>
+        /// <remarks>Appended last so the existing members keep their numeric values.</remarks>
+        YourTurn,
     }
 
     /// <summary>One session's observed attention state.</summary>
@@ -135,6 +148,13 @@ namespace MultiTerminal.MCPServer.Services
         /// </para>
         /// </remarks>
         public bool DetailIsQuestionText { get; set; }
+
+        /// <summary>
+        /// True when the current state was raised by a main-thread TURN END (task 3d51315b): Your
+        /// turn, or a question the agent asked in chat. The owner submitting a prompt answers those;
+        /// it does not answer a permission prompt or an AskUserQuestion, which have their own dialog.
+        /// </summary>
+        public bool RaisedAtTurnEnd { get; set; }
 
         /// <summary>True when the state is one the owner is actually being waited on for.</summary>
         public bool IsBlocking =>
@@ -448,9 +468,12 @@ namespace MultiTerminal.MCPServer.Services
                 // still returns false. An idle timer is not a new block, so it must not restamp
                 // BlockSeq — doing so would re-shout an alarm the owner already acknowledged, on
                 // no new evidence.
+                // The same holds for YourTurn (task 3d51315b): Claude Code's idle timer fires about a
+                // minute after every turn end, and applied it would turn "Your turn" into "Finished
+                // and idle" while the agent is still waiting for the owner's prompt.
                 if (state == AttentionState.Idle
                     && TryGetLiveEntryLocked(key, agentName, out _, out var blocked)
-                    && blocked.IsBlocking)
+                    && (blocked.IsBlocking || blocked.State == AttentionState.YourTurn))
                 {
                     return false;
                 }
@@ -527,6 +550,7 @@ namespace MultiTerminal.MCPServer.Services
                     // Set beside Detail, from the SAME payload, because it describes that exact
                     // string. Computed anywhere else it would drift the moment Detail was rewritten.
                     e.DetailIsQuestionText = IsQuestionTextType(rawType);
+                    e.RaisedAtTurnEnd = false;
                     e.PendingToolUseId = NullIfBlank(Str(payload, "tool_use_id"));
                 },
                 // EVERY blocking notification is a new block, including one that arrives while the
@@ -747,6 +771,7 @@ namespace MultiTerminal.MCPServer.Services
                         // Cleared WITH Detail, never separately — the flag describes that exact
                         // string, so a stale true outliving it is the drift its own doc forbids.
                         e.DetailIsQuestionText = false;
+                        e.RaisedAtTurnEnd = false;
                         e.PendingToolUseId = null;
                         RecordActivityLine(e, activitySummary, observedAtUtc);
                     }, evidenceAtUtc: observedAtUtc);
@@ -764,7 +789,9 @@ namespace MultiTerminal.MCPServer.Services
                     return created || supersededOnCreate;
                 }
 
-                if (existing.IsBlocking)
+                // YourTurn is not a block, but it is cleared under the same ordering rule: a queued
+                // row from the turn that just ended must not read as the agent moving on.
+                if (existing.IsBlocking || existing.State == AttentionState.YourTurn)
                 {
                     // Identity match when both sides have an id; otherwise fall back to ordering.
                     // Activity that predates the block proves nothing — it is the queue draining,
@@ -787,6 +814,7 @@ namespace MultiTerminal.MCPServer.Services
 
                     // Cleared WITH Detail — see the note at the sibling site above.
                     e.DetailIsQuestionText = false;
+                    e.RaisedAtTurnEnd = false;
                     e.PendingToolUseId = null;
                     RecordActivityLine(e, activitySummary, observedAtUtc);
                 });
@@ -840,9 +868,17 @@ namespace MultiTerminal.MCPServer.Services
         /// minutes after they had dismissed it.
         /// </para>
         /// <para>
-        /// Escape ends the turn, so the <c>Stop</c> hook fires. Turn-ended is
-        /// <see cref="AttentionState.Idle"/>: finished, and explicitly NOT a block — the same state
-        /// an <c>idle_prompt</c> notification produces, and for the same reason. It must not pulse.
+        /// Escape ends the turn, so the <c>Stop</c> hook fires. A turn end is not a block: nothing
+        /// fails if nobody answers.
+        /// </para>
+        /// <para>
+        /// But it is not "nothing pending" either (task 3d51315b). A main-thread turn end means the
+        /// agent is waiting for the owner's next prompt, and the rail used to call that "Finished
+        /// and idle", which told the owner nobody needed them while an agent sat on a question it
+        /// had asked in chat. So a turn end is <see cref="AttentionState.YourTurn"/> (the soft
+        /// beacon), and a turn that ended on a question is <see cref="AttentionState.BlockedQuestion"/>
+        /// with the question as its detail, exactly like an <c>AskUserQuestion</c>. Both start a new
+        /// episode, so an earlier acknowledgement does not silence them.
         /// </para>
         /// <para>
         /// Subagents get their own <c>Stop</c>, so <paramref name="isSubagent"/> is honoured here for
@@ -853,8 +889,13 @@ namespace MultiTerminal.MCPServer.Services
         /// <param name="sessionKey">Session id, or agent name if that is how the entry was keyed.</param>
         /// <param name="observedAtUtc">When the turn ended.</param>
         /// <param name="isSubagent">True when a SUBAGENT's turn ended rather than the main thread's.</param>
+        /// <param name="chatQuestion">
+        /// The question the turn's final message ended on (<see cref="MultiTerminal.Services.ChatQuestionDetector"/>),
+        /// or null when it did not end on one or the transcript could not be read. Null is the safe
+        /// side: it reads as Your turn, which still beacons, never as a question nobody asked.
+        /// </param>
         /// <returns>True if the state changed.</returns>
-        public bool NoteTurnEnded(string sessionKey, DateTime observedAtUtc, bool isSubagent)
+        public bool NoteTurnEnded(string sessionKey, DateTime observedAtUtc, bool isSubagent, string chatQuestion = null)
         {
             if (string.IsNullOrWhiteSpace(sessionKey)) return false;
             if (isSubagent) return false;
@@ -870,16 +911,74 @@ namespace MultiTerminal.MCPServer.Services
                     return false;
                 }
 
-                return UpsertLocked(sessionKey, e =>
+                string question = NullIfBlank(chatQuestion);
+                bool changed = UpsertLocked(sessionKey, e =>
                 {
-                    e.State = AttentionState.Idle;
-                    e.Detail = null;
+                    e.State = question != null ? AttentionState.BlockedQuestion : AttentionState.YourTurn;
+                    e.Detail = question;
 
-                    // Cleared WITH Detail — see the note at the sibling site above.
-                    e.DetailIsQuestionText = false;
+                    // Set WITH Detail: the question is the agent's own text, as for AskUserQuestion.
+                    e.DetailIsQuestionText = question != null;
+                    e.RaisedAtTurnEnd = true;
                     e.PendingToolUseId = null;
                     RecordActivityLine(e, "Turn ended", observedAtUtc);
-                }, evidenceAtUtc: observedAtUtc);
+                }, startsNewBlock: true, evidenceAtUtc: observedAtUtc);
+
+                // The episode began when the turn ended, not when this poll got to the row. The clear
+                // edge compares an activity row's time against EnteredAtUtc, so stamping "now" would
+                // make the owner's reply and the agent's first tool call, when they land in the same
+                // poll batch, look older than the turn end and leave the card asking.
+                if (changed
+                    && _entries.TryGetValue(sessionKey, out var ended)
+                    && observedAtUtc.Year >= 2000
+                    && observedAtUtc < ended.EnteredAtUtc)
+                {
+                    ended.EnteredAtUtc = observedAtUtc;
+                }
+
+                return changed;
+            }
+        }
+
+        /// <summary>
+        /// The owner submitted a prompt in this agent's pane (task 3d51315b): the turn that was
+        /// waiting for them is answered, so the agent is working again.
+        /// </summary>
+        /// <remarks>
+        /// Only a <see cref="AttentionState.YourTurn"/> or a question raised at a turn end is cleared
+        /// here. A permission prompt or an <c>AskUserQuestion</c> is answered in its own dialog, and
+        /// Enter on that dialog is not a prompt; those keep their own clear edges. Without this a
+        /// question card stayed lit for as long as the agent took to write a reply that ran no
+        /// tool, because the only clear edges were a tool call or the next turn end.
+        /// </remarks>
+        /// <param name="agentName">The agent registered in the pane the owner typed into.</param>
+        /// <returns>True if the state changed.</returns>
+        public bool NoteOwnerReplied(string agentName)
+        {
+            if (string.IsNullOrWhiteSpace(agentName)) return false;
+
+            lock (_lock)
+            {
+                var entry = _entries.Values
+                    .Where(e => string.Equals(e.AgentName, agentName, StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(e => e.EnteredAtUtc)
+                    .FirstOrDefault();
+                if (entry == null) return false;
+
+                bool waitingAtTurnEnd = entry.State == AttentionState.YourTurn
+                    || (entry.State == AttentionState.BlockedQuestion && entry.RaisedAtTurnEnd);
+                if (!waitingAtTurnEnd) return false;
+
+                string key = _entries.First(kv => ReferenceEquals(kv.Value, entry)).Key;
+                return UpsertLocked(key, e =>
+                {
+                    e.State = AttentionState.Working;
+                    e.Detail = null;
+                    e.DetailIsQuestionText = false;
+                    e.RaisedAtTurnEnd = false;
+                    e.PendingToolUseId = null;
+                    RecordActivityLine(e, "You replied", UtcNow());
+                });
             }
         }
 
@@ -1260,6 +1359,7 @@ namespace MultiTerminal.MCPServer.Services
             LastActivityAtUtc = e.LastActivityAtUtc,
             BlockSeq = e.BlockSeq,
             DetailIsQuestionText = e.DetailIsQuestionText,
+            RaisedAtTurnEnd = e.RaisedAtTurnEnd,
         };
 
         /// <summary>

@@ -161,7 +161,11 @@ namespace MultiTerminal.Tests
             string handler = html.Substring(at, Math.Min(900, html.Length - at));
 
             Assert.Contains("acked[", handler, StringComparison.Ordinal);
-            Assert.Contains("isBlocking", handler, StringComparison.Ordinal);
+
+            // Since task 3d51315b the handler asks wantsYou, which is a block OR Your turn; the
+            // definition is pinned too, so dropping blocks from it cannot pass here.
+            Assert.Contains("wantsYou(", handler, StringComparison.Ordinal);
+            Assert.Contains("function wantsYou(s) { return isBlocking(s) || isSoft(s); }", html, StringComparison.Ordinal);
         }
 
         /// <summary>

@@ -27,6 +27,8 @@ body {
     --badge-bg: #c93b3b; --badge-fg: #ffffff;
     --pulse-question: rgba(203,166,247,0.26);
     --pulse-permission: rgba(250,179,135,0.24);
+    /* Your turn (task 3d51315b): its own hue, so it reads as neither "working" nor "blocked". */
+    --yourturn: #89dceb; --pulse-yourturn: rgba(137,220,235,0.13);
 
     margin: 0; padding: 0;
     font-family: "Segoe UI", system-ui, sans-serif; font-size: 12px;
@@ -47,6 +49,7 @@ body.light {
     --badge-bg: #b42318; --badge-fg: #ffffff;
     --pulse-question: rgba(136,57,239,0.20);
     --pulse-permission: rgba(254,100,11,0.20);
+    --yourturn: #04a5e5; --pulse-yourturn: rgba(4,165,229,0.12);
 }
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 ::-webkit-scrollbar { width: 4px; }
@@ -175,6 +178,7 @@ button.gear[aria-expanded="true"] { border-color: var(--accent); color: var(--te
 .card[data-state="BlockedUnknown"]::before { background: var(--peach); }
 .card[data-state="Working"]::before { background: var(--accent); }
 .card[data-state="Idle"]::before { background: var(--green); }
+.card[data-state="YourTurn"]::before { background: var(--yourturn); }
 
 .top { display: flex; align-items: center; gap: 9px; }
 .avatar {
@@ -212,6 +216,7 @@ button.gear[aria-expanded="true"] { border-color: var(--accent); color: var(--te
 .card[data-state="BlockedUnknown"] .pip { background: var(--peach); }
 .card[data-state="Working"] .pip { background: var(--accent); }
 .card[data-state="Idle"] .pip { background: var(--green); }
+.card[data-state="YourTurn"] .pip { background: var(--yourturn); }
 .observed b { font-weight: 600; }
 .observed q { color: var(--text-quote); font-size: 12.5px; font-style: italic; quotes: '"' '"'; display: block; }
 
@@ -348,7 +353,21 @@ body[data-alarm="hand"] .card.pulsing {
    a true state as calm is the failure this rail exists to prevent. */
 .card.acked, .card.acked * { animation: none !important; }
 .card.acked { transform: none; box-shadow: none; background: var(--bg-card); }
-.card.acked .beacon, .card.acked .klax { display: none !important; }
+.card.acked .beacon, .card.acked .klax, .card.acked .soft-beacon { display: none !important; }
+
+/* ---- YOUR TURN: the soft beacon (task 3d51315b, Owner decision) ----
+   Always this one, whichever alarm is picked above: the alarm is for an agent that is blocked,
+   and an agent whose turn simply ended is not. Slower, dimmer and in its own hue, so it is
+   noticed without competing with a real alarm on the rail. Acknowledged like a block. */
+.soft-beacon { display: none; }
+.card.soft { overflow: hidden; }
+.card.soft .soft-beacon {
+    display: block; position: absolute; inset: -60% -10%; pointer-events: none;
+    background: conic-gradient(from 0deg,
+        var(--pulse-yourturn) 0deg, transparent 32deg,
+        transparent 180deg, transparent 328deg, var(--pulse-yourturn) 360deg);
+    animation: sweep 6s linear infinite;
+}
 .ack-mark {
     font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
     color: var(--text-muted); border: 1px solid var(--border);
@@ -545,10 +564,16 @@ function fmtAge(sec) {
 
 function isBlocking(s) { return !!BLOCKING[s.state]; }
 
+/* Your turn (task 3d51315b): the agent finished its turn and is waiting for your next prompt.
+   NOT a block, so it is never counted in the header and never gets the alarm you picked; it
+   gets the soft beacon instead, a slow dim sweep, and it is acknowledged like a block. */
+function isSoft(s) { return s.state === "YourTurn"; }
+function wantsYou(s) { return isBlocking(s) || isSoft(s); }
+
 function ordered() {
     if (order === "fixed") return sessions.slice();
 
-    function rank(s) { return isBlocking(s) ? 0 : (s.state === "Offline" ? 2 : 1); }
+    function rank(s) { return isBlocking(s) ? 0 : isSoft(s) ? 1 : (s.state === "Offline" ? 3 : 2); }
     var idx = {};
     sessions.forEach(function (s, i) { idx[s.id] = i; });
 
@@ -586,6 +611,7 @@ function rebuildColorCache() {
     colorCache = {
         Working: v("--accent", "#89b4fa"),
         Idle: v("--green", "#a6e3a1"),
+        YourTurn: v("--yourturn", "#89dceb"),
         BlockedQuestion: v("--mauve", "#cba6f7"),
         BlockedPermission: v("--peach", "#fab387"),
         BlockedUnknown: v("--peach", "#fab387"),
@@ -639,7 +665,8 @@ function cardShell(s, extraClass) {
     card.className = "card" + (extraClass || "")
         + (s.state === "Offline" ? " offline" : "")
         + (isBlocking(s) ? " pulsing" : "")
-        + (isBlocking(s) && isAcked(s) ? " acked" : "")
+        + (isSoft(s) ? " soft" : "")
+        + (wantsYou(s) && isAcked(s) ? " acked" : "")
         + (s.id === focusedId ? " focused" : "");
     card.setAttribute("role", "button");
     card.tabIndex = 0;
@@ -665,6 +692,11 @@ function avatarFor(s) {
 /* The alarm overlays exist on every blocking card; CSS decides which one is visible, so
    switching treatment never needs a re-render. */
 function addAlarmOverlays(card, s) {
+    if (isSoft(s)) {
+        var sb = document.createElement("span"); sb.className = "soft-beacon";
+        card.appendChild(sb);
+        return;
+    }
     if (!isBlocking(s)) return;
     var bc = document.createElement("span"); bc.className = "beacon";
     var kx = document.createElement("span"); kx.className = "klax";
@@ -757,7 +789,7 @@ function buildCard(s, team) {
 
     /* The state is untouched by acknowledgement — this marker is the only thing that
        changes, and it says what actually happened: the owner saw it. */
-    if (isBlocking(s) && isAcked(s)) {
+    if (wantsYou(s) && isAcked(s)) {
         var am = document.createElement("span");
         am.className = "ack-mark";
         am.textContent = "acknowledged";
@@ -837,7 +869,7 @@ function buildCompactCard(s) {
     var pip = document.createElement("i"); pip.className = "pip";
     var st = document.createElement("span");
     st.className = "compact-state"; st.textContent = s.observedVerb || "";
-    if (isBlocking(s) && isAcked(s)) st.textContent += " · acknowledged";
+    if (wantsYou(s) && isAcked(s)) st.textContent += " · acknowledged";
     var el = document.createElement("span");
     el.className = "elapsed"; el.textContent = fmtAge(s.sinceSeconds);
     top.appendChild(avatarFor(s)); top.appendChild(name); top.appendChild(pip); top.appendChild(st);
@@ -1139,7 +1171,7 @@ function pruneAnim() {
 
 function activate(s) {
     focusedId = s.id;
-    if (isBlocking(s)) acked[s.id] = { state: s.state, block: blockId(s) };
+    if (wantsYou(s)) acked[s.id] = { state: s.state, block: blockId(s) };
     render();
     post({ type: "focus_session", sessionId: s.id });
 }
@@ -1284,7 +1316,7 @@ window.chrome.webview.addEventListener("message", function (ev) {
         focusedId = msg.sessionId || null;
         if (focusedId) {
             var f = sessions.filter(function (s) { return s.id === focusedId; })[0];
-            if (f && isBlocking(f)) acked[f.id] = { state: f.state, block: blockId(f) };
+            if (f && wantsYou(f)) acked[f.id] = { state: f.state, block: blockId(f) };
         }
         render();
     }

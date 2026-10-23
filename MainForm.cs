@@ -7071,6 +7071,26 @@ namespace MultiTerminal
             doc.ClaudeSessionAdopted += OnPaneClaudeSessionAdopted;
             doc.FormClosing += OnPaneFormClosing;
             doc.BatchCloseRequested += OnPaneBatchCloseRequested;
+
+            // Task 3d51315b: the owner answering a turn-end question (or simply taking their turn)
+            // clears that card at once, instead of when the agent's reply next runs a tool. Wired here
+            // because this is the one call every pane creation site makes.
+            if (doc.Terminal != null)
+                doc.Terminal.PromptSubmitted += (s, e) => OnPanePromptSubmitted(doc);
+        }
+
+        private void OnPanePromptSubmitted(TerminalDocument doc)
+        {
+            try
+            {
+                string agent = doc?.OriginalAgentName;
+                if (string.IsNullOrWhiteSpace(agent)) return;
+                _mcpServer?.Broker?.AgentAttention?.NoteOwnerReplied(agent);
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("MainForm", $"OnPanePromptSubmitted error: {ex.Message}");
+            }
         }
 
         // Item 8: panes MT is closing itself (close_helper, closed with their PM), which never ask about
@@ -9448,7 +9468,8 @@ namespace MultiTerminal
                 var watcher = new MCPServer.Services.AgentActivityWatcher(
                     broker.ActivityFeedService,
                     broker.AgentAttention,
-                    msg => _debugLogService?.Info("AgentActivityWatcher", msg));
+                    msg => _debugLogService?.Info("AgentActivityWatcher", msg),
+                    ChatQuestionDetector.FindQuestionForSession);
                 watcher.Start();
                 _agentActivityWatcher = watcher;
             }
