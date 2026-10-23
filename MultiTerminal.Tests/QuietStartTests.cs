@@ -131,6 +131,16 @@ namespace MultiTerminal.Tests
             Assert.Equal(expected, TerminalRoles.IsQuietStart(projectQuietStart, spawnerName));
         }
 
+        [Theory]
+        [InlineData(false, null, true)]     // Just Claude: no project setting, still quiet
+        [InlineData(true, null, true)]
+        [InlineData(false, "Alice", false)] // the helper rule still wins over a quiet launch
+        [InlineData(false, "ClaudeRemote", false)]
+        public void A_quiet_launch_is_quiet_whatever_the_project_says_except_for_a_helper(bool projectQuietStart, string spawnerName, bool expected)
+        {
+            Assert.Equal(expected, TerminalRoles.IsQuietStart(projectQuietStart, spawnerName, launchQuietStart: true));
+        }
+
         [Fact]
         public void The_launch_variable_is_set_for_a_quiet_start_and_cleared_otherwise()
         {

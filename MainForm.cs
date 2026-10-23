@@ -4940,7 +4940,9 @@ namespace MultiTerminal
                         continue;
                     }
 
-                    bool closable = _mcpServer?.SpawnService?.Panes.Record(helperDocId, resolvedName, pmDoc.DocId, pmDoc.LaunchNonce) == true;
+                    // The PM's registered name rides along for the Attention pane's By team grouping (task
+                    // d71bb221), as SpawnController records the proven spawner's name.
+                    bool closable = _mcpServer?.SpawnService?.Panes.Record(helperDocId, resolvedName, pmDoc.DocId, pmDoc.LaunchNonce, pmName) == true;
                     _paneLaunches?.LinkSpawner(helperDocId, pmDoc.DocId);
                     _debugLogService?.Info("LaunchSession", $"Helper resume: '{resolvedName}' resumed session {entry.SessionId} in '{check.Cwd}' for {pmName} (DocId {helperDocId}, closable by the PM: {closable})");
 
@@ -5485,9 +5487,22 @@ namespace MultiTerminal
                 if (picker.ShowDialog(this) != DialogResult.OK)
                     return; // User cancelled
 
-                string terminalName = picker.SelectedIdentity;
+                // "Unassigned" (the picker's default since ae3d0193) launches under its OWN unique, non-team
+                // name ("Claude", "Claude-2"…), 6a8d029f's no-lead rule with "Claude" as the base. See
+                // JustClaudeLaunchIdentity. Like a project-derived launch it needs the reserved-name census
+                // and FAILS CLOSED without it.
+                HashSet<string> reserved = null;
+                if (Services.JustClaudeLaunchIdentity.IsDefaultChoice(picker.SelectedIdentity)
+                    && !TryTakeJustClaudeReservedNames(identities, out reserved, out string censusError))
+                {
+                    doc.ShowStartScreen();
+                    ShowReservedCensusFailed(censusError);
+                    return;
+                }
+
+                var identity = Services.JustClaudeLaunchIdentity.FromPickerSelection(picker.SelectedIdentity, doc.DocId, reserved);
                 string workingDir = picker.SelectedFolder ?? defaultFolder;
-                bool isTeamLead = true;
+                bool isTeamLead = identity.IsTeamLead;
 
                 // Track the selected folder as a recent directory
                 _settings?.AddRecentDirectory(workingDir);
@@ -5503,25 +5518,38 @@ namespace MultiTerminal
                     return;
                 }
 
-                if (_mcpServer?.Broker != null)
+                // The default registers ONLY through TryRegisterProjectIdentity (atomic, fail-closed, no
+                // placeholder or pool fallback); a named agent keeps PreRegisterTerminalWithName exactly as
+                // before. Run 5: that call used to discard the RegisterResult — see the note at the
+                // project-launch site.
+                if (!Services.JustClaudeLaunchIdentity.TryRegister(
+                        identity,
+                        (string requested, out string resolved, out string error) =>
+                            TryRegisterProjectIdentity(doc.DocId, requested, doc.LaunchNonce, out resolved, out error),
+                        named => _mcpServer?.Broker != null
+                            ? PreRegisterTerminalWithName(doc.DocId, named, isTeamLead, launchNonce: doc.LaunchNonce)
+                            : named,
+                        out string terminalName,
+                        out string refusal))
                 {
-                    // Run 5: was discarding the RegisterResult — see the note at the project-launch site.
-                    // A gate-(4) refusal here launched the session under a name the broker had rejected.
-                    terminalName = PreRegisterTerminalWithName(
-                        doc.DocId,
-                        terminalName,
-                        isTeamLead,
-                        launchNonce: doc.LaunchNonce);
+                    doc.ShowStartScreen();
+                    ShowProjectIdentityRefused(identity.TerminalName, refusal);
+                    return;
                 }
 
                 // AC7 launch-root strategy (task c6ed236c): spawn at repo root, in-shell
                 // cd narrows to the worktree. Falls through to workingDir on no worktree.
                 // The picker's folder is an explicit user choice, so the override only
                 // applies when the agent's active task lives in that repo (f1f74a8f).
-                workingDir = ResolveSpawnDir(terminalName, workingDir, out string taskWorktreePath, explicitTargetDir: workingDir);
+                // Not for the default launch: it chose no team identity, so there is no task to follow.
+                string taskWorktreePath = null;
+                if (!identity.RegisterUnique)
+                    workingDir = ResolveSpawnDir(terminalName, workingDir, out taskWorktreePath, explicitTargetDir: workingDir);
 
+                // Always a quiet start (Owner request 2026-10-04): a plain Claude session opens at an idle
+                // prompt, with no session-start menu, for the default and for a named agent alike.
                 doc.StartTerminal(workingDir, terminalName, launch.AutoRunCommand, isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath, claudeProfile: claudeProfile,
-                    launchKind: Services.PaneLaunchKind.Claude);
+                    launchKind: Services.PaneLaunchKind.Claude, launchQuietStart: true);
 
                 float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
                 doc.SetFontSize(terminalFontSize);
@@ -5817,7 +5845,7 @@ namespace MultiTerminal
         /// </summary>
         public List<string> GetAvailableIdentities(string projectPath = null)
         {
-            var identities = new List<string>();
+            var discoveredNames = new List<string>();
             projectPath = projectPath ?? _settings?.GetLastDirectory() ?? Directory.GetCurrentDirectory();
 
             try
@@ -5834,22 +5862,55 @@ namespace MultiTerminal
                     sid => (agentMap != null && agentMap.TryGetValue(sid, out var agent)) ? agent : null);
                 var discovered = discovery.DiscoverIdentitiesInProject(projectPath);
                 // Dictionary keys are identity names
-                identities.AddRange(discovered.Keys);
+                discoveredNames.AddRange(discovered.Keys);
             }
             catch (Exception ex)
             {
                 _debugLogService?.Error("MainForm", $"Identity discovery failed: {ex.Message}");
             }
 
-            // Also include the name pool for new identities
-            var existing = identities.ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (var name in _terminalNamePool.Take(8)) // First 8 common names
-            {
-                if (!existing.Contains(name))
-                    identities.Add(name);
-            }
+            // Drops the names a default Just Claude launch generates ("Claude", "Claude-02a8"…), which are
+            // throwaways rather than team identities, unless a project declares that name as its team lead or a
+            // roster agent; then adds the first 8 pool names for new identities.
+            return Services.JustClaudeLaunchIdentity.BuildPickerIdentities(
+                discoveredNames, _terminalNamePool.Take(8), IsProjectDeclaredIdentity());
+        }
 
-            return identities;
+        /// <summary>
+        /// A predicate answering "does any project declare this name as its team lead or a roster agent?",
+        /// reading the project database once, on first use (most picker lists contain no generated-shape
+        /// name, so most never read it). If the read fails, generated-shape names stay out of the list.
+        /// </summary>
+        private Func<string, bool> IsProjectDeclaredIdentity()
+        {
+            var db = _sharedProjectDatabase;
+            if (db == null) return null;
+
+            HashSet<string> declared = null;
+            return name =>
+            {
+                if (declared == null)
+                {
+                    declared = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    try
+                    {
+                        foreach (var project in db.GetAllRichProjects())
+                        {
+                            if (!string.IsNullOrWhiteSpace(project.TeamLead)) declared.Add(project.TeamLead);
+                            foreach (var agent in db.GetProjectAgents(project.Id))
+                            {
+                                if (!string.IsNullOrWhiteSpace(agent.AgentName)) declared.Add(agent.AgentName);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _debugLogService?.Error("MainForm", $"Project identity lookup failed: {ex.Message}");
+                    }
+                }
+
+                return declared.Contains(name);
+            };
         }
 
         /// <summary>
@@ -5973,6 +6034,38 @@ namespace MultiTerminal
             }
 
             request = Services.ProjectLaunchIdentity.Resolve(project?.TeamLead, kind, codexDefault, project?.Name, project?.Id, reserved);
+            error = null;
+            return true;
+        }
+
+        /// <summary>
+        /// The reserved-name census for a default ("Unassigned") Just Claude launch (ae3d0193): the same
+        /// ALL-OR-NOTHING census a no-lead project launch takes (<see cref="TryResolveProjectLaunchIdentity"/>),
+        /// with no project of its own, so every project's lead, roster agents and sanitized name are
+        /// reserved, plus Oracle, the Codex default agent, the WHOLE name pool and every name the picker
+        /// offered. False with the reason when it cannot be taken; the caller fails the launch closed.
+        /// </summary>
+        private bool TryTakeJustClaudeReservedNames(IEnumerable<string> offeredIdentities, out HashSet<string> reserved, out string error)
+        {
+            var db = _sharedProjectDatabase;
+            var extras = new List<string> { Services.OracleService.OracleName, _settings?.GetCodexDefaultAgentName() };
+            extras.AddRange(_terminalNamePool);
+            if (offeredIdentities != null) extras.AddRange(offeredIdentities);
+
+            var census = Services.ProjectLaunchIdentity.TryTakeCensus(
+                null,
+                db == null ? null : () => db.GetAllRichProjects().Select(p => (p.Id, p.Name, p.TeamLead)),
+                db == null ? null : id => db.GetProjectAgents(id).Select(a => a.AgentName),
+                extras);
+            if (!census.Succeeded)
+            {
+                _debugLogService?.Warning("StartScreen", $"Reserved-name census failed; Just Claude launch refused: {census.Error}");
+                reserved = null;
+                error = census.Error;
+                return false;
+            }
+
+            reserved = census.Names;
             error = null;
             return true;
         }
@@ -6881,70 +6974,35 @@ namespace MultiTerminal
 
         private void ApplyGridLayout(GridLayoutManager.GridPreset preset)
         {
-            var docs = _gridManager.GetTerminalDocuments();
+            int existingCount = _gridManager.GetTerminalDocuments().Count;
             int neededCount = GetTerminalCountForPreset(preset);
 
-            // Every pane this preset adds opens a plain shell in the same folder, so its Claude profile
-            // is decided ONCE here (ticket c8ee0eec): a refusal is one message box, not one per pane,
-            // and the added panes stay on their start screens, unregistered.
-            string presetDir = _settings?.GetLastDirectory();
-            Models.ClaudeProfile presetClaudeProfile = null;
-            bool presetShellsAllowed = docs.Count >= neededCount
-                || TryGetLaunchClaudeProfile(null, presetDir, $"PowerShell in '{presetDir}'", out presetClaudeProfile);
-
-            // Add terminals if needed
-            while (docs.Count < neededCount)
+            // Top up with Home tabs (task a7d3e675). Each added pane goes through AddNewTerminal, the
+            // same path as "+ New", with NO launch parameter: no shell starts and no team name is taken
+            // until the user picks something on the start screen. This loop used to build and start
+            // terminals itself (pre-register a pool name, then StartTerminal at the last directory), so
+            // a layout produced named PowerShells whose HUDs showed other projects' tasks. That private
+            // copy of the wiring had already drifted once (task 0d72698a lost zoom here), so it is gone
+            // rather than shared.
+            //
+            // forceTabMode docks with DockState.Document, exactly as the old loop did, so ApplyPreset
+            // below still places every pane in its grid slot. AddNewTerminal's own MaxGridPanes
+            // placement is bypassed on purpose, because ApplyPreset owns placement here.
+            //
+            // AddNewTerminal also makes each new pane the last active terminal, which the old loop never
+            // did. Put the user's terminal back so Recent-folder cd and similar still target it.
+            var previousLastActive = _lastActiveTerminal;
+            for (int i = existingCount; i < neededCount; i++)
             {
-                var doc = new TerminalDocument();
-                doc.Terminal.SetDebugLogService(_debugLogService);
-                doc.SetDebugLogService(_debugLogService); // Enable status bar logging
-                doc.SetTheme(_currentTheme);
-                doc.SetMessageBroker(_mcpServer?.Broker); // Enable status bar updates
-                doc.TerminalExited += OnTerminalExited;
-                WirePaneLaunchRecording(doc);
-                doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
-                doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
-                doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
-                doc.StatusBarHeightChanged += OnStatusBarHeightChanged;
-                doc.HudTabZoomChanged += OnHudTabZoomChanged;
-                doc.Terminal.TerminalClicked += OnTerminalClicked;
-                doc.SaveAsPromptRequested += OnSaveAsPromptRequested;
-                doc.DirectoryChanged += OnTerminalDirectoryChanged;
-                doc.ProjectFileChanged += OnProjectFileChanged;
-                doc.ClaudeCodeDetected += OnClaudeCodeDetected;
-                doc.TaskDropped += OnTaskDroppedOnTerminal;
-
-                // Wire up "Launch as..." context menu support
-                doc.GetAvailableIdentities = () => GetAvailableIdentities().ToArray();
-                doc.LaunchAsIdentityRequested += OnLaunchAsIdentityRequested;
-                WireStartScreenEvents(doc);
-
-                doc.Show(_dockPanel, DockState.Document);
-
-                // Pre-register with MessageBroker so the terminal is routable immediately
-                if (presetShellsAllowed)
-                    doc.StartTerminal(presetDir, PreRegisterTerminal(doc.DocId, doc.LaunchNonce), claudeProfile: presetClaudeProfile, launchKind: Services.PaneLaunchKind.PowerShell);
-                else
-                    doc.ShowStartScreen();
-                doc.SetFontSize(_settings?.GetTerminalFontSize() ?? 10f);
-
-                // Grid-preset terminals get the same saved layout as every other creation path.
-                // This block was absent here (task 0d72698a, debugger gate): a terminal spawned by a
-                // layout preset opened every HUD tab at 1.0 no matter what was saved, and Ctrl+wheel
-                // in it went nowhere because nothing was subscribed — the ticket's own defect, one
-                // layer up. Split ratios and status-bar height were missing for the same reason.
-                if (_settings != null)
-                {
-                    doc.ApplyAgentSplitRatio(_settings.GetAgentPanelSplitRatio());
-                    doc.ApplyHudSplitRatio(_settings.GetHudSplitRatio());
-                    ApplySavedHudTabZooms(doc);
-                    doc.ApplyStatusBarHeight(_settings.GetStatusBarHeight());
-                }
-
-                docs.Add(doc);
+                AddNewTerminal(forceTabMode: true);
+            }
+            if (previousLastActive != null && !previousLastActive.IsDisposed)
+            {
+                _lastActiveTerminal = previousLastActive;
             }
 
-            // Apply the layout
+            // Apply the layout. A preset with fewer slots than open terminals closes nothing:
+            // ArrangeAsGrid lays out the first rows*cols documents and leaves the rest where they are.
             _gridManager.ApplyPreset(preset);
         }
 
@@ -7791,12 +7849,22 @@ namespace MultiTerminal
             if (terminals.Count == 0)
                 return;
 
+            // A helper spawned while the Attention rail was closed has not had its link stamped yet.
+            StampHelperLinks();
+
             // Save terminal states
             var sessionData = terminals.Select(t => new TerminalSessionInfo
             {
                 WorkingDirectory = t.GetWorkingDirectory() ?? _settings?.GetLastDirectory(),
                 FontSize = t.GetFontSize(),
-                CustomTitle = t.CustomTitle
+                CustomTitle = t.CustomTitle,
+
+                // The pane's team link, so the Attention rail's By team grouping survives a restart
+                // (task d71bb221).
+                PaneKey = t.PaneKey,
+                HelperName = t.HelperLinkName,
+                SpawnerPaneKey = t.HelperLinkSpawnerPaneKey,
+                SpawnerName = t.HelperLinkSpawnerName,
             }).ToList();
 
             _settings.SetSessionTerminals(sessionData);
@@ -8487,6 +8555,12 @@ namespace MultiTerminal
                 {
                     doc.CustomTitle = sessionInfo.CustomTitle;
                 }
+
+                // The pane's key and helper link from the last run (task d71bb221). A link whose PM
+                // pane is not restored, or is restored under another name, resolves to "Helpers of
+                // <recorded PM>" (or "PM unknown" with no recorded name); it is never re-guessed.
+                doc.RestorePaneKey(sessionInfo.PaneKey);
+                doc.SetHelperLink(sessionInfo.HelperName, sessionInfo.SpawnerPaneKey, sessionInfo.SpawnerName);
             }
             else
             {
@@ -9657,8 +9731,24 @@ namespace MultiTerminal
                     if (activeProject != null) activeTaskProjects[agent] = activeProject;
                 }
 
+                // Team roles for the By team order (task d71bb221): PM from the tab's own role, helper
+                // and its PM from the pane link. Same launched-first pane order as paneProjects, so a
+                // stale restored pane cannot claim a running agent's role.
+                StampHelperLinks();
+                var teamLinks = AttentionPanel.AttentionTeamResolver.Resolve(
+                    panesLaunchedFirst.Select(d => new AttentionPanel.AttentionPaneTeamFacts
+                    {
+                        PaneKey = d.PaneKey,
+                        AgentName = TerminalRegistrationBinder.IsUnassigned(d.PaneAgentName) ? null : d.PaneAgentName,
+                        DisplayedAsPm = d.DisplayedRole == MultiTerminal.Terminal.TerminalRole.ProjectManager,
+                        LaunchedAsHelper = d.LaunchedAsHelper,
+                        LinkHelperName = d.HelperLinkName,
+                        LinkSpawnerPaneKey = d.HelperLinkSpawnerPaneKey,
+                        LinkSpawnerName = d.HelperLinkSpawnerName,
+                    }));
+
                 var cards = AttentionPanel.AttentionCardProjector.Project(
-                    snapshot, colors, claims, DateTime.UtcNow, agentProjects, agentStats, paneProjects, activeTaskProjects);
+                    snapshot, colors, claims, DateTime.UtcNow, agentProjects, agentStats, paneProjects, activeTaskProjects, teamLinks);
 
                 // The account reading is offered ALONGSIDE the per-terminal copies rather than
                 // instead of them: From() already ranks a shared-source reading above a
@@ -9668,11 +9758,81 @@ namespace MultiTerminal
                 if (accountQuota != null) quotaCandidates.Add(accountQuota);
 
                 _attentionPanel.SetSessions(
-                    cards, AttentionPanel.AttentionQuota.From(quotaCandidates));
+                    cards, AttentionPanel.AttentionQuota.From(quotaCandidates),
+                    AttentionPanel.AttentionTeamLayout.Build(cards));
             }
             catch (Exception ex)
             {
                 _debugLogService?.Error("AttentionPanel", $"RefreshAttentionPanel failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Stamps each spawned helper pane with the stable key of the pane that spawned it
+        /// (task d71bb221), so the Attention rail can group it under its PM and the link survives a
+        /// restart.
+        /// </summary>
+        /// <remarks>
+        /// The spawner comes from <c>SpawnedPaneRegistry</c>, which records only a NONCE-PROVEN
+        /// spawner pane — never the name the caller typed into <c>spawn_helper</c>. A helper with no
+        /// proven spawner (the phone app, an old MCP server) is stamped with no spawner key, and the
+        /// rail files it under "PM unknown" rather than guessing. Re-checked on every call while the
+        /// key is missing, so a proof that lands after the pane registers still upgrades the link.
+        /// Done here rather than at spawn time so the spawn path is untouched.
+        /// </remarks>
+        private void StampHelperLinks()
+        {
+            try
+            {
+                var panes = _dockPanel?.Documents.OfType<TerminalDocument>().ToList();
+                if (panes == null || panes.Count == 0) return;
+                var registry = _mcpServer?.SpawnService?.Panes;
+
+                foreach (var doc in panes)
+                {
+                    if (!doc.LaunchedAsHelper) continue;
+                    string agent = doc.PaneAgentName;
+                    if (string.IsNullOrWhiteSpace(agent) || TerminalRegistrationBinder.IsUnassigned(agent)) continue;
+
+                    bool sameAgent = string.Equals(doc.HelperLinkName, agent, StringComparison.OrdinalIgnoreCase);
+                    if (sameAgent && doc.HelperLinkSpawnerPaneKey != null) continue;
+
+                    var (spawnerDocId, spawnerNameAtSpawn) = registry?.SpawnerFor(doc.DocId) ?? (null, null);
+                    var matches = spawnerDocId == null
+                        ? new List<TerminalDocument>()
+                        : panes.Where(p => !ReferenceEquals(p, doc)
+                                           && string.Equals(p.DocId, spawnerDocId, StringComparison.Ordinal)).ToList();
+
+                    // Exactly one pane, still running the agent the registry recorded AT SPAWN TIME:
+                    // its key AND that name are the link (pipeline Run 1). The name is what lets the
+                    // rail notice later that the pane has been reused for somebody else. This stamp
+                    // is lazy, so the spawner may already have left its pane; a pane now running
+                    // anyone else (or nobody) stamps an unproven link instead of attributing the
+                    // helper to the newcomer, and that is retried on the next call because its key
+                    // is still missing. The unproven link keeps the name recorded at spawn time, so
+                    // the rail can still say "Helpers of <name>" if the pane never comes back
+                    // (pipeline Run 2: dropping it left the helper "PM unknown" for good after a
+                    // restart, since a restored pane is not LaunchedAsHelper and is never re-stamped).
+                    var spawner = matches.Count == 1 ? matches[0] : null;
+                    string spawnerName = spawner?.PaneAgentName;
+                    bool stillTheSpawner = spawnerNameAtSpawn != null
+                        && !string.IsNullOrWhiteSpace(spawnerName)
+                        && !TerminalRegistrationBinder.IsUnassigned(spawnerName)
+                        && string.Equals(spawnerName, spawnerNameAtSpawn, StringComparison.OrdinalIgnoreCase);
+                    if (!stillTheSpawner)
+                    {
+                        doc.SetHelperLink(agent, null, spawnerNameAtSpawn);
+                    }
+                    else
+                    {
+                        doc.SetHelperLink(agent, spawner.PaneKey, spawnerName);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Costs the grouping, never the rail.
+                _debugLogService?.Info("AttentionPanel", $"Helper link stamp failed: {ex.Message}");
             }
         }
 
@@ -9716,6 +9876,10 @@ namespace MultiTerminal
             _attentionPanel.AmbientChanged += (s, ambient) => _settings?.SetAttentionPanelAmbient(ambient);
             _attentionPanel.AlarmChanged += (s, alarm) => _settings?.SetAttentionPanelAlarm(alarm);
 
+            // Ctrl+wheel zoom, saved like the chat panel's (task d71bb221) and restored by
+            // ApplyAttentionPanelSettings below.
+            _attentionPanel.ZoomChanged += (s, zoom) => _settings?.SetAttentionPanelZoom(zoom);
+
             // Covers the two RECREATE paths (GetContentFromPersistString, ToggleAttentionPanel),
             // which run long after LoadSettings and so must re-push the stored preferences
             // themselves. On the CONSTRUCTION path this is a deliberate no-op — see
@@ -9753,6 +9917,9 @@ namespace MultiTerminal
             _attentionPanel.SetOrder(_settings.GetAttentionPanelOrder());
             _attentionPanel.SetAmbient(_settings.GetAttentionPanelAmbient());
             _attentionPanel.SetAlarm(_settings.GetAttentionPanelAlarm());
+
+            // Held as a pending value and applied once the WebView2 initialises, like ChatPanel.
+            _attentionPanel.SetZoomFactor(_settings.GetAttentionPanelZoom());
         }
 
         /// <summary>

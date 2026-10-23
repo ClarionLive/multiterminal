@@ -33,11 +33,17 @@ namespace MultiTerminal.MCPServer.Services
         /// <see cref="SpawnerNonce"/>: the generated one prints every field, and the nonce is a secret, so
         /// logging an entry would otherwise write it to the agent-readable debug log (pipeline Run 2).
         /// </summary>
-        public readonly record struct Entry(string HelperDocId, string HelperName, string SpawnerDocId, string SpawnerNonce)
+        /// <remarks>
+        /// <see cref="SpawnerName"/> (task d71bb221, pipeline Run 1) is the name the PROVEN spawner pane
+        /// was registered under at spawn time, read from the broker's row for that pane, never the
+        /// spawnerName the caller typed. The Attention rail uses it to notice that the spawner's pane
+        /// has since been reused for somebody else. It plays no part in authorizing a close.
+        /// </remarks>
+        public readonly record struct Entry(string HelperDocId, string HelperName, string SpawnerDocId, string SpawnerNonce, string? SpawnerName = null)
         {
             /// <inheritdoc/>
             public override string ToString()
-                => $"Entry {{ HelperDocId = {HelperDocId}, HelperName = {HelperName}, SpawnerDocId = {SpawnerDocId} }}";
+                => $"Entry {{ HelperDocId = {HelperDocId}, HelperName = {HelperName}, SpawnerDocId = {SpawnerDocId}, SpawnerName = {SpawnerName} }}";
         }
 
         /// <summary>Number of helper panes currently recorded.</summary>
@@ -60,7 +66,12 @@ namespace MultiTerminal.MCPServer.Services
         /// match. Returns whether an entry was stored, which is what the spawn response reports as
         /// closableBySpawner, so the two cannot disagree.
         /// </summary>
-        public bool Record(string? helperDocId, string? helperName, string? spawnerDocId, string? spawnerNonce)
+        /// <param name="helperDocId">The helper pane's DocId.</param>
+        /// <param name="helperName">The helper's registered name.</param>
+        /// <param name="spawnerDocId">The proven spawner pane's DocId.</param>
+        /// <param name="spawnerNonce">The launch nonce the spawner proved itself with.</param>
+        /// <param name="spawnerName">The proven spawner pane's registered name at spawn time, or null.</param>
+        public bool Record(string? helperDocId, string? helperName, string? spawnerDocId, string? spawnerNonce, string? spawnerName = null)
         {
             if (string.IsNullOrEmpty(helperDocId) || string.IsNullOrEmpty(helperName)
                 || string.IsNullOrEmpty(spawnerDocId) || string.IsNullOrEmpty(spawnerNonce))
@@ -70,7 +81,9 @@ namespace MultiTerminal.MCPServer.Services
 
             lock (_lock)
             {
-                _byHelperDocId[helperDocId] = new Entry(helperDocId, helperName, spawnerDocId, spawnerNonce);
+                _byHelperDocId[helperDocId] = new Entry(
+                    helperDocId, helperName, spawnerDocId, spawnerNonce,
+                    string.IsNullOrWhiteSpace(spawnerName) ? null : spawnerName);
             }
 
             return true;
@@ -109,6 +122,25 @@ namespace MultiTerminal.MCPServer.Services
             }
 
             return found;
+        }
+
+        /// <summary>
+        /// The DocId of the pane that spawned the helper pane <paramref name="helperDocId"/> and the name
+        /// that pane was registered under at spawn time, or (null, null) when nothing proven is recorded
+        /// for it (task d71bb221: the Attention rail groups a helper under its PM). Never returns the
+        /// nonce, which stays a secret of this class. Both values come from one read under the lock.
+        /// </summary>
+        public (string? DocId, string? Name) SpawnerFor(string? helperDocId)
+        {
+            if (string.IsNullOrEmpty(helperDocId))
+            {
+                return (null, null);
+            }
+
+            lock (_lock)
+            {
+                return _byHelperDocId.TryGetValue(helperDocId, out var e) ? (e.SpawnerDocId, e.SpawnerName) : (null, null);
+            }
         }
 
         /// <summary>

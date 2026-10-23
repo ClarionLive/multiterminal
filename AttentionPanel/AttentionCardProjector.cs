@@ -63,7 +63,8 @@ namespace MultiTerminal.AttentionPanel
             IReadOnlyDictionary<string, string> agentProjects = null,
             IReadOnlyDictionary<string, MultiTerminal.Services.TerminalUsageStats> agentStats = null,
             IReadOnlyDictionary<string, AttentionPaneProject> paneProjects = null,
-            IReadOnlyDictionary<string, string> activeTaskProjects = null)
+            IReadOnlyDictionary<string, string> activeTaskProjects = null,
+            IReadOnlyDictionary<string, AttentionTeamLink> teamLinks = null)
         {
             var cards = new List<AttentionCard>();
             if (entries == null) return cards;
@@ -77,9 +78,11 @@ namespace MultiTerminal.AttentionPanel
                 string color = null;
                 string fallbackProject = null;
                 MultiTerminal.Services.TerminalUsageStats stats = null;
+                AttentionTeamLink team = null;
 
                 if (!string.IsNullOrWhiteSpace(agent))
                 {
+                    if (teamLinks != null) teamLinks.TryGetValue(agent, out team);
                     if (claims != null) claims.TryGetValue(agent, out claim);
                     if (agentColors != null) agentColors.TryGetValue(agent, out color);
                     if (agentProjects != null) agentProjects.TryGetValue(agent, out fallbackProject);
@@ -168,6 +171,12 @@ namespace MultiTerminal.AttentionPanel
                         ? (long)age
                         : -1,
                     ContextStale = hasContext && stats.Stale,
+
+                    // Team role (task d71bb221). Only the two known roles are passed through, and a
+                    // PM name only for a helper, so a malformed link cannot invent a role or a team.
+                    Role = team?.Role == AttentionTeamRoles.Pm || team?.Role == AttentionTeamRoles.Helper ? team.Role : null,
+                    Pm = team?.Role == AttentionTeamRoles.Helper && !string.IsNullOrWhiteSpace(team.Pm) ? team.Pm : null,
+                    PmRecordedOnly = team?.Role == AttentionTeamRoles.Helper && !string.IsNullOrWhiteSpace(team.Pm) && team.PmRecordedOnly,
                 });
             }
 

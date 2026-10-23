@@ -79,9 +79,13 @@ namespace MultiTerminal.Terminal
         /// signal), MT's "initializing..." kick, and the post-/clear kick. If those disagreed, a
         /// terminal would get the menu despite the setting, or sit idle with the hook still asking
         /// for session-start.</para>
+        ///
+        /// <para><paramref name="launchQuietStart"/> is a launch that is quiet whatever its project says:
+        /// "Just Claude", which has no project to carry the setting (Owner request 2026-10-04, ticket
+        /// ae3d0193). The helper rule still wins.</para>
         /// </summary>
-        internal static bool IsQuietStart(bool projectQuietStart, string spawnerName) =>
-            projectQuietStart && Resolve(null, spawnerName) != TerminalRole.Helper;
+        internal static bool IsQuietStart(bool projectQuietStart, string spawnerName, bool launchQuietStart = false) =>
+            (projectQuietStart || launchQuietStart) && Resolve(null, spawnerName) != TerminalRole.Helper;
 
         /// <summary>
         /// The role a tab may actually SHOW, given the project it is currently naming.

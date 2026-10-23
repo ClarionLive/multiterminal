@@ -190,6 +190,30 @@ namespace MultiTerminal.AttentionPanel
         /// </remarks>
         [JsonPropertyName("contextStale")]
         public bool ContextStale { get; set; }
+
+        /// <summary>
+        /// <c>"pm"</c>, <c>"helper"</c>, or null for an agent with no team role (task d71bb221).
+        /// </summary>
+        /// <remarks>
+        /// Null is the common case and must stay harmless: a card with no role renders exactly as it
+        /// did before this field existed, in every order.
+        /// </remarks>
+        [JsonPropertyName("role")]
+        public string Role { get; set; }
+
+        /// <summary>
+        /// For a helper, the agent name of the PM whose pane spawned it; null when that is unknown,
+        /// and for every non-helper. Never guessed — see <see cref="AttentionTeamResolver"/>.
+        /// </summary>
+        [JsonPropertyName("pm")]
+        public string Pm { get; set; }
+
+        /// <summary>
+        /// True when <see cref="Pm"/> is only the recorded spawner name, not a pane on the rail
+        /// (pipeline Run 1). Host-side only: it decides the By team grouping, so it is internal and
+        /// never serialised to the view.
+        /// </summary>
+        internal bool PmRecordedOnly { get; set; }
     }
 
     /// <summary>What the board says an agent is working on. A claim, not an observation.</summary>

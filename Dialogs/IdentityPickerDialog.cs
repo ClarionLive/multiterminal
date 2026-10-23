@@ -4,6 +4,7 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Windows.Forms;
+using MultiTerminal.Docking;
 using MultiTerminal.Models;
 using MultiTerminal.Services;
 using MultiTerminal.Terminal;
@@ -14,7 +15,8 @@ namespace MultiTerminal.Dialogs
     /// Dialog for choosing a team lead identity and (in selection mode) a working folder.
     /// Used in two scenarios:
     /// 1. Conflict: a project's team lead is already active — pick an alternative.
-    /// 2. Selection: no team lead was assigned (e.g. "Just Claude") — pick identity + folder.
+    /// 2. Selection: no team lead was assigned (e.g. "Just Claude") — pick identity + folder. The list
+    /// opens on "Unassigned" (no team identity); a named agent is an explicit choice (ae3d0193).
     /// </summary>
     public class IdentityPickerDialog : Form
     {
@@ -191,84 +193,156 @@ namespace MultiTerminal.Dialogs
             CancelButton = _cancelButton;
         }
 
+        /// <summary>Default size of the Launch Claude window, in 96-DPI logical pixels.</summary>
+        internal static readonly Size SelectionDefaultLogicalSize = new Size(640, 720);
+
+        /// <summary>Smallest size the Launch Claude window can be dragged to, in 96-DPI logical pixels.</summary>
+        internal static readonly Size SelectionMinimumLogicalSize = new Size(480, 440);
+
+        /// <summary>
+        /// The agent-name entries the Launch Claude picker shows (ticket ae3d0193): the "Unassigned"
+        /// placeholder FIRST, then <paramref name="identities"/> in their given order. Any other spelling of
+        /// the placeholder in <paramref name="identities"/> (identity discovery reads past sessions, so it can
+        /// surface one) is dropped, so it appears exactly once. Picking it launches with no team identity:
+        /// see <see cref="Services.JustClaudeLaunchIdentity"/>. Selection mode only: the conflict picker swaps
+        /// a team lead for an alternative NAME, and the placeholder is not one.
+        /// </summary>
+        internal static List<string> BuildSelectionEntries(IEnumerable<string> identities)
+        {
+            var entries = new List<string> { TerminalRegistrationBinder.UnassignedPlaceholder };
+            foreach (var name in identities ?? Enumerable.Empty<string>())
+            {
+                if (string.IsNullOrWhiteSpace(name)) continue;
+                if (TerminalRegistrationBinder.IsUnassigned(name.Trim())) continue;
+                entries.Add(name);
+            }
+
+            return entries;
+        }
+
+        /// <summary>Test seam: the entries the identity list holds, in display order.</summary>
+        internal IReadOnlyList<string> IdentityEntries =>
+            _identityList.Items.Cast<object>().Select(o => o.ToString()).ToList();
+
+        /// <summary>Test seam: the identity list's selected index (-1 for none).</summary>
+        internal int SelectedIdentityIndex => _identityList.SelectedIndex;
+
+        /// <summary>Test seam: the identity list's selected entry as TryAccept reads it (null for none).</summary>
+        internal string SelectedIdentityEntry => _identityList.SelectedItem?.ToString().Trim();
+
+        /// <summary>Test seam: the identity list's background, to prove the theme reached it inside the layout.</summary>
+        internal System.Drawing.Color IdentityListBackColor => _identityList.BackColor;
+
         private void BuildSelectionLayout(string defaultFolder, List<string> recentFolders)
         {
-            Size = new Size(560, 520);
-            int y = 16;
+            // Resizable (ticket ae3d0193): a docked TableLayoutPanel whose two list rows are percent-sized,
+            // so both lists grow with the window. Labels, the folder row and the buttons are AutoSize rows
+            // and the fonts are in points, so the layout follows the DPI instead of fixed pixel offsets.
+            FormBorderStyle = FormBorderStyle.Sizable;
+            SizeGripStyle = SizeGripStyle.Show;
+            MinimumSize = LogicalToDeviceUnits(SelectionMinimumLogicalSize);
+            Size = FitToWorkingArea(LogicalToDeviceUnits(SelectionDefaultLogicalSize));
+
+            var recents = recentFolders?.Where(f => Directory.Exists(f)).ToList() ?? new List<string>();
+            bool hasRecents = recents.Count > 0;
+
+            var layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                Padding = new Padding(LogicalToDeviceUnits(12)),
+            };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+            int row = 0;
+            void AddRow(RowStyle style)
+            {
+                layout.RowStyles.Add(style);
+                row++;
+            }
 
             // --- Agent Identity Section ---
             var identityLabel = new Label
             {
                 Text = "Agent name:",
-                Location = new Point(16, y),
-                Size = new Size(512, 20),
+                AutoSize = true,
+                Margin = new Padding(0, 0, 0, LogicalToDeviceUnits(4)),
                 Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
             };
-            Controls.Add(identityLabel);
-            y += 24;
+            layout.Controls.Add(identityLabel, 0, row);
+            layout.SetColumnSpan(identityLabel, 2);
+            AddRow(new RowStyle(SizeType.AutoSize));
 
             _identityList = new ListBox
             {
-                Location = new Point(16, y),
-                Size = new Size(512, 120),
+                Dock = DockStyle.Fill,
                 IntegralHeight = false,
+                Margin = new Padding(0, 0, 0, LogicalToDeviceUnits(12)),
                 Font = new Font("Segoe UI", 10f)
             };
 
-            foreach (var name in _identities)
+            foreach (var name in BuildSelectionEntries(_identities))
                 _identityList.Items.Add(name);
 
             SelectFirstAvailable();
-            Controls.Add(_identityList);
-            y += 130;
+            layout.Controls.Add(_identityList, 0, row);
+            layout.SetColumnSpan(_identityList, 2);
+            AddRow(new RowStyle(SizeType.Percent, hasRecents ? 55f : 100f));
 
             // --- Working Folder Section ---
             var folderLabel = new Label
             {
                 Text = "Working folder:",
-                Location = new Point(16, y),
-                Size = new Size(512, 20),
+                AutoSize = true,
+                Margin = new Padding(0, 0, 0, LogicalToDeviceUnits(4)),
                 Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
             };
-            Controls.Add(folderLabel);
-            y += 24;
+            layout.Controls.Add(folderLabel, 0, row);
+            layout.SetColumnSpan(folderLabel, 2);
+            AddRow(new RowStyle(SizeType.AutoSize));
 
             _folderTextBox = new TextBox
             {
-                Location = new Point(16, y),
-                Size = new Size(424, 26),
+                Anchor = AnchorStyles.Left | AnchorStyles.Right,
+                Margin = new Padding(0, 0, LogicalToDeviceUnits(6), LogicalToDeviceUnits(10)),
                 Font = new Font("Segoe UI", 9.5f),
                 Text = defaultFolder ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
             };
-            Controls.Add(_folderTextBox);
+            layout.Controls.Add(_folderTextBox, 0, row);
 
             _browseButton = new Button
             {
                 Text = "Browse...",
-                Location = new Point(446, y - 1),
-                Size = new Size(82, 27)
+                AutoSize = true,
+                MinimumSize = LogicalToDeviceUnits(new Size(82, 27)),
+                Margin = new Padding(0, 0, 0, LogicalToDeviceUnits(10))
             };
             _browseButton.Click += OnBrowseFolder;
-            Controls.Add(_browseButton);
-            y += 34;
+            layout.Controls.Add(_browseButton, 1, row);
+            AddRow(new RowStyle(SizeType.AutoSize));
 
             // --- Claude Profile Section (only when there is something to choose between) ---
             if (_profileNames.Count > 1)
             {
+                // Rows of the same table as the sections around it (the layout became a resizable
+                // TableLayoutPanel in ae3d0193, after this section was written with fixed positions).
                 var profileLabel = new Label
                 {
                     Text = "Claude profile:",
-                    Location = new Point(16, y),
-                    Size = new Size(512, 20),
+                    AutoSize = true,
+                    Margin = new Padding(0, 0, 0, LogicalToDeviceUnits(4)),
                     Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
                 };
-                Controls.Add(profileLabel);
-                y += 24;
+                layout.Controls.Add(profileLabel, 0, row);
+                layout.SetColumnSpan(profileLabel, 2);
+                AddRow(new RowStyle(SizeType.AutoSize));
 
                 _profileCombo = new ComboBox
                 {
-                    Location = new Point(16, y),
-                    Size = new Size(260, 26),
+                    Anchor = AnchorStyles.Left,
+                    Width = LogicalToDeviceUnits(260),
+                    Margin = new Padding(0, 0, 0, LogicalToDeviceUnits(4)),
                     DropDownStyle = ComboBoxStyle.DropDownList,
                     Font = new Font("Segoe UI", 9.5f)
                 };
@@ -282,18 +356,21 @@ namespace MultiTerminal.Dialogs
                     _pickedProfileName = _profileCombo.SelectedItem.ToString();
                     ShowProfileNote(_profileHint?.Invoke(_pickedProfileName));
                 };
-                Controls.Add(_profileCombo);
-                y += 30;
+                layout.Controls.Add(_profileCombo, 0, row);
+                layout.SetColumnSpan(_profileCombo, 2);
+                AddRow(new RowStyle(SizeType.AutoSize));
 
                 _profileNote = new Label
                 {
-                    Location = new Point(16, y),
-                    Size = new Size(512, 34),
+                    Dock = DockStyle.Fill,
                     AutoSize = false,
+                    Height = LogicalToDeviceUnits(34),
+                    Margin = new Padding(0, 0, 0, LogicalToDeviceUnits(8)),
                     Font = new Font("Segoe UI", 8.5f)
                 };
-                Controls.Add(_profileNote);
-                y += 38;
+                layout.Controls.Add(_profileNote, 0, row);
+                layout.SetColumnSpan(_profileNote, 2);
+                AddRow(new RowStyle(SizeType.Absolute, LogicalToDeviceUnits(42)));
 
                 // The folder decides whether there is a choice at all. Typing is debounced: the answer
                 // reads the project database and the folder's project.json.
@@ -312,24 +389,24 @@ namespace MultiTerminal.Dialogs
             }
 
             // --- Recent Folders Section ---
-            var recents = recentFolders?.Where(f => Directory.Exists(f)).ToList() ?? new List<string>();
-            if (recents.Count > 0)
+            if (hasRecents)
             {
                 var recentLabel = new Label
                 {
                     Text = "Recent folders:",
-                    Location = new Point(16, y),
-                    Size = new Size(512, 20),
+                    AutoSize = true,
+                    Margin = new Padding(0, 0, 0, LogicalToDeviceUnits(4)),
                     Font = new Font("Segoe UI", 9f)
                 };
-                Controls.Add(recentLabel);
-                y += 22;
+                layout.Controls.Add(recentLabel, 0, row);
+                layout.SetColumnSpan(recentLabel, 2);
+                AddRow(new RowStyle(SizeType.AutoSize));
 
                 _recentList = new ListBox
                 {
-                    Location = new Point(16, y),
-                    Size = new Size(512, 140),
+                    Dock = DockStyle.Fill,
                     IntegralHeight = false,
+                    Margin = new Padding(0, 0, 0, LogicalToDeviceUnits(12)),
                     Font = new Font("Segoe UI", 9f)
                 };
 
@@ -350,38 +427,69 @@ namespace MultiTerminal.Dialogs
                     }
                 };
 
-                Controls.Add(_recentList);
-                y += 148;
+                layout.Controls.Add(_recentList, 0, row);
+                layout.SetColumnSpan(_recentList, 2);
+                AddRow(new RowStyle(SizeType.Percent, 45f));
             }
 
             // --- Buttons ---
+            var buttons = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.RightToLeft,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Anchor = AnchorStyles.Right,
+                WrapContents = false,
+                Margin = Padding.Empty
+            };
+
+            _cancelButton = new Button
+            {
+                Text = "Cancel",
+                DialogResult = DialogResult.Cancel,
+                AutoSize = true,
+                MinimumSize = LogicalToDeviceUnits(new Size(80, 30)),
+                Margin = new Padding(LogicalToDeviceUnits(6), 0, 0, 0),
+                Font = new Font("Segoe UI", 9.5f)
+            };
+
             _okButton = new Button
             {
                 Text = "Launch",
-                Location = new Point(370, y),
-                Size = new Size(80, 30),
+                AutoSize = true,
+                MinimumSize = LogicalToDeviceUnits(new Size(80, 30)),
+                Margin = Padding.Empty,
                 Font = new Font("Segoe UI", 9.5f)
             };
             _okButton.Click += (s, e) =>
             {
                 if (TryAccept()) DialogResult = DialogResult.OK;
             };
-            Controls.Add(_okButton);
 
-            _cancelButton = new Button
-            {
-                Text = "Cancel",
-                DialogResult = DialogResult.Cancel,
-                Location = new Point(456, y),
-                Size = new Size(72, 30)
-            };
-            Controls.Add(_cancelButton);
+            // RightToLeft flow: the first control added sits rightmost, so Cancel ends up right of Launch.
+            buttons.Controls.Add(_cancelButton);
+            buttons.Controls.Add(_okButton);
+            layout.Controls.Add(buttons, 0, row);
+            layout.SetColumnSpan(buttons, 2);
+            AddRow(new RowStyle(SizeType.AutoSize));
+
+            layout.RowCount = row;
+            Controls.Add(layout);
 
             AcceptButton = _okButton;
             CancelButton = _cancelButton;
+        }
 
-            // Adjust form height to fit content
-            Size = new Size(560, y + 76);
+        /// <summary>
+        /// Caps <paramref name="size"/> at 90% of the working area of the screen the dialog opens on, so the
+        /// default fits a 1080p display at 150% scaling with the taskbar showing.
+        /// </summary>
+        private static Size FitToWorkingArea(Size size)
+        {
+            var area = Screen.FromPoint(Cursor.Position).WorkingArea;
+            return new Size(
+                Math.Min(size.Width, (int)(area.Width * 0.9)),
+                Math.Min(size.Height, (int)(area.Height * 0.9)));
         }
 
         private void OnBrowseFolder(object sender, EventArgs e)
@@ -509,7 +617,14 @@ namespace MultiTerminal.Dialogs
             BackColor = theme.ToolbarBackground;
             ForeColor = theme.ToolbarForeground;
 
-            foreach (Control ctrl in Controls)
+            ApplyThemeTo(Controls, theme);
+        }
+
+        // Recursive since ae3d0193: the Launch Claude layout nests its controls in layout panels, which
+        // take the form's colours as ambient properties but would otherwise hide their children here.
+        private static void ApplyThemeTo(Control.ControlCollection controls, TerminalTheme theme)
+        {
+            foreach (Control ctrl in controls)
             {
                 if (ctrl is Label lbl)
                 {
@@ -537,6 +652,10 @@ namespace MultiTerminal.Dialogs
                     btn.ForeColor = theme.ToolbarForeground;
                     btn.FlatStyle = FlatStyle.Flat;
                     btn.FlatAppearance.BorderColor = theme.StatusForeground;
+                }
+                else if (ctrl.HasChildren)
+                {
+                    ApplyThemeTo(ctrl.Controls, theme);
                 }
             }
         }

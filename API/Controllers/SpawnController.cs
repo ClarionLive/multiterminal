@@ -153,7 +153,10 @@ namespace MultiTerminal.API.Controllers
             //
             // Recorded after the pane exists. If the Owner closes it in the moment between, Forget runs
             // first and an orphan entry remains; the close endpoint's "pane already gone" branch drops it.
-            bool closableBySpawner = _spawnService.Panes.Record(docId, terminalName, provenSpawner?.DocId, provenSpawner == null ? null : launchNonce);
+            // The proven pane's registered name rides along for the Attention rail (task d71bb221): it
+            // is the broker's row for the nonce-proven pane, not the typed spawnerName above.
+            bool closableBySpawner = _spawnService.Panes.Record(
+                docId, terminalName, provenSpawner?.DocId, provenSpawner == null ? null : launchNonce, provenSpawner?.Name);
 
             // What "success" means here (pipeline Run 1, cross-model adversary): the PANE exists and
             // MT has pre-registered the identity. The helper itself has NOT booted — claude has not

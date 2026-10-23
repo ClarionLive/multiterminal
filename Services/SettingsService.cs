@@ -148,6 +148,7 @@ namespace MultiTerminal.Services
         private const string TasksPanelZoomKey = "TasksPanelZoom";
         private const string ChatPanelZoomKey = "ChatPanelZoom";
         private const string OfficePanelZoomKey = "OfficePanelZoom";
+        private const string AttentionPanelZoomKey = "AttentionPanelZoom";
         private const double DefaultPanelZoom = 1.0;
         private const double MinPanelZoom = 0.25;
         private const double MaxPanelZoom = 5.0;
@@ -589,8 +590,12 @@ namespace MultiTerminal.Services
         /// blocking agent in any mode — the panel ranks blocking first and then applies the mode to
         /// what is left, so the one thing the rail exists to surface can never be filed away under
         /// a heading.
+        /// <para>
+        /// <c>team</c> (task d71bb221) lists each PM with its helpers underneath. Same rule: a team
+        /// with anyone blocked moves to the top as a whole.
+        /// </para>
         /// </remarks>
-        private static readonly string[] AttentionOrders = { "attention", "fixed", "project" };
+        private static readonly string[] AttentionOrders = { "attention", "fixed", "project", "team" };
 
         /// <summary>
         /// Ambient treatments — the "is it working?" channel, running on every card at once.
@@ -782,6 +787,29 @@ namespace MultiTerminal.Services
         {
             zoom = Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
             Set(OfficePanelZoomKey, zoom.ToString("F2", CultureInfo.InvariantCulture));
+        }
+
+        /// <summary>
+        /// Gets the Attention panel WebView2 zoom level (0.25-5.0 range), task d71bb221. Same
+        /// storage, clamp and default as the chat panel's.
+        /// </summary>
+        public double GetAttentionPanelZoom()
+        {
+            string value = Get(AttentionPanelZoomKey);
+            if (!string.IsNullOrEmpty(value) && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double zoom))
+            {
+                return Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
+            }
+            return DefaultPanelZoom;
+        }
+
+        /// <summary>
+        /// Sets the Attention panel WebView2 zoom level.
+        /// </summary>
+        public void SetAttentionPanelZoom(double zoom)
+        {
+            zoom = Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
+            Set(AttentionPanelZoomKey, zoom.ToString("F2", CultureInfo.InvariantCulture));
         }
 
         /// <summary>
@@ -1258,39 +1286,32 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Gets the saved terminal sessions from the last run.
-        /// Format: "dir1|size1|title1;dir2|size2|title2;..."
         /// </summary>
+        /// <remarks>
+        /// Stored as versioned JSON since task d71bb221 (pipeline Run 1); the legacy
+        /// "dir|size|title[|paneKey|helper|spawnerPaneKey];..." form is still read. Both formats, the
+        /// rule for when a legacy column can be trusted, and the pane-key checks are documented on
+        /// <see cref="SessionTerminalsFormat"/>.
+        /// </remarks>
         public List<TerminalSessionInfo> GetSessionTerminals()
         {
             string data = Get(SessionTerminalsKey);
             if (string.IsNullOrEmpty(data))
                 return null;
 
-            var result = new List<TerminalSessionInfo>();
+            List<TerminalSessionInfo> result;
             try
             {
-                foreach (string entry in data.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
-                {
-                    string[] parts = entry.Split('|');
-                    if (parts.Length >= 2 &&
-                        float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float size))
-                    {
-                        var info = new TerminalSessionInfo
-                        {
-                            WorkingDirectory = parts[0],
-                            FontSize = size
-                        };
-                        // Custom title is optional (third part)
-                        if (parts.Length >= 3 && !string.IsNullOrEmpty(parts[2]))
-                        {
-                            info.CustomTitle = parts[2];
-                        }
-                        result.Add(info);
-                    }
-                }
+                result = SessionTerminalsFormat.Read(data);
             }
             catch
             {
+                return null;
+            }
+
+            if (result == null)
+            {
+                System.Diagnostics.Trace.WriteLine("[SettingsService.GetSessionTerminals] Unrecognised SessionTerminals value; restoring no panes.");
                 return null;
             }
 
@@ -1300,6 +1321,11 @@ namespace MultiTerminal.Services
             // TerminalDocument / statusline renderer on restore. Empty/null titles are left
             // untouched — distinct unnamed terminals are legitimately distinct.
             result = DedupByCustomTitle(result, "GetSessionTerminals");
+
+            // Every restored pane key is a well-formed GUID no other restored pane holds, and no link
+            // points at an ambiguous one (pipeline Run 1). After the dedup, so a dropped duplicate
+            // terminal's key does not count.
+            SessionTerminalsFormat.NormalizePaneKeys(result);
 
             return result.Count > 0 ? result : null;
         }
@@ -1333,8 +1359,9 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Saves the terminal sessions for the next run.
-        /// Format: "dir1|size1|title1;dir2|size2|title2;..."
+        /// Saves the terminal sessions for the next run, as one line of versioned JSON (task
+        /// d71bb221, pipeline Run 1): every field — directory, title, pane key, helper link — is
+        /// escaped, so no value can reach another field. See <see cref="SessionTerminalsFormat"/>.
         /// </summary>
         public void SetSessionTerminals(List<TerminalSessionInfo> terminals)
         {
@@ -1349,15 +1376,7 @@ namespace MultiTerminal.Services
             // duplicate that a later restore could re-materialize (task d14048ef).
             terminals = DedupByCustomTitle(terminals, "SetSessionTerminals");
 
-            var entries = new List<string>();
-            foreach (var t in terminals)
-            {
-                string dir = t.WorkingDirectory ?? "";
-                string size = t.FontSize.ToString("F1", CultureInfo.InvariantCulture);
-                string title = t.CustomTitle ?? "";
-                entries.Add($"{dir}|{size}|{title}");
-            }
-            Set(SessionTerminalsKey, string.Join(";", entries));
+            Set(SessionTerminalsKey, SessionTerminalsFormat.Write(terminals));
         }
 
         /// <summary>

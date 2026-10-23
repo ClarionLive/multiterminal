@@ -871,9 +871,20 @@
             color: var(--text-primary);
         }
 
+        /* The wrap holds the field and its clear (x) button (task 28343a65). */
+        .search-wrap {
+            flex: 1;
+            min-width: 0;
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+
         .search-input {
             flex: 1;
-            padding: 8px 12px;
+            min-width: 0;
+            /* right padding reserves room for the x so text never runs under it */
+            padding: 8px 30px 8px 12px;
             border-radius: 8px;
             border: 1px solid var(--input-border);
             background-color: var(--input-bg);
@@ -891,6 +902,32 @@
         .search-input::placeholder {
             color: var(--text-muted);
         }
+
+        /* Clear (x) button inside the search field: hidden until the field has text
+           (same look as the Task HUD's na-clear; task 28343a65). */
+        .search-clear {
+            appearance: none;
+            position: absolute;
+            right: 7px;
+            top: 50%;
+            transform: translateY(-50%);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            width: 18px;
+            height: 18px;
+            padding: 0;
+            border: none;
+            border-radius: 4px;
+            background: transparent;
+            color: var(--text-muted);
+            font-family: var(--font);
+            font-size: 16px;
+            line-height: 1;
+            cursor: pointer;
+        }
+        .search-clear.visible { display: flex; }
+        .search-clear:hover { color: var(--text-primary); background: var(--btn-secondary-hover); }
 
         /* List view */
         .project-list-wrap {
@@ -1174,15 +1211,19 @@
                 </svg>
                 Back
             </button>
-            <input
-                id="search-input"
-                class="search-input"
-                type="text"
-                placeholder="Search projects by name, description, or type..."
-                oninput="onSearchInput()"
-                autocomplete="off"
-                spellcheck="false"
-            />
+            <div class="search-wrap">
+                <input
+                    id="search-input"
+                    class="search-input"
+                    type="text"
+                    placeholder="Search projects by name, description, or type..."
+                    oninput="onSearchInput()"
+                    autocomplete="off"
+                    spellcheck="false"
+                />
+                <button type="button" id="search-clear" class="search-clear" tabindex="-1" title="Clear search" aria-label="Clear search"
+                        onmousedown="event.preventDefault()" onclick="clearSearch()">&times;</button>
+            </div>
             <label class="status-filter-wrap">Show
                 <select id="status-filter-browse" onchange="onStatusFilterChange(this.value)">
                     <option value="default">Active &amp; Parked</option>
@@ -2026,7 +2067,24 @@
        --------------------------------------------------------------- */
     function onSearchInput() {
         searchQuery = document.getElementById('search-input').value;
+        syncSearchClear();
         renderList();
+    }
+
+    // The x shows only while the search has text (task 28343a65).
+    function syncSearchClear() {
+        var clear = document.getElementById('search-clear');
+        if (clear) clear.classList.toggle('visible', document.getElementById('search-input').value.length > 0);
+    }
+
+    // Empties the search and re-runs the keystroke path, keeping the input itself. The x's
+    // mousedown is cancelled in the markup so focus never leaves the field; focus() covers a
+    // click that arrives some other way.
+    function clearSearch() {
+        var input = document.getElementById('search-input');
+        input.value = '';
+        onSearchInput();
+        input.focus();
     }
 
     /* ---------------------------------------------------------------
@@ -2044,6 +2102,7 @@
         // The sort is NOT reset: it is the remembered one (ticket e20e2ce0 item 8).
         document.getElementById('search-input').value = '';
         searchQuery = '';
+        syncSearchClear();
         updateSortHeaders();
         renderList();
         document.getElementById('view-home').classList.remove('active');

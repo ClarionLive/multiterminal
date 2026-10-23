@@ -1534,7 +1534,8 @@ namespace MultiTerminal.Docking
         /// <param name="claudeProfile">The Claude Code config profile this launch runs under (ticket c8ee0eec), already resolved with <see cref="ClaudeProfileResolver"/>. Null means Default.</param>
         /// <param name="resumeSessionId">The Claude session this launch resumes (task ec2ed636), reserved for the pane from the first instant; null for a new session.</param>
         /// <param name="launchKind">The <see cref="PaneLaunchKind"/> of this launch, for the launch record, when the caller knows it (pipeline Run 1, task 7d20e94c). Null derives it from <paramref name="autoRunCommand"/>.</param>
-        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string quietStartProjectId = null, MultiTerminal.Models.ClaudeProfile claudeProfile = null, string resumeSessionId = null, string launchKind = null)
+        /// <param name="launchQuietStart">Quiet start whatever the project says ("Just Claude", ticket ae3d0193). A helper is still never quiet.</param>
+        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string quietStartProjectId = null, MultiTerminal.Models.ClaudeProfile claudeProfile = null, string resumeSessionId = null, string launchKind = null, bool launchQuietStart = false)
         {
             // Per launch, like the role below: a reused pane must not keep the last launch's profile.
             _launchClaudeProfile = new MultiTerminal.Services.ClaudePaneProfile(
@@ -1632,8 +1633,8 @@ namespace MultiTerminal.Docking
                     _debugLogService?.Error("TerminalDocument", $"Quiet start lookup threw for project '{quietProjectId}': {quietEx.Message}");
                 }
             }
-            _terminal.QuietStart = MultiTerminal.Terminal.TerminalRoles.IsQuietStart(projectQuietStart, spawnerName);
-            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"quietStart: '{_terminal.QuietStart}' (project setting '{projectQuietStart}')");
+            _terminal.QuietStart = MultiTerminal.Terminal.TerminalRoles.IsQuietStart(projectQuietStart, spawnerName, launchQuietStart);
+            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"quietStart: '{_terminal.QuietStart}' (project setting '{projectQuietStart}', launch '{launchQuietStart}')");
 
             // Set terminal name as custom title if provided. StartTerminal is
             // an AUTHORITATIVE identity source — the terminalName comes from
@@ -3324,6 +3325,64 @@ namespace MultiTerminal.Docking
         /// title. What the Attention panel matches a card's agent against.
         /// </summary>
         public string PaneAgentName => StatusLineIdentity;
+
+        /// <summary>
+        /// This pane's stable key (task d71bb221). Minted once per pane and saved with the session,
+        /// unlike <see cref="DocId"/>, which is re-minted every run and so cannot carry a link from
+        /// one run to the next. The Attention rail uses it to remember which pane spawned a helper.
+        /// </summary>
+        public string PaneKey { get; private set; } = Guid.NewGuid().ToString("N");
+
+        /// <summary>
+        /// The agent name this pane's helper link was recorded under, or null when the pane is not
+        /// a known helper. See <see cref="SetHelperLink"/>.
+        /// </summary>
+        public string HelperLinkName { get; private set; }
+
+        /// <summary>
+        /// The <see cref="PaneKey"/> of the pane that spawned this helper, proven at spawn time, or
+        /// null when the spawner was not proven (a helper whose PM is unknown).
+        /// </summary>
+        public string HelperLinkSpawnerPaneKey { get; private set; }
+
+        /// <summary>
+        /// The agent name the spawner pane was running when the link was stamped, or null when the
+        /// spawner was unproven (pipeline Run 1). The spawner pane counts as the PM only while it
+        /// still runs under this name: a pane is reused and restored, so its key alone does not say
+        /// who the PM was.
+        /// </summary>
+        public string HelperLinkSpawnerName { get; private set; }
+
+        /// <summary>
+        /// Restores the key a saved session recorded. Ignores an empty value. The session reader has
+        /// already checked it is a well-formed GUID that no other restored pane holds.
+        /// </summary>
+        internal void RestorePaneKey(string paneKey)
+        {
+            if (!string.IsNullOrWhiteSpace(paneKey)) PaneKey = paneKey;
+        }
+
+        /// <summary>
+        /// Records that this pane is a helper running as <paramref name="helperName"/>, spawned by the
+        /// pane keyed <paramref name="spawnerPaneKey"/> while it ran as <paramref name="spawnerName"/>
+        /// (both null = unproven). A null helper name clears the whole link.
+        /// </summary>
+        internal void SetHelperLink(string helperName, string spawnerPaneKey, string spawnerName)
+        {
+            HelperLinkName = string.IsNullOrWhiteSpace(helperName) ? null : helperName;
+            HelperLinkSpawnerPaneKey = HelperLinkName == null || string.IsNullOrWhiteSpace(spawnerPaneKey) ? null : spawnerPaneKey;
+            HelperLinkSpawnerName = HelperLinkName == null || string.IsNullOrWhiteSpace(spawnerName) ? null : spawnerName;
+        }
+
+        /// <summary>True when this pane's CURRENT launch was a <c>spawn_helper</c> spawn.</summary>
+        internal bool LaunchedAsHelper => _terminalRole == MultiTerminal.Terminal.TerminalRole.Helper;
+
+        /// <summary>
+        /// The role this pane's tab shows right now, so the Attention rail's PM tag and the tab's
+        /// "(PM)" are one decision (task d71bb221).
+        /// </summary>
+        internal MultiTerminal.Terminal.TerminalRole DisplayedRole =>
+            MultiTerminal.Terminal.TerminalRoles.ForDisplay(_terminalRole, _launchProjectId, _currentProjectId, _currentProjectKnown);
 
         /// <summary>
         /// Pre-writes a fallback statusline JSON file containing just the folder path
