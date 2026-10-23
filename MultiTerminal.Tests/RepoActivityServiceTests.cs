@@ -427,6 +427,153 @@ namespace MultiTerminal.Tests
             Assert.Empty(summary.Repos);
         }
 
+        // ── The Repositories setting changes (pipeline Run 1) ───────────────
+
+        [Fact]
+        public async Task A_cleared_list_stops_showing_its_repo_and_a_settings_check_resolves_the_remotes()
+        {
+            var project = AddProject("p1", repos: "acme/a");
+            _remotes[project.Path] = new[] { Remote("origin", "x/y") };
+            _client.Respond = (_, _) => Ok(Item(1));
+            using var svc = NewService();
+            await svc.CheckNowAsync(project.Id).WaitAsync(Bound);
+            Assert.Equal(new[] { "acme/a" }, svc.GetSummary(project.Id).Repos.Select(r => r.FullName));
+
+            project.RepoWatchRepos = null;
+
+            // The resolution was made under the old list: not shown, and not Ok, so the badge says not checked.
+            var stale = svc.GetSummary(project.Id);
+            Assert.Empty(stale.Repos);
+            Assert.Equal(RepoActivityState.NeverChecked, stale.State);
+
+            await svc.ScheduleSettingsCheck(project.Id).WaitAsync(Bound);
+
+            Assert.Equal(new[] { "acme/a", "x/y" }, _client.Calls.Select(c => c.Repo));
+            var summary = svc.GetSummary(project.Id);
+            Assert.Equal(new[] { "x/y" }, summary.Repos.Select(r => r.FullName));
+            Assert.Equal(RepoActivityState.Ok, summary.State);
+            Assert.Null(_db.GetRepoWatchState("p1", "acme/a"));
+        }
+
+        [Fact]
+        public async Task A_changed_list_shows_only_the_new_repo_and_forgets_the_old_one_once_checked()
+        {
+            var project = AddProject("p1", repos: "acme/a");
+            _client.Respond = (_, _) => Ok(Item(1));
+            using var svc = NewService();
+            await svc.CheckNowAsync(project.Id).WaitAsync(Bound);
+
+            project.RepoWatchRepos = "acme/b";
+            var before = svc.GetSummary(project.Id);
+            Assert.Equal(new[] { "acme/b" }, before.Repos.Select(r => r.FullName));
+            Assert.Equal(RepoActivityState.NeverChecked, before.State);
+
+            await svc.ScheduleSettingsCheck(project.Id).WaitAsync(Bound);
+
+            Assert.Equal(RepoActivityState.Ok, svc.GetSummary(project.Id).State);
+            Assert.Null(_db.GetRepoWatchState("p1", "acme/a"));
+            Assert.NotNull(_db.GetRepoWatchState("p1", "acme/b"));
+        }
+
+        [Fact]
+        public async Task After_a_restart_with_no_list_only_the_last_resolved_repos_are_shown()
+        {
+            // List acme/a, then clear it: the next check resolves the remotes and forgets acme/a, so a new
+            // service over the same database (a restart, before any check) does not bring it back.
+            var project = AddProject("p1", repos: "acme/a");
+            _remotes[project.Path] = new[] { Remote("origin", "x/y") };
+            using (var first = NewService())
+            {
+                await first.CheckNowAsync(project.Id).WaitAsync(Bound);
+                project.RepoWatchRepos = null;
+                await first.ScheduleSettingsCheck(project.Id).WaitAsync(Bound);
+            }
+
+            using var restarted = NewService();
+            Assert.Equal(new[] { "x/y" }, restarted.GetSummary(project.Id).Repos.Select(r => r.FullName));
+        }
+
+        [Fact]
+        public async Task After_a_restart_a_listed_repo_is_shown_and_a_removed_one_is_not()
+        {
+            var project = AddProject("p1", repos: "acme/a");
+            using (var first = NewService())
+            {
+                await first.CheckNowAsync(project.Id).WaitAsync(Bound);
+            }
+
+            project.RepoWatchRepos = "acme/b";
+            using var restarted = NewService();
+            var summary = restarted.GetSummary(project.Id);
+            Assert.Equal(new[] { "acme/b" }, summary.Repos.Select(r => r.FullName));
+            Assert.Equal(RepoActivityState.NeverChecked, summary.State);
+        }
+
+        [Fact]
+        public async Task An_empty_remotes_read_forgets_nothing()
+        {
+            // GitRemoteReader answers a failed or timed-out read with an empty list.
+            var project = AddProject("p1", repos: "acme/a");
+            using var svc = NewService();
+            await svc.CheckNowAsync(project.Id).WaitAsync(Bound);
+
+            project.RepoWatchRepos = null;
+            project.GitRepoUrl = "https://gitlab.com/o/r.git";
+            await svc.ScheduleSettingsCheck(project.Id).WaitAsync(Bound);
+
+            Assert.Equal(RepoActivityState.NoRepos, svc.GetSummary(project.Id).State);
+            Assert.NotNull(_db.GetRepoWatchState("p1", "acme/a"));
+        }
+
+        [Fact]
+        public async Task The_git_url_fallback_after_an_empty_remotes_read_forgets_nothing()
+        {
+            var project = AddProject("p1", repos: "acme/a");
+            using var svc = NewService();
+            await svc.CheckNowAsync(project.Id).WaitAsync(Bound);
+
+            project.RepoWatchRepos = null;
+            project.GitRepoUrl = "https://github.com/o/r.git";
+            await svc.ScheduleSettingsCheck(project.Id).WaitAsync(Bound);
+
+            Assert.Equal(new[] { "o/r" }, svc.GetSummary(project.Id).Repos.Select(r => r.FullName));
+            Assert.NotNull(_db.GetRepoWatchState("p1", "acme/a"));
+        }
+
+        [Fact]
+        public async Task A_settings_change_during_a_check_queues_a_check_under_the_new_settings()
+        {
+            var project = AddProject("p1", repos: "acme/a");
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _client.RespondAsync = async (repo, _) =>
+            {
+                if (repo == "acme/a")
+                {
+                    entered.TrySetResult();
+                    await release.Task.WaitAsync(Bound);
+                }
+
+                return Ok(Item(1));
+            };
+            using var svc = NewService();
+
+            var running = svc.CheckNowAsync(project.Id);
+            await entered.Task.WaitAsync(Bound);
+            project.RepoWatchRepos = "acme/b";
+            var settingsCheck = svc.ScheduleSettingsCheck(project.Id);
+            Assert.False(settingsCheck.IsCompleted);
+
+            release.SetResult();
+            await running.WaitAsync(Bound);
+            await settingsCheck.WaitAsync(Bound);
+
+            Assert.Equal(new[] { "acme/a", "acme/b" }, _client.Calls.Select(c => c.Repo));
+            var summary = svc.GetSummary(project.Id);
+            Assert.Equal(new[] { "acme/b" }, summary.Repos.Select(r => r.FullName));
+            Assert.Equal(RepoActivityState.Ok, summary.State);
+        }
+
         // ── Failures ─────────────────────────────────────────────────────────
 
         [Theory]

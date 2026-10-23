@@ -4330,21 +4330,22 @@ namespace MultiTerminal
 
         /// <summary>
         /// Repository watching may just have been turned on or off, or its repositories changed (task
-        /// df58b35d): show the new badge state on that project's panes, and when watching is on and a
-        /// repository has never been checked, check now instead of waiting for the next tick or launch.
+        /// df58b35d): show the new badge state on that project's panes, and when watching is on, check now
+        /// under the saved settings instead of waiting for the next tick or launch.
         /// </summary>
+        /// <remarks>
+        /// Every save with watching on rechecks, not only one that changed the repositories (pipeline Run 1).
+        /// Deciding "did the source change" here would need the old settings and would miss a check already
+        /// running under them; a save is a rare, deliberate action costing one request per repository, and
+        /// the service queues the recheck behind a running check rather than joining it.
+        /// </remarks>
         private void RefreshRepoActivityAfterSettingsSaved(string projectId)
         {
             if (_repoActivity == null || string.IsNullOrEmpty(projectId)) return;
             try
             {
                 var summary = _repoActivity.GetSummary(projectId);
-                if (summary.Watching
-                    && (summary.State == Models.RepoActivityState.NeverChecked
-                        || summary.Repos.Any(r => r.State == Models.RepoActivityState.NeverChecked)))
-                {
-                    _repoActivity.NotifyProjectLaunched(projectId);
-                }
+                if (summary.Watching) _repoActivity.NotifySettingsChanged(projectId);
 
                 var badge = RepoActivityBadge.From(summary);
                 foreach (var doc in _dockPanel.Contents.OfType<TerminalDocument>().ToList())

@@ -8388,6 +8388,41 @@ namespace MultiTerminal.Services
             return cmd.ExecuteNonQuery();
         }
 
+        /// <summary>
+        /// Removes the project's repo states whose repo is not in <paramref name="keep"/> (the repositories
+        /// a successful resolution produced; pipeline Run 1). One statement. An empty or null
+        /// <paramref name="keep"/> removes NOTHING: "keep none" is never inferred from an empty set, which
+        /// is what a failed git remotes read looks like; use <see cref="DeleteRepoWatchStates"/> to remove
+        /// all of them.
+        /// </summary>
+        /// <returns>The number of rows removed.</returns>
+        public int DeleteRepoWatchStatesExcept(string projectId, IReadOnlyCollection<string> keep)
+        {
+            if (string.IsNullOrWhiteSpace(projectId) || keep == null) return 0;
+            var keys = new List<string>();
+            var distinct = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string k in keep)
+            {
+                if (!string.IsNullOrWhiteSpace(k) && distinct.Add(NormalizeWatchedRepo(k))) keys.Add(NormalizeWatchedRepo(k));
+            }
+
+            if (keys.Count == 0) return 0;
+
+            var names = new List<string>(keys.Count);
+            for (int i = 0; i < keys.Count; i++) names.Add("@k" + i.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+            // GATE BEFORE LockConn — never wait for the gate while holding _dbLock (see SqliteWriteGate).
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.DeleteRepoWatchStatesExcept", projectId);
+            using var gate = LockConn();
+#pragma warning disable CA2100 // The IN list is generated parameter names only; every value flows through SQLiteParameter.
+            using var cmd = new SQLiteCommand(
+                "DELETE FROM repo_watch_state WHERE project_id = @project AND repo NOT IN (" + string.Join(", ", names) + ")", _connection);
+#pragma warning restore CA2100
+            cmd.Parameters.AddWithValue("@project", projectId);
+            for (int i = 0; i < keys.Count; i++) cmd.Parameters.AddWithValue(names[i], keys[i]);
+            return cmd.ExecuteNonQuery();
+        }
+
         private static RepoWatchState ReadRepoWatchState(SQLiteDataReader reader)
         {
             string Str(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);

@@ -185,5 +185,32 @@ namespace MultiTerminal.Tests
             Assert.Null(db.GetRepoWatchState("p1", "a/repo"));
             Assert.Equal(99, db.GetRepoWatchState("p2", "a/repo").SeenMaxNumber);
         }
+
+        [Fact]
+        public void DeleteExcept_keeps_the_listed_repos_case_insensitively_and_only_in_that_project()
+        {
+            using var db = new TaskDatabase();
+            db.SaveRepoWatchFetch("p1", "a/keep", "e", T1, "ok", null, "[]");
+            db.SaveRepoWatchFetch("p1", "b/drop", "e", T1, "ok", null, "[]");
+            db.SaveRepoWatchFetch("p1", "c/drop", "e", T1, "ok", null, "[]");
+            db.SaveRepoWatchFetch("p2", "b/drop", "e", T1, "ok", null, "[]");
+
+            Assert.Equal(2, db.DeleteRepoWatchStatesExcept("p1", new[] { " A/Keep " }));
+
+            Assert.Equal(new[] { "a/keep" }, db.GetRepoWatchStates("p1").Select(s => s.Repo).ToArray());
+            Assert.NotNull(db.GetRepoWatchState("p2", "b/drop"));
+        }
+
+        [Fact]
+        public void DeleteExcept_with_nothing_to_keep_removes_nothing()
+        {
+            using var db = new TaskDatabase();
+            db.SaveRepoWatchFetch("p1", "a/repo", "e", T1, "ok", null, "[]");
+
+            Assert.Equal(0, db.DeleteRepoWatchStatesExcept("p1", Array.Empty<string>()));
+            Assert.Equal(0, db.DeleteRepoWatchStatesExcept("p1", new[] { " " }));
+            Assert.Equal(0, db.DeleteRepoWatchStatesExcept("p1", null!));
+            Assert.Single(db.GetRepoWatchStates("p1"));
+        }
     }
 }

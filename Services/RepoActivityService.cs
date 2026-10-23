@@ -52,7 +52,8 @@ namespace MultiTerminal.Services
     /// </para>
     /// <para>
     /// <b>When.</b> Once for every watched project at <see cref="Start"/>, and again whenever a project is
-    /// launched (<see cref="NotifyProjectLaunched"/>). After that a 60s tick checks a project only while a
+    /// launched (<see cref="NotifyProjectLaunched"/>) or its settings are saved (<see cref="NotifySettingsChanged"/>,
+    /// which queues behind a running check instead of joining it). After that a 60s tick checks a project only while a
     /// pane is open on it and only when its interval has passed since its last check. Interval 0 means
     /// "startup and launch only", never on the tick. Without a token GitHub allows 60 requests an hour, so
     /// an unauthenticated project is never checked on the tick more often than every 15 minutes.
@@ -192,6 +193,17 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// The project's settings were saved (fire and forget): check it now under the new settings. A check
+        /// already running was started under the old ones, so instead of joining it, one more check is queued
+        /// to start when it ends. Like a launch, it ignores the interval and the unauthenticated floor but not
+        /// a rate-limit backoff.
+        /// </summary>
+        public void NotifySettingsChanged(string projectId)
+        {
+            _ = ScheduleSettingsCheck(projectId);
+        }
+
+        /// <summary>
         /// The user's "Check now": checks the project immediately, ignoring its interval and the
         /// unauthenticated floor, but not a rate-limit backoff. Joins a check already running for it.
         /// Never throws for a check failure (the outcome is in <see cref="GetSummary"/>); only
@@ -223,30 +235,38 @@ namespace MultiTerminal.Services
                 };
             }
 
+            string settingsKey = ResolutionKey(project.RepoWatchRepos);
             bool checking;
             HashSet<string>? pending;
             IReadOnlyList<GitHubRepoRef>? resolved;
+            bool resolvedThisRun;
             lock (_gate)
             {
                 if (_runtime.TryGetValue(projectId, out var rt))
                 {
                     checking = rt.Checking;
                     pending = rt.PendingRepos == null ? null : new HashSet<string>(rt.PendingRepos, StringComparer.Ordinal);
-                    resolved = rt.ResolvedRepos;
+                    resolvedThisRun = rt.ResolvedRepos != null;
+                    // A resolution made under other Repositories settings says nothing about these ones.
+                    resolved = string.Equals(rt.ResolvedFrom, settingsKey, StringComparison.Ordinal) ? rt.ResolvedRepos : null;
                 }
                 else
                 {
                     checking = false;
                     pending = null;
                     resolved = null;
+                    resolvedThisRun = false;
                 }
             }
 
             var states = _db.GetRepoWatchStates(projectId)
                 .ToDictionary(s => s.Repo, StringComparer.Ordinal);
 
-            // The settings list is cheap and always current; the folder's remotes are known only from the
-            // last check; before any check this run, whatever was stored by an earlier one.
+            // The settings list is cheap and always current. The folder's remotes are known only from a check
+            // made under the CURRENT settings: one made under an older list is stale, and shows as not checked
+            // (or Checking) until the next check resolves again. Before any check this run, whatever an earlier
+            // run stored: a successful resolution prunes the rows of repositories it no longer includes (see
+            // RunCheckAsync), so those are the last resolution's repositories.
             IReadOnlyList<string> names = RepoWatchSettings.ParseRepos(project.RepoWatchRepos);
             bool noRepos = false;
             if (names.Count == 0)
@@ -256,7 +276,7 @@ namespace MultiTerminal.Services
                     names = resolved.Select(r => r.FullName).ToList();
                     noRepos = names.Count == 0;
                 }
-                else
+                else if (!resolvedThisRun)
                 {
                     names = states.Keys.ToList();
                 }
@@ -397,6 +417,36 @@ namespace MultiTerminal.Services
             return StartCheck(projectId);
         }
 
+        /// <summary>
+        /// <see cref="NotifySettingsChanged"/>, returning a task that completes when the check under the new
+        /// settings does (after the running one and its queued successor, when one was running).
+        /// </summary>
+        internal Task ScheduleSettingsCheck(string projectId)
+        {
+            if (_disposed || IsDisabled() || string.IsNullOrWhiteSpace(projectId)) return Task.CompletedTask;
+            Task running;
+            lock (_gate)
+            {
+                if (_disposed) return Task.CompletedTask;
+                if (!_inFlight.TryGetValue(projectId, out running!)) return StartCheck(projectId);
+                GetRuntime(projectId).RecheckWhenDone = true;
+            }
+
+            // RunCheckAsync's finally swaps in the queued check under _gate before the running task completes,
+            // so by the time this continuation runs the in-flight entry is that check (or it already ended).
+            return running.ContinueWith(
+                _ =>
+                {
+                    lock (_gate)
+                    {
+                        return _inFlight.TryGetValue(projectId, out var next) ? next : Task.CompletedTask;
+                    }
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default).Unwrap();
+        }
+
         private void OnTimer()
         {
             // The checks the tick starts finish on their own; RunCheckAsync never faults.
@@ -431,15 +481,21 @@ namespace MultiTerminal.Services
                 raise = true;
                 RaiseChanged(projectId);
 
-                var repos = await ResolveReposAsync(project).ConfigureAwait(false);
+                var (repos, definitive) = await ResolveReposAsync(project).ConfigureAwait(false);
                 lock (_gate)
                 {
                     var rt = GetRuntime(projectId);
                     rt.ResolvedRepos = repos;
+                    rt.ResolvedFrom = ResolutionKey(project.RepoWatchRepos);
                     rt.PendingRepos = new HashSet<string>(repos.Select(r => TaskDatabase.NormalizeWatchedRepo(r.FullName)), StringComparer.Ordinal);
                 }
 
                 if (repos.Count == 0) return;
+
+                // Forget repositories this project no longer watches (removed from the list, or a remote that
+                // is gone), so neither a restart nor "Mark all seen" brings them back. Only after a DEFINITIVE
+                // resolution: see ResolveReposAsync.
+                if (definitive) PruneStates(project, repos);
 
                 string? token = SafeGetToken(project);
                 foreach (var repo in repos)
@@ -485,6 +541,14 @@ namespace MultiTerminal.Services
                 lock (_gate)
                 {
                     _inFlight.Remove(projectId);
+
+                    // The settings changed while this check ran under the old ones (ScheduleSettingsCheck).
+                    var rt = GetRuntime(projectId);
+                    if (rt.RecheckWhenDone)
+                    {
+                        rt.RecheckWhenDone = false;
+                        if (!_disposed) StartCheck(projectId);
+                    }
                 }
 
                 if (raise && !_disposed) RaiseChanged(projectId);
@@ -536,8 +600,15 @@ namespace MultiTerminal.Services
             }
         }
 
-        /// <summary>The settings list, else the folder's github.com remotes, else the Git URL, else none.</summary>
-        private async Task<IReadOnlyList<GitHubRepoRef>> ResolveReposAsync(Project project)
+        /// <summary>
+        /// The settings list, else the folder's github.com remotes, else the Git URL, else none.
+        /// <c>Definitive</c> says whether the set may be used to forget other repositories: true for a
+        /// non-empty settings list and for a non-empty remotes read. False for the Git URL fallback and for
+        /// an empty set, because <see cref="GitRemoteReader"/> answers a failed or timed-out read with an
+        /// empty list, so "no remotes" cannot be told from "could not read them", and the Git URL is used
+        /// exactly then; forgetting a fork's other remote on a slow git would reset its seen mark.
+        /// </summary>
+        private async Task<(IReadOnlyList<GitHubRepoRef> Repos, bool Definitive)> ResolveReposAsync(Project project)
         {
             var listed = new List<GitHubRepoRef>();
             foreach (string name in RepoWatchSettings.ParseRepos(project.RepoWatchRepos))
@@ -545,7 +616,7 @@ namespace MultiTerminal.Services
                 if (GitHubRepoRef.TryParseFullName(name, out var parsed)) listed.Add(parsed);
             }
 
-            if (listed.Count > 0) return listed;
+            if (listed.Count > 0) return (listed, true);
 
             string? folder = string.IsNullOrWhiteSpace(project.SourcePath) ? project.Path : project.SourcePath;
             if (!string.IsNullOrWhiteSpace(folder))
@@ -566,12 +637,33 @@ namespace MultiTerminal.Services
 
                 var seen = new HashSet<GitHubRepoRef>();
                 var fromRemotes = (remotes ?? Array.Empty<GitRemoteRepo>()).Select(r => r.Repo).Where(seen.Add).ToList();
-                if (fromRemotes.Count > 0) return fromRemotes;
+                if (fromRemotes.Count > 0) return (fromRemotes, true);
             }
 
             return GitHubRepoRef.TryParse(project.GitRepoUrl, out var fromUrl)
-                ? new[] { fromUrl }
-                : Array.Empty<GitHubRepoRef>();
+                ? (new[] { fromUrl }, false)
+                : (Array.Empty<GitHubRepoRef>(), false);
+        }
+
+        /// <summary>
+        /// The Repositories setting as a comparable key: the parsed names, lower-cased, in order. Empty for
+        /// no list (the remotes are used). What a resolution was made under, so a later change is seen.
+        /// </summary>
+        private static string ResolutionKey(string? repoWatchRepos)
+            => string.Join(",", RepoWatchSettings.ParseRepos(repoWatchRepos).Select(TaskDatabase.NormalizeWatchedRepo));
+
+        private void PruneStates(Project project, IReadOnlyList<GitHubRepoRef> repos)
+        {
+            try
+            {
+                int removed = _db.DeleteRepoWatchStatesExcept(project.Id, repos.Select(r => r.FullName).ToList());
+                if (removed > 0) Log($"RepoActivityService: forgot {removed} repository state(s) project {project.Name} no longer watches.");
+            }
+            catch (Exception ex)
+            {
+                // Best effort: a leftover row can only reappear after a restart, until the next successful prune.
+                Log($"RepoActivityService could not forget unwatched repositories of project {project.Name}: {ex.Message}");
+            }
         }
 
         private RepoActivityRepo BuildRepo(string projectId, string fullName, string key, RepoWatchState? state, bool checking)
@@ -817,6 +909,15 @@ namespace MultiTerminal.Services
 
             /// <summary>The repositories the last check resolved; null = not resolved this run.</summary>
             public IReadOnlyList<GitHubRepoRef>? ResolvedRepos;
+
+            /// <summary>
+            /// The Repositories setting (as <see cref="ResolutionKey"/>) <see cref="ResolvedRepos"/> was resolved
+            /// under. When it differs from the project's current setting, the resolution is stale.
+            /// </summary>
+            public string? ResolvedFrom;
+
+            /// <summary>The settings changed during the running check: start another when it ends.</summary>
+            public bool RecheckWhenDone;
         }
     }
 }
