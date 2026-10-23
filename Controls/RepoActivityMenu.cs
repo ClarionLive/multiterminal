@@ -194,7 +194,8 @@ namespace MultiTerminal.Controls
             Action markAllSeen,
             Action checkNow,
             Action openProjectSettings,
-            Action<string>? log)
+            Action<string>? log,
+            Rectangle? badgeScreenBounds = null)
         {
             // CA2000: both are owned by the menu's Closed handler below, which disposes them once the menu
             // has closed and its click has run; a using here would dispose them while the menu is open.
@@ -265,7 +266,49 @@ namespace MultiTerminal.Controls
                 menu.Dispose();
                 headerFont.Dispose();
             }));
-            menu.Show(Cursor.Position);
+
+            if (badgeScreenBounds is Rectangle badge)
+            {
+                // Right above the badge, on the badge's own monitor (Owner live test: at the cursor
+                // position the list opened on the other screen). A list taller than the work area starts
+                // at its top; WinForms keeps a drop-down on the screen it opens on and adds scroll arrows.
+                Rectangle area = Screen.FromRectangle(badge).WorkingArea;
+                Rectangle bounds = PlaceAbove(badge, menu.GetPreferredSize(Size.Empty), area);
+                menu.Show(bounds.Location);
+            }
+            else
+            {
+                menu.Show(Cursor.Position);
+            }
+        }
+
+        /// <summary>
+        /// Where a list of <paramref name="menuSize"/> goes for a badge at <paramref name="badge"/>:
+        /// above it, left edges aligned; below it when only below has room; otherwise pinned to the top
+        /// of <paramref name="workingArea"/>. Always entirely inside the work area, at most its size.
+        /// </summary>
+        internal static Rectangle PlaceAbove(Rectangle badge, Size menuSize, Rectangle workingArea)
+        {
+            int width = Math.Min(menuSize.Width, workingArea.Width);
+            int height = Math.Min(menuSize.Height, workingArea.Height);
+
+            int x = Math.Clamp(badge.Left, workingArea.Left, workingArea.Right - width);
+
+            int y;
+            if (badge.Top - height >= workingArea.Top)
+            {
+                y = badge.Top - height;
+            }
+            else if (badge.Bottom + height <= workingArea.Bottom)
+            {
+                y = badge.Bottom;
+            }
+            else
+            {
+                y = workingArea.Top;
+            }
+
+            return new Rectangle(x, y, width, height);
         }
 
         /// <summary>How long after a click-away closes the list a badge click is taken as that same click.</summary>

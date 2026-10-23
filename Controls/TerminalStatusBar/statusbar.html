@@ -680,8 +680,19 @@
             btn.title = available ? 'Project settings' : 'This pane is not in a registered project';
         }
 
+        // Sends the badge's rectangle in device pixels of this WebView (CSS px x devicePixelRatio, which
+        // includes zoom and monitor scaling), so the host can open the list right above the badge on
+        // the badge's own monitor instead of wherever the cursor position maps to.
         function onRepoActivityClick() {
-            postMessage('repoActivityClick', {});
+            var el = document.getElementById('repo-activity-badge');
+            var r = el ? el.getBoundingClientRect() : null;
+            var dpr = window.devicePixelRatio || 1;
+            postMessage('repoActivityClick', r ? {
+                left: Math.round(r.left * dpr),
+                top: Math.round(r.top * dpr),
+                width: Math.round(r.width * dpr),
+                height: Math.round(r.height * dpr)
+            } : {});
         }
 
         // The repository badge (task df58b35d). badge is null (hide) or

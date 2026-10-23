@@ -530,6 +530,84 @@ namespace MultiTerminal.Tests
             Assert.Equal(suppressed, RepoActivityMenu.ShouldSuppressReopen(closedAt + msSinceClose, closedAt));
         }
 
+        // ---- Placement (Owner live test 2026-10-23: the list opened on the other monitor) -----------
+
+        private static readonly System.Drawing.Rectangle Work = new(0, 0, 1920, 1040);
+
+        [Fact]
+        public void The_list_opens_right_above_the_badge_with_left_edges_aligned()
+        {
+            var badge = new System.Drawing.Rectangle(800, 1000, 60, 20);
+            var placed = RepoActivityMenu.PlaceAbove(badge, new System.Drawing.Size(400, 300), Work);
+            Assert.Equal(new System.Drawing.Rectangle(800, 700, 400, 300), placed);
+        }
+
+        [Fact]
+        public void Near_the_right_edge_the_list_shifts_left_to_stay_on_the_badges_screen()
+        {
+            var badge = new System.Drawing.Rectangle(1880, 1000, 30, 20);
+            var placed = RepoActivityMenu.PlaceAbove(badge, new System.Drawing.Size(400, 300), Work);
+            Assert.Equal(1520, placed.Left);
+            Assert.True(Work.Contains(placed));
+        }
+
+        [Fact]
+        public void A_badge_near_the_top_opens_the_list_below_it()
+        {
+            var badge = new System.Drawing.Rectangle(100, 50, 60, 20);
+            var placed = RepoActivityMenu.PlaceAbove(badge, new System.Drawing.Size(400, 300), Work);
+            Assert.Equal(70, placed.Top);
+        }
+
+        [Fact]
+        public void A_list_taller_than_the_screen_starts_at_its_top_and_never_leaves_it()
+        {
+            var badge = new System.Drawing.Rectangle(800, 1000, 60, 20);
+            var placed = RepoActivityMenu.PlaceAbove(badge, new System.Drawing.Size(400, 2200), Work);
+            Assert.Equal(Work.Top, placed.Top);
+            Assert.True(Work.Contains(placed));
+        }
+
+        [Fact]
+        public void A_second_monitor_keeps_the_list_on_that_monitor()
+        {
+            // A monitor to the LEFT of the primary has negative x.
+            var left = new System.Drawing.Rectangle(-2560, 0, 2560, 1400);
+            var badge = new System.Drawing.Rectangle(-300, 1360, 60, 20);
+            var placed = RepoActivityMenu.PlaceAbove(badge, new System.Drawing.Size(400, 300), left);
+            Assert.True(left.Contains(placed));
+            Assert.Equal(1060, placed.Top);
+        }
+
+        [Theory]
+        [InlineData("{\"left\":10,\"top\":2,\"width\":60,\"height\":20}", true)]
+        [InlineData("{}", false)]
+        [InlineData("{\"left\":10,\"top\":2,\"width\":60}", false)]
+        [InlineData("{\"left\":\"10\",\"top\":2,\"width\":60,\"height\":20}", false)]
+        [InlineData("{\"left\":10.5,\"top\":2,\"width\":60,\"height\":20}", false)]
+        [InlineData("{\"left\":10,\"top\":2,\"width\":0,\"height\":20}", false)]
+        [InlineData("{\"left\":990,\"top\":2,\"width\":60,\"height\":20}", false)]
+        [InlineData("{\"left\":-5,\"top\":2,\"width\":60,\"height\":20}", false)]
+        public void The_click_rectangle_is_used_only_when_it_can_be_the_badge(string json, bool accepted)
+        {
+            using var doc = JsonDocument.Parse(json);
+            bool ok = TerminalStatusBarRenderer.TryReadBadgeRect(doc.RootElement, new System.Drawing.Size(1000, 30), out var rect);
+            Assert.Equal(accepted, ok);
+            if (accepted) Assert.Equal(new System.Drawing.Rectangle(10, 2, 60, 20), rect);
+        }
+
+        [Fact]
+        public void Statusbar_html_sends_the_badge_rectangle_fields_the_renderer_reads()
+        {
+            string html = ReadStripped("Controls", "TerminalStatusBar", "statusbar.html");
+            string body = BalancedBodyAfter(html, "function onRepoActivityClick(", "onRepoActivityClick()");
+
+            foreach (var field in new[] { "left:", "top:", "width:", "height:" })
+                Assert.Contains(field, body, StringComparison.Ordinal);
+            Assert.Contains("getBoundingClientRect()", body, StringComparison.Ordinal);
+            Assert.Contains("devicePixelRatio", body, StringComparison.Ordinal);
+        }
+
         private static string BalancedBodyAfter(string src, string anchor, string what)
         {
             int start = src.IndexOf(anchor, StringComparison.Ordinal);

@@ -89,6 +89,44 @@ namespace MultiTerminal.Controls
         public event EventHandler RepoActivityRequested;
 
         /// <summary>
+        /// Where the badge was on screen at its last click, or null when the page did not say (task
+        /// df58b35d, Owner live test: the list opened on another monitor). Set just before
+        /// <see cref="RepoActivityRequested"/> is raised.
+        /// </summary>
+        public Rectangle? LastRepoActivityBadgeScreenBounds { get; private set; }
+
+        /// <summary>
+        /// Reads the badge rectangle a click message carries (device pixels of the WebView). False when a
+        /// field is missing or not a whole number, or when the rectangle is empty or not inside
+        /// <paramref name="client"/>: the page is trusted, but a value that cannot be the badge must not
+        /// place the menu.
+        /// </summary>
+        internal static bool TryReadBadgeRect(JsonElement root, Size client, out Rectangle rect)
+        {
+            rect = Rectangle.Empty;
+            if (!TryInt(root, "left", out int left) || !TryInt(root, "top", out int top)
+                || !TryInt(root, "width", out int width) || !TryInt(root, "height", out int height))
+            {
+                return false;
+            }
+
+            var candidate = new Rectangle(left, top, width, height);
+            if (width <= 0 || height <= 0 || !new Rectangle(Point.Empty, client).Contains(candidate))
+            {
+                return false;
+            }
+
+            rect = candidate;
+            return true;
+
+            static bool TryInt(JsonElement e, string name, out int value)
+            {
+                value = 0;
+                return e.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.Number && p.TryGetInt32(out value);
+            }
+        }
+
+        /// <summary>
         /// Event fired when the user clicks the Open Folder button on the status bar.
         /// The string argument is the folder path.
         /// </summary>
@@ -349,6 +387,10 @@ namespace MultiTerminal.Controls
                     else if (type == RepoActivityClickType)
                     {
                         _debugLogService?.Trace("TerminalStatusBar", "Repository activity badge clicked");
+                        LastRepoActivityBadgeScreenBounds =
+                            _webView != null && TryReadBadgeRect(root, _webView.ClientSize, out var badge)
+                                ? _webView.RectangleToScreen(badge)
+                                : null;
                         RepoActivityRequested?.Invoke(this, EventArgs.Empty);
                     }
                     else if (type == "hudToggle")

@@ -9720,7 +9720,8 @@ namespace MultiTerminal
                     markAllSeen: () => service.MarkAllSeen(projectId),
                     checkNow: () => _ = CheckRepoActivityNowAsync(service, projectId),
                     openProjectSettings: () => OpenProjectSettings(projectId),
-                    log: msg => _debugLogService?.Warning("RepoActivity", msg));
+                    log: msg => _debugLogService?.Warning("RepoActivity", msg),
+                    badgeScreenBounds: (sender as TerminalDocument)?.LastRepoActivityBadgeScreenBounds);
             }
             catch (Exception ex)
             {

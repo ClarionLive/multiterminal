@@ -437,6 +437,9 @@ namespace MultiTerminal.Docking
         /// </summary>
         public event EventHandler<string> RepoActivityRequested;
 
+        /// <summary>Screen bounds of the repository badge at its last click, or null (see the status bar).</summary>
+        public Rectangle? LastRepoActivityBadgeScreenBounds => _statusBar?.LastRepoActivityBadgeScreenBounds;
+
         /// <summary>
         /// Function to retrieve available identity names for the "Launch as..." menu.
         /// Set by MainForm to provide identity list.
