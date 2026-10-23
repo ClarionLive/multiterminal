@@ -609,11 +609,35 @@ namespace MultiTerminal.Dialogs
             if (_isSelectionMode && _folderTextBox != null)
             {
                 string folder = _folderTextBox.Text.Trim();
-                if (string.IsNullOrEmpty(folder) || !Directory.Exists(folder))
+                switch (ClassifyWorkingFolder(folder, Directory.Exists))
                 {
-                    MessageBox.Show(this, "Please select a valid working folder.", "Invalid Folder",
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return false;
+                    case WorkingFolderCheck.Exists:
+                        break;
+
+                    case WorkingFolderCheck.CanCreate:
+                        var answer = MessageBox.Show(this,
+                            $"The folder \"{folder}\" does not exist.\n\nCreate it?",
+                            "Create Folder",
+                            MessageBoxButtons.YesNo,
+                            MessageBoxIcon.Question);
+                        if (answer != DialogResult.Yes) return false;
+                        try
+                        {
+                            Directory.CreateDirectory(folder);
+                        }
+                        catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException
+                                                   || ex is ArgumentException || ex is NotSupportedException)
+                        {
+                            MessageBox.Show(this, $"Could not create the folder:\n\n{ex.Message}", "Create Folder",
+                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            return false;
+                        }
+                        break;
+
+                    default:
+                        MessageBox.Show(this, "Please select a valid working folder.", "Invalid Folder",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return false;
                 }
                 SelectedFolder = folder;
 
@@ -628,6 +652,35 @@ namespace MultiTerminal.Dialogs
             }
 
             return true;
+        }
+
+        internal enum WorkingFolderCheck
+        {
+            /// <summary>Blank, relative, malformed, UNC, or on a drive that does not exist.</summary>
+            Invalid,
+            Exists,
+            /// <summary>A local absolute path whose drive exists but whose folder does not yet.</summary>
+            CanCreate,
+        }
+
+        /// <summary>
+        /// Pure: what the Launch Claude dialog does with the typed working folder (GH #44). Only a
+        /// fully qualified path on an existing local drive is offered for creation; a UNC path is not,
+        /// so the dialog never creates folders on a network share the user may not have meant.
+        /// </summary>
+        internal static WorkingFolderCheck ClassifyWorkingFolder(string folder, Func<string, bool> directoryExists)
+        {
+            if (string.IsNullOrWhiteSpace(folder)) return WorkingFolderCheck.Invalid;
+            if (folder.IndexOfAny(Path.GetInvalidPathChars()) >= 0) return WorkingFolderCheck.Invalid;
+            if (!Path.IsPathFullyQualified(folder)) return WorkingFolderCheck.Invalid;
+            if (directoryExists(folder)) return WorkingFolderCheck.Exists;
+
+            string root = Path.GetPathRoot(folder);
+            bool isDriveRoot = root != null && root.Length == 3 && char.IsLetter(root[0])
+                               && root[1] == ':' && (root[2] == '\\' || root[2] == '/');
+            if (!isDriveRoot || !directoryExists(root)) return WorkingFolderCheck.Invalid;
+
+            return WorkingFolderCheck.CanCreate;
         }
 
         private void ApplyTheme(TerminalTheme theme)
