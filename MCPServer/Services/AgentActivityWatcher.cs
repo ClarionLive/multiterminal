@@ -93,7 +93,7 @@ namespace MultiTerminal.MCPServer.Services
         private readonly IActivityFeedReader _feed;
         private readonly AgentAttentionService _attention;
         private readonly Action<string> _log;
-        private readonly Func<string, string> _turnEndQuestion;
+        private readonly Func<string, DateTime, string> _turnEndQuestion;
         private readonly int _pollMs;
         private readonly int _batchLimit;
 
@@ -125,7 +125,7 @@ namespace MultiTerminal.MCPServer.Services
         /// MainForm passes <c>ChatQuestionDetector.FindQuestionForSession</c>). Omitted, every turn
         /// end reads as Your turn.
         /// </param>
-        public AgentActivityWatcher(IActivityFeedReader feed, AgentAttentionService attention, Action<string> log = null, Func<string, string> turnEndQuestion = null)
+        public AgentActivityWatcher(IActivityFeedReader feed, AgentAttentionService attention, Action<string> log = null, Func<string, DateTime, string> turnEndQuestion = null)
         {
             _feed = feed ?? throw new ArgumentNullException(nameof(feed));
             _attention = attention ?? throw new ArgumentNullException(nameof(attention));
@@ -251,10 +251,7 @@ namespace MultiTerminal.MCPServer.Services
 
                 if (!Prime()) return;
 
-                RecheckTurnEnds(DateTime.UtcNow);
-
-                List<ActivityFeedEntry> rows = _feed.GetActivitiesAfterId(_watermark, _batchLimit);
-                if (rows == null || rows.Count == 0) return;
+                List<ActivityFeedEntry> rows = _feed.GetActivitiesAfterId(_watermark, _batchLimit) ?? new List<ActivityFeedEntry>();
 
                 foreach (var row in rows)
                 {
@@ -272,6 +269,12 @@ namespace MultiTerminal.MCPServer.Services
                         Log($"AgentActivityWatcher skipped row {row.Id}: {ex.Message}");
                     }
                 }
+
+                // Rechecks run AFTER the rows, and only once the backlog is drained (pipeline run 2,
+                // adversary). Run first, an entry could still read YourTurn while a newer row that
+                // moves it on sat unread, and the recheck would hand that newer turn's question to
+                // the older turn end.
+                if (rows.Count < _batchLimit) RecheckTurnEnds(Clock());
             }
             catch (Exception ex)
             {
@@ -338,7 +341,7 @@ namespace MultiTerminal.MCPServer.Services
             if (turnEnded)
             {
                 string sid = SessionIdOf(row.DetailsJson);
-                string question = AskedAtTurnEnd(sid);
+                string question = AskedAtTurnEnd(sid, observedAt);
                 _attention.NoteTurnEnded(sessionKey, observedAt, isSubagent: false, chatQuestion: question);
 
                 // No question found may only mean the final message is not in the transcript yet
@@ -352,7 +355,7 @@ namespace MultiTerminal.MCPServer.Services
                     {
                         lock (_pendingTurnEnds)
                         {
-                            _pendingTurnEnds.Add(new PendingTurnEnd(sessionKey, sid, entry.BlockSeq, DateTime.UtcNow));
+                            _pendingTurnEnds.Add(new PendingTurnEnd(sessionKey, sid, entry.BlockSeq, Clock(), observedAt));
                         }
                     }
                 }
@@ -422,13 +425,13 @@ namespace MultiTerminal.MCPServer.Services
         /// (task 3d51315b). Null on any failure: the turn end then reads as Your turn, which still
         /// beacons, rather than as a question nobody asked.
         /// </summary>
-        private string AskedAtTurnEnd(string sessionId)
+        private string AskedAtTurnEnd(string sessionId, DateTime turnEndedAtUtc)
         {
             if (_turnEndQuestion == null || string.IsNullOrWhiteSpace(sessionId)) return null;
 
             try
             {
-                return _turnEndQuestion(sessionId);
+                return _turnEndQuestion(sessionId, turnEndedAtUtc);
             }
             catch (Exception ex)
             {
@@ -442,22 +445,27 @@ namespace MultiTerminal.MCPServer.Services
 
         private sealed class PendingTurnEnd
         {
-            public PendingTurnEnd(string sessionKey, string sessionId, long blockSeq, DateTime firstReadUtc)
+            public PendingTurnEnd(string sessionKey, string sessionId, long blockSeq, DateTime firstReadUtc, DateTime turnEndedAtUtc)
             {
                 SessionKey = sessionKey;
                 SessionId = sessionId;
                 BlockSeq = blockSeq;
                 FirstReadUtc = firstReadUtc;
+                TurnEndedAtUtc = turnEndedAtUtc;
             }
 
             public string SessionKey { get; }
             public string SessionId { get; }
             public long BlockSeq { get; }
             public DateTime FirstReadUtc { get; }
+            public DateTime TurnEndedAtUtc { get; }
             public int Rechecks { get; set; }
         }
 
         private readonly List<PendingTurnEnd> _pendingTurnEnds = new List<PendingTurnEnd>();
+
+        /// <summary>The time the turn-end rechecks are measured against; a test may replace it.</summary>
+        internal Func<DateTime> Clock { get; set; } = () => DateTime.UtcNow;
 
         /// <summary>
         /// Reads again each turn end whose first read found no question and whose recheck is due,
@@ -484,7 +492,7 @@ namespace MultiTerminal.MCPServer.Services
                                         && entry.State == AttentionState.YourTurn
                                         && entry.BlockSeq == p.BlockSeq;
 
-                string question = stillThisEpisode ? AskedAtTurnEnd(p.SessionId) : null;
+                string question = stillThisEpisode ? AskedAtTurnEnd(p.SessionId, p.TurnEndedAtUtc) : null;
                 if (question != null)
                 {
                     _attention.UpgradeTurnEndToQuestion(p.SessionKey, p.BlockSeq, question);

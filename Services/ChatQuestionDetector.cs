@@ -46,13 +46,14 @@ namespace MultiTerminal.Services
         /// The question the session's last turn ended on, or null. Never throws.
         /// </summary>
         /// <param name="sessionId">Claude Code session id from the TURN_END row.</param>
-        public static string FindQuestionForSession(string sessionId)
+        /// <param name="turnEndedAtUtc">The TURN_END row's time; text written well after it is a later turn's.</param>
+        public static string FindQuestionForSession(string sessionId, DateTime turnEndedAtUtc)
         {
             try
             {
                 string path = FindTranscript(sessionId, ClaudeProfileResolver.GetAllRoots());
                 if (path == null) return null;
-                return FindQuestion(FinalAssistantText(ReadTailLines(path, TailBytes)));
+                return FindQuestion(FinalAssistantText(ReadTailLines(path, TailBytes), turnEndedAtUtc));
             }
             catch
             {
@@ -139,8 +140,15 @@ namespace MultiTerminal.Services
         /// reached a sentence from the middle of the turn, and past an owner prompt the previous
         /// turn's question. Sidechain lines (a subagent's), meta lines (hook context) and lines with
         /// no message are skipped.
+        /// <para>
+        /// With <paramref name="turnEndedAtUtc"/>, a final text stamped more than
+        /// <see cref="TurnEndSlack"/> after the turn end belongs to a LATER turn and gives null
+        /// (pipeline run 2, adversary): a recheck read seconds after the turn end must not hand the
+        /// next turn's question to this one. The slack covers a final line written just after the
+        /// Stop hook's row; a later turn needs the owner's prompt and the model's reply first.
+        /// </para>
         /// </remarks>
-        internal static string FinalAssistantText(IReadOnlyList<string> lines)
+        internal static string FinalAssistantText(IReadOnlyList<string> lines, DateTime? turnEndedAtUtc = null)
         {
             if (lines == null) return null;
 
@@ -167,7 +175,16 @@ namespace MultiTerminal.Services
                         // Text first or nothing: a final thinking or tool-call line means the turn's
                         // last text is not there (yet), and the watcher reads again shortly.
                         string text = LastText(content);
-                        return string.IsNullOrWhiteSpace(text) ? null : text;
+                        if (string.IsNullOrWhiteSpace(text)) return null;
+
+                        if (turnEndedAtUtc is DateTime ended
+                            && TimestampOf(root) is DateTime written
+                            && written > ended + TurnEndSlack)
+                        {
+                            return null;
+                        }
+
+                        return text;
                     }
 
                     return null;
@@ -235,6 +252,18 @@ namespace MultiTerminal.Services
             return last;
         }
 
+        /// <summary>How long after the turn end its final text may be stamped and still be its own.</summary>
+        public static readonly TimeSpan TurnEndSlack = TimeSpan.FromSeconds(5);
+
+        /// <summary>A transcript line's <c>timestamp</c> as UTC, or null.</summary>
+        private static DateTime? TimestampOf(JsonElement line)
+            => line.TryGetProperty("timestamp", out var ts)
+               && ts.ValueKind == JsonValueKind.String
+               && DateTime.TryParse(ts.GetString(), System.Globalization.CultureInfo.InvariantCulture,
+                   System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var at)
+                ? at
+                : (DateTime?)null;
+
         /// <summary>The latest <c>timestamp</c> on any line, or null.</summary>
         internal static DateTime? LatestTimestamp(IReadOnlyList<string> lines)
         {
@@ -246,11 +275,7 @@ namespace MultiTerminal.Services
                 try
                 {
                     using var doc = JsonDocument.Parse(lines[i]);
-                    if (doc.RootElement.ValueKind == JsonValueKind.Object
-                        && doc.RootElement.TryGetProperty("timestamp", out var ts)
-                        && ts.ValueKind == JsonValueKind.String
-                        && DateTime.TryParse(ts.GetString(), System.Globalization.CultureInfo.InvariantCulture,
-                            System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var at))
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object && TimestampOf(doc.RootElement) is DateTime at)
                     {
                         return at;
                     }

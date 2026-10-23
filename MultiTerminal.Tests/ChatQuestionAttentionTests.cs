@@ -119,6 +119,22 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void Text_written_well_after_the_turn_end_belongs_to_a_later_turn()
+        {
+            // Pipeline run 2 (adversary): a recheck must not hand the next turn's question to this one.
+            DateTime ended = new DateTime(2026, 10, 23, 18, 0, 0, DateTimeKind.Utc);
+            string Stamped(string text, DateTime at) =>
+                Assistant(text).Replace("{\"type\":\"assistant\"", "{\"type\":\"assistant\",\"timestamp\":\"" + at.ToString("o") + "\"");
+
+            var own = new List<string> { Stamped("Push it?", ended.AddSeconds(2)) };
+            var later = new List<string> { Stamped("Push it?", ended.AddSeconds(30)) };
+
+            Assert.Equal("Push it?", ChatQuestionDetector.FinalAssistantText(own, ended));
+            Assert.Null(ChatQuestionDetector.FinalAssistantText(later, ended));
+            Assert.Equal("Push it?", ChatQuestionDetector.FinalAssistantText(later));
+        }
+
+        [Fact]
         public void A_torn_line_is_skipped_not_fatal()
         {
             var lines = new List<string> { Assistant("Ready to deploy?"), "{\"type\":\"assist" };
@@ -415,7 +431,7 @@ namespace MultiTerminal.Tests
             _taskDb = new TaskDatabase();
             _feed = new ActivityFeedService();
             _attention = new AgentAttentionService();
-            _watcher = new AgentActivityWatcher(_feed, _attention, null, sid =>
+            _watcher = new AgentActivityWatcher(_feed, _attention, null, (sid, endedAt) =>
             {
                 _asked.Add(sid);
                 return _answer;
@@ -510,6 +526,35 @@ namespace MultiTerminal.Tests
 
             Assert.Equal(AttentionState.Working, _attention.Get(Session).State);
         }
+
+        [Fact]
+        public void A_due_recheck_waits_for_the_rows_that_move_the_agent_on()
+        {
+            // Pipeline run 2 (adversary): the recheck ran BEFORE the poll applied newer rows, so it
+            // could read the next turn's question while the card still showed the old turn end.
+            Assert.True(_watcher.Prime());
+            Seed();
+            _answer = null;
+            TurnEnd();
+            _watcher.Poll();
+            Assert.Equal(AttentionState.YourTurn, _attention.Get(Session).State);
+
+            // The agent moved on (a tool ran) and its next turn asks something; the recheck is due.
+            Thread.Sleep(30);
+            _feed.RecordGeneralActivity("TOOL_COMPLETE", Agent, "Edit: x.cs", "info",
+                $"{{\"tool\":\"Edit\",\"agent_id\":null,\"session_id\":\"{Session}\"}}");
+            _answer = "A question from the NEXT turn?";
+            _watcher.Clock = () => DateTime.UtcNow + TimeSpan.FromMinutes(1);
+
+            _watcher.Poll();
+
+            Assert.Equal(AttentionState.Working, _attention.Get(Session).State);
+
+            // The discriminator: in the wrong order the recheck reads the transcript again (and
+            // upgrades the old turn end for a moment) before the tool row clears it, so the final
+            // state alone could not tell the orders apart. In the right order it never reads.
+            Assert.Single(_asked);
+        }
     }
 
     public class PromptSubmitDetectorTests
@@ -554,6 +599,22 @@ namespace MultiTerminal.Tests
             var d = new PromptSubmitDetector();
             Assert.Equal(0, Feed(d, "abc\u0003\r"));
             Assert.Equal(1, Feed(d, "café\r"));
+        }
+
+        [Fact]
+        public void Application_cursor_arrows_and_alt_enter_are_not_text_or_submissions()
+        {
+            var d = new PromptSubmitDetector();
+            Assert.Equal(0, Feed(d, "\u001bOA\u001bOB\r"));      // arrows (ESC O A) then Enter on a menu
+            Assert.Equal(0, Feed(d, "line\u001b\r"));            // Alt+Enter is a newline
+            Assert.Equal(1, Feed(d, "\r"));
+        }
+
+        [Fact]
+        public void A_lone_escape_does_not_swallow_the_next_key()
+        {
+            var d = new PromptSubmitDetector();
+            Assert.Equal(1, Feed(d, "\u001by\r"));
         }
     }
 }

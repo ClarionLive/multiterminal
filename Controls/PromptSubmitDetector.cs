@@ -30,6 +30,7 @@ namespace MultiTerminal.Controls
         private bool _inPaste;
         private bool _afterEscape;
         private bool _inCsi;
+        private bool _inSs3;
         private readonly StringBuilder _csiParams = new StringBuilder();
 
         /// <summary>Feeds one chunk of keyboard data; returns how many prompts it submitted.</summary>
@@ -60,6 +61,13 @@ namespace MultiTerminal.Controls
                     continue;
                 }
 
+                if (_inSs3)
+                {
+                    // ESC O <final>: an arrow or function key in application cursor mode.
+                    _inSs3 = false;
+                    continue;
+                }
+
                 if (_afterEscape)
                 {
                     _afterEscape = false;
@@ -67,9 +75,20 @@ namespace MultiTerminal.Controls
                     {
                         _inCsi = true;
                         _csiParams.Clear();
+                        continue;
                     }
 
-                    continue;
+                    if (b == (byte)'O')
+                    {
+                        _inSs3 = true;
+                        continue;
+                    }
+
+                    // ESC CR is Alt+Enter, a newline in the prompt rather than its submission.
+                    if (b == 0x0D) continue;
+
+                    // A lone Escape keypress: the byte after it is ordinary input, so it falls
+                    // through rather than being swallowed (pipeline run 2, debugger note).
                 }
 
                 switch (b)
