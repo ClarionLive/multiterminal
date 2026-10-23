@@ -62,8 +62,7 @@ namespace MultiTerminal.Controls
             if (summary == null || !summary.Watching) return null;
 
             DateTime now = nowUtc ?? DateTime.UtcNow;
-            bool hasList = summary.State != RepoActivityState.NoRepos
-                           && (summary.LastCheckedUtc.HasValue || summary.OpenIssues + summary.OpenPullRequests > 0);
+            bool hasList = summary.State != RepoActivityState.NoRepos && HasAnyList(summary);
 
             string counts = hasList ? CountsText(summary) : string.Empty;
             string tooltip;
@@ -91,6 +90,24 @@ namespace MultiTerminal.Controls
                 Tooltip = StripUrls(tooltip),
                 Dim = summary.State != RepoActivityState.Ok && summary.State != RepoActivityState.Checking,
             };
+        }
+
+        /// <summary>
+        /// Whether any watched repository has a list to count: read successfully, still holding items
+        /// from an earlier read, or being rechecked after an earlier check. A project whose every repo
+        /// has only ever failed (a typo, a private repo with no token) has none, and its badge shows
+        /// "–" rather than a 0 that reads as "no issues" (Owner live test 2026-10-23).
+        /// </summary>
+        internal static bool HasAnyList(RepoActivitySummary summary)
+        {
+            if (summary.OpenIssues + summary.OpenPullRequests > 0) return true;
+            foreach (var repo in summary.Repos)
+            {
+                if (repo.State == RepoActivityState.Ok || repo.Items.Count > 0) return true;
+                if (repo.State == RepoActivityState.Checking && repo.LastCheckedUtc.HasValue) return true;
+            }
+
+            return false;
         }
 
         /// <summary>The <c>repoActivity:</c> payload: the badge as JSON, or <c>null</c> to hide it.</summary>

@@ -486,6 +486,51 @@ namespace MultiTerminal.Tests
             return body;
         }
 
+        // ---- A repo that was never read is not "0 issues" (Owner live test 2026-10-23) -------------
+
+        private static RepoActivitySummary CheckedButUnread(params RepoActivityRepo[] repos) => new()
+        {
+            ProjectId = "p1",
+            Watching = true,
+            State = RepoActivityState.NoAccess,
+            Reason = "not found or no access",
+            LastCheckedUtc = Now.AddMinutes(-1),
+            Repos = repos,
+        };
+
+        [Fact]
+        public void Every_repo_unreadable_shows_unknown_counts_not_zero()
+        {
+            var badge = RepoActivityBadge.From(CheckedButUnread(
+                new RepoActivityRepo { FullName = "clarionlive/multitermina", State = RepoActivityState.NoAccess, LastCheckedUtc = Now.AddMinutes(-1) }), Now)!;
+
+            Assert.Null(badge.Issues);
+            Assert.Null(badge.PullRequests);
+            Assert.True(badge.Dim);
+            Assert.Contains("not found or no access", badge.Tooltip, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void One_readable_repo_with_nothing_open_shows_zero()
+        {
+            var badge = RepoActivityBadge.From(CheckedButUnread(
+                new RepoActivityRepo { FullName = "a/typo", State = RepoActivityState.NoAccess, LastCheckedUtc = Now.AddMinutes(-1) },
+                new RepoActivityRepo { FullName = "a/quiet", State = RepoActivityState.Ok, LastCheckedUtc = Now.AddMinutes(-1) }), Now)!;
+
+            Assert.Equal(0, badge.Issues);
+            Assert.Equal(0, badge.PullRequests);
+        }
+
+        [Fact]
+        public void A_recheck_of_a_readable_repo_keeps_its_counts_while_it_runs()
+        {
+            var summary = CheckedButUnread(
+                new RepoActivityRepo { FullName = "a/quiet", State = RepoActivityState.Checking, LastCheckedUtc = Now.AddMinutes(-20) });
+            Assert.True(RepoActivityBadge.HasAnyList(summary));
+            Assert.False(RepoActivityBadge.HasAnyList(CheckedButUnread(
+                new RepoActivityRepo { FullName = "a/new", State = RepoActivityState.Checking })));
+        }
+
         // ---- Click-away (Owner live test 2026-10-23: the list stayed open over a WebView2) ----------
 
         [Fact]
