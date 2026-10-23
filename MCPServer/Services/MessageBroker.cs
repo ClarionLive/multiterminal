@@ -6868,6 +6868,11 @@ namespace MultiTerminal.MCPServer.Services
             try { CodeGraphIndexCoordinator?.ClearProject(projectName); }
             catch (Exception ex) { LogError($"Failed to clear code graph for project {projectName}: {ex.Message}"); }
 
+            // Best-effort: drop the project's GitHub repo watch state (task df58b35d). Lives in TaskDatabase,
+            // not one of ProjectDatabase's child tables, so the row delete above does not reach it.
+            try { _taskDb.DeleteRepoWatchStates(projectId); }
+            catch (Exception ex) { LogError($"Failed to clear repo watch state for project {projectId}: {ex.Message}"); }
+
             BroadcastProjectUpdate();
 
             // Record activity for the feed

@@ -612,6 +612,21 @@ namespace MultiTerminal.Services
                     name TEXT NOT NULL UNIQUE COLLATE NOCASE,
                     created_at DATETIME DEFAULT (datetime('now'))
                 );
+
+                -- GitHub repo watch (task df58b35d): the last fetch per (project, repo) and the highest
+                -- issue/PR number the user has seen. repo is lower-cased owner/repo; last_checked_at is
+                -- round-trip ISO-8601 UTC text. See the Repo Watch State region.
+                CREATE TABLE IF NOT EXISTS repo_watch_state (
+                    project_id TEXT NOT NULL,
+                    repo TEXT NOT NULL,
+                    etag TEXT,
+                    last_checked_at TEXT,
+                    last_status TEXT,
+                    last_message TEXT,
+                    seen_max_number INTEGER,
+                    snapshot_json TEXT,
+                    PRIMARY KEY (project_id, repo)
+                );
             ";
 
             using var command = new SQLiteCommand(schema, _connection);
@@ -8230,6 +8245,163 @@ namespace MultiTerminal.Services
                 EndedAt = ended == null ? (DateTime?)null : ParsePaneLaunchTime(ended),
                 EndReason = Str(12),
                 Seq = reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
+            };
+        }
+
+        #endregion
+
+        #region Repo Watch State
+
+        // Task df58b35d (GitHub #53). Every method normalizes the repo through NormalizeWatchedRepo, so a
+        // caller passing "Owner/Repo" and one passing "owner/repo" address the same row. Timestamps use the
+        // pane_launches format (round-trip ISO-8601 UTC text).
+
+        private const string RepoWatchColumns =
+            "project_id, repo, etag, last_checked_at, last_status, last_message, seen_max_number, snapshot_json";
+
+        /// <summary>The stored key for a repo: trimmed, lower-cased <c>owner/repo</c> (GitHub names are case-insensitive).</summary>
+        internal static string NormalizeWatchedRepo(string repo)
+            => repo?.Trim().ToLowerInvariant();
+
+        private static void RequireRepoWatchKey(string projectId, string repo)
+        {
+            if (string.IsNullOrWhiteSpace(projectId)) throw new ArgumentException("A project id is required.", nameof(projectId));
+            if (string.IsNullOrWhiteSpace(repo)) throw new ArgumentException("A repo is required.", nameof(repo));
+        }
+
+        /// <summary>One project's state for one repo, or null when the repo has never been checked or marked.</summary>
+        public RepoWatchState GetRepoWatchState(string projectId, string repo)
+        {
+            if (string.IsNullOrWhiteSpace(projectId) || string.IsNullOrWhiteSpace(repo)) return null;
+            using var gate = LockConn();
+            using var cmd = new SQLiteCommand(
+                "SELECT " + RepoWatchColumns + " FROM repo_watch_state WHERE project_id = @project AND repo = @repo", _connection);
+            cmd.Parameters.AddWithValue("@project", projectId);
+            cmd.Parameters.AddWithValue("@repo", NormalizeWatchedRepo(repo));
+            using var reader = cmd.ExecuteReader();
+            return reader.Read() ? ReadRepoWatchState(reader) : null;
+        }
+
+        /// <summary>Every repo state stored for one project, ordered by repo.</summary>
+        public IReadOnlyList<RepoWatchState> GetRepoWatchStates(string projectId)
+        {
+            var results = new List<RepoWatchState>();
+            if (string.IsNullOrWhiteSpace(projectId)) return results;
+            using var gate = LockConn();
+            using var cmd = new SQLiteCommand(
+                "SELECT " + RepoWatchColumns + " FROM repo_watch_state WHERE project_id = @project ORDER BY repo", _connection);
+            cmd.Parameters.AddWithValue("@project", projectId);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read()) results.Add(ReadRepoWatchState(reader));
+            return results;
+        }
+
+        /// <summary>
+        /// Records the outcome of one fetch (upsert). Checked-at, status and message are always written.
+        /// The ETag and snapshot are replaced only together and only when <paramref name="snapshotJson"/> is
+        /// non-null (a 200 with a body): a 304 or an error passes null and keeps both, so the next request
+        /// still sends the ETag that matches the snapshot on file. Never touches <c>seen_max_number</c>.
+        /// </summary>
+        public void SaveRepoWatchFetch(string projectId, string repo, string etag, DateTime checkedAtUtc, string status, string message, string snapshotJson)
+        {
+            RequireRepoWatchKey(projectId, repo);
+            // GATE BEFORE LockConn — never wait for the gate while holding _dbLock (see SqliteWriteGate).
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.SaveRepoWatchFetch", projectId);
+            using var gate = LockConn();
+            const string sql = @"
+                INSERT INTO repo_watch_state (project_id, repo, etag, last_checked_at, last_status, last_message, snapshot_json)
+                VALUES (@project, @repo, @etag, @checked, @status, @message, @snapshot)
+                ON CONFLICT(project_id, repo) DO UPDATE SET
+                    last_checked_at = excluded.last_checked_at,
+                    last_status = excluded.last_status,
+                    last_message = excluded.last_message,
+                    etag = CASE WHEN excluded.snapshot_json IS NULL THEN repo_watch_state.etag ELSE excluded.etag END,
+                    snapshot_json = COALESCE(excluded.snapshot_json, repo_watch_state.snapshot_json)";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@project", projectId);
+            cmd.Parameters.AddWithValue("@repo", NormalizeWatchedRepo(repo));
+            // An ETag without its snapshot would make a later 304 vouch for content that was never stored.
+            cmd.Parameters.AddWithValue("@etag", snapshotJson == null ? DBNull.Value : ((object)etag ?? DBNull.Value));
+            cmd.Parameters.AddWithValue("@checked", FormatPaneLaunchTime(checkedAtUtc));
+            cmd.Parameters.AddWithValue("@status", (object)status ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@message", (object)message ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@snapshot", (object)snapshotJson ?? DBNull.Value);
+            cmd.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Sets the seen high-water mark to <paramref name="currentMax"/> only when it has never been set,
+        /// so the first check of a repo does not report its whole history as new. One statement: of two
+        /// concurrent first checks, exactly one sets it. Creates the row if missing.
+        /// </summary>
+        /// <returns>True when this call set the mark.</returns>
+        public bool InitializeRepoSeenIfUnset(string projectId, string repo, long currentMax)
+        {
+            RequireRepoWatchKey(projectId, repo);
+            // GATE BEFORE LockConn — never wait for the gate while holding _dbLock (see SqliteWriteGate).
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.InitializeRepoSeenIfUnset", projectId);
+            using var gate = LockConn();
+            const string sql = @"
+                INSERT INTO repo_watch_state (project_id, repo, seen_max_number) VALUES (@project, @repo, @max)
+                ON CONFLICT(project_id, repo) DO UPDATE SET seen_max_number = excluded.seen_max_number
+                WHERE repo_watch_state.seen_max_number IS NULL";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@project", projectId);
+            cmd.Parameters.AddWithValue("@repo", NormalizeWatchedRepo(repo));
+            cmd.Parameters.AddWithValue("@max", currentMax);
+            return cmd.ExecuteNonQuery() > 0;
+        }
+
+        /// <summary>
+        /// The user has seen everything up to <paramref name="seenMax"/>. Raises the mark, never lowers it
+        /// (<c>MAX</c> in the statement), so a late call carrying an older view cannot re-mark items as new.
+        /// Creates the row if missing.
+        /// </summary>
+        public void MarkRepoSeen(string projectId, string repo, long seenMax)
+        {
+            RequireRepoWatchKey(projectId, repo);
+            // GATE BEFORE LockConn — never wait for the gate while holding _dbLock (see SqliteWriteGate).
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.MarkRepoSeen", projectId);
+            using var gate = LockConn();
+            // COALESCE because SQLite's scalar MAX returns NULL when any argument is NULL.
+            const string sql = @"
+                INSERT INTO repo_watch_state (project_id, repo, seen_max_number) VALUES (@project, @repo, @max)
+                ON CONFLICT(project_id, repo) DO UPDATE SET
+                    seen_max_number = MAX(COALESCE(repo_watch_state.seen_max_number, excluded.seen_max_number), excluded.seen_max_number)";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@project", projectId);
+            cmd.Parameters.AddWithValue("@repo", NormalizeWatchedRepo(repo));
+            cmd.Parameters.AddWithValue("@max", seenMax);
+            cmd.ExecuteNonQuery();
+        }
+
+        /// <summary>Removes every repo state of one project (the project was deleted).</summary>
+        /// <returns>The number of rows removed.</returns>
+        public int DeleteRepoWatchStates(string projectId)
+        {
+            if (string.IsNullOrWhiteSpace(projectId)) return 0;
+            // GATE BEFORE LockConn — never wait for the gate while holding _dbLock (see SqliteWriteGate).
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.DeleteRepoWatchStates", projectId);
+            using var gate = LockConn();
+            using var cmd = new SQLiteCommand("DELETE FROM repo_watch_state WHERE project_id = @project", _connection);
+            cmd.Parameters.AddWithValue("@project", projectId);
+            return cmd.ExecuteNonQuery();
+        }
+
+        private static RepoWatchState ReadRepoWatchState(SQLiteDataReader reader)
+        {
+            string Str(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
+            string checkedAt = Str(3);
+            return new RepoWatchState
+            {
+                ProjectId = Str(0),
+                Repo = Str(1),
+                ETag = Str(2),
+                LastCheckedAt = checkedAt == null ? (DateTime?)null : ParsePaneLaunchTime(checkedAt).ToUniversalTime(),
+                LastStatus = Str(4),
+                LastMessage = Str(5),
+                SeenMaxNumber = reader.IsDBNull(6) ? (long?)null : reader.GetInt64(6),
+                SnapshotJson = Str(7),
             };
         }
 
