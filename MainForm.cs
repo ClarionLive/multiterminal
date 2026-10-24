@@ -369,6 +369,48 @@ namespace MultiTerminal
         /// a client-side timeout doesn't cancel server-side delivery (the controller doesn't
         /// flow the request's cancellation into the gateway forward).
         /// </summary>
+        private Services.GitHubWatchService _gitHubWatch;
+
+        /// <summary>
+        /// Builds and starts the GitHub watch (task 92eeeb47). After the REST host is up, so the
+        /// loopback push it sends has a listener. The token comes from the project's linked source
+        /// control account, and only from a GitHub one.
+        /// </summary>
+        private void StartGitHubWatch()
+        {
+            try
+            {
+                var db = _sharedProjectDatabase;
+                var broker = _mcpServer?.Broker;
+                if (db == null || broker == null || _gitHubWatch != null) return;
+
+                _gitHubWatch = new Services.GitHubWatchService(
+                    db,
+                    projects: () => db.GetAllRichProjects(),
+                    gitHubTokenForAccount: accountId =>
+                    {
+                        var account = _sourceControlAccountService?.GetAll()
+                            .FirstOrDefault(a => string.Equals(a.Id, accountId, StringComparison.Ordinal));
+                        if (account == null || !string.Equals(account.Provider, "github", StringComparison.OrdinalIgnoreCase))
+                            return null;
+                        return _sourceControlAccountService.GetToken(accountId);
+                    },
+                    feed: new Services.GitHubIssueFeed(),
+                    createSuggestion: (title, description, projectId) =>
+                    {
+                        var created = broker.CreateTask(title, description, "GitHub", "suggestion", "normal", projectId);
+                        return created != null && created.Success ? created.TaskId : null;
+                    },
+                    push: (title, body) => { _ = SendJanitorSeverePushAsync(title, body); },
+                    log: message => _debugLogService?.Info("GitHubWatch", message));
+                _gitHubWatch.Start();
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("GitHubWatch", $"Could not start: {ex.Message}");
+            }
+        }
+
         private async System.Threading.Tasks.Task SendJanitorSeverePushAsync(string title, string body)
         {
             try
@@ -1059,6 +1101,9 @@ namespace MultiTerminal
                         // Disconnects terminals whose Claude process died without a teardown, so the
                         // event-driven panels drop them too (task d1151661 item 3).
                         StartTerminalLivenessReaper();
+
+                        // Checks projects' GitHub repos for new issues and PRs (task 92eeeb47).
+                        StartGitHubWatch();
 
                         // Wire terminal stream resolver: resolves any terminal identifier
                         // (terminal ID, DocId, or agent name) to its ConPtyTerminal instance
@@ -7273,6 +7318,9 @@ namespace MultiTerminal
             if (e == null) return;
             _paneLaunches?.OnLaunchBegan(e.DocId, e.TerminalName, e.ProjectId, e.WorkingDirectory, e.Kind, e.ResumeSessionId, e.LaunchGeneration);
 
+            // "Check on terminal start" (task 92eeeb47); debounced and in the background.
+            _gitHubWatch?.NotifyTerminalStarted(e.ProjectId);
+
             // A reused pane must not keep the previous agent's colour (51a8a17b, pipeline Run 1).
             RefreshPaneAttention();
         }
@@ -10396,6 +10444,8 @@ namespace MultiTerminal
                 _sessionSyncTimer?.Dispose();
                 _teamWatcher?.Dispose();
                 _codeGraphWatcher?.Dispose();
+                // Before the project DB it reads and writes (task 92eeeb47).
+                _gitHubWatch?.Dispose();
                 // Before the DB it reads (task edcdcdd5).
                 _agentActivityWatcher?.Dispose();
                 // Before the broker state and profile DB its sweep writes (task d1151661).

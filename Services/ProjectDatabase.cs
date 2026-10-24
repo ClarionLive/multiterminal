@@ -301,6 +301,30 @@ namespace MultiTerminal.Services
                     UNIQUE(project_id, skill_name)
                 );
                 CREATE INDEX IF NOT EXISTS idx_project_skills_project ON project_skills(project_id);
+
+                -- GitHub watch (task 92eeeb47): per project and repo, the newest issue/PR number
+                -- already accounted for. GitHub numbers issues and PRs from one rising sequence, so
+                -- anything above the baseline is new.
+                CREATE TABLE IF NOT EXISTS github_watch_state (
+                    project_id TEXT NOT NULL,
+                    repo TEXT NOT NULL,
+                    baseline_number INTEGER NOT NULL,
+                    last_checked_at DATETIME,
+                    last_error TEXT,
+                    PRIMARY KEY (project_id, repo)
+                );
+
+                -- One row per issue/PR the watcher reported; the INSERT OR IGNORE on it is what
+                -- makes a card at most once, even if two checks overlap.
+                CREATE TABLE IF NOT EXISTS github_watch_seen (
+                    project_id TEXT NOT NULL,
+                    repo TEXT NOT NULL,
+                    number INTEGER NOT NULL,
+                    is_pr INTEGER NOT NULL DEFAULT 0,
+                    task_id TEXT,
+                    seen_at DATETIME NOT NULL,
+                    PRIMARY KEY (project_id, repo, number)
+                );
             ";
 
             using var command = new SQLiteCommand(createSql, _connection);
@@ -986,6 +1010,86 @@ namespace MultiTerminal.Services
         /// unset (NULL) projects cannot silently override that choice.</para>
         /// </summary>
         /// <returns>True if a row was updated, false if the project was not found.</returns>
+        /// <summary>
+        /// The GitHub watch state for a project's repo (task 92eeeb47): the newest issue/PR number
+        /// already accounted for (null = never checked for this project) and when it was last checked,
+        /// which survives a restart so a daily check is not reset by one.
+        /// </summary>
+        public (int? Baseline, DateTime? LastCheckedUtc) GetGitHubWatchState(string projectId, string repo)
+        {
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand(
+                    "SELECT baseline_number, last_checked_at FROM github_watch_state WHERE project_id = @p AND repo = @r", _connection);
+                command.Parameters.AddWithValue("@p", projectId);
+                command.Parameters.AddWithValue("@r", repo);
+                using var reader = command.ExecuteReader();
+                if (!reader.Read()) return (null, null);
+                int? baseline = reader.IsDBNull(0) ? (int?)null : reader.GetInt32(0);
+                DateTime? last = reader.IsDBNull(1) ? (DateTime?)null : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc);
+                return (baseline, last);
+            }
+        }
+
+        /// <summary>
+        /// Records a check: the baseline only ever rises (an older check finishing late cannot lower
+        /// it), and the outcome (null error = it worked) is kept for the form to show.
+        /// </summary>
+        public void RecordGitHubWatchCheck(string projectId, string repo, int baseline, string error)
+        {
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand(@"
+                    INSERT INTO github_watch_state (project_id, repo, baseline_number, last_checked_at, last_error)
+                    VALUES (@p, @r, @b, @at, @err)
+                    ON CONFLICT(project_id, repo) DO UPDATE SET
+                        baseline_number = MAX(github_watch_state.baseline_number, excluded.baseline_number),
+                        last_checked_at = excluded.last_checked_at,
+                        last_error = excluded.last_error", _connection);
+                command.Parameters.AddWithValue("@p", projectId);
+                command.Parameters.AddWithValue("@r", repo);
+                command.Parameters.AddWithValue("@b", baseline);
+                command.Parameters.AddWithValue("@at", DateTime.UtcNow);
+                command.Parameters.AddWithValue("@err", (object)error ?? DBNull.Value);
+                command.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// Claims an issue/PR for reporting: true the first time, false if it was claimed before. The
+        /// one place that decides "new", so overlapping checks cannot both report one item.
+        /// </summary>
+        public bool TryClaimGitHubItem(string projectId, string repo, int number, bool isPullRequest)
+        {
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand(@"
+                    INSERT OR IGNORE INTO github_watch_seen (project_id, repo, number, is_pr, seen_at)
+                    VALUES (@p, @r, @n, @pr, @at)", _connection);
+                command.Parameters.AddWithValue("@p", projectId);
+                command.Parameters.AddWithValue("@r", repo);
+                command.Parameters.AddWithValue("@n", number);
+                command.Parameters.AddWithValue("@pr", isPullRequest ? 1 : 0);
+                command.Parameters.AddWithValue("@at", DateTime.UtcNow);
+                return command.ExecuteNonQuery() > 0;
+            }
+        }
+
+        /// <summary>Links a claimed issue/PR to the board card made for it.</summary>
+        public void SetGitHubItemTask(string projectId, string repo, int number, string taskId)
+        {
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand(
+                    "UPDATE github_watch_seen SET task_id = @t WHERE project_id = @p AND repo = @r AND number = @n", _connection);
+                command.Parameters.AddWithValue("@t", taskId);
+                command.Parameters.AddWithValue("@p", projectId);
+                command.Parameters.AddWithValue("@r", repo);
+                command.Parameters.AddWithValue("@n", number);
+                command.ExecuteNonQuery();
+            }
+        }
+
         public bool SetLaunchMode(string projectId, MultiTerminal.Models.ProjectLaunchMode mode)
         {
             if (string.IsNullOrWhiteSpace(projectId))
