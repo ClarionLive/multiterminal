@@ -396,8 +396,16 @@ namespace MultiTerminal
                     },
                     // An ordinary notification, not forced: it follows the remote-mode gate like
                     // any other (pipeline Run 1; the janitor's forced "error" push is for rare,
-                    // severe alerts only).
-                    push: (title, body) => { _ = SendOwnerNotificationAsync(title, body, "info", "GitHub", forcePush: false, logSource: "GitHubWatch"); },
+                    // severe alerts only). That gate drops it while the Owner is at the desk, so
+                    // the same text also goes to the Owner's Inbox, which is all Notify mode
+                    // would otherwise leave (pipeline Run 2).
+                    push: (title, body) =>
+                    {
+                        string owner = broker.DefaultInboxRecipient;
+                        if (!string.IsNullOrEmpty(owner))
+                            broker.CreateInboxNotification(owner, null, null, null, null, "github_watch", $"{title}: {body}", "GitHub");
+                        _ = SendOwnerNotificationAsync(title, body, "info", "GitHub", forcePush: false, logSource: "GitHubWatch");
+                    },
                     log: message => _debugLogService?.Info("GitHubWatch", message));
 #pragma warning restore CA2000
                 _gitHubWatch.Start();

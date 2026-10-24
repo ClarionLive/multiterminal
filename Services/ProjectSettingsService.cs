@@ -227,14 +227,8 @@ namespace MultiTerminal.Services
                         }
                     }
 
-                    // GitHub watch (task 92eeeb47, pipeline Run 1): turning watching back on, or pointing
-                    // it at another repository, starts from a fresh baseline. An old baseline covers a gap
-                    // nobody watched, and everything created in it would become cards.
-                    bool watchTurnedOn = changed.TryGetValue("gitHubWatchMode", out var newMode)
-                        && newMode != GitHubWatchSettings.ModeToStorage(GitHubWatchMode.Off)
-                        && current.GitHubWatchMode == GitHubWatchMode.Off;
-                    if (watchTurnedOn || changed.ContainsKey("gitRepoUrl"))
-                        _db.ResetGitHubWatchState(update.ProjectId);
+                    // Turning GitHub watch back on, or pointing it at another repository, resets its
+                    // baseline inside UpdateProjectField (task 92eeeb47), so every writer gets it.
 
                     SaveAgents(update.ProjectId, update.Agents);
                     SaveSpecialists(update.ProjectId, update.SpecialistAgents);

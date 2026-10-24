@@ -330,6 +330,20 @@ namespace MultiTerminal.Services
                 );
             ";
 
+            // A github_watch_state from an unreleased build of task 92eeeb47 has a NOT NULL baseline and
+            // no last_success_at, and CREATE TABLE IF NOT EXISTS would keep it. Nothing in it is worth
+            // keeping (it only holds baselines), so drop it and let the CREATE below make it again.
+            using (var probe = new SQLiteCommand(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'github_watch_state' " +
+                "AND NOT EXISTS (SELECT 1 FROM pragma_table_info('github_watch_state') WHERE name = 'last_success_at')", _connection))
+            {
+                if (Convert.ToInt64(probe.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) > 0)
+                {
+                    using var drop = new SQLiteCommand("DROP TABLE github_watch_state", _connection);
+                    drop.ExecuteNonQuery();
+                }
+            }
+
             using var command = new SQLiteCommand(createSql, _connection);
             command.ExecuteNonQuery();
         }
@@ -542,6 +556,9 @@ namespace MultiTerminal.Services
 
             lock (_dbLock)
             {
+                bool watchField = fieldName == "github_watch_mode" || fieldName == "git_repo_url";
+                string oldValue = watchField ? ReadProjectText(projectId, fieldName) : null;
+
                 // CA2100 / CA3001: fieldName is whitelist-validated against _allowedProjectFields above (rejected if not present);
                 // all user-supplied values (projectId, paramValue) flow through SQLiteParameter.
                 #pragma warning disable CA2100
@@ -553,7 +570,50 @@ namespace MultiTerminal.Services
                 command.Parameters.AddWithValue("@value", paramValue);
                 command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
 
-                return command.ExecuteNonQuery() > 0;
+                bool updated = command.ExecuteNonQuery() > 0;
+                // Here, not in one caller: the form, PATCH /api/projects/{id} and the MCP update_project
+                // tool all write through this method (task 92eeeb47, pipeline Run 2).
+                if (updated && watchField && ShouldResetGitHubWatch(fieldName, oldValue, value))
+                    ResetGitHubWatchState(projectId);
+                return updated;
+            }
+        }
+
+        /// <summary>
+        /// Whether a write to a GitHub watch field starts the watch from a fresh baseline (task 92eeeb47):
+        /// watching turned on from Off, or the Repository URL now names another repository. A baseline
+        /// left from before covers a gap nobody watched, and everything created in it would become
+        /// cards. The URL is compared as the parsed <c>owner/name</c>, so writing the same repository
+        /// another way (ssh form, a trailing .git) keeps the baseline. Pure.
+        /// </summary>
+        internal static bool ShouldResetGitHubWatch(string column, string oldValue, string newValue)
+        {
+            if (column == "github_watch_mode")
+                return MultiTerminal.Models.GitHubWatchSettings.ParseMode(oldValue) == MultiTerminal.Models.GitHubWatchMode.Off
+                    && MultiTerminal.Models.GitHubWatchSettings.ParseMode(newValue) != MultiTerminal.Models.GitHubWatchMode.Off;
+            if (column == "git_repo_url")
+                return !string.Equals(GitHubRepoRef.TryParse(oldValue)?.FullName, GitHubRepoRef.TryParse(newValue)?.FullName,
+                    StringComparison.OrdinalIgnoreCase);
+            return false;
+        }
+
+        /// <summary>A project's stored GitHub watch mode or Repository URL, or null.</summary>
+        private string ReadProjectText(string projectId, string column)
+        {
+            // Fixed statements, not an interpolated column: nothing a caller passes reaches the SQL text.
+            string sql = column switch
+            {
+                "github_watch_mode" => "SELECT github_watch_mode FROM projects WHERE id = @id",
+                "git_repo_url" => "SELECT git_repo_url FROM projects WHERE id = @id",
+                _ => throw new ArgumentOutOfRangeException(nameof(column), column, "Not a GitHub watch column."),
+            };
+            // Re-entrant: both callers already hold _dbLock.
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@id", projectId);
+                var result = command.ExecuteScalar();
+                return result == null || result is DBNull ? null : Convert.ToString(result, System.Globalization.CultureInfo.InvariantCulture);
             }
         }
 
@@ -892,7 +952,14 @@ namespace MultiTerminal.Services
                 command.Parameters.AddWithValue("@claudeProfile",
                     (object)NormalizeClaudeProfileName(project.ClaudeProfile) ?? DBNull.Value);
 
+                // A null URL keeps the stored one (COALESCE), so only a non-null one can repoint the
+                // watch; the same reset rule as UpdateProjectField (task 92eeeb47, pipeline Run 2).
+                string oldRepoUrl = project.GitRepoUrl != null ? ReadProjectText(project.Id, "git_repo_url") : null;
+
                 command.ExecuteNonQuery();
+
+                if (project.GitRepoUrl != null && ShouldResetGitHubWatch("git_repo_url", oldRepoUrl, project.GitRepoUrl))
+                    ResetGitHubWatchState(project.Id);
             }
         }
 
@@ -1084,15 +1151,18 @@ namespace MultiTerminal.Services
         /// null when this check learned nothing (it failed): a null never creates or replaces one, so
         /// a failed FIRST check leaves the repo un-baselined and the next good check is still a
         /// baseline-only check (pipeline Run 1). A baseline only ever rises. The outcome (null error =
-        /// it worked) is kept for the form; <c>last_success_at</c> moves only on success.
+        /// it worked) is kept for the form; <c>last_success_at</c> moves only on success, or when
+        /// <paramref name="fetched"/> says GitHub answered and only a card failed: the interval then
+        /// keeps its pace and the card is tried at the next check, instead of every retry delay
+        /// (pipeline Run 2).
         /// </summary>
-        public void RecordGitHubWatchCheck(string projectId, string repo, int? baseline, string error)
+        public void RecordGitHubWatchCheck(string projectId, string repo, int? baseline, string error, bool fetched = false)
         {
             lock (_dbLock)
             {
                 using var command = new SQLiteCommand(@"
                     INSERT INTO github_watch_state (project_id, repo, baseline_number, last_checked_at, last_success_at, last_error)
-                    VALUES (@p, @r, @b, @at, CASE WHEN @err IS NULL THEN @at END, @err)
+                    VALUES (@p, @r, @b, @at, CASE WHEN @err IS NULL OR @fetched = 1 THEN @at END, @err)
                     ON CONFLICT(project_id, repo) DO UPDATE SET
                         baseline_number = CASE
                             WHEN excluded.baseline_number IS NULL THEN github_watch_state.baseline_number
@@ -1106,6 +1176,7 @@ namespace MultiTerminal.Services
                 command.Parameters.AddWithValue("@b", baseline.HasValue ? (object)baseline.Value : DBNull.Value);
                 command.Parameters.AddWithValue("@at", DateTime.UtcNow);
                 command.Parameters.AddWithValue("@err", (object)error ?? DBNull.Value);
+                command.Parameters.AddWithValue("@fetched", fetched ? 1 : 0);
                 command.ExecuteNonQuery();
             }
         }
