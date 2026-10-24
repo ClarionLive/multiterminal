@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using MultiTerminal.MCPServer.Services;
 
@@ -96,8 +97,159 @@ namespace MultiTerminal.Services
         /// inside a git repository, when git isn't on PATH, or when the
         /// invocation times out — callers should treat empty as "no switcher
         /// to render."
+        /// <para>
+        /// <paramref name="maxAge"/> (task 47d8473b): when given, a result computed for the same
+        /// repository within that age is returned instead of a new one, and concurrent callers for
+        /// one repository share a single computation. A list costs one git process for the list
+        /// plus one per worktree for the dirty counts, and every terminal's 10s dirty poll asked for
+        /// it independently: on a repo with 59 worktrees that was the bulk of MT's CPU (about half
+        /// a core, nearly all kernel time from starting git.exe). Omitted, the result is fresh, as
+        /// the Git tab and the REST route expect; a fresh result also refreshes the shared one.
+        /// </para>
         /// </summary>
-        public async Task<List<WorktreeEntry>> GetWorktreesForRepoAsync(string workingDir)
+        public async Task<List<WorktreeEntry>> GetWorktreesForRepoAsync(string workingDir, TimeSpan? maxAge = null)
+        {
+            // CA3003: see the rationale in ComputeWorktreesAsync.
+#pragma warning disable CA3003
+            if (string.IsNullOrEmpty(workingDir) || !Directory.Exists(workingDir))
+                return new List<WorktreeEntry>();
+#pragma warning restore CA3003
+
+            // One key per REPOSITORY, so terminals sitting in different worktrees of one repo share
+            // the result. The common git dir is read from files (no process) for a worktree root;
+            // a poll remembers it per folder, because a subfolder needs git to answer.
+            string common = maxAge == null
+                ? await ResolveCommonGitDirAsync(workingDir).ConfigureAwait(false)
+                : await ResolveRepoKeyCachedAsync(workingDir).ConfigureAwait(false);
+            string key = string.IsNullOrEmpty(common) ? CanonicalizePath(workingDir) : common;
+
+            // A fresh caller never joins an older computation: it asked for now. Started outside
+            // the lock, so other callers never wait behind its process start.
+            if (maxAge == null)
+                return CloneAll(await ComputeAndStoreAsync(workingDir, key).ConfigureAwait(false));
+
+            Task<List<WorktreeEntry>> pending;
+            lock (_cacheLock)
+            {
+                if (_cache.TryGetValue(key, out var hit)
+                    && Environment.TickCount64 - hit.AtMs <= (long)maxAge.Value.TotalMilliseconds)
+                {
+                    return CloneAll(hit.Entries);
+                }
+
+                if (!_inFlight.TryGetValue(key, out pending))
+                {
+                    // Task.Run, so the entry is registered before the work can finish (a git that
+                    // fails to start completes synchronously), and only this task removes it: a
+                    // fresh caller's run must not drop a poll's entry.
+                    bool keyIsRemembered = !string.IsNullOrEmpty(common);
+                    pending = Task.Run(() => ComputeAndStoreAsync(workingDir, key, keyIsRemembered));
+                    _inFlight[key] = pending;
+                    pending.ContinueWith(
+                        done =>
+                        {
+                            lock (_cacheLock)
+                            {
+                                if (_inFlight.TryGetValue(key, out var current) && current == done)
+                                    _inFlight.Remove(key);
+                            }
+                        },
+                        CancellationToken.None,
+                        TaskContinuationOptions.None,
+                        TaskScheduler.Default);
+                }
+            }
+
+            return CloneAll(await pending.ConfigureAwait(false));
+        }
+
+        private readonly object _cacheLock = new object();
+        // Ages are Environment.TickCount64 (monotonic): a wall-clock step back must not make an old
+        // list look new for the length of the step.
+        private readonly Dictionary<string, (long AtMs, long Generation, List<WorktreeEntry> Entries)> _cache =
+            new Dictionary<string, (long AtMs, long Generation, List<WorktreeEntry> Entries)>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, Task<List<WorktreeEntry>>> _inFlight =
+            new Dictionary<string, Task<List<WorktreeEntry>>>(StringComparer.OrdinalIgnoreCase);
+        private long _generation;
+
+        /// <summary>How long a poll trusts a folder's remembered repository key.</summary>
+        internal static readonly TimeSpan RepoKeyMaxAge = TimeSpan.FromMinutes(5);
+
+        private readonly Dictionary<string, (long AtMs, string Common)> _repoKeys =
+            new Dictionary<string, (long AtMs, string Common)>(StringComparer.OrdinalIgnoreCase);
+
+        private async Task<string> ResolveRepoKeyCachedAsync(string workingDir)
+        {
+            string folder = CanonicalizePath(workingDir);
+            lock (_cacheLock)
+            {
+                if (_repoKeys.TryGetValue(folder, out var known)
+                    && Environment.TickCount64 - known.AtMs <= (long)RepoKeyMaxAge.TotalMilliseconds)
+                {
+                    return known.Common;
+                }
+            }
+
+            string common = await ResolveCommonGitDirAsync(workingDir).ConfigureAwait(false);
+            lock (_cacheLock) _repoKeys[folder] = (Environment.TickCount64, common);
+            return common;
+        }
+
+        private async Task<List<WorktreeEntry>> ComputeAndStoreAsync(string workingDir, string key, bool confirmKey = false)
+        {
+            // Aged from when the read FINISHED, so a slow read still gets its full reuse window;
+            // ordered by when it started, so an older read finishing late never replaces a newer one.
+            long generation = Interlocked.Increment(ref _generation);
+
+            // A remembered key can be up to RepoKeyMaxAge old. If the folder now belongs to another
+            // repository (re-cloned, or another repo's worktree put at the same path), its list
+            // must not be stored under, or handed to, the old repository's callers: forget the
+            // key and answer "no switcher" once; the next poll resolves it again.
+            if (confirmKey)
+            {
+                string actual = await ResolveCommonGitDirAsync(workingDir).ConfigureAwait(false);
+                if (!string.Equals(actual, key, StringComparison.OrdinalIgnoreCase))
+                {
+                    lock (_cacheLock) _repoKeys.Remove(CanonicalizePath(workingDir));
+                    return new List<WorktreeEntry>();
+                }
+            }
+
+            var entries = await ComputeWorktreesAsync(workingDir).ConfigureAwait(false);
+            lock (_cacheLock)
+            {
+                if (!_cache.TryGetValue(key, out var existing) || existing.Generation < generation)
+                    _cache[key] = (Environment.TickCount64, generation, CloneAll(entries));
+            }
+
+            return entries;
+        }
+
+        /// <summary>Copies, so no caller can change what another caller is handed.</summary>
+        private static List<WorktreeEntry> CloneAll(List<WorktreeEntry> entries)
+        {
+            var copy = new List<WorktreeEntry>(entries?.Count ?? 0);
+            if (entries == null) return copy;
+            foreach (var e in entries)
+            {
+                if (e == null) continue;
+                copy.Add(new WorktreeEntry
+                {
+                    Path = e.Path,
+                    Branch = e.Branch,
+                    IsMain = e.IsMain,
+                    DirtyCount = e.DirtyCount,
+                    LinkedTaskId = e.LinkedTaskId,
+                    LinkedTaskTitle = e.LinkedTaskTitle,
+                    LinkedAgent = e.LinkedAgent,
+                    LinkedIsCanonical = e.LinkedIsCanonical,
+                });
+            }
+
+            return copy;
+        }
+
+        private async Task<List<WorktreeEntry>> ComputeWorktreesAsync(string workingDir)
         {
             // CA3003: workingDir originates from broker._projects (trusted, populated by
             // ProjectService) or from HudGitRenderer's SetProject(path) call. REST callers
@@ -309,16 +461,81 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Runs <c>git rev-parse --git-common-dir</c> in <paramref name="workingDir"/>
-        /// and returns the canonical path to the shared git common directory
-        /// (the parent repository's <c>.git</c> directory). Two worktrees of
+        /// The common git dir of a working-tree ROOT, read from the same files
+        /// <c>git rev-parse --git-common-dir</c> reads, in the same normalized form
+        /// (<see cref="Path.GetFullPath(string)"/>, forward slashes, no trailing slash). Null when
+        /// this cannot answer, so the caller asks git:
+        /// <list type="bullet">
+        /// <item>a <c>.git</c> DIRECTORY is the main checkout: it is the common dir;</item>
+        /// <item>a <c>.git</c> FILE (<c>gitdir: &lt;dir&gt;</c>) is a linked worktree: its common dir
+        /// is the gitdir's <c>commondir</c> file resolved against the gitdir, or the gitdir itself
+        /// when there is no such file;</item>
+        /// <item>no <c>.git</c> (a subfolder rather than a root), or anything malformed: null.</item>
+        /// </list>
+        /// A UNC result gives the empty string (rejected), never null: opening a remote path would
+        /// make Windows authenticate to that host, which the git fallback would do as well.
+        /// </summary>
+        internal static string TryReadCommonGitDir(string worktreeRoot)
+        {
+            try
+            {
+                string dotGit = Path.Combine(worktreeRoot, ".git");
+                if (Directory.Exists(dotGit)) return NormalizeGitDir(Path.GetFullPath(dotGit));
+                if (!File.Exists(dotGit)) return null;
+
+                string text = File.ReadAllText(dotGit).Trim();
+                const string Prefix = "gitdir:";
+                if (!text.StartsWith(Prefix, StringComparison.Ordinal)) return null;
+
+                string gitDir = ResolveAgainst(worktreeRoot, text.Substring(Prefix.Length).Trim());
+                if (gitDir == null) return null;
+                if (IsUnc(gitDir)) return string.Empty;
+                if (!Directory.Exists(gitDir)) return null;
+
+                string commonFile = Path.Combine(gitDir, "commondir");
+                if (!File.Exists(commonFile)) return NormalizeGitDir(gitDir);
+
+                string common = ResolveAgainst(gitDir, File.ReadAllText(commonFile).Trim());
+                if (common == null) return null;
+                if (IsUnc(common)) return string.Empty;
+                if (!Directory.Exists(common)) return null;
+
+                // Answer only for the layout `git worktree add` writes (<common>/worktrees/<name>);
+                // anything else is left to git, so this read never accepts more than git does.
+                string expectedParent = NormalizeGitDir(Path.Combine(common, "worktrees"));
+                string actualParent = NormalizeGitDir(Path.GetDirectoryName(gitDir.TrimEnd('\\', '/')) ?? string.Empty);
+                if (!string.Equals(expectedParent, actualParent, StringComparison.OrdinalIgnoreCase)) return null;
+
+                return NormalizeGitDir(common);
+            }
+            catch
+            {
+                return null;
+            }
+
+            static string ResolveAgainst(string baseDir, string value)
+            {
+                if (string.IsNullOrEmpty(value)) return null;
+                return Path.IsPathRooted(value) ? Path.GetFullPath(value) : Path.GetFullPath(Path.Combine(baseDir, value));
+            }
+
+            static bool IsUnc(string p) => p.StartsWith("\\\\", StringComparison.Ordinal) || p.StartsWith("//", StringComparison.Ordinal);
+
+            static string NormalizeGitDir(string p) => p.Replace('\\', '/').TrimEnd('/');
+        }
+
+        /// <summary>
+        /// Returns the canonical path to the shared git common directory of
+        /// <paramref name="workingDir"/> (the parent repository's <c>.git</c> directory),
+        /// read from files by <see cref="TryReadCommonGitDir"/> when it can answer and
+        /// otherwise from <c>git rev-parse --git-common-dir</c>. Two worktrees of
         /// the same repository return identical values; worktrees of
         /// different repositories return different values. Used as the
         /// authoritative identity check for "is this entry actually a
         /// worktree of THIS repo, or did porcelain metadata forge it?"
         ///
         /// <para>Returns empty on any failure (git not on PATH, not a repo,
-        /// timeout, hostile output) — callers must treat empty as "unknown
+        /// timeout, hostile output, a network path) — callers must treat empty as "unknown
         /// identity, reject the entry."</para>
         /// </summary>
         private async Task<string> ResolveCommonGitDirAsync(string workingDir)
@@ -328,6 +545,11 @@ namespace MultiTerminal.Services
 #pragma warning disable CA3003
             if (!Directory.Exists(workingDir)) return string.Empty;
 #pragma warning restore CA3003
+
+            // Read from the files git itself reads when it can (task 47d8473b): this runs once per
+            // worktree per list, and a process per worktree was most of MT's CPU.
+            string fromFiles = TryReadCommonGitDir(workingDir);
+            if (fromFiles != null) return fromFiles;
 
             var (exitCode, stdout, _) = await GitExec.RunAsync(
                 workingDir, GitTimeoutMs, "rev-parse", "--git-common-dir").ConfigureAwait(false);
