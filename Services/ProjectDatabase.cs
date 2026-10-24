@@ -519,11 +519,15 @@ namespace MultiTerminal.Services
                 fieldName = mapped;
 
             // Enforce column whitelist — fieldName is embedded directly in SQL so it MUST be validated
-            if (!_allowedProjectFields.Contains(fieldName))
+            if (!_allowedProjectFields.TryGetValue(fieldName, out var canonicalField))
             {
                 System.Diagnostics.Debug.WriteLine($"[ProjectDatabase] UpdateProjectField rejected disallowed field: {fieldName}");
                 return false;
             }
+            // The whitelist ignores case; everything after it compares exactly, so carry on with the
+            // whitelist's own spelling. "GIT_REPO_URL" would otherwise be written while skipping the
+            // GitHub watch reset below (task 92eeeb47, pipeline Run 3).
+            fieldName = canonicalField;
 
             // Determine the parameter value — booleans are stored as 0/1 INTEGER
             object paramValue;

@@ -542,6 +542,19 @@ namespace MultiTerminal.Tests
             Assert.Equal(41, _db.GetGitHubWatchState(project.Id, "o/r").Baseline);
         }
 
+        [Theory]
+        [InlineData("GitHub_Watch_Mode", "notify")]
+        [InlineData("GIT_REPO_URL", "https://github.com/o/other")]
+        public void A_column_name_in_any_case_still_resets_the_baseline(string field, string value)
+        {
+            // The whitelist ignores case, so these are written; they must not skip the reset (pipeline Run 3).
+            var (_, _, _, _, project) = Build(GitHubWatchMode.Off);
+            _db.RecordGitHubWatchCheck(project.Id, "o/r", 40, null);
+
+            Assert.True(_db.UpdateProjectField(project.Id, field, value));
+            Assert.Null(_db.GetGitHubWatchState(project.Id, "o/r").Baseline);
+        }
+
         [Fact]
         public void Repointing_the_repository_resets_the_baseline_and_rewriting_the_same_one_does_not()
         {
