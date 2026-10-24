@@ -1227,9 +1227,10 @@ namespace MultiTerminal.Docking
             CloseButtonVisible = true;
             ShowHint = DockState.Document;
 
-            // Reserve space for focus border (always 2px padding, color toggles)
+            // Reserve space for focus border (always 2px padding; OnPaint draws it)
             Padding = new Padding(2);
             BackColor = Color.FromArgb(30, 30, 30);
+            ResizeRedraw = true;
 
             // Initialize tab header context menu
             InitializeTabContextMenu();
@@ -1733,6 +1734,7 @@ namespace MultiTerminal.Docking
         public void SetTheme(TerminalTheme theme)
         {
             _currentTheme = theme;
+            BackColor = theme.Background;
             _terminal.SetTheme(theme);
             _statusBar?.SetTheme(theme.IsDark);
             _hudTabContainer?.ApplyTheme(theme.IsDark);
@@ -1773,18 +1775,33 @@ namespace MultiTerminal.Docking
             _terminal.FocusTerminal();
         }
 
+        private static readonly Color FocusBorderColor = Color.FromArgb(76, 175, 80);
+        private bool _hasFocusBorder;
+
         /// <summary>
         /// Shows or hides a green focus border around this terminal.
-        /// Padding is always 2 to avoid layout shift; only BackColor changes.
+        /// Padding is always 2 to avoid layout shift. The border is drawn in that padding by
+        /// OnPaint; BackColor stays the theme background, so a pane with nothing in it yet (the
+        /// New Project dialog over an empty pane, task 2ab0b3c2) shows the theme, not solid green.
         /// </summary>
         public void SetFocusBorder(bool hasFocus)
         {
-            var newColor = hasFocus
-                ? Color.FromArgb(76, 175, 80) // Green focus indicator
-                : Color.FromArgb(30, 30, 30); // Blend with background
+            if (_hasFocusBorder == hasFocus) return;
+            _hasFocusBorder = hasFocus;
+            Invalidate();
+        }
 
-            if (BackColor != newColor)
-                BackColor = newColor;
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            if (!_hasFocusBorder) return;
+
+            var r = ClientRectangle;
+            using var brush = new SolidBrush(FocusBorderColor);
+            e.Graphics.FillRectangle(brush, r.Left, r.Top, r.Width, Padding.Top);
+            e.Graphics.FillRectangle(brush, r.Left, r.Bottom - Padding.Bottom, r.Width, Padding.Bottom);
+            e.Graphics.FillRectangle(brush, r.Left, r.Top, Padding.Left, r.Height);
+            e.Graphics.FillRectangle(brush, r.Right - Padding.Right, r.Top, Padding.Right, r.Height);
         }
 
         /// <summary>
