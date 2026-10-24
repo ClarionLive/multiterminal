@@ -37,6 +37,10 @@ namespace MultiTerminal
         [STAThread]
         static void Main()
         {
+            // Before anything else: an exception that escapes everything leaves a crash report in the
+            // logs folder (GitHub #38: a crash left nothing in MT's own log).
+            UnhandledExceptionLogger.Install();
+
             // Check Windows version for ConPTY support using RtlGetVersion (accurate on all Windows versions)
             var osInfo = new OSVERSIONINFOEX { dwOSVersionInfoSize = Marshal.SizeOf(typeof(OSVERSIONINFOEX)) };
             RtlGetVersion(ref osInfo);
