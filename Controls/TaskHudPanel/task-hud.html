@@ -110,6 +110,10 @@ body.light {
     outline: none;
 }
 
+/* `display: flex` above outranks the browser's own [hidden] rule, so without this a tab the script
+   hides (board mode's Not Active tab) stays on screen. */
+.tab-btn[hidden] { display: none; }
+
 .tab-btn:hover { color: var(--text-primary); }
 .tab-btn:focus-visible { outline: 1px dotted #3B82F6; outline-offset: -2px; }
 .tab-btn.active {
@@ -711,7 +715,9 @@ body.empty .no-task       { display: flex; }
 
 <!-- Tab bar: Active / Not Active (task f17777d2) -->
 <div class="tab-bar">
-    <button type="button" class="tab-btn active" id="tab-btn-active" data-tab="active">Active</button>
+    <button type="button" class="tab-btn active" id="tab-btn-active" data-tab="active">
+        Active <span class="tab-count" id="tab-count-active">0</span>
+    </button>
     <button type="button" class="tab-btn" id="tab-btn-notactive" data-tab="notactive">
         Not Active <span class="tab-count" id="tab-count-notactive">0</span>
     </button>
@@ -832,14 +838,27 @@ function applyTheme(isDark) {
 }
 
 // ============================================================
-//  Tabs (task f17777d2)
+//  Tabs (task f17777d2; GitHub #54)
 //  currentTab === null until the first hud_data arrives, so the
 //  smart default (Active when a task is active, else Not Active)
-//  applies exactly once. After that, refreshes never yank the tab
-//  away from the user — only a successful HUD-initiated activation
-//  flips back to Active.
+//  applies once. After that, refreshes never yank the tab away from
+//  the user, with one exception: when a DIFFERENT task becomes
+//  active (the HUD's own Activate button, or an agent calling
+//  set_task_active) the HUD shows it. Before #54 only the HUD's own
+//  button did that, so an agent's activation went unnoticed.
 // ============================================================
 let currentTab = null;          // 'active' | 'notactive'
+let lastActiveId = null;        // the active task id in the previous hud_data
+
+// Which tab a hud_data payload leaves showing. Pure (no DOM), so mcp/test/taskHudTabs.test.mjs
+// can run it: the first payload picks by whether a task is active; afterwards a newly active task
+// (an id other than the previous payload's) switches to Active, and anything else keeps the tab.
+function nextHudTab(currentTab, previousActiveId, activeId, pendingActivateId) {
+    if (pendingActivateId && activeId === pendingActivateId) return 'active';
+    if (currentTab === null) return activeId ? 'active' : 'notactive';
+    if (activeId && activeId !== previousActiveId) return 'active';
+    return currentTab;
+}
 
 // Read-only board mode (task f5744489). The host sets this from hud_data.readOnly. It suppresses
 // the Not Active tab and the Activate control — but it is NOT the security boundary: the host
@@ -914,6 +933,7 @@ function clearHud() {
     // Not Active rows either (adversary finding D, f17777d2 Run 1 — the
     // 'clear' message currently has no C# sender, but stay correct if one appears).
     document.getElementById('tab-count-notactive').textContent = '0';
+    document.getElementById('tab-count-active').textContent = '0';
     // Reset the Not-Active view state too (task 08dc9c1f): drop cached tasks and
     // the live search query so a stale filter/count can't survive a clear. The
     // sort preference is intentionally kept (it's a user setting, not row state).
@@ -1237,6 +1257,11 @@ function renderHud(data) {
 
     renderNotActive(Array.isArray(data.notActiveTasks) ? data.notActiveTasks : []);
 
+    const activeId = active ? active.id : null;
+    const previousActiveId = lastActiveId;
+    lastActiveId = activeId;
+    document.getElementById('tab-count-active').textContent = active ? '1' : '0';
+
     if (boardMode) {
         // Only one tab exists here, so there is no tab logic to run — and the smart-default below
         // would happily switch to a tab that is now hidden, leaving a blank pane.
@@ -1244,14 +1269,10 @@ function renderHud(data) {
         return;
     }
 
-    // Tab logic: flip to Active when OUR activation request landed;
-    // otherwise smart-default exactly once on first data.
-    if (pendingActivateId && active && active.id === pendingActivateId) {
-        pendingActivateId = null;
-        switchTab('active');
-    } else if (currentTab === null) {
-        switchTab(active ? 'active' : 'notactive');
-    }
+    // Tab logic: see nextHudTab.
+    const tab = nextHudTab(currentTab, previousActiveId, activeId, pendingActivateId);
+    if (pendingActivateId && activeId === pendingActivateId) pendingActivateId = null;
+    if (tab !== currentTab) switchTab(tab);
 }
 
 // Hides the controls that only make sense when a terminal is behind the HUD. Idempotent, and
@@ -1261,6 +1282,9 @@ function applyBoardModeChrome() {
     document.body.classList.toggle('board-mode', boardMode);
     const notActiveBtn = document.getElementById('tab-btn-notactive');
     if (notActiveBtn) notActiveBtn.hidden = boardMode;
+    // The board shows one selected card, not "the active task", so a count there would mislead.
+    const activeCount = document.getElementById('tab-count-active');
+    if (activeCount) activeCount.hidden = boardMode;
 }
 
 // ============================================================
