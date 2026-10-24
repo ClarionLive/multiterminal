@@ -465,6 +465,34 @@ namespace MultiTerminal.Tests
             Assert.Empty(_db.GetProjectPrompts(p.Id));
         }
 
+        /// <summary>
+        /// The GitHub watch settings (task 92eeeb47) start off for an existing project and round-trip
+        /// through the form's save path; an unknown mode or interval saves as off, never as a guess.
+        /// </summary>
+        [Fact]
+        public void GitHub_watch_settings_start_off_and_round_trip_through_the_form()
+        {
+            var p = Seed();
+            var before = _db.GetRichProject(p.Id);
+            Assert.Equal(GitHubWatchMode.Off, before.GitHubWatchMode);
+            Assert.False(before.GitHubCheckOnStart);
+            Assert.Equal(GitHubCheckInterval.Off, before.GitHubCheckInterval);
+
+            var on = _service.Save(UpdateFor(p,
+                ("gitHubWatchMode", "board"), ("gitHubCheckOnStart", "true"), ("gitHubCheckInterval", "1h")));
+            Assert.True(on.Success, on.Error);
+            var after = _db.GetRichProject(p.Id);
+            Assert.Equal(GitHubWatchMode.Board, after.GitHubWatchMode);
+            Assert.True(after.GitHubCheckOnStart);
+            Assert.Equal(GitHubCheckInterval.Hour1, after.GitHubCheckInterval);
+
+            var junk = _service.Save(UpdateFor(p, ("gitHubWatchMode", "everything"), ("gitHubCheckInterval", "5s")));
+            Assert.True(junk.Success, junk.Error);
+            var cleared = _db.GetRichProject(p.Id);
+            Assert.Equal(GitHubWatchMode.Off, cleared.GitHubWatchMode);
+            Assert.Equal(GitHubCheckInterval.Off, cleared.GitHubCheckInterval);
+        }
+
         // The raw stored launch_mode, so a test can tell the explicit 'ask' SetLaunchMode writes from NULL.
         private string RawLaunchMode(string projectId)
         {

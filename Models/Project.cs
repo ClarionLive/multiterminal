@@ -172,6 +172,21 @@ namespace MultiTerminal.Models
         public ProjectLaunchMode LaunchMode { get; set; } = ProjectLaunchMode.Ask;
 
         /// <summary>
+        /// What MT does with new issues and PRs in this project's GitHub repository (task 92eeeb47).
+        /// SQLite-only (<c>projects.github_watch_mode</c>, with <see cref="GitHubCheckOnStart"/> and
+        /// <see cref="GitHubCheckInterval"/>), not carried by project.json and not in the
+        /// SaveRichProject UPSERT, like <see cref="LaunchMode"/>. NULL reads as Off, so no existing
+        /// project starts calling GitHub. Written through UpdateProjectField.
+        /// </summary>
+        public GitHubWatchMode GitHubWatchMode { get; set; } = GitHubWatchMode.Off;
+
+        /// <summary>Check the repository when a terminal starts in this project (task 92eeeb47).</summary>
+        public bool GitHubCheckOnStart { get; set; }
+
+        /// <summary>How often MT checks the repository on its own (task 92eeeb47).</summary>
+        public GitHubCheckInterval GitHubCheckInterval { get; set; } = GitHubCheckInterval.Off;
+
+        /// <summary>
         /// Parses a stored <c>launch_mode</c> value, case-insensitively and ignoring surrounding
         /// whitespace. Null, blank and unrecognized values read as <see cref="ProjectLaunchMode.Ask"/>,
         /// so a bad DB value can never make a launch skip the prompt.

@@ -141,11 +141,12 @@ namespace MultiTerminal.Services
             "isPinned", "createdBy", "claudeProfile", "launchMode", "defaultTerminal", "quietStart", "teamLead",
             "launchCommand", "sourcePath", "deployPath", "buildOutputPath", "buildCommand", "deployCommand",
             "gitRepoUrl", "gitDefaultBranch", "gitAutoCommit", "sourceControlAccountId", "changeLog",
+            "gitHubWatchMode", "gitHubCheckOnStart", "gitHubCheckInterval",
         };
 
         private static readonly HashSet<string> BooleanFields = new HashSet<string>(StringComparer.Ordinal)
         {
-            "isPinned", "quietStart", "gitAutoCommit",
+            "isPinned", "quietStart", "gitAutoCommit", "gitHubCheckOnStart",
         };
 
         private readonly ProjectDatabase _db;
@@ -367,6 +368,11 @@ namespace MultiTerminal.Services
                 case "launchMode":
                     // Unknown or blank reads as ask, the same rule as the stored value (task ec2ed636).
                     return Project.LaunchModeToStorage(Project.ParseLaunchMode(value));
+                case "gitHubWatchMode":
+                    // Unknown or blank reads as off, the same rule as the stored value (task 92eeeb47).
+                    return GitHubWatchSettings.ModeToStorage(GitHubWatchSettings.ParseMode(value));
+                case "gitHubCheckInterval":
+                    return GitHubWatchSettings.IntervalToStorage(GitHubWatchSettings.ParseInterval(value));
                 case "currentVersion":
                     return string.IsNullOrWhiteSpace(value) ? "0.1.0" : value;
                 default:
@@ -415,6 +421,9 @@ namespace MultiTerminal.Services
                 case "gitAutoCommit": return p.GitAutoCommit ? "true" : "false";
                 case "sourceControlAccountId": return p.SourceControlAccountId;
                 case "changeLog": return p.ChangeLog;
+                case "gitHubWatchMode": return GitHubWatchSettings.ModeToStorage(p.GitHubWatchMode);
+                case "gitHubCheckOnStart": return p.GitHubCheckOnStart ? "true" : "false";
+                case "gitHubCheckInterval": return GitHubWatchSettings.IntervalToStorage(p.GitHubCheckInterval);
                 default: throw new ArgumentOutOfRangeException(nameof(field), field, "Not an editable project field.");
             }
         }

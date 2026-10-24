@@ -41,7 +41,7 @@ namespace MultiTerminal.ProjectSettings
             foreach (var name in ProjectSettingsService.EditableFields)
             {
                 string value = ProjectSettingsService.ReadField(project, name);
-                if (name == "isPinned" || name == "quietStart" || name == "gitAutoCommit")
+                if (name == "isPinned" || name == "quietStart" || name == "gitAutoCommit" || name == "gitHubCheckOnStart")
                     fields[name] = value == "true";
                 else
                     fields[name] = value ?? string.Empty;
@@ -81,6 +81,20 @@ namespace MultiTerminal.ProjectSettings
                         new { value = Project.LaunchModeToStorage(ProjectLaunchMode.Ask), label = "Ask each time" },
                         new { value = Project.LaunchModeToStorage(ProjectLaunchMode.New), label = "Always start a new session" },
                         new { value = Project.LaunchModeToStorage(ProjectLaunchMode.Continue), label = "Always continue the last session" },
+                    },
+                    gitHubWatchModes = new[]
+                    {
+                        new { value = GitHubWatchSettings.ModeToStorage(GitHubWatchMode.Off), label = "Off" },
+                        new { value = GitHubWatchSettings.ModeToStorage(GitHubWatchMode.Notify), label = "Notify me of new issues and PRs" },
+                        new { value = GitHubWatchSettings.ModeToStorage(GitHubWatchMode.Board), label = "Notify me and add them to the board" },
+                    },
+                    gitHubCheckIntervals = new[]
+                    {
+                        new { value = GitHubWatchSettings.IntervalToStorage(GitHubCheckInterval.Off), label = "Never (only on terminal start)" },
+                        new { value = GitHubWatchSettings.IntervalToStorage(GitHubCheckInterval.Minutes15), label = "Every 15 minutes" },
+                        new { value = GitHubWatchSettings.IntervalToStorage(GitHubCheckInterval.Hour1), label = "Every hour" },
+                        new { value = GitHubWatchSettings.IntervalToStorage(GitHubCheckInterval.Hours4), label = "Every 4 hours" },
+                        new { value = GitHubWatchSettings.IntervalToStorage(GitHubCheckInterval.Daily), label = "Once a day" },
                     },
                     terminals = new[]
                     {
