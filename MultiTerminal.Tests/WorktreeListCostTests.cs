@@ -113,6 +113,24 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void A_gitdir_outside_the_common_dirs_worktrees_folder_is_left_to_git()
+        {
+            // A real worktree's admin dir, copied elsewhere: its commondir still names the real
+            // repository, but it is not where `git worktree add` puts one.
+            string realAdmin = Path.Combine(_repo, ".git", "worktrees", "abcd1234");
+            string elsewhere = Path.Combine(_root, "elsewhere-admin");
+            Directory.CreateDirectory(elsewhere);
+            File.WriteAllText(Path.Combine(elsewhere, "commondir"), Path.Combine(_repo, ".git"));
+            Assert.True(Directory.Exists(realAdmin));
+
+            string fake = Path.Combine(_root, "claims-the-repo");
+            Directory.CreateDirectory(fake);
+            File.WriteAllText(Path.Combine(fake, ".git"), "gitdir: " + elsewhere);
+
+            Assert.Null(WorktreeListService.TryReadCommonGitDir(fake));
+        }
+
+        [Fact]
         public void A_malformed_dot_git_file_is_left_to_git()
         {
             string fake = Path.Combine(_root, "malformed");
