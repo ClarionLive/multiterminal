@@ -292,6 +292,7 @@ namespace MultiTerminal.Controls
                         if (_lastRemoteMode.HasValue)
                             SendMessage($"remoteMode:{(_lastRemoteMode.Value ? "true" : "false")}");
                         SendMessage($"projectSettings:{(_lastProjectSettingsAvailable ? "true" : "false")}");
+                        SendMessage($"attention:{_lastAttention}");
 
                         Ready?.Invoke(this, EventArgs.Empty);
                     }
@@ -510,6 +511,19 @@ namespace MultiTerminal.Controls
             _lastProjectSettingsAvailable = available;
             if (_isInitialized)
                 SendMessage($"projectSettings:{(available ? "true" : "false")}");
+        }
+
+        private string _lastAttention = "none";
+
+        /// <summary>
+        /// Tints the header while this pane's agent needs the Owner (task 51a8a17b): "none",
+        /// "yourturn", "permission" or "question". Remembered and replayed on 'ready'.
+        /// </summary>
+        public void SetAttention(string level)
+        {
+            _lastAttention = level ?? "none";
+            if (_isInitialized)
+                SendMessage($"attention:{_lastAttention}");
         }
 
         /// <summary>

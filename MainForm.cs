@@ -462,7 +462,10 @@ namespace MultiTerminal
                 Dock = DockStyle.Fill,
                 Theme = new WeifenLuo.WinFormsUI.Docking.VS2015DarkTheme(),
                 DocumentStyle = DocumentStyle.DockingWindow,
-                ShowDocumentIcon = false
+                // On for the attention dot on terminal tabs (task 51a8a17b). Every document gets an
+                // icon: a terminal's is blank until its agent needs the Owner, and any other document
+                // is given the blank one in OnDockContentAdded so no stray app icon appears.
+                ShowDocumentIcon = true
             };
 
             // Configure dock panel
@@ -476,6 +479,15 @@ namespace MultiTerminal
             // relying on TerminalDocument.Dispose, which WebView2-hosted docs can skip on a
             // tab-close, leaving an orphaned claude process + a still-registered agent (task a9435da9).
             _dockPanel.ContentRemoved += OnDockContentRemoved;
+
+            // Document tabs show icons (task 51a8a17b). Only a terminal's tab means something by
+            // its icon; every other content is given the blank one, so a panel opened as a document
+            // does not grow a stray application icon on its tab.
+            _dockPanel.ContentAdded += (s, e) =>
+            {
+                if (e?.Content is Form f && !(e.Content is TerminalDocument))
+                    f.Icon = Services.PaneAttention.TabIcon(Services.PaneAttentionLevel.None, true);
+            };
 
             Controls.Add(_dockPanel);
 
@@ -7272,6 +7284,9 @@ namespace MultiTerminal
             }
 
             _paneLaunches?.OnSessionAdopted(e.DocId, e.SessionId, e.PreviousSessionId, e.LaunchGeneration);
+
+            // The pane now holds a session id, which is how attention entries find it (51a8a17b).
+            RefreshPaneAttention();
         }
 
         /// <summary>
@@ -9424,6 +9439,7 @@ namespace MultiTerminal
                     // more pass. Clearing afterwards would drop that event and leave the rail
                     // showing state it had already been told was out of date.
                     System.Threading.Interlocked.Exchange(ref _attentionRefreshPending, 0);
+                    RefreshPaneAttention();
                     RefreshAttentionPanel();
                 }));
             }
@@ -9439,6 +9455,46 @@ namespace MultiTerminal
         /// 1 while an attention repaint is already queued. See <see cref="OnAgentAttentionChanged"/>.
         /// </summary>
         private int _attentionRefreshPending;
+
+        /// <summary>
+        /// Colours each terminal pane's header and tab by what its agent needs from the Owner (task
+        /// 51a8a17b). UI thread. In-memory only (the attention snapshot and the open panes), so it is
+        /// cheap enough to run on every attention change; the matching rules are
+        /// <see cref="Services.PaneAttention.Assign"/>.
+        /// </summary>
+        private void RefreshPaneAttention()
+        {
+            try
+            {
+                var broker = _mcpServer?.Broker;
+                if (broker?.AgentAttention == null || _gridManager == null) return;
+
+                var docs = new Dictionary<string, TerminalDocument>(StringComparer.Ordinal);
+                var panes = new List<Services.PaneAttention.PaneInfo>();
+                foreach (var doc in _gridManager.GetTerminalDocuments())
+                {
+                    if (doc == null || doc.IsDisposed) continue;
+                    string id = doc.InstanceId.ToString();
+                    docs[id] = doc;
+                    panes.Add(new Services.PaneAttention.PaneInfo
+                    {
+                        PaneId = id,
+                        SessionId = doc.CurrentClaudeSessionId,
+                        AgentName = doc.OriginalAgentName,
+                        IsHelper = doc.LaunchedAsHelper,
+                    });
+                }
+
+                foreach (var kv in Services.PaneAttention.Assign(panes, broker.AgentAttention.Snapshot()))
+                {
+                    if (docs.TryGetValue(kv.Key, out var doc)) doc.SetPaneAttention(kv.Value);
+                }
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Info("PaneAttention", $"Refresh failed: {ex.Message}");
+            }
+        }
 
         /// <summary>
         /// Builds and starts the poller that feeds observed tool activity into the attention

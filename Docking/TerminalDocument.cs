@@ -1232,6 +1232,9 @@ namespace MultiTerminal.Docking
             BackColor = Color.FromArgb(30, 30, 30); // placeholder until SetTheme applies the theme
             ResizeRedraw = true;
 
+            // Tabs show icons (task 51a8a17b): a blank one until the agent needs the Owner.
+            Icon = Services.PaneAttention.TabIcon(Services.PaneAttentionLevel.None, true);
+
             // Initialize tab header context menu
             InitializeTabContextMenu();
 
@@ -1735,6 +1738,7 @@ namespace MultiTerminal.Docking
         {
             _currentTheme = theme;
             BackColor = theme.Background;
+            Icon = Services.PaneAttention.TabIcon(_paneAttention, theme.IsDark);
             _terminal.SetTheme(theme);
             _statusBar?.SetTheme(theme.IsDark);
             _hudTabContainer?.ApplyTheme(theme.IsDark);
@@ -1773,6 +1777,29 @@ namespace MultiTerminal.Docking
         public void FocusTerminal()
         {
             _terminal.FocusTerminal();
+        }
+
+        private Services.PaneAttentionLevel _paneAttention = Services.PaneAttentionLevel.None;
+
+        /// <summary>
+        /// Shows that this pane's agent needs the Owner (task 51a8a17b): the header takes the state's
+        /// colour and the tab a coloured dot. Called by MainForm from the attention snapshot.
+        /// </summary>
+        public void SetPaneAttention(Services.PaneAttentionLevel level)
+        {
+            if (_paneAttention == level) return;
+            _paneAttention = level;
+            ApplyPaneAttention();
+        }
+
+        private void ApplyPaneAttention()
+        {
+            bool isDark = _currentTheme?.IsDark ?? true;
+            Icon = Services.PaneAttention.TabIcon(_paneAttention, isDark);
+            _statusBar?.SetAttention(Services.PaneAttention.WireName(_paneAttention));
+
+            // The tab strip repaints on its own for a text change, not for an icon change.
+            Pane?.Invalidate(true);
         }
 
         private static readonly Color FocusBorderColor = Color.FromArgb(76, 175, 80);
@@ -2143,7 +2170,8 @@ namespace MultiTerminal.Docking
                 StartPosition = _diffPopupBounds.HasValue
                     ? FormStartPosition.Manual
                     : FormStartPosition.CenterParent,
-                Icon = FindForm()?.Icon
+                // The main window's icon: this pane's own Icon is its tab's attention dot (51a8a17b).
+                Icon = (TopLevelControl as Form)?.Icon
             };
 #pragma warning restore CA2000
 

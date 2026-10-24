@@ -85,6 +85,24 @@
             height: 140px;
             background: var(--bg-card);
             border-bottom: 1px solid var(--border-color);
+            transition: background 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        /* Attention tint (task 51a8a17b): the pane's agent needs the Owner. Same hues as the
+           Attention panel's cards (--yourturn, --peach, --mauve), so a pane and its card match.
+           A block is a strong tint; "your turn" is a soft one. */
+        body[data-attention="yourturn"]   { --attn: #89dceb; --attn-mix: 16%; }
+        body[data-attention="permission"] { --attn: #fab387; --attn-mix: 30%; }
+        body[data-attention="question"]   { --attn: #cba6f7; --attn-mix: 30%; }
+        body.light[data-attention="yourturn"]   { --attn: #04a5e5; }
+        body.light[data-attention="permission"] { --attn: #fe640b; }
+        body.light[data-attention="question"]   { --attn: #8839ef; }
+
+        body[data-attention="yourturn"] .status-bar-container,
+        body[data-attention="permission"] .status-bar-container,
+        body[data-attention="question"] .status-bar-container {
+            background: color-mix(in srgb, var(--attn) var(--attn-mix), var(--bg-card));
+            box-shadow: inset 6px 0 0 var(--attn);
         }
 
         /* ============================================
@@ -141,7 +159,7 @@
         }
 
         .terminal-name {
-            font-size: var(--font-size-sm);
+            font-size: 20px; /* larger than the rest of the row: it is what tells the panes apart */
             font-weight: 600;
             color: var(--text-primary);
         }
@@ -977,6 +995,8 @@
                         setRemoteMode(data.split(':')[1] === 'true');
                     } else if (data.startsWith('projectSettings:')) {
                         setProjectSettingsAvailable(data.split(':')[1] === 'true');
+                    } else if (data.startsWith('attention:')) {
+                        document.body.setAttribute('data-attention', data.substring(10));
                     }
                 }
             });
