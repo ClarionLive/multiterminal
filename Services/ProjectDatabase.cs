@@ -308,8 +308,11 @@ namespace MultiTerminal.Services
                 CREATE TABLE IF NOT EXISTS github_watch_state (
                     project_id TEXT NOT NULL,
                     repo TEXT NOT NULL,
-                    baseline_number INTEGER NOT NULL,
+                    -- NULL until a check SUCCEEDS: a failed first check must not invent a baseline
+                    -- (0 would make the whole backlog new; pipeline Run 1).
+                    baseline_number INTEGER,
                     last_checked_at DATETIME,
+                    last_success_at DATETIME,
                     last_error TEXT,
                     PRIMARY KEY (project_id, repo)
                 );
@@ -1001,70 +1004,106 @@ namespace MultiTerminal.Services
         internal static string NormalizeClaudeProfileName(string profileName) =>
             MultiTerminal.Models.ClaudeProfile.NormalizeName(profileName);
 
+        /// <summary>One project's watch state for one repo (task 92eeeb47).</summary>
+        public sealed class GitHubWatchStateRow
+        {
+            /// <summary>Newest number accounted for; null = never checked for this project.</summary>
+            public int? Baseline { get; set; }
+
+            /// <summary>Last attempt, successful or not.</summary>
+            public DateTime? LastCheckedUtc { get; set; }
+
+            /// <summary>Last check that worked; the interval is counted from this (pipeline Run 1).</summary>
+            public DateTime? LastSuccessUtc { get; set; }
+
+            /// <summary>The last attempt's error; null when it worked.</summary>
+            public string LastError { get; set; }
+        }
+
         /// <summary>
-        /// Sets a project's launch mode (task ec2ed636): ask / new / continue. The only writer of
-        /// <c>launch_mode</c>; the SaveRichProject UPSERT does not name the column, so a
-        /// project.json re-save can never reset it.
-        /// <para>Ask is written as the string "ask", not NULL. Both read as Ask today, but an
-        /// explicit "ask" records that the user CHOSE it, so a future change of the default for
-        /// unset (NULL) projects cannot silently override that choice.</para>
+        /// The GitHub watch state for a project's repo (task 92eeeb47). It survives a restart, so a
+        /// daily check is not reset by one.
         /// </summary>
-        /// <returns>True if a row was updated, false if the project was not found.</returns>
-        /// <summary>
-        /// The GitHub watch state for a project's repo (task 92eeeb47): the newest issue/PR number
-        /// already accounted for (null = never checked for this project) and when it was last checked,
-        /// which survives a restart so a daily check is not reset by one.
-        /// </summary>
-        public (int? Baseline, DateTime? LastCheckedUtc) GetGitHubWatchState(string projectId, string repo)
+        public GitHubWatchStateRow GetGitHubWatchState(string projectId, string repo)
         {
             lock (_dbLock)
             {
                 using var command = new SQLiteCommand(
-                    "SELECT baseline_number, last_checked_at FROM github_watch_state WHERE project_id = @p AND repo = @r", _connection);
+                    "SELECT baseline_number, last_checked_at, last_success_at, last_error FROM github_watch_state WHERE project_id = @p AND repo = @r",
+                    _connection);
                 command.Parameters.AddWithValue("@p", projectId);
                 command.Parameters.AddWithValue("@r", repo);
                 using var reader = command.ExecuteReader();
-                if (!reader.Read()) return (null, null);
-                int? baseline = reader.IsDBNull(0) ? (int?)null : reader.GetInt32(0);
-                DateTime? last = reader.IsDBNull(1) ? (DateTime?)null : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc);
-                return (baseline, last);
-            }
-        }
-
-        /// <summary>The last check's outcome for the project form: when, and its error (null = it worked).</summary>
-        public (DateTime? LastCheckedUtc, string LastError) GetGitHubWatchLastCheck(string projectId, string repo)
-        {
-            lock (_dbLock)
-            {
-                using var command = new SQLiteCommand(
-                    "SELECT last_checked_at, last_error FROM github_watch_state WHERE project_id = @p AND repo = @r", _connection);
-                command.Parameters.AddWithValue("@p", projectId);
-                command.Parameters.AddWithValue("@r", repo);
-                using var reader = command.ExecuteReader();
-                if (!reader.Read()) return (null, null);
-                DateTime? last = reader.IsDBNull(0) ? (DateTime?)null : DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc);
-                return (last, reader.IsDBNull(1) ? null : reader.GetString(1));
+                var row = new GitHubWatchStateRow();
+                if (!reader.Read()) return row;
+                row.Baseline = reader.IsDBNull(0) ? (int?)null : reader.GetInt32(0);
+                // ToUniversalTime, not SpecifyKind: System.Data.SQLite hands the stored UTC value back
+                // as LOCAL wall time (TaskDatabase reads its DATETIMEs the same way; pipeline Run 1).
+                row.LastCheckedUtc = reader.IsDBNull(1) ? (DateTime?)null : reader.GetDateTime(1).ToUniversalTime();
+                row.LastSuccessUtc = reader.IsDBNull(2) ? (DateTime?)null : reader.GetDateTime(2).ToUniversalTime();
+                row.LastError = reader.IsDBNull(3) ? null : reader.GetString(3);
+                return row;
             }
         }
 
         /// <summary>
-        /// Records a check: the baseline only ever rises (an older check finishing late cannot lower
-        /// it), and the outcome (null error = it worked) is kept for the form to show.
+        /// Forgets a project's watch baselines (task 92eeeb47, pipeline Run 1), so the next check is a
+        /// baseline-only check again. Called when watching is turned back on or the repository URL
+        /// changes: a baseline left from before covers a gap nobody watched, and would turn everything
+        /// created in it into cards. Claims are kept, so an item already reported is never re-reported.
         /// </summary>
-        public void RecordGitHubWatchCheck(string projectId, string repo, int baseline, string error)
+        public void ResetGitHubWatchState(string projectId)
+        {
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand("DELETE FROM github_watch_state WHERE project_id = @p", _connection);
+                command.Parameters.AddWithValue("@p", projectId);
+                command.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// Releases a claim whose card could not be made, so the next check offers the item again
+        /// (pipeline Run 1). Only an unlinked claim is released.
+        /// </summary>
+        public void ReleaseGitHubItemClaim(string projectId, string repo, int number)
+        {
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand(
+                    "DELETE FROM github_watch_seen WHERE project_id = @p AND repo = @r AND number = @n AND task_id IS NULL", _connection);
+                command.Parameters.AddWithValue("@p", projectId);
+                command.Parameters.AddWithValue("@r", repo);
+                command.Parameters.AddWithValue("@n", number);
+                command.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// Records a check. <paramref name="baseline"/> is the newest number now accounted for, or
+        /// null when this check learned nothing (it failed): a null never creates or replaces one, so
+        /// a failed FIRST check leaves the repo un-baselined and the next good check is still a
+        /// baseline-only check (pipeline Run 1). A baseline only ever rises. The outcome (null error =
+        /// it worked) is kept for the form; <c>last_success_at</c> moves only on success.
+        /// </summary>
+        public void RecordGitHubWatchCheck(string projectId, string repo, int? baseline, string error)
         {
             lock (_dbLock)
             {
                 using var command = new SQLiteCommand(@"
-                    INSERT INTO github_watch_state (project_id, repo, baseline_number, last_checked_at, last_error)
-                    VALUES (@p, @r, @b, @at, @err)
+                    INSERT INTO github_watch_state (project_id, repo, baseline_number, last_checked_at, last_success_at, last_error)
+                    VALUES (@p, @r, @b, @at, CASE WHEN @err IS NULL THEN @at END, @err)
                     ON CONFLICT(project_id, repo) DO UPDATE SET
-                        baseline_number = MAX(github_watch_state.baseline_number, excluded.baseline_number),
+                        baseline_number = CASE
+                            WHEN excluded.baseline_number IS NULL THEN github_watch_state.baseline_number
+                            WHEN github_watch_state.baseline_number IS NULL THEN excluded.baseline_number
+                            ELSE MAX(github_watch_state.baseline_number, excluded.baseline_number) END,
                         last_checked_at = excluded.last_checked_at,
+                        last_success_at = COALESCE(excluded.last_success_at, github_watch_state.last_success_at),
                         last_error = excluded.last_error", _connection);
                 command.Parameters.AddWithValue("@p", projectId);
                 command.Parameters.AddWithValue("@r", repo);
-                command.Parameters.AddWithValue("@b", baseline);
+                command.Parameters.AddWithValue("@b", baseline.HasValue ? (object)baseline.Value : DBNull.Value);
                 command.Parameters.AddWithValue("@at", DateTime.UtcNow);
                 command.Parameters.AddWithValue("@err", (object)error ?? DBNull.Value);
                 command.ExecuteNonQuery();
@@ -1106,6 +1145,15 @@ namespace MultiTerminal.Services
             }
         }
 
+        /// <summary>
+        /// Sets a project's launch mode (task ec2ed636): ask / new / continue. The only writer of
+        /// <c>launch_mode</c>; the SaveRichProject UPSERT does not name the column, so a
+        /// project.json re-save can never reset it.
+        /// <para>Ask is written as the string "ask", not NULL. Both read as Ask today, but an
+        /// explicit "ask" records that the user CHOSE it, so a future change of the default for
+        /// unset (NULL) projects cannot silently override that choice.</para>
+        /// </summary>
+        /// <returns>True if a row was updated, false if the project was not found.</returns>
         public bool SetLaunchMode(string projectId, MultiTerminal.Models.ProjectLaunchMode mode)
         {
             if (string.IsNullOrWhiteSpace(projectId))

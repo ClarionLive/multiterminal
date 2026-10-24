@@ -337,10 +337,9 @@ namespace MultiTerminal.ProjectSettings
                 // Whether the GitHub watch can run, and its last check (task 92eeeb47).
                 var linked = all.FirstOrDefault(a => string.Equals(a.Id, project.SourceControlAccountId, StringComparison.Ordinal));
                 var repo = GitHubRepoRef.TryParse(project.GitRepoUrl);
-                var (lastChecked, lastError) = repo == null ? ((DateTime?)null, (string)null)
-                    : _context.ProjectDb.GetGitHubWatchLastCheck(project.Id, repo.FullName);
+                var state = repo == null ? null : _context.ProjectDb.GetGitHubWatchState(project.Id, repo.FullName);
                 options.GitHubWatchStatus = GitHubWatchService.DescribeStatus(
-                    project, linked?.Provider, linked?.HasToken == true, lastChecked, lastError);
+                    project, linked?.Provider, linked?.HasToken == true, state?.LastCheckedUtc, state?.LastError);
             }
             catch (Exception ex) { _context.Log?.Warning("ProjectSettings", $"Source accounts unreadable: {ex.Message}"); }
 

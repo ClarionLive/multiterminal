@@ -360,15 +360,6 @@ namespace MultiTerminal
             }
         }
 
-        /// <summary>
-        /// Task 94356803: severe-tier janitor push (HALF-MERGED checkout — manual cleanup
-        /// needed). Loopback POST to our own :5050 notifications endpoint with forcePush,
-        /// which bypasses the remote-mode gate (Owner-approved: rare + severe warrants a
-        /// buzz even at the desk) and reuses the controller's gateway-secret/type handling.
-        /// Fire-and-forget best-effort: the janitor sweep must never block on push I/O, and
-        /// a client-side timeout doesn't cancel server-side delivery (the controller doesn't
-        /// flow the request's cancellation into the gateway forward).
-        /// </summary>
         private Services.GitHubWatchService _gitHubWatch;
 
         /// <summary>
@@ -401,7 +392,10 @@ namespace MultiTerminal
                         var created = broker.CreateTask(title, description, "GitHub", "suggestion", "normal", projectId);
                         return created != null && created.Success ? created.TaskId : null;
                     },
-                    push: (title, body) => { _ = SendJanitorSeverePushAsync(title, body); },
+                    // An ordinary notification, not forced: it follows the remote-mode gate like
+                    // any other (pipeline Run 1; the janitor's forced "error" push is for rare,
+                    // severe alerts only).
+                    push: (title, body) => { _ = SendOwnerNotificationAsync(title, body, "info", "GitHub", forcePush: false, logSource: "GitHubWatch"); },
                     log: message => _debugLogService?.Info("GitHubWatch", message));
                 _gitHubWatch.Start();
             }
@@ -411,27 +405,46 @@ namespace MultiTerminal
             }
         }
 
-        private async System.Threading.Tasks.Task SendJanitorSeverePushAsync(string title, string body)
+        /// <summary>
+        /// Task 94356803: severe-tier janitor push (HALF-MERGED checkout — manual cleanup
+        /// needed). Loopback POST to our own :5050 notifications endpoint with forcePush,
+        /// which bypasses the remote-mode gate (Owner-approved: rare + severe warrants a
+        /// buzz even at the desk) and reuses the controller's gateway-secret/type handling.
+        /// Fire-and-forget best-effort: the janitor sweep must never block on push I/O, and
+        /// a client-side timeout doesn't cancel server-side delivery (the controller doesn't
+        /// flow the request's cancellation into the gateway forward).
+        /// </summary>
+        private System.Threading.Tasks.Task SendJanitorSeverePushAsync(string title, string body) =>
+            SendOwnerNotificationAsync(title, body, "error", "Janitor", forcePush: true, logSource: "Janitor");
+
+        /// <summary>
+        /// A notification to the Owner through our own <c>/api/notifications</c>, best-effort and
+        /// never throwing. <paramref name="forcePush"/> bypasses the remote-mode gate; only the
+        /// janitor's severe alert uses it.
+        /// </summary>
+        private async System.Threading.Tasks.Task SendOwnerNotificationAsync(
+            string title, string body, string notificationType, string agentName, bool forcePush, string logSource)
         {
             try
             {
                 var payload = System.Text.Json.JsonSerializer.Serialize(new
                 {
-                    notification_type = "error",
+                    notification_type = notificationType,
                     title,
                     message = body,
-                    agent_name = "Janitor",
+                    agent_name = agentName,
                 });
                 using var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
-                using var response = await _loopbackHttpClient.PostAsync("http://localhost:5050/api/notifications?forcePush=true", content);
+                string url = "http://localhost:5050/api/notifications" + (forcePush ? "?forcePush=true" : "");
+                using var response = await _loopbackHttpClient.PostAsync(url, content);
                 if (!response.IsSuccessStatusCode)
                 {
-                    _debugLogService?.Warning("Janitor", $"Severe push rejected: HTTP {(int)response.StatusCode}");
+                    _debugLogService?.Warning(logSource, $"Notification rejected: HTTP {(int)response.StatusCode}");
                 }
             }
             catch (Exception ex)
             {
-                _debugLogService?.Warning("Janitor", $"Severe push failed: {ex.Message}");
+                _debugLogService?.Warning(logSource, $"Notification failed: {ex.Message}");
             }
         }
 

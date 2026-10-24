@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -36,7 +37,14 @@ namespace MultiTerminal.Services
         public string Error { get; private set; }
         public IReadOnlyList<GitHubItem> Items { get; private set; } = Array.Empty<GitHubItem>();
 
-        public static GitHubFeedResult Success(IReadOnlyList<GitHubItem> items) => new GitHubFeedResult { Ok = true, Items = items };
+        /// <summary>
+        /// The page cap was reached before the listing got back to the last number already seen, so
+        /// items older than the oldest one returned may be missing (pipeline Run 1).
+        /// </summary>
+        public bool Truncated { get; private set; }
+
+        public static GitHubFeedResult Success(IReadOnlyList<GitHubItem> items, bool truncated = false) =>
+            new GitHubFeedResult { Ok = true, Items = items, Truncated = truncated };
         public static GitHubFeedResult Fail(string error) => new GitHubFeedResult { Ok = false, Error = error };
     }
 
@@ -48,8 +56,14 @@ namespace MultiTerminal.Services
     /// </summary>
     public sealed class GitHubIssueFeed
     {
-        /// <summary>How many of the newest items one check reads.</summary>
+        /// <summary>Items per request.</summary>
         public const int PageSize = 50;
+
+        /// <summary>
+        /// At most this many pages per check (250 items). A check pages back until it reaches the last
+        /// number already seen; past the cap it stops and says so rather than reading without end.
+        /// </summary>
+        public const int MaxPages = 5;
 
         /// <summary>A response larger than this is refused, not read.</summary>
         public const int MaxResponseBytes = 4 * 1024 * 1024;
@@ -64,11 +78,41 @@ namespace MultiTerminal.Services
         /// <param name="handler">Null for the real network; tests pass a stub.</param>
         public GitHubIssueFeed(HttpMessageHandler handler = null)
         {
-            _http = handler == null ? new HttpClient() : new HttpClient(handler, disposeHandler: false);
+            // No automatic redirects: HttpClient drops the Authorization header on one, so a renamed
+            // repo would read as "not found" for a private repo. A redirect is reported instead.
+            // CA2000: the HttpClient owns the handler it is given here (disposeHandler: true).
+#pragma warning disable CA2000
+            _http = handler == null
+                ? new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }, disposeHandler: true)
+                : new HttpClient(handler, disposeHandler: false);
+#pragma warning restore CA2000
             _http.Timeout = Timeout.InfiniteTimeSpan; // the per-request token below is the one timeout
         }
 
-        public async Task<GitHubFeedResult> FetchNewestAsync(GitHubRepoRef repo, string token, CancellationToken cancellationToken = default)
+        /// <summary>
+        /// The newest items, newest first. With <paramref name="seenUpTo"/> (the baseline) it pages
+        /// back until a page reaches a number at or below it, or runs out, or hits
+        /// <see cref="MaxPages"/> (then <see cref="GitHubFeedResult.Truncated"/>). With no baseline
+        /// (the first check) one page is enough: only its newest number is used.
+        /// </summary>
+        public async Task<GitHubFeedResult> FetchNewestAsync(GitHubRepoRef repo, string token, int? seenUpTo = null, CancellationToken cancellationToken = default)
+        {
+            var all = new List<GitHubItem>();
+            for (int page = 1; page <= MaxPages; page++)
+            {
+                var one = await FetchPageAsync(repo, token, page, cancellationToken).ConfigureAwait(false);
+                if (!one.Ok) return one;
+                all.AddRange(one.Items);
+
+                bool lastPage = one.Items.Count < PageSize;
+                bool reachedSeen = seenUpTo == null || one.Items.Any(i => i.Number <= seenUpTo.Value);
+                if (lastPage || reachedSeen) return GitHubFeedResult.Success(all);
+            }
+
+            return GitHubFeedResult.Success(all, truncated: true);
+        }
+
+        private async Task<GitHubFeedResult> FetchPageAsync(GitHubRepoRef repo, string token, int page, CancellationToken cancellationToken)
         {
             if (repo == null) return GitHubFeedResult.Fail("No GitHub repository.");
             if (string.IsNullOrWhiteSpace(token)) return GitHubFeedResult.Fail("No GitHub token.");
@@ -76,7 +120,7 @@ namespace MultiTerminal.Services
             // Owner and name are validated by GitHubRepoRef to GitHub's own character sets, so they
             // are safe in the path; escaped anyway.
             string url = "https://api.github.com/repos/" + Uri.EscapeDataString(repo.Owner) + "/" + Uri.EscapeDataString(repo.Name)
-                         + "/issues?state=all&sort=created&direction=desc&per_page=" + PageSize;
+                         + "/issues?state=all&sort=created&direction=desc&per_page=" + PageSize + "&page=" + page;
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(RequestTimeout);
@@ -91,6 +135,8 @@ namespace MultiTerminal.Services
                 using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
                 if (response.StatusCode == HttpStatusCode.Unauthorized)
                     return GitHubFeedResult.Fail("GitHub refused the account's token (401). Check the source control account.");
+                if ((int)response.StatusCode >= 300 && (int)response.StatusCode < 400)
+                    return GitHubFeedResult.Fail($"GitHub says {repo.FullName} has moved ({(int)response.StatusCode}). Update the Repository URL.");
                 if (response.StatusCode == HttpStatusCode.NotFound)
                     return GitHubFeedResult.Fail($"GitHub has no repository {repo.FullName} that this account can see (404).");
                 if (response.StatusCode == HttpStatusCode.Forbidden || (int)response.StatusCode == 429)

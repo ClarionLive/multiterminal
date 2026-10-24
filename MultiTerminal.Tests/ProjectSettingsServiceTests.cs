@@ -493,6 +493,31 @@ namespace MultiTerminal.Tests
             Assert.Equal(GitHubCheckInterval.Off, cleared.GitHubCheckInterval);
         }
 
+        /// <summary>
+        /// Turning GitHub watching back on, or changing the repository URL, forgets the old baseline
+        /// (pipeline Run 1): it covers a gap nobody watched, and everything created in it would become
+        /// cards. Changing only the interval keeps it.
+        /// </summary>
+        [Fact]
+        public void Turning_GitHub_watching_back_on_or_changing_the_repo_starts_a_fresh_baseline()
+        {
+            var p = Seed();
+            Assert.True(_service.Save(UpdateFor(p, ("gitHubWatchMode", "board"), ("gitRepoUrl", "https://github.com/o/r"))).Success);
+            _db.RecordGitHubWatchCheck(p.Id, "o/r", 40, null);
+
+            Assert.True(_service.Save(UpdateFor(p, ("gitHubCheckInterval", "1h"))).Success);
+            Assert.Equal(40, _db.GetGitHubWatchState(p.Id, "o/r").Baseline);   // unrelated change keeps it
+
+            Assert.True(_service.Save(UpdateFor(p, ("gitHubWatchMode", "off"))).Success);
+            Assert.Equal(40, _db.GetGitHubWatchState(p.Id, "o/r").Baseline);   // turning off keeps it
+            Assert.True(_service.Save(UpdateFor(p, ("gitHubWatchMode", "notify"))).Success);
+            Assert.Null(_db.GetGitHubWatchState(p.Id, "o/r").Baseline);        // back on: fresh
+
+            _db.RecordGitHubWatchCheck(p.Id, "o/r", 50, null);
+            Assert.True(_service.Save(UpdateFor(p, ("gitRepoUrl", "https://github.com/o/other"))).Success);
+            Assert.Null(_db.GetGitHubWatchState(p.Id, "o/r").Baseline);        // repo changed: fresh
+        }
+
         // The raw stored launch_mode, so a test can tell the explicit 'ask' SetLaunchMode writes from NULL.
         private string RawLaunchMode(string projectId)
         {
