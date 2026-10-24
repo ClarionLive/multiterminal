@@ -4078,7 +4078,14 @@ namespace MultiTerminal.Docking
             if (_workingTreeDirtyTimer != null) return;
 
             _workingTreeDirtyTimer = new System.Windows.Forms.Timer { Interval = 10000 };
-            _workingTreeDirtyTimer.Tick += (s, e) => RefreshWorkingTreeDirty();
+
+            // Only a pane the owner can see refreshes on the timer (task 47d8473b): the strip of a
+            // tab behind another tab is not on screen, and becoming the active document refreshes it
+            // through Activated below. Every pane polling every 10s was most of MT's CPU.
+            _workingTreeDirtyTimer.Tick += (s, e) =>
+            {
+                if (IsOnScreenForDirtyStrip()) RefreshWorkingTreeDirty();
+            };
             _workingTreeDirtyTimer.Start();
 
             // On-focus refresh — DockContent is a Form, so Activated fires when
@@ -4107,6 +4114,21 @@ namespace MultiTerminal.Docking
         private void OnDocActivatedForDirtyRefresh(object sender, EventArgs e)
         {
             RefreshWorkingTreeDirty();
+        }
+
+        /// <summary>How old a shared worktree list the dirty strip accepts (task 47d8473b).</summary>
+        private static readonly TimeSpan WorkingTreeListMaxAge = TimeSpan.FromSeconds(30);
+
+        /// <summary>
+        /// Whether this pane's HUD strip is on screen: visible, not minimized with the main window,
+        /// and the selected tab of its dock pane (a floating or sole pane counts as selected).
+        /// </summary>
+        private bool IsOnScreenForDirtyStrip()
+        {
+            if (_isDisposing || IsDisposed || !Visible) return false;
+            if (DockPanel?.FindForm() is Form host && host.WindowState == FormWindowState.Minimized) return false;
+            var pane = Pane;
+            return pane == null || ReferenceEquals(pane.ActiveContent, this);
         }
 
         /// <summary>
@@ -4155,7 +4177,7 @@ namespace MultiTerminal.Docking
                     var wtList = broker.WorktreeList;
                     if (wtList != null)
                     {
-                        var entries = await wtList.GetWorktreesForRepoAsync(folder).ConfigureAwait(false);
+                        var entries = await wtList.GetWorktreesForRepoAsync(folder, WorkingTreeListMaxAge).ConfigureAwait(false);
                         if (entries != null && entries.Count > 0)
                         {
                             int mainDirty = 0;
