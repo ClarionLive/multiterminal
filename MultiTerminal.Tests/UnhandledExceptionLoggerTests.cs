@@ -67,6 +67,27 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void A_report_is_not_lost_while_another_writer_holds_the_daily_file()
+        {
+            // Stands in for a second crash handler mid-write: the day's file is held open exclusively.
+            Directory.CreateDirectory(_dir);
+            string daily = Path.Combine(_dir, "crash-2026-10-24.log");
+            File.WriteAllText(daily, "earlier report\n");
+
+            string written;
+            using (new FileStream(daily, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                written = UnhandledExceptionLogger.TryAppendReport(_dir, When, "fatal report\n");
+            }
+
+            Assert.NotNull(written);
+            Assert.NotEqual(daily, written);
+            Assert.StartsWith("crash-2026-10-24-", Path.GetFileName(written), StringComparison.Ordinal);
+            Assert.Equal("fatal report\n", File.ReadAllText(written));
+            Assert.Equal("earlier report\n", File.ReadAllText(daily));
+        }
+
+        [Fact]
         public void An_unwritable_location_returns_null_instead_of_throwing()
         {
             // A path through an existing FILE cannot be a directory, so the write must fail.

@@ -45,9 +45,10 @@ namespace MultiTerminal.Services.Startup
         private static void Record(string source, Exception? exception, bool isTerminating)
         {
             var thread = Thread.CurrentThread;
+            DateTime now = DateTime.Now; // one reading, so the report's time and its file's date agree
             string report = FormatReport(
-                source, exception, isTerminating, DateTime.Now, thread.ManagedThreadId, thread.Name, thread.IsThreadPoolThread);
-            TryAppendReport(DebugLogService.LogDirectory, DateTime.Now, report);
+                source, exception, isTerminating, now, thread.ManagedThreadId, thread.Name, thread.IsThreadPoolThread);
+            TryAppendReport(DebugLogService.LogDirectory, now, report);
         }
 
         /// <summary>The report text. Pure, so the content can be tested without crashing anything.</summary>
@@ -85,21 +86,50 @@ namespace MultiTerminal.Services.Startup
 
         /// <summary>
         /// Appends <paramref name="report"/> to <c>crash-yyyy-MM-dd.log</c> in <paramref name="directory"/>.
-        /// Returns the file written, or null when it could not be written. Never throws.
+        /// When that file is busy, the report goes to a file of its own instead
+        /// (<c>crash-yyyy-MM-dd-HHmmss-fff-&lt;id&gt;.log</c>). Returns the file written, or null when
+        /// nothing could be written. Never throws.
         /// </summary>
+        /// <remarks>
+        /// Two handlers can fire at once: an unobserved task exception on the finalizer thread while the
+        /// fatal exception is being reported. The append takes the file exclusively for writing, so the
+        /// second writer gets a sharing violation, and the report it carries may be the fatal one. Sharing
+        /// the file for writing instead would not be safe either: an append positions at the end when the
+        /// file is opened, so two writers can overwrite each other.
+        /// </remarks>
         internal static string? TryAppendReport(string directory, DateTime localTime, string report)
         {
+            string day = localTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
             try
             {
                 Directory.CreateDirectory(directory);
-                string path = Path.Combine(
-                    directory, "crash-" + localTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + ".log");
+                string path = Path.Combine(directory, "crash-" + day + ".log");
                 File.AppendAllText(path, report, Encoding.UTF8);
                 return path;
+            }
+            catch (IOException)
+            {
+                // Busy (or otherwise unwritable): fall through to a file nobody else can be holding.
             }
             catch (Exception)
             {
                 // Nowhere left to report to; the runtime's own handling (Event Viewer) still applies.
+                return null;
+            }
+
+            try
+            {
+                string own = Path.Combine(
+                    directory,
+                    "crash-" + day + "-" + localTime.ToString("HHmmss-fff", CultureInfo.InvariantCulture)
+                        + "-" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".log");
+                using var stream = new FileStream(own, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+                byte[] bytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(report);
+                stream.Write(bytes, 0, bytes.Length);
+                return own;
+            }
+            catch (Exception)
+            {
                 return null;
             }
         }

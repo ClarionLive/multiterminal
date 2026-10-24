@@ -9031,16 +9031,10 @@ namespace MultiTerminal
                 {
                     _debugLogService?.Info("MainForm", $"Native team removed: {e.TeamName} (members: {string.Join(", ", e.MemberNames)})");
 
-                    if (InvokeRequired)
-                    {
-                        try { BeginInvoke(new Action(() => CleanupTeamPanels(e.TeamKey, e.ConfigRoot, e.IsDefaultRoot, e.MemberNames, e.TranscriptPaths))); }
-                        catch (ObjectDisposedException) { }
-                        catch (InvalidOperationException) { } // no window handle yet, or it is gone: there are no panels to close
-                    }
-                    else
-                    {
-                        CleanupTeamPanels(e.TeamKey, e.ConfigRoot, e.IsDefaultRoot, e.MemberNames, e.TranscriptPaths);
-                    }
+                    // Same route as the discovery handlers: before this form has a handle a discovery is
+                    // queued, so the removal must queue behind it rather than run first on the watcher's
+                    // thread and leave the panel it should close to be created afterwards (GitHub #38).
+                    RunOnUiThread(() => CleanupTeamPanels(e.TeamKey, e.ConfigRoot, e.IsDefaultRoot, e.MemberNames, e.TranscriptPaths));
                 };
 
                 _teamWatcher.MemberRemoved += (s, e) =>
@@ -9063,13 +9057,8 @@ namespace MultiTerminal
                         }
                     }
 
-                    if (InvokeRequired)
-                    {
-                        try { BeginInvoke(new Action(CloseAgentPanel)); }
-                        catch (ObjectDisposedException) { }
-                    }
-                    else
-                        CloseAgentPanel();
+                    // Queued behind any pending creation of this panel, as for TeamRemoved above.
+                    RunOnUiThread(CloseAgentPanel);
                 };
 
                 _teamWatcher.SubagentDiscovered += (s, e) =>
