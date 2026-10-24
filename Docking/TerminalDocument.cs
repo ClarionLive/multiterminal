@@ -1229,7 +1229,7 @@ namespace MultiTerminal.Docking
 
             // Reserve space for focus border (always 2px padding; OnPaint draws it)
             Padding = new Padding(2);
-            BackColor = Color.FromArgb(30, 30, 30);
+            BackColor = Color.FromArgb(30, 30, 30); // placeholder until SetTheme applies the theme
             ResizeRedraw = true;
 
             // Initialize tab header context menu
