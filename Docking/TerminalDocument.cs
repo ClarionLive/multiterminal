@@ -4226,7 +4226,7 @@ namespace MultiTerminal.Docking
                 try
                 {
                     _hudTabContainer?.SetWorkingTreeDirty(count, branch, aggregateText);
-                    _hudGit?.RequestRefresh();
+                    _hudGit?.RequestRefresh(WorkingTreeListMaxAge);
                 }
                 catch { }
             });

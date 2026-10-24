@@ -123,22 +123,21 @@ namespace MultiTerminal.Services
                 : await ResolveRepoKeyCachedAsync(workingDir).ConfigureAwait(false);
             string key = string.IsNullOrEmpty(common) ? CanonicalizePath(workingDir) : common;
 
+            // A fresh caller never joins an older computation: it asked for now. Started outside
+            // the lock, so other callers never wait behind its process start.
+            if (maxAge == null)
+                return CloneAll(await ComputeAndStoreAsync(workingDir, key).ConfigureAwait(false));
+
             Task<List<WorktreeEntry>> pending;
             lock (_cacheLock)
             {
-                if (maxAge is TimeSpan age
-                    && _cache.TryGetValue(key, out var hit)
-                    && DateTime.UtcNow - hit.AtUtc <= age)
+                if (_cache.TryGetValue(key, out var hit)
+                    && Environment.TickCount64 - hit.AtMs <= (long)maxAge.Value.TotalMilliseconds)
                 {
                     return CloneAll(hit.Entries);
                 }
 
-                if (maxAge == null)
-                {
-                    // A fresh caller never joins an older computation: it asked for now.
-                    pending = ComputeAndStoreAsync(workingDir, key);
-                }
-                else if (!_inFlight.TryGetValue(key, out pending))
+                if (!_inFlight.TryGetValue(key, out pending))
                 {
                     // Task.Run, so the entry is registered before the work can finish (a git that
                     // fails to start completes synchronously), and only this task removes it: a
@@ -164,8 +163,10 @@ namespace MultiTerminal.Services
         }
 
         private readonly object _cacheLock = new object();
-        private readonly Dictionary<string, (DateTime AtUtc, long Generation, List<WorktreeEntry> Entries)> _cache =
-            new Dictionary<string, (DateTime AtUtc, long Generation, List<WorktreeEntry> Entries)>(StringComparer.OrdinalIgnoreCase);
+        // Ages are Environment.TickCount64 (monotonic): a wall-clock step back must not make an old
+        // list look new for the length of the step.
+        private readonly Dictionary<string, (long AtMs, long Generation, List<WorktreeEntry> Entries)> _cache =
+            new Dictionary<string, (long AtMs, long Generation, List<WorktreeEntry> Entries)>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, Task<List<WorktreeEntry>>> _inFlight =
             new Dictionary<string, Task<List<WorktreeEntry>>>(StringComparer.OrdinalIgnoreCase);
         private long _generation;
@@ -173,20 +174,23 @@ namespace MultiTerminal.Services
         /// <summary>How long a poll trusts a folder's remembered repository key.</summary>
         internal static readonly TimeSpan RepoKeyMaxAge = TimeSpan.FromMinutes(5);
 
-        private readonly Dictionary<string, (DateTime AtUtc, string Common)> _repoKeys =
-            new Dictionary<string, (DateTime AtUtc, string Common)>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, (long AtMs, string Common)> _repoKeys =
+            new Dictionary<string, (long AtMs, string Common)>(StringComparer.OrdinalIgnoreCase);
 
         private async Task<string> ResolveRepoKeyCachedAsync(string workingDir)
         {
             string folder = CanonicalizePath(workingDir);
             lock (_cacheLock)
             {
-                if (_repoKeys.TryGetValue(folder, out var known) && DateTime.UtcNow - known.AtUtc <= RepoKeyMaxAge)
+                if (_repoKeys.TryGetValue(folder, out var known)
+                    && Environment.TickCount64 - known.AtMs <= (long)RepoKeyMaxAge.TotalMilliseconds)
+                {
                     return known.Common;
+                }
             }
 
             string common = await ResolveCommonGitDirAsync(workingDir).ConfigureAwait(false);
-            lock (_cacheLock) _repoKeys[folder] = (DateTime.UtcNow, common);
+            lock (_cacheLock) _repoKeys[folder] = (Environment.TickCount64, common);
             return common;
         }
 
@@ -199,7 +203,7 @@ namespace MultiTerminal.Services
             lock (_cacheLock)
             {
                 if (!_cache.TryGetValue(key, out var existing) || existing.Generation < generation)
-                    _cache[key] = (DateTime.UtcNow, generation, CloneAll(entries));
+                    _cache[key] = (Environment.TickCount64, generation, CloneAll(entries));
             }
 
             return entries;

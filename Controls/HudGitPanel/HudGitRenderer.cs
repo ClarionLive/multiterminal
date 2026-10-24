@@ -1307,16 +1307,19 @@ namespace MultiTerminal.Controls
         /// working-tree dirty poll to catch edits that don't touch <c>.git/</c>
         /// (which the <see cref="GitRepoWatcher"/> can't see). Fire-and-forget;
         /// safe to call from any thread.
+        /// <para><paramref name="worktreeListMaxAge"/> (task 47d8473b): the poll passes its own
+        /// age so it shares the repository's worktree list instead of computing a fresh one on
+        /// every tick; omitted, the list is fresh.</para>
         /// </summary>
-        public void RequestRefresh()
+        public void RequestRefresh(TimeSpan? worktreeListMaxAge = null)
         {
             if (IsDisposed) return;
             try
             {
                 if (InvokeRequired)
-                    BeginInvoke(new Action(() => { _ = RefreshAsync(); }));
+                    BeginInvoke(new Action(() => { _ = RefreshAsync(worktreeListMaxAge); }));
                 else
-                    _ = RefreshAsync();
+                    _ = RefreshAsync(worktreeListMaxAge);
             }
             catch { }
         }
@@ -1336,7 +1339,7 @@ namespace MultiTerminal.Controls
         /// Single fetch keeps the two consumers in lock-step (no race window
         /// where the allowlist trails the payload by one fire).</para>
         /// </summary>
-        private async Task RefreshAsync()
+        private async Task RefreshAsync(TimeSpan? worktreeListMaxAge = null)
         {
             var svc = _currentService;
             if (svc == null) return;
@@ -1377,7 +1380,7 @@ namespace MultiTerminal.Controls
                 System.Collections.Generic.IReadOnlyList<MultiTerminal.Services.WorktreeEntry> worktrees;
                 if (worktreeSvc != null)
                 {
-                    var fetched = await worktreeSvc.GetWorktreesForRepoAsync(projectPath);
+                    var fetched = await worktreeSvc.GetWorktreesForRepoAsync(projectPath, worktreeListMaxAge);
                     worktrees = fetched ?? (System.Collections.Generic.IReadOnlyList<MultiTerminal.Services.WorktreeEntry>)Array.Empty<MultiTerminal.Services.WorktreeEntry>();
                 }
                 else

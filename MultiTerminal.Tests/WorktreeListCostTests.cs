@@ -157,7 +157,11 @@ namespace MultiTerminal.Tests
             Assert.Equal(2, (await svc.GetWorktreesForRepoAsync(_repo, TimeSpan.FromMinutes(5))).Count);
             Assert.Equal(3, (await svc.GetWorktreesForRepoAsync(_repo)).Count);
 
-            // The fresh read refreshed the shared one, from any worktree of the same repo.
+            // The fresh read refreshed the shared one, and a poll from another worktree of the same
+            // repo is handed it: a fourth worktree added now is not seen, so the answer came from
+            // the shared list rather than a new read (which would count 4).
+            string fourth = Path.Combine(_repo, ".claude", "worktrees", "ef019999");
+            Git(_repo, "worktree", "add", "-q", "-b", "task/ef019999", fourth);
             Assert.Equal(3, (await svc.GetWorktreesForRepoAsync(_worktree, TimeSpan.FromMinutes(5))).Count);
         }
 
