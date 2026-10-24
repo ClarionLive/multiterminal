@@ -54,6 +54,7 @@
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.12.0/lib/addon-web-links.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.9.0/lib/addon-unicode11.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.19.0/lib/addon-webgl.min.js"></script>
 
     <script>
         // Theme definitions matching TerminalTheme.cs
@@ -113,6 +114,33 @@
         let currentFontSize = 10;
         let isInitialized = false;
 
+        // xterm.js's GPU renderer (GitHub #51). Much cheaper than the default DOM renderer for the
+        // constant redraws of a full-screen app like Claude Code. Whenever WebGL is not available here
+        // (the script did not load, no GPU context, some RDP/VM setups) the terminal simply keeps the
+        // DOM renderer; if the GPU context is lost later (a driver reset, or the browser reclaiming
+        // contexts when many panes are open) the addon is disposed and xterm goes back to the DOM
+        // renderer on its own. Which renderer a pane ended up on is logged to the host.
+        let webglAddon = null;
+        function enableWebglRenderer() {
+            if (typeof WebglAddon === 'undefined') {
+                sendToHost({ type: 'log', level: 'info', message: 'renderer: dom (webgl addon not loaded)' });
+                return;
+            }
+            try {
+                const addon = new WebglAddon.WebglAddon();
+                addon.onContextLoss(() => {
+                    try { addon.dispose(); } catch (e) { }
+                    if (webglAddon === addon) webglAddon = null;
+                    sendToHost({ type: 'log', level: 'warning', message: 'renderer: webgl context lost, back to dom' });
+                });
+                term.loadAddon(addon);
+                webglAddon = addon;
+                sendToHost({ type: 'log', level: 'info', message: 'renderer: webgl' });
+            } catch (e) {
+                sendToHost({ type: 'log', level: 'info', message: 'renderer: dom (webgl unavailable: ' + e + ')' });
+            }
+        }
+
         // The Windows build number the host puts in the URL (&winbuild=). Tells xterm.js it is talking
         // to ConPTY, which changes how it handles reflow on resize (GitHub #51). Missing or not a
         // positive whole number: leave windowsPty unset, xterm's default behaviour.
@@ -166,6 +194,9 @@
 
             // Open terminal in container
             term.open(container);
+
+            // The GPU renderer attaches to an opened terminal only.
+            enableWebglRenderer();
 
             // Initial fit
             fitAddon.fit();
