@@ -1031,6 +1031,22 @@ namespace MultiTerminal.Services
             }
         }
 
+        /// <summary>The last check's outcome for the project form: when, and its error (null = it worked).</summary>
+        public (DateTime? LastCheckedUtc, string LastError) GetGitHubWatchLastCheck(string projectId, string repo)
+        {
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand(
+                    "SELECT last_checked_at, last_error FROM github_watch_state WHERE project_id = @p AND repo = @r", _connection);
+                command.Parameters.AddWithValue("@p", projectId);
+                command.Parameters.AddWithValue("@r", repo);
+                using var reader = command.ExecuteReader();
+                if (!reader.Read()) return (null, null);
+                DateTime? last = reader.IsDBNull(0) ? (DateTime?)null : DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc);
+                return (last, reader.IsDBNull(1) ? null : reader.GetString(1));
+            }
+        }
+
         /// <summary>
         /// Records a check: the baseline only ever rises (an older check finishing late cannot lower
         /// it), and the outcome (null error = it worked) is kept for the form to show.

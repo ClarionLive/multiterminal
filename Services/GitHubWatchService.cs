@@ -228,6 +228,34 @@ namespace MultiTerminal.Services
             return nowUtc - lastCheckedUtc.Value >= period.Value;
         }
 
+        /// <summary>
+        /// One line for the project form saying whether the project can be watched and how the last
+        /// check went, so "not watchable" is visible rather than a silent no-op. Shown whatever the
+        /// mode, so the Owner can see what turning it on would need. Pure.
+        /// </summary>
+        /// <param name="accountProvider">The linked account's provider ("github", "bitbucket"), or null when none is linked.</param>
+        public static string DescribeStatus(Project project, string accountProvider, bool accountHasToken,
+            DateTime? lastCheckedUtc, string lastError)
+        {
+            if (project == null) return string.Empty;
+            var repo = GitHubRepoRef.TryParse(project.GitRepoUrl);
+            if (repo == null)
+                return "Not watchable: the Repository URL above is not a github.com repository.";
+            if (accountProvider == null)
+                return $"Not watchable: link a GitHub source control account to check {repo.FullName}.";
+            if (!string.Equals(accountProvider, "github", StringComparison.OrdinalIgnoreCase))
+                return "Not watchable: the linked source control account is not a GitHub account.";
+            if (!accountHasToken)
+                return "Not watchable: the linked GitHub account has no token saved.";
+            if (lastCheckedUtc == null)
+                return $"Ready to watch {repo.FullName}. Not checked yet.";
+
+            string when = lastCheckedUtc.Value.ToLocalTime().ToString("g", System.Globalization.CultureInfo.CurrentCulture);
+            return string.IsNullOrEmpty(lastError)
+                ? $"Watching {repo.FullName}. Last checked {when}."
+                : $"Watching {repo.FullName}. Last check {when} failed: {lastError}";
+        }
+
         internal static string Kind(GitHubItem item) => item.IsPullRequest ? "PR" : "Issue";
 
         internal static string CardTitle(GitHubItem item) =>

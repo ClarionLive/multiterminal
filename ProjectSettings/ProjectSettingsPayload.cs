@@ -17,6 +17,9 @@ namespace MultiTerminal.ProjectSettings
         public IReadOnlyList<(string Name, string Description)> AvailableMcpServers { get; set; } = Array.Empty<(string, string)>();
         public IReadOnlyList<string> AvailableSkills { get; set; } = Array.Empty<string>();
         public IReadOnlyList<(string Type, string Description)> AvailableSpecialists { get; set; } = Array.Empty<(string, string)>();
+
+        /// <summary>One line: can this project's GitHub repo be watched, and how did the last check go (task 92eeeb47).</summary>
+        public string GitHubWatchStatus { get; set; } = string.Empty;
     }
 
     /// <summary>
@@ -59,6 +62,7 @@ namespace MultiTerminal.ProjectSettings
                     createdAt = FormatDate(project.CreatedAt),
                     updatedAt = FormatDate(project.UpdatedAt),
                     lastOpenedAt = FormatDate(project.LastOpenedAt),
+                    gitHubWatchStatus = options.GitHubWatchStatus ?? string.Empty,
                 },
                 lists = new
                 {

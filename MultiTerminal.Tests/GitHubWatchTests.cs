@@ -157,6 +157,30 @@ namespace MultiTerminal.Tests
             Assert.Equal(due, GitHubWatchService.IsDue(interval, last, now));
         }
 
+        // ── What the form says ───────────────────────────────────────────────────
+
+        [Theory]
+        [InlineData("https://bitbucket.org/o/r", "github", true, "not a github.com repository")]
+        [InlineData("https://github.com/o/r", null, false, "link a GitHub source control account")]
+        [InlineData("https://github.com/o/r", "bitbucket", true, "not a GitHub account")]
+        [InlineData("https://github.com/o/r", "github", false, "no token saved")]
+        [InlineData("https://github.com/o/r", "github", true, "Ready to watch o/r")]
+        public void The_form_says_why_a_project_cannot_be_watched(string repoUrl, string provider, bool hasToken, string expected)
+        {
+            var p = Project.Create("P", Path.GetTempPath());
+            p.GitRepoUrl = repoUrl;
+            Assert.Contains(expected, GitHubWatchService.DescribeStatus(p, provider, hasToken, null, null));
+        }
+
+        [Fact]
+        public void The_form_shows_the_last_checks_failure()
+        {
+            var p = Project.Create("P", Path.GetTempPath());
+            p.GitRepoUrl = "https://github.com/o/r";
+            string status = GitHubWatchService.DescribeStatus(p, "github", true, DateTime.UtcNow, "GitHub returned 500.");
+            Assert.Contains("failed: GitHub returned 500.", status);
+        }
+
         // ── End to end, against a stub GitHub and a real database ──────────────
 
         private sealed class StubGitHub : HttpMessageHandler

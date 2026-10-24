@@ -246,6 +246,7 @@
             <div class="field"><label for="f-sourceControlAccountId">Source control account</label><select id="f-sourceControlAccountId" data-field="sourceControlAccountId" data-options="sourceAccounts" data-none="(none)"></select></div>
             <h3>Watch GitHub</h3>
             <div class="note">MT checks the repository above for new issues and pull requests, using the source control account above (a GitHub account). The first check only notes what is already there, so turning this on does not add the existing backlog. MT never comments on, labels or closes anything.</div>
+            <div class="hint" id="github-watch-status"></div>
             <div class="field"><label for="f-gitHubWatchMode">New issues and PRs</label><select id="f-gitHubWatchMode" data-field="gitHubWatchMode" data-options="gitHubWatchModes"></select>
                 <div class="hint">"Add them to the board" puts one card per issue or PR in the board's Suggestion column, linked to GitHub, never twice.</div></div>
             <div class="field"><label>On terminal start</label><label class="check"><input type="checkbox" data-field="gitHubCheckOnStart"> Check when a terminal for this project starts</label></div>
@@ -536,6 +537,7 @@
         $('about-created').textContent = msg.about.createdAt || '—';
         $('about-updated').textContent = msg.about.updatedAt || '—';
         $('about-opened').textContent = msg.about.lastOpenedAt || '—';
+        $('github-watch-status').textContent = msg.about.gitHubWatchStatus || '';
 
         var missing = (state.options.claudeProfiles || []).some(function (c) { return c.missing && c.value === msg.fields.claudeProfile; });
         var hint = $('profile-hint');
