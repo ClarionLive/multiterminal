@@ -480,14 +480,7 @@ namespace MultiTerminal
             // tab-close, leaving an orphaned claude process + a still-registered agent (task a9435da9).
             _dockPanel.ContentRemoved += OnDockContentRemoved;
 
-            // Document tabs show icons (task 51a8a17b). Only a terminal's tab means something by
-            // its icon; every other content is given the blank one, so a panel opened as a document
-            // does not grow a stray application icon on its tab.
-            _dockPanel.ContentAdded += (s, e) =>
-            {
-                if (e?.Content is Form f && !(e.Content is TerminalDocument))
-                    f.Icon = Services.PaneAttention.TabIcon(Services.PaneAttentionLevel.None, true);
-            };
+            _dockPanel.ContentAdded += OnDockContentAdded;
 
             Controls.Add(_dockPanel);
 
@@ -921,6 +914,7 @@ namespace MultiTerminal
                 // entry, so the change event alone would leave the ghost on screen until something
                 // unrelated happened to fire. Both events drive the same full rebuild.
                 _mcpServer.Broker.AgentAttention.AttentionRemoved += OnAgentAttentionChanged;
+                RefreshPaneAttention();
                 RefreshAttentionPanel();
 
                 // Initialize dashboard header alongside other panels (not deferred — deferring
@@ -7266,6 +7260,9 @@ namespace MultiTerminal
         {
             if (e == null) return;
             _paneLaunches?.OnLaunchBegan(e.DocId, e.TerminalName, e.ProjectId, e.WorkingDirectory, e.Kind, e.ResumeSessionId, e.LaunchGeneration);
+
+            // A reused pane must not keep the previous agent's colour (51a8a17b, pipeline Run 1).
+            RefreshPaneAttention();
         }
 
         /// <summary>
@@ -7330,6 +7327,9 @@ namespace MultiTerminal
                 // 7d20e94c, Owner decision). Writes nothing once MT is shutting down.
                 _paneLaunches?.OnProcessExited(doc.DocId);
 
+                // Nothing runs in the pane now, so it shows no attention (51a8a17b).
+                RefreshPaneAttention();
+
                 // Unregister terminal from broker (sets profile offline)
                 if (_mcpServer?.Broker != null && !string.IsNullOrEmpty(doc.DocId))
                 {
@@ -7356,6 +7356,18 @@ namespace MultiTerminal
         /// force the teardown here. Every step is idempotent with the normal Dispose/OnTerminalExited
         /// paths, so this is safe even when the ordinary close DID run.
         /// </summary>
+        /// <summary>
+        /// Document tabs show icons (task 51a8a17b), and only a terminal's means something: its
+        /// attention dot. Every other content is given the blank icon here, deliberately replacing
+        /// the <c>SystemIcons.Application</c> each panel sets for itself, so a panel opened as a
+        /// document does not grow a stray application icon on its tab.
+        /// </summary>
+        private void OnDockContentAdded(object sender, DockContentEventArgs e)
+        {
+            if (e?.Content is Form f && !(e.Content is TerminalDocument))
+                f.Icon = Services.PaneAttention.TabIcon(Services.PaneAttentionLevel.None, true);
+        }
+
         private void OnDockContentRemoved(object sender, DockContentEventArgs e)
         {
             if (!(e.Content is TerminalDocument doc))
@@ -9467,21 +9479,32 @@ namespace MultiTerminal
             try
             {
                 var broker = _mcpServer?.Broker;
-                if (broker?.AgentAttention == null || _gridManager == null) return;
+                if (broker?.AgentAttention == null || _dockPanel == null) return;
 
                 var docs = new Dictionary<string, TerminalDocument>(StringComparer.Ordinal);
                 var panes = new List<Services.PaneAttention.PaneInfo>();
-                foreach (var doc in _gridManager.GetTerminalDocuments())
+
+                // Contents, not Documents: Documents leaves out a floated terminal (pipeline Run 1).
+                foreach (var doc in _dockPanel.Contents.OfType<TerminalDocument>())
                 {
                     if (doc == null || doc.IsDisposed) continue;
                     string id = doc.InstanceId.ToString();
                     docs[id] = doc;
+
+                    // The rule ClaudeProfilePaneLookup.Match uses: the confirmed name, and the tab
+                    // title only while the pane has none.
+                    string name = string.IsNullOrEmpty(doc.OriginalAgentName) ? doc.CustomTitle : doc.OriginalAgentName;
                     panes.Add(new Services.PaneAttention.PaneInfo
                     {
                         PaneId = id,
                         SessionId = doc.CurrentClaudeSessionId,
-                        AgentName = doc.OriginalAgentName,
-                        IsHelper = doc.LaunchedAsHelper,
+                        AgentName = name,
+                        // The cards' rule (AttentionTeamResolver.IsHelperPane): launched as a helper,
+                        // or its helper link still names the agent it runs.
+                        IsHelper = doc.LaunchedAsHelper
+                            || (!string.IsNullOrEmpty(doc.HelperLinkName)
+                                && string.Equals(doc.HelperLinkName, name, StringComparison.OrdinalIgnoreCase)),
+                        IsLive = doc.HasActiveLaunch,
                     });
                 }
 

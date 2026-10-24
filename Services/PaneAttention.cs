@@ -38,11 +38,20 @@ namespace MultiTerminal.Services
             /// <summary>The Claude session the pane holds, or null before it is learned.</summary>
             public string SessionId { get; set; }
 
-            /// <summary>The pane's confirmed agent name (<c>TerminalDocument.OriginalAgentName</c>).</summary>
+            /// <summary>
+            /// The pane's identity: its confirmed agent name (<c>TerminalDocument.OriginalAgentName</c>),
+            /// or its tab title while it has none, as <c>ClaudeProfilePaneLookup.Match</c> decides it.
+            /// </summary>
             public string AgentName { get; set; }
 
             /// <summary>A spawned helper: its turn end is for its PM, not the Owner.</summary>
             public bool IsHelper { get; set; }
+
+            /// <summary>
+            /// A launch is running in the pane. A pane whose process exited, or that sits on its start
+            /// screen, shows nothing: an entry left over from its last agent must not colour it.
+            /// </summary>
+            public bool IsLive { get; set; } = true;
         }
 
         /// <summary>
@@ -80,6 +89,7 @@ namespace MultiTerminal.Services
             {
                 if (p?.PaneId == null) continue;
                 result[p.PaneId] = PaneAttentionLevel.None;
+                if (!p.IsLive) continue;
 
                 if (!string.IsNullOrEmpty(p.SessionId))
                 {
@@ -159,6 +169,8 @@ namespace MultiTerminal.Services
         /// </summary>
         public static Icon TabIcon(PaneAttentionLevel level, bool isDark)
         {
+            if (level == PaneAttentionLevel.None) isDark = true; // blank either way: one icon
+
             lock (IconLock)
             {
                 if (Icons.TryGetValue((level, isDark), out var cached)) return cached;

@@ -1,4 +1,7 @@
+using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Text.RegularExpressions;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
 using Xunit;
@@ -87,6 +90,21 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void A_pane_with_nothing_running_is_never_coloured_by_its_last_agent()
+        {
+            // The process exited (or the pane is back on its start screen): the pane keeps its name,
+            // and its last agent's entry is still in the snapshot until it goes Offline.
+            var exited = Pane("p1", null, "Frank");
+            exited.IsLive = false;
+
+            var result = PaneAttention.Assign(
+                new[] { exited },
+                new[] { Entry("s1", "Frank", AttentionState.YourTurn) });
+
+            Assert.Equal(PaneAttentionLevel.None, result["p1"]);
+        }
+
+        [Fact]
         public void Every_pane_is_in_the_result_so_a_cleared_one_goes_back_to_none()
         {
             var result = PaneAttention.Assign(new[] { Pane("p1", "s1", "Eve") }, new List<AgentAttentionEntry>());
@@ -108,19 +126,57 @@ namespace MultiTerminal.Tests
             Assert.Equal(expected, PaneAttention.LevelFor(state, isHelper: false));
         }
 
-        [Fact]
-        public void The_header_page_handles_every_wire_value_the_pane_can_send()
-        {
-            // The page and C# share these strings with no compiler between them.
-            string html = System.IO.File.ReadAllText(System.IO.Path.Combine(
-                RepoRoot(), "Controls", "TerminalStatusBar", "statusbar.html"));
+        private static string Read(params string[] parts) =>
+            System.IO.File.ReadAllText(System.IO.Path.Combine(new[] { RepoRoot() }.Concat(parts).ToArray()));
 
-            Assert.Contains("data.startsWith('attention:')", html);
-            foreach (PaneAttentionLevel level in System.Enum.GetValues(typeof(PaneAttentionLevel)))
+        private static string Hex(System.Drawing.Color c) => $"#{c.R:x2}{c.G:x2}{c.B:x2}";
+
+        /// <summary>The Attention panel variable each level borrows its hue from.</summary>
+        private static string PanelVariable(PaneAttentionLevel level) => level switch
+        {
+            PaneAttentionLevel.YourTurn => "--yourturn",
+            PaneAttentionLevel.Permission => "--peach",
+            PaneAttentionLevel.Question => "--mauve",
+            _ => null,
+        };
+
+        [Fact]
+        public void The_header_tint_the_tab_dot_and_the_Attention_card_use_one_hue_per_state_and_theme()
+        {
+            // Three copies of these colours exist with no compiler between them: the Attention panel's
+            // CSS variables, the header page's selectors and ColorFor (the tab dot). A pane and its card
+            // must read as one signal, so every copy is compared, in both themes.
+            string panel = Read("AttentionPanel", "attention-panel.html");
+            int lightAt = panel.IndexOf("body.light {", StringComparison.Ordinal);
+            Assert.True(lightAt > 0, "attention-panel.html no longer has a 'body.light {' block.");
+            string panelDark = panel.Substring(0, lightAt);
+            string panelLight = panel.Substring(lightAt, panel.IndexOf('}', lightAt) - lightAt);
+
+            string header = Read("Controls", "TerminalStatusBar", "statusbar.html");
+            Assert.Contains("data.startsWith('attention:')", header);
+
+            int compared = 0;
+            foreach (PaneAttentionLevel level in Enum.GetValues(typeof(PaneAttentionLevel)))
             {
                 if (level == PaneAttentionLevel.None) continue;
-                Assert.Contains($"body[data-attention=\"{PaneAttention.WireName(level)}\"]", html);
+                foreach (bool isDark in new[] { true, false })
+                {
+                    string expected = Hex(PaneAttention.ColorFor(level, isDark));
+
+                    var card = Regex.Match(isDark ? panelDark : panelLight,
+                        Regex.Escape(PanelVariable(level)) + @":\s*(#[0-9a-fA-F]{6})");
+                    Assert.True(card.Success, $"{PanelVariable(level)} not found in the {(isDark ? "dark" : "light")} panel theme.");
+                    Assert.Equal(expected, card.Groups[1].Value, StringComparer.OrdinalIgnoreCase);
+
+                    string selector = (isDark ? "body" : "body.light") + $"[data-attention=\"{PaneAttention.WireName(level)}\"]";
+                    var tint = Regex.Match(header, Regex.Escape(selector) + @"\s*\{\s*--attn:\s*(#[0-9a-fA-F]{6})");
+                    Assert.True(tint.Success, $"'{selector} {{ --attn: ... }}' not found in statusbar.html.");
+                    Assert.Equal(expected, tint.Groups[1].Value, StringComparer.OrdinalIgnoreCase);
+                    compared++;
+                }
             }
+
+            Assert.Equal(6, compared);
         }
     }
 }

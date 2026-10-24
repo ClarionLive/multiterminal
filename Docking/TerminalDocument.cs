@@ -1738,12 +1738,12 @@ namespace MultiTerminal.Docking
         {
             _currentTheme = theme;
             BackColor = theme.Background;
-            Icon = Services.PaneAttention.TabIcon(_paneAttention, theme.IsDark);
             _terminal.SetTheme(theme);
             _statusBar?.SetTheme(theme.IsDark);
             _hudTabContainer?.ApplyTheme(theme.IsDark);
             _embeddedAgentPanel?.ApplyTheme(theme.IsDark);
             _startScreen?.ApplyTheme(theme.IsDark);
+            ApplyPaneAttention(); // the dot's hue follows the theme, as the cards' do
 
             // Theme the drop zone
             if (_dropZone != null)
@@ -1780,6 +1780,9 @@ namespace MultiTerminal.Docking
         }
 
         private Services.PaneAttentionLevel _paneAttention = Services.PaneAttentionLevel.None;
+
+        /// <summary>True while a launch runs in this pane (between its start and its process exit).</summary>
+        internal bool HasActiveLaunch => _claudeSession.ActiveLaunchStartedMs != null;
 
         /// <summary>
         /// Shows that this pane's agent needs the Owner (task 51a8a17b): the header takes the state's
