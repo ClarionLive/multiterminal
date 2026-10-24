@@ -166,6 +166,42 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public async Task A_folder_reused_by_another_repository_does_not_poison_the_old_repositorys_list()
+        {
+            using var broker = new MessageBroker();
+            var svc = new WorktreeListService(_db, broker);
+
+            // The poll remembers that _worktree belongs to _repo.
+            Assert.Equal(2, (await svc.GetWorktreesForRepoAsync(_worktree, TimeSpan.FromMinutes(5))).Count);
+
+            // Within the remembered window, that path becomes a worktree of a different repository
+            // with three worktrees in all.
+            Git(_repo, "worktree", "remove", "--force", _worktree);
+            string other = Path.Combine(_root, "other");
+            Directory.CreateDirectory(other);
+            Git(other, "init", "-q");
+            Git(other, "config", "user.email", "t@example.com");
+            Git(other, "config", "user.name", "Test");
+            File.WriteAllText(Path.Combine(other, "b.txt"), "b");
+            Git(other, "add", "b.txt");
+            Git(other, "commit", "-q", "-m", "init");
+            Git(other, "worktree", "add", "-q", "-b", "y1", _worktree);
+            Git(other, "worktree", "add", "-q", "-b", "y2", Path.Combine(_root, "other-y2"));
+
+            // A poll that must recompute does not hand the other repository's list out under the
+            // old key...
+            Assert.Empty(await svc.GetWorktreesForRepoAsync(_worktree, TimeSpan.Zero));
+
+            // ...nor store it there: _repo's callers still get _repo's list.
+            var mine = await svc.GetWorktreesForRepoAsync(_repo, TimeSpan.FromMinutes(5));
+            Assert.Equal(2, mine.Count);
+            Assert.DoesNotContain(mine, e => e.Path.Replace('\\', '/').StartsWith(other.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase));
+
+            // The folder's key was forgotten, so the next poll finds its real repository.
+            Assert.Equal(3, (await svc.GetWorktreesForRepoAsync(_worktree, TimeSpan.Zero)).Count);
+        }
+
+        [Fact]
         public async Task A_caller_cannot_change_what_the_next_caller_is_handed()
         {
             using var broker = new MessageBroker();

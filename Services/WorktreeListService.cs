@@ -142,7 +142,8 @@ namespace MultiTerminal.Services
                     // Task.Run, so the entry is registered before the work can finish (a git that
                     // fails to start completes synchronously), and only this task removes it: a
                     // fresh caller's run must not drop a poll's entry.
-                    pending = Task.Run(() => ComputeAndStoreAsync(workingDir, key));
+                    bool keyIsRemembered = !string.IsNullOrEmpty(common);
+                    pending = Task.Run(() => ComputeAndStoreAsync(workingDir, key, keyIsRemembered));
                     _inFlight[key] = pending;
                     pending.ContinueWith(
                         done =>
@@ -194,11 +195,26 @@ namespace MultiTerminal.Services
             return common;
         }
 
-        private async Task<List<WorktreeEntry>> ComputeAndStoreAsync(string workingDir, string key)
+        private async Task<List<WorktreeEntry>> ComputeAndStoreAsync(string workingDir, string key, bool confirmKey = false)
         {
             // Aged from when the read FINISHED, so a slow read still gets its full reuse window;
             // ordered by when it started, so an older read finishing late never replaces a newer one.
             long generation = Interlocked.Increment(ref _generation);
+
+            // A remembered key can be up to RepoKeyMaxAge old. If the folder now belongs to another
+            // repository (re-cloned, or another repo's worktree put at the same path), its list
+            // must not be stored under, or handed to, the old repository's callers: forget the
+            // key and answer "no switcher" once; the next poll resolves it again.
+            if (confirmKey)
+            {
+                string actual = await ResolveCommonGitDirAsync(workingDir).ConfigureAwait(false);
+                if (!string.Equals(actual, key, StringComparison.OrdinalIgnoreCase))
+                {
+                    lock (_cacheLock) _repoKeys.Remove(CanonicalizePath(workingDir));
+                    return new List<WorktreeEntry>();
+                }
+            }
+
             var entries = await ComputeWorktreesAsync(workingDir).ConfigureAwait(false);
             lock (_cacheLock)
             {
