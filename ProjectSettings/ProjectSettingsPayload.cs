@@ -44,7 +44,7 @@ namespace MultiTerminal.ProjectSettings
             foreach (var name in ProjectSettingsService.EditableFields)
             {
                 string value = ProjectSettingsService.ReadField(project, name);
-                if (name == "isPinned" || name == "quietStart" || name == "gitAutoCommit" || name == "gitHubCheckOnStart")
+                if (ProjectSettingsService.IsBooleanField(name))
                     fields[name] = value == "true";
                 else
                     fields[name] = value ?? string.Empty;

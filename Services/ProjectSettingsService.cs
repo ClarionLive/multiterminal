@@ -149,6 +149,9 @@ namespace MultiTerminal.Services
             "isPinned", "quietStart", "gitAutoCommit", "gitHubCheckOnStart",
         };
 
+        /// <summary>Whether a field is a checkbox (sent to the page as a bool).</summary>
+        internal static bool IsBooleanField(string field) => BooleanFields.Contains(field);
+
         private readonly ProjectDatabase _db;
         private readonly ProjectService _projectService;
         private readonly IProjectSettingsHost _host;

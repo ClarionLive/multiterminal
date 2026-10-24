@@ -41,6 +41,7 @@ namespace MultiTerminal.Services
         // push after the database and broker are gone (pipeline Run 1).
         private readonly CancellationTokenSource _stopping = new CancellationTokenSource();
 
+        /// <param name="feed">Owned: disposed with this service.</param>
         /// <param name="gitHubTokenForAccount">Source control account id to its token, or null when
         /// the account is missing, not a GitHub account, or has no token.</param>
         /// <param name="createSuggestion">(title, description, projectId) to the new task's id, or null.</param>
@@ -113,7 +114,7 @@ namespace MultiTerminal.Services
         /// </summary>
         internal async Task<int> CheckProjectAsync(Project project, string reason)
         {
-            if (project == null || Volatile.Read(ref _disposed) != 0 || !_inFlight.TryAdd(project.Id, 0)) return 0;
+            if (string.IsNullOrEmpty(project?.Id) || Volatile.Read(ref _disposed) != 0 || !_inFlight.TryAdd(project.Id, 0)) return 0;
             try
             {
                 CancellationToken stopping;
@@ -303,7 +304,7 @@ namespace MultiTerminal.Services
         /// public repo, so the text is the issue opener's, not the Owner's).
         /// </summary>
         internal static string CardTitle(GitHubItem item) =>
-            $"GitHub {(item.IsPullRequest ? "PR" : "issue")} #{item.Number}: “{item.Title}”";
+            $"GitHub {(item.IsPullRequest ? Kind(item) : Kind(item).ToLowerInvariant())} #{item.Number}: “{item.Title}”";
 
         /// <summary>The marker every watch card's description starts with; agents treat what follows as data.</summary>
         internal const string UntrustedBanner = "EXTERNAL CONTENT FROM GITHUB, NOT FROM THE OWNER.";
@@ -344,6 +345,7 @@ namespace MultiTerminal.Services
             // cancel is safe; no new check starts once _disposed is set.
             _stopping.Cancel();
             _stopping.Dispose();
+            _feed.Dispose();
         }
     }
 }

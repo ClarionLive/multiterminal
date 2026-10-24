@@ -31,8 +31,11 @@ namespace MultiTerminal.Tests
             _db = new ProjectDatabase();
         }
 
+        private readonly List<GitHubWatchService> _services = new List<GitHubWatchService>();
+
         public void Dispose()
         {
+            foreach (var s in _services) s.Dispose();
             _db.Dispose();
             SQLiteConnection.ClearAllPools();
             foreach (var f in new[] { _dbPath, _dbPath + "-wal", _dbPath + "-shm" })
@@ -261,6 +264,8 @@ namespace MultiTerminal.Tests
             var github = new StubGitHub();
             var cards = new List<string>();
             var pushes = new List<string>();
+            // CA2000: the service owns the feed; the service is disposed with the test class.
+#pragma warning disable CA2000
             var service = new GitHubWatchService(
                 _db,
                 () => new[] { project },
@@ -269,6 +274,8 @@ namespace MultiTerminal.Tests
                 (title, description, projectId) => { cards.Add(title); return "task-" + cards.Count; },
                 (title, body) => pushes.Add(title + "|" + body),
                 _ => { });
+#pragma warning restore CA2000
+            _services.Add(service);
             return (service, github, cards, pushes, project);
         }
 
@@ -308,8 +315,18 @@ namespace MultiTerminal.Tests
             await service.CheckProjectAsync(project, "first");
             Assert.Single(cards);
 
-            // The claim table, not the baseline, is the last word on "new".
-            Assert.False(_db.TryClaimGitHubItem(project.Id, "o/r", 11, isPullRequest: false));
+            // Lose the baseline: put it back below #11, which the code never does itself.
+            using (var raw = new SQLiteConnection($"Data Source={_dbPath}"))
+            {
+                raw.Open();
+                using var cmd = new SQLiteCommand("UPDATE github_watch_state SET baseline_number = 10 WHERE project_id = @p", raw);
+                cmd.Parameters.AddWithValue("@p", project.Id);
+                Assert.Equal(1, cmd.ExecuteNonQuery());
+            }
+
+            // #11 is "above the baseline" again, but its claim stops a second card.
+            Assert.Equal(0, await service.CheckProjectAsync(project, "after the loss"));
+            Assert.Single(cards);
         }
 
         [Fact]
@@ -354,7 +371,10 @@ namespace MultiTerminal.Tests
 
             // The board refuses #22 once; #21 and #23 get cards.
             var failOnce = new HashSet<string> { "GitHub issue #22: “Item 22”" };
+            // CA2000: the service owns (and disposes) the feed.
+#pragma warning disable CA2000
             using var service2 = new GitHubWatchService(_db, () => new[] { project }, _ => "tok", new GitHubIssueFeed(github),
+#pragma warning restore CA2000
                 (title, description, projectId) =>
                 {
                     if (failOnce.Remove(title)) return null;

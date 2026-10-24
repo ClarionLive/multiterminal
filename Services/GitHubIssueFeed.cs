@@ -54,7 +54,7 @@ namespace MultiTerminal.Services
     /// newest first, which lists pull requests too (they carry a <c>pull_request</c> member). Everything
     /// in the response is untrusted and is validated or sanitized before anything else sees it.
     /// </summary>
-    public sealed class GitHubIssueFeed
+    public sealed class GitHubIssueFeed : IDisposable
     {
         /// <summary>Items per request.</summary>
         public const int PageSize = 50;
@@ -95,6 +95,8 @@ namespace MultiTerminal.Services
         /// <see cref="MaxPages"/> (then <see cref="GitHubFeedResult.Truncated"/>). With no baseline
         /// (the first check) one page is enough: only its newest number is used.
         /// </summary>
+        public void Dispose() => _http.Dispose();
+
         public async Task<GitHubFeedResult> FetchNewestAsync(GitHubRepoRef repo, string token, int? seenUpTo = null, CancellationToken cancellationToken = default)
         {
             var all = new List<GitHubItem>();

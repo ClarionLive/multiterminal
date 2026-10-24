@@ -375,6 +375,8 @@ namespace MultiTerminal
                 var broker = _mcpServer?.Broker;
                 if (db == null || broker == null || _gitHubWatch != null) return;
 
+                // CA2000: the watch service owns the feed it is given and disposes it in Dispose.
+#pragma warning disable CA2000
                 _gitHubWatch = new Services.GitHubWatchService(
                     db,
                     projects: () => db.GetAllRichProjects(),
@@ -397,6 +399,7 @@ namespace MultiTerminal
                     // severe alerts only).
                     push: (title, body) => { _ = SendOwnerNotificationAsync(title, body, "info", "GitHub", forcePush: false, logSource: "GitHubWatch"); },
                     log: message => _debugLogService?.Info("GitHubWatch", message));
+#pragma warning restore CA2000
                 _gitHubWatch.Start();
             }
             catch (Exception ex)
