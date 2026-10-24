@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using MultiTerminal.MCPServer.Services;
 
@@ -129,11 +130,30 @@ namespace MultiTerminal.Services
                     return CloneAll(hit.Entries);
                 }
 
-                if (!_inFlight.TryGetValue(key, out pending) || maxAge == null)
+                if (maxAge == null)
                 {
                     // A fresh caller never joins an older computation: it asked for now.
                     pending = ComputeAndStoreAsync(workingDir, key);
-                    if (maxAge != null) _inFlight[key] = pending;
+                }
+                else if (!_inFlight.TryGetValue(key, out pending))
+                {
+                    // Task.Run, so the entry is registered before the work can finish (a git that
+                    // fails to start completes synchronously), and only this task removes it: a
+                    // fresh caller's run must not drop a poll's entry.
+                    pending = Task.Run(() => ComputeAndStoreAsync(workingDir, key));
+                    _inFlight[key] = pending;
+                    pending.ContinueWith(
+                        done =>
+                        {
+                            lock (_cacheLock)
+                            {
+                                if (_inFlight.TryGetValue(key, out var current) && current == done)
+                                    _inFlight.Remove(key);
+                            }
+                        },
+                        CancellationToken.None,
+                        TaskContinuationOptions.None,
+                        TaskScheduler.Default);
                 }
             }
 
@@ -148,16 +168,17 @@ namespace MultiTerminal.Services
 
         private async Task<List<WorktreeEntry>> ComputeAndStoreAsync(string workingDir, string key)
         {
-            try
+            // Aged from when the read STARTED, and an older read finishing late never replaces a
+            // newer one.
+            DateTime startedUtc = DateTime.UtcNow;
+            var entries = await ComputeWorktreesAsync(workingDir).ConfigureAwait(false);
+            lock (_cacheLock)
             {
-                var entries = await ComputeWorktreesAsync(workingDir).ConfigureAwait(false);
-                lock (_cacheLock) _cache[key] = (DateTime.UtcNow, CloneAll(entries));
-                return entries;
+                if (!_cache.TryGetValue(key, out var existing) || existing.AtUtc <= startedUtc)
+                    _cache[key] = (startedUtc, CloneAll(entries));
             }
-            finally
-            {
-                lock (_cacheLock) _inFlight.Remove(key);
-            }
+
+            return entries;
         }
 
         /// <summary>Copies, so no caller can change what another caller is handed.</summary>
@@ -396,19 +417,6 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Runs <c>git rev-parse --git-common-dir</c> in <paramref name="workingDir"/>
-        /// and returns the canonical path to the shared git common directory
-        /// (the parent repository's <c>.git</c> directory). Two worktrees of
-        /// the same repository return identical values; worktrees of
-        /// different repositories return different values. Used as the
-        /// authoritative identity check for "is this entry actually a
-        /// worktree of THIS repo, or did porcelain metadata forge it?"
-        ///
-        /// <para>Returns empty on any failure (git not on PATH, not a repo,
-        /// timeout, hostile output) — callers must treat empty as "unknown
-        /// identity, reject the entry."</para>
-        /// </summary>
-        /// <summary>
         /// The common git dir of a working-tree ROOT, read from the same files
         /// <c>git rev-parse --git-common-dir</c> reads, in the same normalized form
         /// (<see cref="Path.GetFullPath(string)"/>, forward slashes, no trailing slash). Null when
@@ -464,6 +472,20 @@ namespace MultiTerminal.Services
             static string NormalizeGitDir(string p) => p.Replace('\\', '/').TrimEnd('/');
         }
 
+        /// <summary>
+        /// Returns the canonical path to the shared git common directory of
+        /// <paramref name="workingDir"/> (the parent repository's <c>.git</c> directory),
+        /// read from files by <see cref="TryReadCommonGitDir"/> when it can answer and
+        /// otherwise from <c>git rev-parse --git-common-dir</c>. Two worktrees of
+        /// the same repository return identical values; worktrees of
+        /// different repositories return different values. Used as the
+        /// authoritative identity check for "is this entry actually a
+        /// worktree of THIS repo, or did porcelain metadata forge it?"
+        ///
+        /// <para>Returns empty on any failure (git not on PATH, not a repo,
+        /// timeout, hostile output, a network path) — callers must treat empty as "unknown
+        /// identity, reject the entry."</para>
+        /// </summary>
         private async Task<string> ResolveCommonGitDirAsync(string workingDir)
         {
             if (string.IsNullOrEmpty(workingDir)) return string.Empty;
