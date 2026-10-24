@@ -110,6 +110,10 @@ body.light {
     outline: none;
 }
 
+/* `display: flex` above outranks the browser's own [hidden] rule, so without this a tab the script
+   hides (board mode's Not Active tab) stays on screen. */
+.tab-btn[hidden] { display: none; }
+
 .tab-btn:hover { color: var(--text-primary); }
 .tab-btn:focus-visible { outline: 1px dotted #3B82F6; outline-offset: -2px; }
 .tab-btn.active {

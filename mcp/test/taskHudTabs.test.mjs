@@ -53,6 +53,14 @@ test("an ordinary refresh leaves the tab the user chose", () => {
   assert.equal(nextHudTab("notactive", null, null, null), "notactive");
 });
 
+test("a tab button the script hides is really hidden (board mode's Not Active tab)", () => {
+  // .tab-btn sets display:flex, which outranks the browser's [hidden] rule; found in the Owner's live
+  // test of #54, where the board HUD still showed "Not Active 0". The stylesheet must restore it.
+  const style = src.slice(src.indexOf("<style>"), src.indexOf("</style>"));
+  assert.ok(style.length > 1000, "stylesheet extraction looks empty");
+  assert.match(style, /\.tab-btn\[hidden\]\s*\{\s*display:\s*none;?\s*\}/);
+});
+
 test("the HUD's own Activate button still lands on Active", () => {
   assert.equal(nextHudTab("notactive", "t1", "t2", "t2"), "active");
   // A pending request for another task does not force Active while t1 just stays active.
