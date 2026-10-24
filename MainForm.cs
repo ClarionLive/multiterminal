@@ -1860,6 +1860,18 @@ namespace MultiTerminal
                     // Must not abort the terminal-to-document mapping below.
                     _debugLogService?.Error("AttentionPanel", $"Card creation on register failed: {attnEx.Message}");
                 }
+
+                // A pane can learn its name here while an entry for that name already exists, which
+                // raises no attention change (task 51a8a17b, pipeline Run 2). Posted, so it runs on
+                // the UI thread after the mapping below.
+                try
+                {
+                    if (IsHandleCreated && !IsDisposed) BeginInvoke(new Action(RefreshPaneAttention));
+                }
+                catch (InvalidOperationException)
+                {
+                    // The form is tearing down; nothing to colour.
+                }
             }
 
             // Map the MCP terminal ID to the TerminalDocument. The decision lives in
@@ -7346,17 +7358,6 @@ namespace MultiTerminal
         }
 
         /// <summary>
-        /// Robust teardown when a terminal tab is CLOSED (removed from the dock). The tab-✕ is
-        /// supposed to Dispose the <see cref="TerminalDocument"/> — which kills the whole process
-        /// tree via the ConPTY Job Object AND unregisters the agent — but with WebView2-hosted docs
-        /// DockPanelSuite's close routing can skip Dispose, leaving the claude process alive and the
-        /// agent still registered (task a9435da9; the "James stayed on the roster after I closed his
-        /// tab" repro). ContentRemoved is the docking library's authoritative "content left the panel"
-        /// signal (it does NOT fire when a doc is merely floated or re-docked within the panel), so we
-        /// force the teardown here. Every step is idempotent with the normal Dispose/OnTerminalExited
-        /// paths, so this is safe even when the ordinary close DID run.
-        /// </summary>
-        /// <summary>
         /// Document tabs show icons (task 51a8a17b), and only a terminal's means something: its
         /// attention dot. Every other content is given the blank icon here, deliberately replacing
         /// the <c>SystemIcons.Application</c> each panel sets for itself, so a panel opened as a
@@ -7368,6 +7369,17 @@ namespace MultiTerminal
                 f.Icon = Services.PaneAttention.TabIcon(Services.PaneAttentionLevel.None, true);
         }
 
+        /// <summary>
+        /// Robust teardown when a terminal tab is CLOSED (removed from the dock). The tab-✕ is
+        /// supposed to Dispose the <see cref="TerminalDocument"/> — which kills the whole process
+        /// tree via the ConPTY Job Object AND unregisters the agent — but with WebView2-hosted docs
+        /// DockPanelSuite's close routing can skip Dispose, leaving the claude process alive and the
+        /// agent still registered (task a9435da9; the "James stayed on the roster after I closed his
+        /// tab" repro). ContentRemoved is the docking library's authoritative "content left the panel"
+        /// signal (it does NOT fire when a doc is merely floated or re-docked within the panel), so we
+        /// force the teardown here. Every step is idempotent with the normal Dispose/OnTerminalExited
+        /// paths, so this is safe even when the ordinary close DID run.
+        /// </summary>
         private void OnDockContentRemoved(object sender, DockContentEventArgs e)
         {
             if (!(e.Content is TerminalDocument doc))
