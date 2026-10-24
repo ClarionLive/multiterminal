@@ -58,6 +58,28 @@ namespace MultiTerminal.Tests
             Assert.True(enable > open, "The WebGL addon must be loaded after term.open(): it attaches to an opened terminal only.");
         }
 
+        // ---- Ctrl+wheel zoom is coalesced (Owner live test 2026-10-24: zooming felt flickery) -------
+
+        [Fact]
+        public void Wheel_zoom_draws_once_per_frame_and_fits_and_saves_once_when_the_wheel_stops()
+        {
+            string body = FunctionBody(ReadTerminalHtml(), "function scheduleWheelZoom(");
+
+            int frame = body.IndexOf("requestAnimationFrame(", StringComparison.Ordinal);
+            int settle = body.IndexOf("setTimeout(", StringComparison.Ordinal);
+            Assert.True(frame >= 0 && settle > frame, "The size should be drawn per frame, then settled on a timer.");
+            Assert.Contains("clearTimeout(wheelZoomSettleTimer)", body, StringComparison.Ordinal);
+
+            // The fit (inside setFontSize) and the save run only in the settle callback, after the timer.
+            string settled = body.Substring(settle);
+            Assert.Contains("setFontSize(size)", settled, StringComparison.Ordinal);
+            Assert.Contains("type: 'fontSizeChanged'", settled, StringComparison.Ordinal);
+            string perFrame = body.Substring(0, settle);
+            Assert.DoesNotContain("fitAddon.fit()", perFrame, StringComparison.Ordinal);
+            Assert.DoesNotContain("setFontSize(", perFrame, StringComparison.Ordinal);
+            Assert.DoesNotContain("sendToHost(", perFrame, StringComparison.Ordinal);
+        }
+
         private static string FunctionBody(string src, string anchor)
         {
             int start = src.IndexOf(anchor, StringComparison.Ordinal);
