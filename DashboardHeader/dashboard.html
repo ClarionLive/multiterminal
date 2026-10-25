@@ -170,13 +170,22 @@
     min-width: 0;
   }
 
-  .project-info { display: flex; align-items: center; gap: 10px; min-width: 0; }
-  .project-name { font-weight: 600; font-size: 14px; color: var(--text); white-space: nowrap; }
+  /* The project name and branch keep their width, so only the task title (which ellipsizes) absorbs
+     a narrow bar. When this box was allowed to shrink, its nowrap text was not clipped and painted
+     over the start of the task title (GH #70). Each part has its own cap and ellipsis instead, with
+     the full text in a tooltip. */
+  .project-info { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+  .project-name {
+    font-weight: 600; font-size: 14px; color: var(--text); white-space: nowrap;
+    max-width: 220px; overflow: hidden; text-overflow: ellipsis;
+  }
   .git-branch {
     display: flex; align-items: center; gap: 5px;
     font-size: 12px; color: var(--mauve);
     background: rgba(203,166,247,0.1); padding: 3px 10px; border-radius: 12px; white-space: nowrap;
+    max-width: 240px; overflow: hidden;
   }
+  #branchName { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   body.light .git-branch { background: rgba(136,57,239,0.1); }
 
   .task-info { display: flex; align-items: center; gap: 10px; min-width: 0; flex-shrink: 1; }
@@ -337,8 +346,12 @@
 
   // ============ Update Functions ============
   function updateProject(data) {
-    document.getElementById('projectName').textContent = data.name || '—';
-    document.getElementById('branchName').textContent = data.branch || '—';
+    const nameEl = document.getElementById('projectName');
+    nameEl.textContent = data.name || '—';
+    nameEl.title = data.name || '';
+    const branchEl = document.getElementById('branchName');
+    branchEl.textContent = data.branch || '—';
+    branchEl.title = data.branch || '';
   }
 
   function updateTask(data) {
