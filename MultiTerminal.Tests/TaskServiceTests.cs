@@ -106,6 +106,21 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void A_GitHub_watch_ticket_keeps_the_status_and_priority_the_watcher_asks_for()
+        {
+            // Task e4924065, pipeline Run 1: CreateTask turns a priority it does not know (it once got
+            // "high") into normal without a word, so the watcher's values are checked against the real
+            // validation here, not a stub.
+            var result = _svc.CreateTask("GitHub issue #1 in o/r", "d", "GitHub",
+                MultiTerminal.Services.GitHubWatchService.TicketStatus, MultiTerminal.Services.GitHubWatchService.TicketPriority);
+
+            var task = _svc.GetTask(result.TaskId);
+            Assert.Equal(MultiTerminal.Services.GitHubWatchService.TicketStatus, task.Status);
+            Assert.Equal(MultiTerminal.Services.GitHubWatchService.TicketPriority, task.Priority);
+            Assert.NotEqual("normal", task.Priority);
+        }
+
+        [Fact]
         public void CreateTask_PersistsAndCaches_AndBroadcasts()
         {
             var result = _svc.CreateTask("title", "desc", "diana");

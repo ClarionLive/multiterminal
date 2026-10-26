@@ -389,11 +389,12 @@ namespace MultiTerminal
                         return _sourceControlAccountService.GetToken(accountId);
                     },
                     feed: new Services.GitHubIssueFeed(),
-                    // To Do at high priority (task e4924065, Owner decision): issues and PRs are work to
-                    // resolve quickly, not suggestions to weigh.
+                    // To Do at the board's top priority (task e4924065, Owner decision): issues and PRs
+                    // are work to resolve quickly, not suggestions to weigh.
                     createTicket: (title, description, projectId) =>
                     {
-                        var created = broker.CreateTask(title, description, "GitHub", "todo", "high", projectId);
+                        var created = broker.CreateTask(title, description, "GitHub",
+                            Services.GitHubWatchService.TicketStatus, Services.GitHubWatchService.TicketPriority, projectId);
                         return created != null && created.Success ? created.TaskId : null;
                     },
                     // An ordinary notification, not forced: it follows the remote-mode gate like
@@ -605,6 +606,7 @@ namespace MultiTerminal
                 string docId = target.DocId;
                 string sessionId = target.CurrentClaudeSessionId;
                 DateTime? launchStarted = target.ActiveLaunchStartedUtc;
+                long launchGeneration = target.LaunchGeneration;
                 var terminal = broker.GetTerminal(name);
                 int? port = terminal?.ChannelPort;
                 if (!string.Equals(terminal?.DocId, docId, StringComparison.OrdinalIgnoreCase) || !HasSessionRoute(name, port)) return;
@@ -618,11 +620,16 @@ namespace MultiTerminal
                 {
                     try
                     {
-                        // Again, immediately before the write: still this pane's name, still at a pause.
-                        bool samePane = string.Equals(broker.GetTerminal(name)?.DocId, docId, StringComparison.OrdinalIgnoreCase);
+                        // Again, immediately before the write: still this pane's name, the same launch
+                        // (a relaunch under the same name and DocId is a different session; pipeline
+                        // Run 2), still at a pause, and every notice still queued (watching turned off
+                        // or the project deleted removes them).
+                        bool samePane = string.Equals(broker.GetTerminal(name)?.DocId, docId, StringComparison.OrdinalIgnoreCase)
+                                        && target.LaunchGeneration == launchGeneration;
                         bool stillPaused = Services.GitHubAgentNotices.IsPaneAtPause(
                             broker.AgentAttention?.Snapshot(), sessionId, name, launchStarted, DateTime.UtcNow);
-                        if (!samePane || !stillPaused) return;
+                        var stillQueued = db.GetGitHubPendingNotices(projectId).Select(n => n.Id).ToHashSet();
+                        if (!samePane || !stillPaused || !ids.All(stillQueued.Contains)) return;
 
                         bool ok = await DeliverToSessionAsync(name, port, Services.GitHubAgentNotices.SenderName, message).ConfigureAwait(false);
                         if (ok)

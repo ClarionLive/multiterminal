@@ -328,6 +328,9 @@ namespace MultiTerminal.Tests
             project.SourceControlAccountId = "acct";
             project.GitHubWatchMode = mode;
             _db.SaveRichProject(project);
+            // SaveRichProject does not write the watch columns (the form does, through
+            // UpdateProjectField), and the notice queue reads the stored mode (pipeline Run 2).
+            _db.UpdateProjectField(project.Id, "gitHubWatchMode", GitHubWatchSettings.ModeToStorage(mode));
 
             var github = new StubGitHub();
             var cards = new List<string>();
@@ -796,18 +799,20 @@ namespace MultiTerminal.Tests
         [Fact]
         public void Delivered_notices_are_removed_by_id_so_ones_queued_meanwhile_stay()
         {
-            _db.AddGitHubPendingNotices("p", "o/r", new[] { new ProjectDatabase.GitHubPendingNotice { Number = 1 } });
-            var sent = _db.GetGitHubPendingNotices("p").Select(n => n.Id).ToList();
-            _db.AddGitHubPendingNotices("p", "o/r", new[]
+            var (_, _, _, _, project) = Build(GitHubWatchMode.Board);
+            string p = project.Id;
+            _db.AddGitHubPendingNotices(p, "o/r", new[] { new ProjectDatabase.GitHubPendingNotice { Number = 1 } });
+            var sent = _db.GetGitHubPendingNotices(p).Select(n => n.Id).ToList();
+            _db.AddGitHubPendingNotices(p, "o/r", new[]
             {
                 new ProjectDatabase.GitHubPendingNotice { Number = 1 },   // already queued: not twice
                 new ProjectDatabase.GitHubPendingNotice { Number = 2, IsPullRequest = true },
             });
-            Assert.Equal(new[] { "p" }, _db.GetProjectsWithGitHubPendingNotices());
+            Assert.Equal(new[] { p }, _db.GetProjectsWithGitHubPendingNotices());
 
             _db.DeleteGitHubPendingNotices(sent);
 
-            var left = Assert.Single(_db.GetGitHubPendingNotices("p"));
+            var left = Assert.Single(_db.GetGitHubPendingNotices(p));
             Assert.Equal(2, left.Number);
             Assert.True(left.IsPullRequest);
         }
@@ -871,13 +876,46 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void An_untouched_agent_with_only_its_registration_placeholder_is_paused_after_a_quiet_minute()
+        {
+            // Pipeline Run 2: every MT terminal gets an Unknown placeholder at registration (again after
+            // a /clear), so the production "nothing observed yet" state is that placeholder, not an
+            // empty list. The quiet minute runs from the later of the launch and the placeholder.
+            var now = DateTime.UtcNow;
+            var launch = now.AddMinutes(-30);
+            var unknown = MultiTerminal.MCPServer.Services.AttentionState.Unknown;
+            MultiTerminal.MCPServer.Services.AgentAttentionEntry Placeholder(DateTime entered) =>
+                new MultiTerminal.MCPServer.Services.AgentAttentionEntry { SessionId = "CA", AgentName = "CA", State = unknown, EnteredAtUtc = entered };
+
+            Assert.True(GitHubAgentNotices.IsPaneAtPause(new[] { Placeholder(now.AddMinutes(-2)) }, null, "CA", launch, now));
+            Assert.False(GitHubAgentNotices.IsPaneAtPause(new[] { Placeholder(now.AddSeconds(-10)) }, null, "CA", launch, now));   // a /clear just now
+
+            // Unknown WITH observed activity is not a placeholder: it cannot be told apart from working.
+            var seen = Placeholder(now.AddMinutes(-2));
+            seen.LastActivityAtUtc = now.AddSeconds(-5);
+            Assert.False(GitHubAgentNotices.IsPaneAtPause(new[] { seen }, null, "CA", launch, now));
+        }
+
+        [Fact]
+        public void Nothing_is_queued_for_a_project_whose_watch_is_off()
+        {
+            // Pipeline Run 2: a check that passed its stale test just before the Owner turned the watch
+            // off must not refill the queue the Off just emptied.
+            var (_, _, _, _, project) = Build(GitHubWatchMode.Off);
+            _db.AddGitHubPendingNotices(project.Id, "o/r", new[] { new ProjectDatabase.GitHubPendingNotice { Number = 1 } });
+            Assert.Empty(_db.GetGitHubPendingNotices(project.Id));
+        }
+
+        [Fact]
         public void Turning_watching_off_or_deleting_the_project_drops_its_queued_notices()
         {
             var (_, _, _, _, project) = Build(GitHubWatchMode.Board);
             var other = Project.Create("Other", Path.GetTempPath());
             _db.SaveRichProject(other);
+            _db.UpdateProjectField(other.Id, "gitHubWatchMode", "notify");
             _db.AddGitHubPendingNotices(project.Id, "o/r", new[] { new ProjectDatabase.GitHubPendingNotice { Number = 1 } });
             _db.AddGitHubPendingNotices(other.Id, "o/x", new[] { new ProjectDatabase.GitHubPendingNotice { Number = 2 } });
+            Assert.Single(_db.GetGitHubPendingNotices(other.Id));   // so the delete below has something to drop
 
             Assert.True(_db.UpdateProjectField(project.Id, "gitHubWatchMode", "board"));   // still on: kept
             Assert.Single(_db.GetGitHubPendingNotices(project.Id));

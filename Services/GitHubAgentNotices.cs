@@ -22,9 +22,9 @@ namespace MultiTerminal.Services
         public const string SenderName = "GitHub watch";
 
         /// <summary>
-        /// How long a launch must have run with no attention entry at all before that silence counts as
-        /// a pause (pipeline Run 1). A first turn shows activity well within this; a quiet-start agent
-        /// waiting for the Owner shows none.
+        /// How long an agent must have shown nothing (no entry, or only its registration placeholder)
+        /// before that silence counts as a pause (pipeline Runs 1-2). A first turn shows activity well
+        /// within this; a quiet-start agent waiting for the Owner shows none.
         /// </summary>
         public static readonly TimeSpan QuietAfterLaunch = TimeSpan.FromMinutes(1);
 
@@ -53,12 +53,25 @@ namespace MultiTerminal.Services
         public static bool IsPaneAtPause(IEnumerable<AgentAttentionEntry> snapshot, string sessionId, string agentName,
             DateTime? launchStartedUtc, DateTime nowUtc)
         {
-            var states = (snapshot ?? Enumerable.Empty<AgentAttentionEntry>())
+            var owned = (snapshot ?? Enumerable.Empty<AgentAttentionEntry>())
                 .Where(e => e != null && Owns(e, sessionId, agentName))
-                .Select(e => e.State);
-            bool quiet = launchStartedUtc.HasValue && nowUtc - launchStartedUtc.Value >= QuietAfterLaunch;
-            return IsAtPause(states, quiet);
+                .ToList();
+
+            // Every MT terminal gets an Unknown placeholder when it registers (again after a /clear), so
+            // "no entry" is not what an untouched agent looks like: a placeholder with nothing observed
+            // is (pipeline Run 2). It counts as silence, and the quiet minute runs from the later of the
+            // launch and the placeholder, so a /clear restarts the clock.
+            var observed = owned.Where(e => !IsPlaceholder(e)).ToList();
+            if (observed.Count > 0) return IsAtPause(observed.Select(e => e.State));
+
+            DateTime? silentSince = launchStartedUtc;
+            foreach (var p in owned)
+                if (silentSince == null || p.EnteredAtUtc > silentSince.Value) silentSince = p.EnteredAtUtc;
+            return launchStartedUtc.HasValue && nowUtc - silentSince.Value >= QuietAfterLaunch;
         }
+
+        private static bool IsPlaceholder(AgentAttentionEntry e) =>
+            e.State == AttentionState.Unknown && e.LastActivityAtUtc == null;
 
         private static bool Owns(AgentAttentionEntry e, string sessionId, string agentName) =>
             (!string.IsNullOrEmpty(sessionId) && string.Equals(e.SessionId, sessionId, StringComparison.Ordinal))
@@ -79,7 +92,7 @@ namespace MultiTerminal.Services
             int tickets = notices.Count(n => !string.IsNullOrEmpty(n.TaskId));
             string what = Plural(notices.Count, "new item", "new items");
             lines.Add(tickets > 0
-                ? $"GitHub watch: {what} on GitHub for {projectName}; {Plural(tickets, "To Do ticket was", "To Do tickets were")} filed (high priority)."
+                ? $"GitHub watch: {what} on GitHub for {projectName}; {Plural(tickets, "To Do ticket was", "To Do tickets were")} filed (urgent)."
                 : $"GitHub watch: {what} on GitHub for {projectName}.");
 
             foreach (var n in notices)

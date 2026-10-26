@@ -12,8 +12,8 @@ namespace MultiTerminal.Services
     /// Watches each project's GitHub repository for new issues and pull requests (task 92eeeb47).
     /// MT does the polling, not an agent: no tokens are spent and no session is interrupted. Per
     /// project (the project form's Watch GitHub settings): check when a terminal for it starts and/or
-    /// on an interval; on new items, notify the Owner and, in Board mode, add one To Do ticket (high
-    /// priority) per item (task e4924065; phase 1 made Suggestion cards). New items are also queued
+    /// on an interval; on new items, notify the Owner and, in Board mode, add one To Do ticket (urgent,
+    /// the board's top priority) per item (task e4924065; phase 1 made Suggestion cards). New items are also queued
     /// for the project's agent (<see cref="NoticesQueued"/>), and each check refreshes the repo's open
     /// issue and PR counts for the terminal headers (<see cref="CountsChanged"/>). The first check for
     /// a repo only records a baseline, so turning watching on does not dump the existing backlog on
@@ -23,6 +23,16 @@ namespace MultiTerminal.Services
     {
         /// <summary>How often the timer looks for projects whose interval has come round.</summary>
         internal static readonly TimeSpan TickPeriod = TimeSpan.FromMinutes(1);
+
+        /// <summary>The column a Board-mode ticket starts in (task e4924065, Owner decision).</summary>
+        public const string TicketStatus = "todo";
+
+        /// <summary>
+        /// The priority a Board-mode ticket gets: the board's highest. The Owner asked for "high";
+        /// the board has urgent / normal / low, and TaskService.CreateTask silently turns any other
+        /// value into normal (pipeline Run 1), so it is urgent.
+        /// </summary>
+        public const string TicketPriority = "urgent";
 
         /// <summary>A terminal start checks again only after this, so opening several panes at once is one check.</summary>
         internal static readonly TimeSpan OnStartDebounce = TimeSpan.FromMinutes(5);
