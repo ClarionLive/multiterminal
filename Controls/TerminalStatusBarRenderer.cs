@@ -293,6 +293,7 @@ namespace MultiTerminal.Controls
                             SendMessage($"remoteMode:{(_lastRemoteMode.Value ? "true" : "false")}");
                         SendMessage($"projectSettings:{(_lastProjectSettingsAvailable ? "true" : "false")}");
                         SendMessage($"attention:{_lastAttention}");
+                        SendMessage($"github:{_lastGitHubJson}");
 
                         Ready?.Invoke(this, EventArgs.Empty);
                     }
@@ -333,6 +334,19 @@ namespace MultiTerminal.Controls
                     {
                         _debugLogService?.Trace("TerminalStatusBar", "HUD toggle clicked");
                         HudToggleRequested?.Invoke(this, EventArgs.Empty);
+                    }
+                    else if (type == "openGitHub")
+                    {
+                        // Only the target's NAME crosses from the page; MainForm builds the URL from the
+                        // project's own repo (GitHubRepoRef.WebUrl), so the page cannot open anything else.
+                        string target = root.TryGetProperty("target", out var tEl) && tEl.ValueKind == JsonValueKind.String ? tEl.GetString() : null;
+                        if (target == "repo" || target == "issues" || target == "pulls")
+                            GitHubOpenRequested?.Invoke(this, target);
+                    }
+                    else if (type == "contentHeight")
+                    {
+                        if (root.TryGetProperty("height", out var hEl) && hEl.ValueKind == JsonValueKind.Number && hEl.TryGetDouble(out double cssHeight))
+                            GrowToFit(cssHeight);
                     }
                     else if (type == "openFolder")
                     {
@@ -511,6 +525,37 @@ namespace MultiTerminal.Controls
             _lastProjectSettingsAvailable = available;
             if (_isInitialized)
                 SendMessage($"projectSettings:{(available ? "true" : "false")}");
+        }
+
+        private string _lastGitHubJson = "null";
+
+        /// <summary>A GitHub band link was clicked: "repo", "issues" or "pulls" (task e4924065).</summary>
+        public event EventHandler<string> GitHubOpenRequested;
+
+        /// <summary>
+        /// Shows the project's GitHub band (task e4924065): the repo as <c>owner/name</c>, with its open
+        /// issue and PR counts when both are known. A null repo hides the band. Remembered and replayed
+        /// on 'ready'.
+        /// </summary>
+        public void SetGitHub(string repoFullName, int? openIssues, int? openPullRequests)
+        {
+            _lastGitHubJson = string.IsNullOrEmpty(repoFullName)
+                ? "null"
+                : JsonSerializer.Serialize(new { repo = repoFullName, issues = openIssues, prs = openPullRequests });
+            if (_isInitialized)
+                SendMessage($"github:{_lastGitHubJson}");
+        }
+
+        /// <summary>
+        /// Makes the bar tall enough for its rows when a new one (the GitHub band) appears. Grows only:
+        /// a height the Owner dragged larger is kept, and nothing ever shrinks it below that.
+        /// </summary>
+        private void GrowToFit(double cssHeight)
+        {
+            if (cssHeight <= 0 || cssHeight > 600) return;
+            double scale = (_webView?.ZoomFactor ?? 1.0) * DeviceDpi / 96.0;
+            int needed = (int)Math.Ceiling(cssHeight * scale) + 2;
+            if (needed > Height) Height = needed;
         }
 
         private string _lastAttention = "none";

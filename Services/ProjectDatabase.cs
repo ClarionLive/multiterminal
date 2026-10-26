@@ -314,7 +314,27 @@ namespace MultiTerminal.Services
                     last_checked_at DATETIME,
                     last_success_at DATETIME,
                     last_error TEXT,
+                    -- Open issue and PR counts at the last check that could read them (task e4924065),
+                    -- shown in each of the project's terminal headers. NULL = not known yet.
+                    open_issues INTEGER,
+                    open_prs INTEGER,
+                    counts_at DATETIME,
                     PRIMARY KEY (project_id, repo)
+                );
+
+                -- New issues/PRs waiting to be told to the project's agent (task e4924065). A row is
+                -- deleted once delivered; it waits while no agent pane for the project is open or the
+                -- agent is mid-turn.
+                CREATE TABLE IF NOT EXISTS github_watch_pending (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id TEXT NOT NULL,
+                    repo TEXT NOT NULL,
+                    number INTEGER NOT NULL,
+                    is_pr INTEGER NOT NULL DEFAULT 0,
+                    task_id TEXT,
+                    url TEXT,
+                    created_at DATETIME NOT NULL,
+                    UNIQUE (project_id, repo, number)
                 );
 
                 -- One row per issue/PR the watcher reported; the INSERT OR IGNORE on it is what
@@ -346,6 +366,23 @@ namespace MultiTerminal.Services
 
             using var command = new SQLiteCommand(createSql, _connection);
             command.ExecuteNonQuery();
+
+            // The open counts (task e4924065) came after the table shipped (task 92eeeb47).
+            var stateColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using (var info = new SQLiteCommand("SELECT name FROM pragma_table_info('github_watch_state')", _connection))
+            using (var reader = info.ExecuteReader())
+            {
+                while (reader.Read()) stateColumns.Add(reader.GetString(0));
+            }
+            foreach (var (name, definition) in new[] { ("open_issues", "INTEGER"), ("open_prs", "INTEGER"), ("counts_at", "DATETIME") })
+            {
+                if (stateColumns.Contains(name)) continue;
+                // CA2100: name/definition come from the literal list above; no input reaches this SQL.
+#pragma warning disable CA2100
+                using var alter = new SQLiteCommand($"ALTER TABLE github_watch_state ADD COLUMN {name} {definition}", _connection);
+#pragma warning restore CA2100
+                alter.ExecuteNonQuery();
+            }
         }
 
         #region Project Operations (MCPServer.Models.Project — used by MessageBroker)
@@ -1089,6 +1126,27 @@ namespace MultiTerminal.Services
 
             /// <summary>The last attempt's error; null when it worked.</summary>
             public string LastError { get; set; }
+
+            /// <summary>Open issues (not PRs) at the last count; null = not known (task e4924065).</summary>
+            public int? OpenIssues { get; set; }
+
+            /// <summary>Open pull requests at the last count; null = not known.</summary>
+            public int? OpenPullRequests { get; set; }
+        }
+
+        /// <summary>One new issue/PR waiting to be told to the project's agent (task e4924065).</summary>
+        public sealed class GitHubPendingNotice
+        {
+            public long Id { get; set; }
+            public string Repo { get; set; }
+            public int Number { get; set; }
+            public bool IsPullRequest { get; set; }
+
+            /// <summary>The To Do ticket made for it (Board mode), or null (Notify mode).</summary>
+            public string TaskId { get; set; }
+
+            /// <summary>An https://github.com/ link, or null.</summary>
+            public string Url { get; set; }
         }
 
         /// <summary>
@@ -1100,7 +1158,7 @@ namespace MultiTerminal.Services
             lock (_dbLock)
             {
                 using var command = new SQLiteCommand(
-                    "SELECT baseline_number, last_checked_at, last_success_at, last_error FROM github_watch_state WHERE project_id = @p AND repo = @r",
+                    "SELECT baseline_number, last_checked_at, last_success_at, last_error, open_issues, open_prs FROM github_watch_state WHERE project_id = @p AND repo = @r",
                     _connection);
                 command.Parameters.AddWithValue("@p", projectId);
                 command.Parameters.AddWithValue("@r", repo);
@@ -1113,7 +1171,118 @@ namespace MultiTerminal.Services
                 row.LastCheckedUtc = reader.IsDBNull(1) ? (DateTime?)null : reader.GetDateTime(1).ToUniversalTime();
                 row.LastSuccessUtc = reader.IsDBNull(2) ? (DateTime?)null : reader.GetDateTime(2).ToUniversalTime();
                 row.LastError = reader.IsDBNull(3) ? null : reader.GetString(3);
+                row.OpenIssues = reader.IsDBNull(4) ? (int?)null : reader.GetInt32(4);
+                row.OpenPullRequests = reader.IsDBNull(5) ? (int?)null : reader.GetInt32(5);
                 return row;
+            }
+        }
+
+        /// <summary>
+        /// Stores a repo's open issue and PR counts (task e4924065) on the state row a check has just
+        /// recorded. No row (the check never recorded one) changes nothing.
+        /// </summary>
+        public void RecordGitHubOpenCounts(string projectId, string repo, int openIssues, int openPullRequests)
+        {
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand(
+                    "UPDATE github_watch_state SET open_issues = @i, open_prs = @pr, counts_at = @at WHERE project_id = @p AND repo = @r",
+                    _connection);
+                command.Parameters.AddWithValue("@p", projectId);
+                command.Parameters.AddWithValue("@r", repo);
+                command.Parameters.AddWithValue("@i", openIssues);
+                command.Parameters.AddWithValue("@pr", openPullRequests);
+                command.Parameters.AddWithValue("@at", DateTime.UtcNow);
+                command.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// Queues new issues/PRs to be told to the project's agent (task e4924065). An item already
+        /// queued is not queued twice.
+        /// </summary>
+        public void AddGitHubPendingNotices(string projectId, string repo, IEnumerable<GitHubPendingNotice> notices)
+        {
+            if (notices == null) return;
+            // GATE BEFORE _dbLock, the SqliteWriteGate lock-ordering rule.
+            using var writeGate = SqliteWriteGate.EnterWrite("ProjectDatabase.AddGitHubPendingNotices", projectId);
+            lock (_dbLock)
+            {
+                using var tx = _connection.BeginTransaction();
+                foreach (var n in notices)
+                {
+                    using var command = new SQLiteCommand(@"
+                        INSERT OR IGNORE INTO github_watch_pending (project_id, repo, number, is_pr, task_id, url, created_at)
+                        VALUES (@p, @r, @n, @pr, @t, @u, @at)", _connection, tx);
+                    command.Parameters.AddWithValue("@p", projectId);
+                    command.Parameters.AddWithValue("@r", repo);
+                    command.Parameters.AddWithValue("@n", n.Number);
+                    command.Parameters.AddWithValue("@pr", n.IsPullRequest ? 1 : 0);
+                    command.Parameters.AddWithValue("@t", (object)n.TaskId ?? DBNull.Value);
+                    command.Parameters.AddWithValue("@u", (object)n.Url ?? DBNull.Value);
+                    command.Parameters.AddWithValue("@at", DateTime.UtcNow);
+                    command.ExecuteNonQuery();
+                }
+                tx.Commit();
+            }
+        }
+
+        /// <summary>The project's queued notices, oldest first.</summary>
+        public List<GitHubPendingNotice> GetGitHubPendingNotices(string projectId)
+        {
+            var list = new List<GitHubPendingNotice>();
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand(
+                    "SELECT id, repo, number, is_pr, task_id, url FROM github_watch_pending WHERE project_id = @p ORDER BY repo, number",
+                    _connection);
+                command.Parameters.AddWithValue("@p", projectId);
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                {
+                    list.Add(new GitHubPendingNotice
+                    {
+                        Id = reader.GetInt64(0),
+                        Repo = reader.GetString(1),
+                        Number = reader.GetInt32(2),
+                        IsPullRequest = reader.GetInt32(3) != 0,
+                        TaskId = reader.IsDBNull(4) ? null : reader.GetString(4),
+                        Url = reader.IsDBNull(5) ? null : reader.GetString(5),
+                    });
+                }
+            }
+            return list;
+        }
+
+        /// <summary>The projects that have queued notices.</summary>
+        public List<string> GetProjectsWithGitHubPendingNotices()
+        {
+            var list = new List<string>();
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand("SELECT DISTINCT project_id FROM github_watch_pending", _connection);
+                using var reader = command.ExecuteReader();
+                while (reader.Read()) list.Add(reader.GetString(0));
+            }
+            return list;
+        }
+
+        /// <summary>Removes notices that were delivered, by id, so ones queued meanwhile stay.</summary>
+        public void DeleteGitHubPendingNotices(IEnumerable<long> ids)
+        {
+            if (ids == null) return;
+            // GATE BEFORE _dbLock, the SqliteWriteGate lock-ordering rule.
+            using var writeGate = SqliteWriteGate.EnterWrite("ProjectDatabase.DeleteGitHubPendingNotices", null);
+            lock (_dbLock)
+            {
+                using var tx = _connection.BeginTransaction();
+                foreach (long id in ids)
+                {
+                    using var command = new SQLiteCommand("DELETE FROM github_watch_pending WHERE id = @id", _connection, tx);
+                    command.Parameters.AddWithValue("@id", id);
+                    command.ExecuteNonQuery();
+                }
+                tx.Commit();
             }
         }
 

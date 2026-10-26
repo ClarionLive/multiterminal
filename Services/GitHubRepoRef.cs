@@ -72,5 +72,22 @@ namespace MultiTerminal.Services
 
             return new GitHubRepoRef(owner, name);
         }
+
+        /// <summary>
+        /// The page a header link opens (task e4924065): <c>"repo"</c>, <c>"issues"</c> or
+        /// <c>"pulls"</c> of this repository on github.com, anything else null. The header page names
+        /// only the target, never a URL, so a click can open nothing but these three pages.
+        /// </summary>
+        public string WebUrl(string target)
+        {
+            string root = "https://github.com/" + Owner + "/" + Name;
+            switch (target)
+            {
+                case "repo": return root;
+                case "issues": return root + "/issues";
+                case "pulls": return root + "/pulls";
+                default: return null;
+            }
+        }
     }
 }

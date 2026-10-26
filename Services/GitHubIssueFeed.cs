@@ -114,6 +114,86 @@ namespace MultiTerminal.Services
             return GitHubFeedResult.Success(all, truncated: true);
         }
 
+        /// <summary>
+        /// The repository's open issues and open pull requests (task e4924065), or null when either
+        /// request fails. GitHub's <c>open_issues_count</c> counts both together, so the PR count comes
+        /// from a search (<c>is:pr is:open</c>, its <c>total_count</c>) and issues are the rest.
+        /// </summary>
+        public async Task<(int Issues, int PullRequests)?> FetchOpenCountsAsync(GitHubRepoRef repo, string token, CancellationToken cancellationToken = default)
+        {
+            if (repo == null || string.IsNullOrWhiteSpace(token)) return null;
+            string owner = Uri.EscapeDataString(repo.Owner), name = Uri.EscapeDataString(repo.Name);
+
+            byte[] repoBody = await GetBodyAsync($"https://api.github.com/repos/{owner}/{name}", token, cancellationToken).ConfigureAwait(false);
+            int? openTotal = ParseIntProperty(repoBody, "open_issues_count");
+            if (openTotal == null) return null;
+
+            // The query's own characters (owner, name) are GitHub's [A-Za-z0-9._-], checked by GitHubRepoRef.
+            string query = Uri.EscapeDataString($"repo:{repo.Owner}/{repo.Name} is:pr is:open");
+            byte[] searchBody = await GetBodyAsync($"https://api.github.com/search/issues?q={query}&per_page=1", token, cancellationToken).ConfigureAwait(false);
+            int? openPrs = ParseIntProperty(searchBody, "total_count");
+            if (openPrs == null) return null;
+
+            return OpenCounts(openTotal.Value, openPrs.Value);
+        }
+
+        /// <summary>Pure: issues = the combined count less the PRs, never below zero (the two reads are not atomic).</summary>
+        internal static (int Issues, int PullRequests) OpenCounts(int openIssuesAndPrs, int openPrs)
+        {
+            int prs = Math.Max(0, openPrs);
+            return (Math.Max(0, openIssuesAndPrs - prs), prs);
+        }
+
+        /// <summary>Pure: a non-negative integer top-level property of a JSON object, or null.</summary>
+        internal static int? ParseIntProperty(byte[] body, string property)
+        {
+            if (body == null) return null;
+            try
+            {
+                using var doc = JsonDocument.Parse(body);
+                return doc.RootElement.ValueKind == JsonValueKind.Object
+                       && doc.RootElement.TryGetProperty(property, out var v)
+                       && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out int n) && n >= 0
+                    ? n : (int?)null;
+            }
+            catch (JsonException)
+            {
+                return null;
+            }
+        }
+
+        /// <summary>One authorized GET; the body on a 2xx answer, else null. Same limits as the issue list.</summary>
+        private async Task<byte[]> GetBodyAsync(string url, string token, CancellationToken cancellationToken)
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(RequestTimeout);
+            try
+            {
+                using var request = NewRequest(url, token);
+                using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode || response.Content.Headers.ContentLength > MaxResponseBytes) return null;
+                return await ReadCappedAsync(response.Content, timeout.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                return null;
+            }
+            catch (HttpRequestException)
+            {
+                return null;
+            }
+        }
+
+        private static HttpRequestMessage NewRequest(string url, string token)
+        {
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            request.Headers.UserAgent.ParseAdd("MultiTerminal");
+            request.Headers.Accept.ParseAdd("application/vnd.github+json");
+            request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
+            return request;
+        }
+
         private async Task<GitHubFeedResult> FetchPageAsync(GitHubRepoRef repo, string token, int page, CancellationToken cancellationToken)
         {
             if (repo == null) return GitHubFeedResult.Fail("No GitHub repository.");
@@ -128,12 +208,7 @@ namespace MultiTerminal.Services
             timeout.CancelAfter(RequestTimeout);
             try
             {
-                using var request = new HttpRequestMessage(HttpMethod.Get, url);
-                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-                request.Headers.UserAgent.ParseAdd("MultiTerminal");
-                request.Headers.Accept.ParseAdd("application/vnd.github+json");
-                request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
-
+                using var request = NewRequest(url, token);
                 using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
                 if (response.StatusCode == HttpStatusCode.Unauthorized)
                     return GitHubFeedResult.Fail("GitHub refused the account's token (401). Check the source control account.");

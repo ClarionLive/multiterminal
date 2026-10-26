@@ -419,6 +419,22 @@ namespace MultiTerminal.Docking
         public event EventHandler<string> ProjectSettingsRequested;
 
         /// <summary>
+        /// A link on the header's GitHub band was clicked (task e4924065): which page ("repo", "issues"
+        /// or "pulls") of which project's repo. MainForm builds the URL and opens the browser.
+        /// </summary>
+        public event EventHandler<GitHubLinkRequestedEventArgs> GitHubLinkRequested;
+
+        /// <summary>
+        /// <see cref="SettingsProjectId"/> took a new value (task e4924065), so MainForm can show that
+        /// project's GitHub band. Carries the new id, null when the pane left every project.
+        /// </summary>
+        public event EventHandler<string> SettingsProjectChanged;
+
+        /// <summary>Shows or hides the header's GitHub band (task e4924065). A null repo hides it.</summary>
+        public void SetGitHubBand(string repoFullName, int? openIssues, int? openPullRequests) =>
+            _statusBar?.SetGitHub(repoFullName, openIssues, openPullRequests);
+
+        /// <summary>
         /// The project the status bar's gear opens: the registered project containing the pane's folder,
         /// else the project it was launched for. Null when neither exists, and the gear is then disabled.
         /// </summary>
@@ -879,6 +895,11 @@ namespace MultiTerminal.Docking
             {
                 if (!string.IsNullOrEmpty(SettingsProjectId))
                     ProjectSettingsRequested?.Invoke(this, SettingsProjectId);
+            };
+            _statusBar.GitHubOpenRequested += (s, target) =>
+            {
+                if (!string.IsNullOrEmpty(SettingsProjectId))
+                    GitHubLinkRequested?.Invoke(this, new GitHubLinkRequestedEventArgs(SettingsProjectId, target));
             };
             _statusBar.OpenFolderRequested += OnOpenFolderRequested;
             _statusBar.HudToggleRequested += (s, e) =>
@@ -3338,8 +3359,11 @@ namespace MultiTerminal.Docking
             }
             HeaderProjectName = projectName;
             HeaderWorkingOnProject = workingOn;
+            string previousSettingsProjectId = SettingsProjectId;
             SettingsProjectId = projectId ?? _launchProjectId;
             _statusBar.SetProjectSettingsAvailable(!string.IsNullOrEmpty(SettingsProjectId));
+            if (!string.Equals(previousSettingsProjectId, SettingsProjectId, StringComparison.Ordinal))
+                SettingsProjectChanged?.Invoke(this, SettingsProjectId);
 
             _debugLogService?.Trace("TerminalDocument", $"UpdateStatusBar: Calling _statusBar.UpdateStatus with:");
             _debugLogService?.Trace("TerminalDocument", $"  - terminalName: '{terminalName}'");

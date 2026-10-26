@@ -82,7 +82,9 @@
         .status-bar-container {
             display: flex;
             flex-direction: column;
-            height: 140px;
+            /* A minimum, not a fixed height: the GitHub band (task e4924065) adds a row, and the
+               container must grow with it so the ResizeObserver below can report the new height. */
+            min-height: 140px;
             background: var(--bg-card);
             border-bottom: 1px solid var(--border-color);
             transition: background 0.3s ease, box-shadow 0.3s ease;
@@ -541,9 +543,52 @@
         .tok-cost { color: var(--ctx-green); }
         .tok-burn { color: var(--text-muted); }
 
-        /* Hidden state for rows 2-3 before data arrives */
+        /* ============================================
+           Row 4: GitHub band (task e4924065): the project's repo, a link that opens it, and its
+           open issue/PR counts. C# builds every URL; the page only names which page to open.
+           ============================================ */
+        .row-github {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 0 12px;
+            min-height: 28px;
+            border-top: 1px solid var(--border-color);
+            font-size: var(--font-size-xs);
+            font-family: 'Cascadia Code', 'Consolas', monospace;
+            color: var(--text-secondary);
+            white-space: nowrap;
+            overflow: hidden;
+        }
+
+        .github-mark {
+            flex-shrink: 0;
+            width: 14px;
+            height: 14px;
+            fill: var(--text-muted);
+        }
+
+        .github-link {
+            background: none;
+            border: none;
+            padding: 0;
+            font: inherit;
+            color: var(--text-primary);
+            cursor: pointer;
+            text-decoration: none;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .github-link:hover { text-decoration: underline; }
+        .github-link.count { color: var(--text-secondary); flex-shrink: 0; }
+        .github-sep { color: var(--text-muted); flex-shrink: 0; }
+        .github-counts.hidden { display: none; }
+
+        /* Hidden state for rows 2-4 before data arrives */
         .row-folder.hidden,
-        .row-statusline.hidden {
+        .row-statusline.hidden,
+        .row-github.hidden {
             display: none;
         }
 
@@ -609,6 +654,18 @@
                     <line x1="10" y1="14" x2="21" y2="3"/>
                 </svg>
             </button>
+        </div>
+
+        <!-- Row 4 in function, shown under the folder row: the project's GitHub repo (task e4924065) -->
+        <div class="row-github hidden" id="row-github">
+            <svg class="github-mark" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+            <button class="github-link" id="github-repo" title="Open the repository on GitHub" onclick="onGitHubClick('repo')"></button>
+            <span class="github-counts hidden" id="github-counts">
+                <span class="github-sep">·</span>
+                <button class="github-link count" id="github-issues" title="Open the issues on GitHub" onclick="onGitHubClick('issues')"></button>
+                <span class="github-sep">·</span>
+                <button class="github-link count" id="github-prs" title="Open the pull requests on GitHub" onclick="onGitHubClick('pulls')"></button>
+            </span>
         </div>
 
         <!-- Row 3: Status Line (model / context / quota) -->
@@ -683,6 +740,40 @@
                 el.classList.remove('remote');
                 valEl.textContent = 'Local';
             }
+        }
+
+        // GitHub band (task e4924065). Text only, through textContent: the repo name comes from the
+        // project's settings and the counts are numbers.
+        function setGitHub(info) {
+            var row = document.getElementById('row-github');
+            if (!info || !info.repo) { row.classList.add('hidden'); return; }
+            document.getElementById('github-repo').textContent = info.repo + ' ↗';
+            var counts = document.getElementById('github-counts');
+            if (typeof info.issues === 'number' && typeof info.prs === 'number') {
+                document.getElementById('github-issues').textContent = info.issues + (info.issues === 1 ? ' issue' : ' issues');
+                document.getElementById('github-prs').textContent = info.prs + (info.prs === 1 ? ' PR open' : ' PRs open');
+                counts.classList.remove('hidden');
+            } else {
+                counts.classList.add('hidden');
+            }
+            row.classList.remove('hidden');
+        }
+
+        // The GitHub band is a fourth row, and must not be clipped by a bar the Owner sized for three:
+        // report the content's height whenever it changes, and C# grows the bar if it is shorter
+        // (never shrinks it).
+        (function () {
+            var container = document.querySelector('.status-bar-container');
+            if (!container || typeof ResizeObserver === 'undefined') return;
+            var last = 0;
+            new ResizeObserver(function () {
+                var h = Math.ceil(container.scrollHeight);
+                if (h !== last) { last = h; postMessage('contentHeight', { height: h }); }
+            }).observe(container);
+        })();
+
+        function onGitHubClick(target) {
+            postMessage('openGitHub', { target: target });
         }
 
         function onOpenFolderClick() {
@@ -998,6 +1089,8 @@
                         setProjectSettingsAvailable(data.split(':')[1] === 'true');
                     } else if (data.startsWith('attention:')) {
                         document.body.setAttribute('data-attention', data.substring(10));
+                    } else if (data.startsWith('github:')) {
+                        setGitHub(JSON.parse(data.substring(7)));
                     }
                 }
             });

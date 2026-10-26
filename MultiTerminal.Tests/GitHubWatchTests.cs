@@ -286,15 +286,31 @@ namespace MultiTerminal.Tests
             /// <summary>Runs while the request is "out", to change state mid-check.</summary>
             public Action OnRequest { get; set; }
 
+            /// <summary>The body of GET /repos/o/r (task e4924065); the default carries no count.</summary>
+            public string RepoBody { get; set; } = "{}";
+
+            /// <summary>The body of GET /search/issues (the open PR count).</summary>
+            public string SearchBody { get; set; } = "{}";
+
+            /// <summary>Only the issue-list requests, without the count reads.</summary>
+            public List<HttpRequestMessage> IssueRequests =>
+                Requests.Where(r => r.RequestUri.AbsolutePath.EndsWith("/issues", StringComparison.Ordinal)).ToList();
+
             protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
             {
                 Requests.Add(request);
                 OnRequest?.Invoke();
+                string path = request.RequestUri.AbsolutePath;
+                if (path == "/search/issues") return Respond(SearchBody);
+                if (!path.EndsWith("/issues", StringComparison.Ordinal)) return Respond(RepoBody);
                 var query = System.Web.HttpUtility.ParseQueryString(request.RequestUri.Query);
                 int page = int.TryParse(query["page"], out var p) ? p : 1;
                 string body = page == 1 ? Body : (MorePages.TryGetValue(page, out var b) ? b : "[]");
-                return Task.FromResult(new HttpResponseMessage(Status) { Content = new StringContent(body, Encoding.UTF8, "application/json") });
+                return Respond(body);
             }
+
+            private Task<HttpResponseMessage> Respond(string body) =>
+                Task.FromResult(new HttpResponseMessage(Status) { Content = new StringContent(body, Encoding.UTF8, "application/json") });
         }
 
         private static string Range(int newest, int oldest) =>
@@ -351,7 +367,7 @@ namespace MultiTerminal.Tests
             Assert.Equal(2, cards.Count);
             Assert.Single(pushes);
 
-            var request = github.Requests.Last();
+            var request = github.IssueRequests.Last();
             Assert.Equal("api.github.com", request.RequestUri.Host);
             Assert.Equal("/repos/o/r/issues", request.RequestUri.AbsolutePath);
             Assert.Equal("tok", request.Headers.Authorization?.Parameter);
@@ -410,7 +426,7 @@ namespace MultiTerminal.Tests
 
             await service.CheckProjectAsync(project, "burst");
             Assert.Equal(GitHubIssueFeed.PageSize * GitHubIssueFeed.MaxPages, cards.Count);
-            Assert.Equal(GitHubIssueFeed.MaxPages + 1, github.Requests.Count);   // the baseline check + the cap, no more
+            Assert.Equal(GitHubIssueFeed.MaxPages + 1, github.IssueRequests.Count);   // the baseline check + the cap, no more
             Assert.Contains("older ones were not added", pushes.Single());
         }
 
@@ -661,6 +677,214 @@ namespace MultiTerminal.Tests
             Assert.Empty(cards);
             Assert.Empty(pushes);
             Assert.Equal(7, _db.GetGitHubWatchState(project.Id, "o/r").Baseline);
+        }
+
+        // ── Phase 2 (task e4924065): counts, the header link, the agent's notices ──
+
+        [Theory]
+        [InlineData("repo", "https://github.com/o/r")]
+        [InlineData("issues", "https://github.com/o/r/issues")]
+        [InlineData("pulls", "https://github.com/o/r/pulls")]
+        [InlineData("issues/1", null)]
+        [InlineData("../evil", null)]
+        [InlineData("https://example.com", null)]
+        [InlineData("", null)]
+        [InlineData(null, null)]
+        public void A_header_link_opens_only_the_repo_its_issues_or_its_pulls(string target, string expected)
+        {
+            Assert.Equal(expected, GitHubRepoRef.TryParse("https://github.com/o/r").WebUrl(target));
+        }
+
+        [Theory]
+        [InlineData(10, 3, 7, 3)]
+        [InlineData(3, 3, 0, 3)]
+        [InlineData(2, 5, 0, 5)]   // the two reads are not atomic: never a negative issue count
+        public void Open_issues_are_the_combined_count_less_the_PRs(int combined, int prs, int issues, int expectedPrs)
+        {
+            Assert.Equal((issues, expectedPrs), GitHubIssueFeed.OpenCounts(combined, prs));
+        }
+
+        [Theory]
+        [InlineData("{\"open_issues_count\":12}", 12)]
+        [InlineData("{\"open_issues_count\":-1}", null)]
+        [InlineData("{\"open_issues_count\":\"12\"}", null)]
+        [InlineData("[{\"open_issues_count\":12}]", null)]
+        [InlineData("not json", null)]
+        [InlineData("{}", null)]
+        public void A_count_is_read_only_from_a_non_negative_number(string body, int? expected)
+        {
+            Assert.Equal(expected, GitHubIssueFeed.ParseIntProperty(Encoding.UTF8.GetBytes(body), "open_issues_count"));
+        }
+
+        [Fact]
+        public async Task A_check_stores_the_open_counts_and_says_so()
+        {
+            var (service, github, _, _, project) = Build(GitHubWatchMode.Board);
+            github.Body = Page(5);
+            github.RepoBody = "{\"open_issues_count\":9}";
+            github.SearchBody = "{\"total_count\":4}";
+            var changed = new List<string>();
+            service.CountsChanged += changed.Add;
+
+            await service.CheckProjectAsync(project, "first");
+
+            var state = _db.GetGitHubWatchState(project.Id, "o/r");
+            Assert.Equal(5, state.OpenIssues);
+            Assert.Equal(4, state.OpenPullRequests);
+            Assert.Equal(new[] { project.Id }, changed);
+            var search = github.Requests.Single(r => r.RequestUri.AbsolutePath == "/search/issues");
+            Assert.Contains("repo:o/r is:pr is:open", Uri.UnescapeDataString(search.RequestUri.Query));
+        }
+
+        [Fact]
+        public async Task A_count_that_cannot_be_read_keeps_the_last_one_and_does_not_fail_the_check()
+        {
+            var (service, github, cards, _, project) = Build(GitHubWatchMode.Board);
+            github.Body = Page(5);
+            github.RepoBody = "{\"open_issues_count\":9}";
+            github.SearchBody = "{\"total_count\":4}";
+            await service.CheckProjectAsync(project, "first");
+
+            github.Body = Page(6, 5);
+            github.SearchBody = "{\"message\":\"rate limited\"}";
+            Assert.Equal(1, await service.CheckProjectAsync(project, "second"));
+            Assert.Single(cards);
+
+            var state = _db.GetGitHubWatchState(project.Id, "o/r");
+            Assert.Null(state.LastError);
+            Assert.Equal(5, state.OpenIssues);
+            Assert.Equal(4, state.OpenPullRequests);
+        }
+
+        [Fact]
+        public async Task New_items_are_queued_for_the_project_agent_with_their_tickets_and_the_first_check_queues_none()
+        {
+            var (service, github, _, _, project) = Build(GitHubWatchMode.Board);
+            var queued = new List<string>();
+            service.NoticesQueued += queued.Add;
+
+            github.Body = Page(10);
+            await service.CheckProjectAsync(project, "baseline");
+            Assert.Empty(_db.GetGitHubPendingNotices(project.Id));
+            Assert.Empty(queued);
+
+            github.Body = Page(12, 11, 10);
+            await service.CheckProjectAsync(project, "check");
+
+            var pending = _db.GetGitHubPendingNotices(project.Id);
+            Assert.Equal(new[] { 11, 12 }, pending.Select(p => p.Number));
+            Assert.Equal(new[] { "task-1", "task-2" }, pending.Select(p => p.TaskId));
+            Assert.Equal("https://github.com/o/r/issues/11", pending[0].Url);
+            Assert.Equal(new[] { project.Id }, queued);
+        }
+
+        [Fact]
+        public async Task Notify_mode_queues_the_items_too_but_without_tickets()
+        {
+            var (service, github, cards, _, project) = Build(GitHubWatchMode.Notify);
+            github.Body = Page(10);
+            await service.CheckProjectAsync(project, "baseline");
+            github.Body = Page(11, 10);
+            await service.CheckProjectAsync(project, "check");
+
+            Assert.Empty(cards);
+            var pending = Assert.Single(_db.GetGitHubPendingNotices(project.Id));
+            Assert.Equal(11, pending.Number);
+            Assert.Null(pending.TaskId);
+        }
+
+        [Fact]
+        public void Delivered_notices_are_removed_by_id_so_ones_queued_meanwhile_stay()
+        {
+            _db.AddGitHubPendingNotices("p", "o/r", new[] { new ProjectDatabase.GitHubPendingNotice { Number = 1 } });
+            var sent = _db.GetGitHubPendingNotices("p").Select(n => n.Id).ToList();
+            _db.AddGitHubPendingNotices("p", "o/r", new[]
+            {
+                new ProjectDatabase.GitHubPendingNotice { Number = 1 },   // already queued: not twice
+                new ProjectDatabase.GitHubPendingNotice { Number = 2, IsPullRequest = true },
+            });
+            Assert.Equal(new[] { "p" }, _db.GetProjectsWithGitHubPendingNotices());
+
+            _db.DeleteGitHubPendingNotices(sent);
+
+            var left = Assert.Single(_db.GetGitHubPendingNotices("p"));
+            Assert.Equal(2, left.Number);
+            Assert.True(left.IsPullRequest);
+        }
+
+        [Theory]
+        [InlineData(new MultiTerminal.MCPServer.Services.AttentionState[0], true)]
+        [InlineData(new[] { MultiTerminal.MCPServer.Services.AttentionState.Idle }, true)]
+        [InlineData(new[] { MultiTerminal.MCPServer.Services.AttentionState.YourTurn }, true)]
+        [InlineData(new[] { MultiTerminal.MCPServer.Services.AttentionState.Working }, false)]
+        [InlineData(new[] { MultiTerminal.MCPServer.Services.AttentionState.BlockedQuestion }, false)]
+        [InlineData(new[] { MultiTerminal.MCPServer.Services.AttentionState.BlockedPermission }, false)]
+        [InlineData(new[] { MultiTerminal.MCPServer.Services.AttentionState.Unknown }, false)]
+        [InlineData(new[] { MultiTerminal.MCPServer.Services.AttentionState.Offline }, false)]
+        [InlineData(new[] { MultiTerminal.MCPServer.Services.AttentionState.YourTurn, MultiTerminal.MCPServer.Services.AttentionState.Working }, false)]
+        public void A_notice_waits_for_the_agent_to_pause(MultiTerminal.MCPServer.Services.AttentionState[] states, bool atPause)
+        {
+            Assert.Equal(atPause, GitHubAgentNotices.IsAtPause(states));
+        }
+
+        [Fact]
+        public void The_agent_message_names_tickets_and_asks_the_owner_and_carries_no_github_text()
+        {
+            var notices = new List<ProjectDatabase.GitHubPendingNotice>
+            {
+                new ProjectDatabase.GitHubPendingNotice { Repo = "o/r", Number = 283, TaskId = "abc12345", Url = "https://github.com/o/r/issues/283" },
+                new ProjectDatabase.GitHubPendingNotice { Repo = "o/r", Number = 284, IsPullRequest = true, TaskId = "def67890", Url = "https://github.com/o/r/pull/284" },
+            };
+
+            string text = GitHubAgentNotices.BuildMessage("ClarionAssistant", notices);
+
+            Assert.Contains("2 To Do tickets were filed", text);
+            Assert.Contains("Issue #283 in o/r: ticket abc12345", text);
+            Assert.Contains("PR #284 in o/r: ticket def67890", text);
+            Assert.Contains("ask_owner", text);
+            Assert.Contains("untrusted", text);
+            // Structural: a notice has no title field, so nothing written on GitHub can reach the message.
+            Assert.DoesNotContain(typeof(ProjectDatabase.GitHubPendingNotice).GetProperties(), p => p.Name.Contains("Title", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void In_notify_mode_the_agent_message_links_the_items_instead()
+        {
+            var notices = new List<ProjectDatabase.GitHubPendingNotice>
+            {
+                new ProjectDatabase.GitHubPendingNotice { Repo = "o/r", Number = 9, Url = "https://github.com/o/r/issues/9" },
+            };
+
+            string text = GitHubAgentNotices.BuildMessage("Proj", notices);
+
+            Assert.Contains("1 new item on GitHub for Proj.", text);
+            Assert.Contains("Issue #9 in o/r: https://github.com/o/r/issues/9", text);
+            Assert.DoesNotContain("ticket", text);
+            Assert.Null(GitHubAgentNotices.BuildMessage("Proj", new List<ProjectDatabase.GitHubPendingNotice>()));
+        }
+
+        [Fact]
+        public void A_watch_state_table_from_phase_one_gets_the_count_columns()
+        {
+            _db.Dispose();
+            SQLiteConnection.ClearAllPools();
+            using (var connection = new SQLiteConnection($"Data Source={_dbPath}"))
+            {
+                connection.Open();
+                using var old = new SQLiteCommand(
+                    "DROP TABLE github_watch_state; CREATE TABLE github_watch_state (project_id TEXT NOT NULL, repo TEXT NOT NULL, " +
+                    "baseline_number INTEGER, last_checked_at DATETIME, last_success_at DATETIME, last_error TEXT, PRIMARY KEY (project_id, repo))", connection);
+                old.ExecuteNonQuery();
+            }
+            SQLiteConnection.ClearAllPools();
+
+            using var reopened = new ProjectDatabase();
+            reopened.RecordGitHubWatchCheck("p", "o/r", 3, null);
+            reopened.RecordGitHubOpenCounts("p", "o/r", 2, 1);
+            var state = reopened.GetGitHubWatchState("p", "o/r");
+            Assert.Equal(3, state.Baseline);   // the phase-one row survives: only columns were added
+            Assert.Equal(2, state.OpenIssues);
+            Assert.Equal(1, state.OpenPullRequests);
         }
     }
 }

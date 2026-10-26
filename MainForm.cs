@@ -389,9 +389,11 @@ namespace MultiTerminal
                         return _sourceControlAccountService.GetToken(accountId);
                     },
                     feed: new Services.GitHubIssueFeed(),
-                    createSuggestion: (title, description, projectId) =>
+                    // To Do at high priority (task e4924065, Owner decision): issues and PRs are work to
+                    // resolve quickly, not suggestions to weigh.
+                    createTicket: (title, description, projectId) =>
                     {
-                        var created = broker.CreateTask(title, description, "GitHub", "suggestion", "normal", projectId);
+                        var created = broker.CreateTask(title, description, "GitHub", "todo", "high", projectId);
                         return created != null && created.Success ? created.TaskId : null;
                     },
                     // An ordinary notification, not forced: it follows the remote-mode gate like
@@ -408,11 +410,211 @@ namespace MultiTerminal
                     },
                     log: message => _debugLogService?.Info("GitHubWatch", message));
 #pragma warning restore CA2000
+                // Task e4924065. The service raises these on a pool thread; panes are UI objects.
+                _gitHubWatch.CountsChanged += projectId => PostGitHubUi(() => RefreshGitHubBands(projectId));
+                _gitHubWatch.NoticesQueued += projectId => PostGitHubUi(() => DeliverGitHubNotices(projectId));
+                _gitHubWatch.Ticked += () => PostGitHubUi(DeliverAllGitHubNotices);
                 _gitHubWatch.Start();
+                PostGitHubUi(() => RefreshGitHubBands(null));
             }
             catch (Exception ex)
             {
                 _debugLogService?.Error("GitHubWatch", $"Could not start: {ex.Message}");
+            }
+        }
+
+        private void PostGitHubUi(Action action)
+        {
+            try
+            {
+                if (!IsDisposed && IsHandleCreated) BeginInvoke(action);
+            }
+            catch (InvalidOperationException)
+            {
+                // The form is closing; nothing left to show.
+            }
+        }
+
+        /// <summary>
+        /// Shows each terminal's GitHub band (task e4924065): the repo of the project the pane belongs
+        /// to (<see cref="TerminalDocument.SettingsProjectId"/>), with the open issue and PR counts
+        /// while that project is watched. A pane outside any project, or in one with no github.com
+        /// repo, has no band. <paramref name="onlyProjectId"/> limits it to one project's panes.
+        /// </summary>
+        private void RefreshGitHubBands(string onlyProjectId)
+        {
+            try
+            {
+                var db = _sharedProjectDatabase;
+                if (db == null || _dockPanel == null) return;
+
+                var bands = new Dictionary<string, (string Repo, int? Issues, int? Prs)>(StringComparer.Ordinal);
+                foreach (var doc in _dockPanel.Contents.OfType<TerminalDocument>())
+                {
+                    if (doc == null || doc.IsDisposed) continue;
+                    string projectId = doc.SettingsProjectId;
+                    if (onlyProjectId != null && !string.Equals(projectId, onlyProjectId, StringComparison.Ordinal)) continue;
+                    if (string.IsNullOrEmpty(projectId))
+                    {
+                        doc.SetGitHubBand(null, null, null);
+                        continue;
+                    }
+
+                    if (!bands.TryGetValue(projectId, out var band))
+                    {
+                        var project = db.GetRichProject(projectId);
+                        var repo = Services.GitHubRepoRef.TryParse(project?.GitRepoUrl);
+                        if (repo == null)
+                            band = (null, null, null);
+                        else if (project.GitHubWatchMode == GitHubWatchMode.Off)
+                            band = (repo.FullName, null, null);   // the link without counts nobody refreshes
+                        else
+                        {
+                            var state = db.GetGitHubWatchState(projectId, repo.FullName);
+                            band = (repo.FullName, state.OpenIssues, state.OpenPullRequests);
+                        }
+                        bands[projectId] = band;
+                    }
+                    doc.SetGitHubBand(band.Repo, band.Issues, band.Prs);
+                }
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Info("GitHubWatch", $"Header band refresh failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Opens the page a GitHub band link names (task e4924065). The URL is built here from the
+        /// project's own repo; the header only says which of the three pages.
+        /// </summary>
+        private void OnPaneGitHubLinkRequested(object sender, GitHubLinkRequestedEventArgs e)
+        {
+            try
+            {
+                var project = _sharedProjectDatabase?.GetRichProject(e.ProjectId);
+                string url = Services.GitHubRepoRef.TryParse(project?.GitRepoUrl)?.WebUrl(e.Target);
+                if (url == null) return;
+                using var browser = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Warning("GitHubWatch", $"Could not open the GitHub page: {ex.Message}");
+            }
+        }
+
+        // 1 while a delivery for that project is in flight, so a tick and an attention change cannot
+        // send the same notices twice.
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _gitHubNoticeInFlight =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
+
+        // Set when notices are queued, cleared when the database says none are left, so an attention
+        // change (which fires often) only queries the database while there is something to deliver.
+        private int _gitHubNoticesMaybePending = 1;
+
+        private void DeliverAllGitHubNotices()
+        {
+            if (System.Threading.Volatile.Read(ref _gitHubNoticesMaybePending) == 0) return;
+            try
+            {
+                var projects = _sharedProjectDatabase?.GetProjectsWithGitHubPendingNotices();
+                if (projects == null) return;
+                if (projects.Count == 0)
+                {
+                    System.Threading.Interlocked.Exchange(ref _gitHubNoticesMaybePending, 0);
+                    return;
+                }
+                foreach (var projectId in projects) DeliverGitHubNotices(projectId);
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Info("GitHubWatch", $"Notice sweep failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Tells a project's agent about its queued GitHub items (task e4924065), if it is at a pause.
+        /// UI thread. The agent is every live pane launched as that project's PM; one at a pause gets
+        /// the message (<see cref="Services.GitHubAgentNotices.IsAtPause"/>). Delivered rows are
+        /// deleted by id; anything not delivered waits for the next try (the agent's next attention
+        /// change, its next start, or the watch's next tick).
+        /// </summary>
+        private void DeliverGitHubNotices(string projectId)
+        {
+            System.Threading.Interlocked.Exchange(ref _gitHubNoticesMaybePending, 1);
+            var db = _sharedProjectDatabase;
+            var broker = _mcpServer?.Broker;
+            if (db == null || broker == null || _dockPanel == null || string.IsNullOrEmpty(projectId)) return;
+            if (!_gitHubNoticeInFlight.TryAdd(projectId, 0)) return;
+
+            bool handedOff = false;
+            try
+            {
+                var notices = db.GetGitHubPendingNotices(projectId);
+                if (notices.Count == 0) return;
+
+                var snapshot = broker.AgentAttention?.Snapshot() ?? (IReadOnlyList<AgentAttentionEntry>)Array.Empty<AgentAttentionEntry>();
+                TerminalDocument target = null;
+                foreach (var doc in _dockPanel.Contents.OfType<TerminalDocument>())
+                {
+                    if (doc == null || doc.IsDisposed || !doc.HasActiveLaunch) continue;
+                    if (!string.Equals(doc.LaunchProjectId, projectId, StringComparison.Ordinal)) continue;
+                    if (doc.DisplayedRole != MultiTerminal.Terminal.TerminalRole.ProjectManager) continue;
+                    if (string.IsNullOrEmpty(doc.OriginalAgentName)) continue;
+
+                    // The pane's own entries: by session when it has one, else by its confirmed name.
+                    string session = doc.CurrentClaudeSessionId;
+                    var states = snapshot
+                        .Where(en => !string.IsNullOrEmpty(session)
+                            ? string.Equals(en.SessionId, session, StringComparison.Ordinal)
+                            : string.Equals(en.AgentName, doc.OriginalAgentName, StringComparison.OrdinalIgnoreCase))
+                        .Select(en => en.State);
+                    if (Services.GitHubAgentNotices.IsAtPause(states)) { target = doc; break; }
+                }
+                if (target == null) return;
+
+                string name = target.OriginalAgentName;
+                var terminal = broker.GetTerminal(name);
+                int? port = terminal?.ChannelPort;
+                if (!HasSessionRoute(name, port)) return;
+
+                string projectName = db.GetRichProject(projectId)?.Name ?? "this project";
+                string message = Services.GitHubAgentNotices.BuildMessage(projectName, notices);
+                var ids = notices.Select(n => n.Id).ToList();
+
+                handedOff = true;
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        bool ok = await DeliverToSessionAsync(name, port, Services.GitHubAgentNotices.SenderName, message).ConfigureAwait(false);
+                        if (ok)
+                        {
+                            db.DeleteGitHubPendingNotices(ids);
+                            _debugLogService?.Info("GitHubWatch", $"Told {name} about {ids.Count} new GitHub item(s) for {projectName}.");
+                        }
+                        else
+                        {
+                            _debugLogService?.Info("GitHubWatch", $"Could not reach {name}; {ids.Count} GitHub notice(s) stay queued.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _debugLogService?.Warning("GitHubWatch", $"Notice delivery to {name} failed: {ex.Message}");
+                    }
+                    finally
+                    {
+                        _gitHubNoticeInFlight.TryRemove(projectId, out _);
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Info("GitHubWatch", $"Notice delivery for {projectId} failed: {ex.Message}");
+            }
+            finally
+            {
+                if (!handedOff) _gitHubNoticeInFlight.TryRemove(projectId, out _);
             }
         }
 
@@ -4399,6 +4601,8 @@ namespace MultiTerminal
                 doc.RefreshStartScreenProjects();
                 doc.UpdateStatusBar();
             }
+            // The Repository URL or the watch mode may have changed (task e4924065).
+            RefreshGitHubBands(projectId);
         }
 
         /// <summary>
@@ -7164,6 +7368,10 @@ namespace MultiTerminal
             // because this is the one call every pane creation site makes.
             if (doc.Terminal != null)
                 doc.Terminal.PromptSubmitted += (s, e) => OnPanePromptSubmitted(doc);
+
+            // Task e4924065: the header's GitHub band follows the pane's project.
+            doc.GitHubLinkRequested += OnPaneGitHubLinkRequested;
+            doc.SettingsProjectChanged += (s, projectId) => PostGitHubUi(() => RefreshGitHubBands(null));
         }
 
         private void OnPanePromptSubmitted(TerminalDocument doc)
@@ -9537,6 +9745,8 @@ namespace MultiTerminal
                     System.Threading.Interlocked.Exchange(ref _attentionRefreshPending, 0);
                     RefreshPaneAttention();
                     RefreshAttentionPanel();
+                    // An agent reaching a pause is when its queued GitHub notices go out (task e4924065).
+                    DeliverAllGitHubNotices();
                 }));
             }
             catch
