@@ -413,7 +413,15 @@ namespace MultiTerminal
                 // Task e4924065. The service raises these on a pool thread; panes are UI objects.
                 _gitHubWatch.CountsChanged += projectId => PostGitHubUi(() => RefreshGitHubBands(projectId));
                 _gitHubWatch.NoticesQueued += projectId => PostGitHubUi(() => DeliverGitHubNotices(projectId));
-                _gitHubWatch.Ticked += () => PostGitHubUi(DeliverAllGitHubNotices);
+                // Each tick also refreshes the bands: PATCH /api/projects/{id} and update_project change
+                // the Repository URL without any event MainForm hears (pipeline Run 1), so a REST or MCP
+                // edit shows within a minute.
+                _gitHubWatch.Ticked += () => PostGitHubUi(() =>
+                {
+                    DeliverAllGitHubNotices();
+                    RefreshGitHubBands(null);
+                });
+                broker.ProjectsUpdated += (s, e) => PostGitHubUi(() => RefreshGitHubBands(null));
                 _gitHubWatch.Start();
                 PostGitHubUi(() => RefreshGitHubBands(null));
             }
@@ -512,11 +520,39 @@ namespace MultiTerminal
         // change (which fires often) only queries the database while there is something to deliver.
         private int _gitHubNoticesMaybePending = 1;
 
+        // Ids already injected whose delete has not landed yet (pipeline Run 1). A later send skips
+        // them, so a delete that failed after a good injection cannot repeat the message.
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<long, byte> _gitHubNoticesDelivered =
+            new System.Collections.Concurrent.ConcurrentDictionary<long, byte>();
+
+        /// <summary>The live panes launched as a project's PM, i.e. the agents a notice can go to.</summary>
+        private List<TerminalDocument> ProjectManagerPanes(string projectId) =>
+            _dockPanel == null
+                ? new List<TerminalDocument>()
+                : _dockPanel.Contents.OfType<TerminalDocument>()
+                    .Where(doc => doc != null && !doc.IsDisposed && doc.HasActiveLaunch
+                        && doc.DisplayedRole == MultiTerminal.Terminal.TerminalRole.ProjectManager
+                        && !string.IsNullOrEmpty(doc.OriginalAgentName)
+                        && (projectId == null || string.Equals(doc.LaunchProjectId, projectId, StringComparison.Ordinal)))
+                    .ToList();
+
         private void DeliverAllGitHubNotices()
         {
             if (System.Threading.Volatile.Read(ref _gitHubNoticesMaybePending) == 0) return;
             try
             {
+                // A delete that failed after a good injection: try it again, so the row goes.
+                if (!_gitHubNoticesDelivered.IsEmpty)
+                {
+                    var stuck = _gitHubNoticesDelivered.Keys.ToList();
+                    _sharedProjectDatabase?.DeleteGitHubPendingNotices(stuck);
+                    foreach (long id in stuck) _gitHubNoticesDelivered.TryRemove(id, out _);
+                }
+
+                // No PM pane open at all: nothing could be delivered, so skip the database
+                // (an attention change fires often; pipeline Run 1).
+                if (ProjectManagerPanes(null).Count == 0) return;
+
                 var projects = _sharedProjectDatabase?.GetProjectsWithGitHubPendingNotices();
                 if (projects == null) return;
                 if (projects.Count == 0)
@@ -535,9 +571,11 @@ namespace MultiTerminal
         /// <summary>
         /// Tells a project's agent about its queued GitHub items (task e4924065), if it is at a pause.
         /// UI thread. The agent is every live pane launched as that project's PM; one at a pause gets
-        /// the message (<see cref="Services.GitHubAgentNotices.IsAtPause"/>). Delivered rows are
-        /// deleted by id; anything not delivered waits for the next try (the agent's next attention
-        /// change, its next start, or the watch's next tick).
+        /// the message (<see cref="Services.GitHubAgentNotices.IsPaneAtPause"/>). Just before the
+        /// injection the pause and the name-to-pane binding are checked again, so a turn that started
+        /// meanwhile, or the name now held by another pane, gets nothing (pipeline Run 1). Delivered
+        /// rows are deleted by id; anything not delivered waits for the next try (the agent's next
+        /// attention change or the watch's next tick).
         /// </summary>
         private void DeliverGitHubNotices(string projectId)
         {
@@ -545,38 +583,31 @@ namespace MultiTerminal
             var db = _sharedProjectDatabase;
             var broker = _mcpServer?.Broker;
             if (db == null || broker == null || _dockPanel == null || string.IsNullOrEmpty(projectId)) return;
+
+            var panes = ProjectManagerPanes(projectId);
+            if (panes.Count == 0) return;
             if (!_gitHubNoticeInFlight.TryAdd(projectId, 0)) return;
 
             bool handedOff = false;
             try
             {
-                var notices = db.GetGitHubPendingNotices(projectId);
+                var notices = db.GetGitHubPendingNotices(projectId)
+                    .Where(n => !_gitHubNoticesDelivered.ContainsKey(n.Id)).ToList();
                 if (notices.Count == 0) return;
 
                 var snapshot = broker.AgentAttention?.Snapshot() ?? (IReadOnlyList<AgentAttentionEntry>)Array.Empty<AgentAttentionEntry>();
-                TerminalDocument target = null;
-                foreach (var doc in _dockPanel.Contents.OfType<TerminalDocument>())
-                {
-                    if (doc == null || doc.IsDisposed || !doc.HasActiveLaunch) continue;
-                    if (!string.Equals(doc.LaunchProjectId, projectId, StringComparison.Ordinal)) continue;
-                    if (doc.DisplayedRole != MultiTerminal.Terminal.TerminalRole.ProjectManager) continue;
-                    if (string.IsNullOrEmpty(doc.OriginalAgentName)) continue;
-
-                    // The pane's own entries: by session when it has one, else by its confirmed name.
-                    string session = doc.CurrentClaudeSessionId;
-                    var states = snapshot
-                        .Where(en => !string.IsNullOrEmpty(session)
-                            ? string.Equals(en.SessionId, session, StringComparison.Ordinal)
-                            : string.Equals(en.AgentName, doc.OriginalAgentName, StringComparison.OrdinalIgnoreCase))
-                        .Select(en => en.State);
-                    if (Services.GitHubAgentNotices.IsAtPause(states)) { target = doc; break; }
-                }
+                var target = panes.FirstOrDefault(doc => Services.GitHubAgentNotices.IsPaneAtPause(
+                    snapshot, doc.CurrentClaudeSessionId, doc.OriginalAgentName, doc.ActiveLaunchStartedUtc, DateTime.UtcNow));
                 if (target == null) return;
 
+                // Captured on the UI thread; the delivery task reads only these and the broker.
                 string name = target.OriginalAgentName;
+                string docId = target.DocId;
+                string sessionId = target.CurrentClaudeSessionId;
+                DateTime? launchStarted = target.ActiveLaunchStartedUtc;
                 var terminal = broker.GetTerminal(name);
                 int? port = terminal?.ChannelPort;
-                if (!HasSessionRoute(name, port)) return;
+                if (!string.Equals(terminal?.DocId, docId, StringComparison.OrdinalIgnoreCase) || !HasSessionRoute(name, port)) return;
 
                 string projectName = db.GetRichProject(projectId)?.Name ?? "this project";
                 string message = Services.GitHubAgentNotices.BuildMessage(projectName, notices);
@@ -587,10 +618,18 @@ namespace MultiTerminal
                 {
                     try
                     {
+                        // Again, immediately before the write: still this pane's name, still at a pause.
+                        bool samePane = string.Equals(broker.GetTerminal(name)?.DocId, docId, StringComparison.OrdinalIgnoreCase);
+                        bool stillPaused = Services.GitHubAgentNotices.IsPaneAtPause(
+                            broker.AgentAttention?.Snapshot(), sessionId, name, launchStarted, DateTime.UtcNow);
+                        if (!samePane || !stillPaused) return;
+
                         bool ok = await DeliverToSessionAsync(name, port, Services.GitHubAgentNotices.SenderName, message).ConfigureAwait(false);
                         if (ok)
                         {
+                            foreach (long id in ids) _gitHubNoticesDelivered[id] = 0;
                             db.DeleteGitHubPendingNotices(ids);
+                            foreach (long id in ids) _gitHubNoticesDelivered.TryRemove(id, out _);
                             _debugLogService?.Info("GitHubWatch", $"Told {name} about {ids.Count} new GitHub item(s) for {projectName}.");
                         }
                         else

@@ -82,9 +82,7 @@
         .status-bar-container {
             display: flex;
             flex-direction: column;
-            /* A minimum, not a fixed height: the GitHub band (task e4924065) adds a row, and the
-               container must grow with it so the ResizeObserver below can report the new height. */
-            min-height: 140px;
+            height: 140px;
             background: var(--bg-card);
             border-bottom: 1px solid var(--border-color);
             transition: background 0.3s ease, box-shadow 0.3s ease;
@@ -546,13 +544,14 @@
         /* ============================================
            Row 4: GitHub band (task e4924065): the project's repo, a link that opens it, and its
            open issue/PR counts. C# builds every URL; the page only names which page to open.
+           Slim, so the four rows still fit the bar's 140px (the bar does not grow; pipeline Run 1).
            ============================================ */
         .row-github {
             display: flex;
             align-items: center;
             gap: 8px;
             padding: 0 12px;
-            min-height: 28px;
+            min-height: 24px;
             border-top: 1px solid var(--border-color);
             font-size: var(--font-size-xs);
             font-family: 'Cascadia Code', 'Consolas', monospace;
@@ -758,19 +757,6 @@
             }
             row.classList.remove('hidden');
         }
-
-        // The GitHub band is a fourth row, and must not be clipped by a bar the Owner sized for three:
-        // report the content's height whenever it changes, and C# grows the bar if it is shorter
-        // (never shrinks it).
-        (function () {
-            var container = document.querySelector('.status-bar-container');
-            if (!container || typeof ResizeObserver === 'undefined') return;
-            var last = 0;
-            new ResizeObserver(function () {
-                var h = Math.ceil(container.scrollHeight);
-                if (h !== last) { last = h; postMessage('contentHeight', { height: h }); }
-            }).observe(container);
-        })();
 
         function onGitHubClick(target) {
             postMessage('openGitHub', { target: target });

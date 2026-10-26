@@ -1805,6 +1805,10 @@ namespace MultiTerminal.Docking
         /// <summary>True while a launch runs in this pane (between its start and its process exit).</summary>
         internal bool HasActiveLaunch => _claudeSession.ActiveLaunchStartedMs != null;
 
+        /// <summary>When the running launch started (UTC), or null with no launch (task e4924065).</summary>
+        internal DateTime? ActiveLaunchStartedUtc =>
+            _claudeSession.ActiveLaunchStartedMs is long ms ? DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime : (DateTime?)null;
+
         /// <summary>
         /// Shows that this pane's agent needs the Owner (task 51a8a17b): the header takes the state's
         /// colour and the tab a coloured dot. Called by MainForm from the attention snapshot.

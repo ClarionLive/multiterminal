@@ -22,18 +22,49 @@ namespace MultiTerminal.Services
         public const string SenderName = "GitHub watch";
 
         /// <summary>
+        /// How long a launch must have run with no attention entry at all before that silence counts as
+        /// a pause (pipeline Run 1). A first turn shows activity well within this; a quiet-start agent
+        /// waiting for the Owner shows none.
+        /// </summary>
+        public static readonly TimeSpan QuietAfterLaunch = TimeSpan.FromMinutes(1);
+
+        /// <summary>
         /// Whether the agent is at a pause, so a notice will not land in the middle of its work (Owner
         /// decision 2026-10-26). <paramref name="states"/> are the attention states of the agent's
-        /// session; none at all means it has shown no activity since it started, which is a pause.
-        /// Working is not; nor is waiting on the Owner (a question or permission prompt), so the notice
-        /// does not bury what the Owner is being asked. Offline and Unknown are not either: the first
-        /// cannot receive it, the second cannot be told apart from working.
+        /// entries. Idle and Your turn are pauses. Working is not; nor is waiting on the Owner (a
+        /// question or permission prompt), so the notice does not bury what the Owner is being asked.
+        /// Offline and Unknown are not either: the first cannot receive it, the second cannot be told
+        /// apart from working. No entry at all counts only when <paramref name="quietLongEnough"/>.
         /// </summary>
-        public static bool IsAtPause(IEnumerable<AttentionState> states)
+        public static bool IsAtPause(IEnumerable<AttentionState> states, bool quietLongEnough = true)
         {
             var list = (states ?? Enumerable.Empty<AttentionState>()).ToList();
+            if (list.Count == 0) return quietLongEnough;
             return list.All(s => s == AttentionState.Idle || s == AttentionState.YourTurn);
         }
+
+        /// <summary>
+        /// Whether one pane's agent is at a pause (pipeline Run 1). Its entries are picked the way the
+        /// attention service decides who owns an entry: by the pane's session id, OR by the agent's name
+        /// in either field. Most entries are keyed and stamped by NAME (the launch placeholder, tool
+        /// activity, turn ends); only a permission or question notification carries the session id.
+        /// Matching by session id alone found nothing for those, which read as a pause mid-turn.
+        /// </summary>
+        public static bool IsPaneAtPause(IEnumerable<AgentAttentionEntry> snapshot, string sessionId, string agentName,
+            DateTime? launchStartedUtc, DateTime nowUtc)
+        {
+            var states = (snapshot ?? Enumerable.Empty<AgentAttentionEntry>())
+                .Where(e => e != null && Owns(e, sessionId, agentName))
+                .Select(e => e.State);
+            bool quiet = launchStartedUtc.HasValue && nowUtc - launchStartedUtc.Value >= QuietAfterLaunch;
+            return IsAtPause(states, quiet);
+        }
+
+        private static bool Owns(AgentAttentionEntry e, string sessionId, string agentName) =>
+            (!string.IsNullOrEmpty(sessionId) && string.Equals(e.SessionId, sessionId, StringComparison.Ordinal))
+            || (!string.IsNullOrEmpty(agentName)
+                && (string.Equals(e.AgentName, agentName, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(e.SessionId, agentName, StringComparison.OrdinalIgnoreCase)));
 
         /// <summary>
         /// The message for one project's queued notices. Lists each item by kind, number and either

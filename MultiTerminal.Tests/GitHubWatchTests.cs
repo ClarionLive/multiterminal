@@ -827,6 +827,68 @@ namespace MultiTerminal.Tests
             Assert.Equal(atPause, GitHubAgentNotices.IsAtPause(states));
         }
 
+        private static MultiTerminal.MCPServer.Services.AgentAttentionEntry Entry(string sessionId, string agentName, MultiTerminal.MCPServer.Services.AttentionState state) =>
+            new MultiTerminal.MCPServer.Services.AgentAttentionEntry { SessionId = sessionId, AgentName = agentName, State = state };
+
+        [Fact]
+        public void A_name_keyed_working_entry_blocks_a_notice_even_when_the_pane_knows_its_session_id()
+        {
+            // Pipeline Run 1: most entries are keyed and stamped by NAME (launch placeholder, tool
+            // activity, turn ends), sometimes with no AgentName at all. A uuid-only match found nothing
+            // here and read it as a pause in the middle of the agent's work.
+            var now = DateTime.UtcNow;
+            var longAgo = now.AddMinutes(-30);
+            var working = MultiTerminal.MCPServer.Services.AttentionState.Working;
+
+            Assert.False(GitHubAgentNotices.IsPaneAtPause(new[] { Entry("ClarionAssistant", null, working) }, "uuid-1", "ClarionAssistant", longAgo, now));
+            Assert.False(GitHubAgentNotices.IsPaneAtPause(new[] { Entry("clarionassistant", null, working) }, "uuid-1", "ClarionAssistant", longAgo, now));
+            Assert.False(GitHubAgentNotices.IsPaneAtPause(new[] { Entry("other-key", "ClarionAssistant", working) }, "uuid-1", "ClarionAssistant", longAgo, now));
+            Assert.False(GitHubAgentNotices.IsPaneAtPause(new[] { Entry("uuid-1", null, working) }, "uuid-1", "ClarionAssistant", longAgo, now));
+        }
+
+        [Fact]
+        public void A_pane_is_at_a_pause_on_its_own_idle_or_your_turn_entry_and_other_agents_do_not_count()
+        {
+            var now = DateTime.UtcNow;
+            var longAgo = now.AddMinutes(-30);
+            var s = MultiTerminal.MCPServer.Services.AttentionState.YourTurn;
+            var working = MultiTerminal.MCPServer.Services.AttentionState.Working;
+
+            Assert.True(GitHubAgentNotices.IsPaneAtPause(new[] { Entry("ClarionAssistant", "ClarionAssistant", s) }, "uuid-1", "ClarionAssistant", longAgo, now));
+            Assert.True(GitHubAgentNotices.IsPaneAtPause(
+                new[] { Entry("uuid-1", null, s), Entry("Grace", "Grace", working) }, "uuid-1", "ClarionAssistant", longAgo, now));
+        }
+
+        [Fact]
+        public void With_no_entry_at_all_a_pane_counts_as_paused_only_after_a_quiet_minute()
+        {
+            var now = DateTime.UtcNow;
+            var none = Array.Empty<MultiTerminal.MCPServer.Services.AgentAttentionEntry>();
+
+            Assert.False(GitHubAgentNotices.IsPaneAtPause(none, null, "CA", now.AddSeconds(-10), now));   // a first turn may be under way
+            Assert.True(GitHubAgentNotices.IsPaneAtPause(none, null, "CA", now - GitHubAgentNotices.QuietAfterLaunch, now));
+            Assert.False(GitHubAgentNotices.IsPaneAtPause(none, null, "CA", null, now));                  // no launch: nothing to tell
+        }
+
+        [Fact]
+        public void Turning_watching_off_or_deleting_the_project_drops_its_queued_notices()
+        {
+            var (_, _, _, _, project) = Build(GitHubWatchMode.Board);
+            var other = Project.Create("Other", Path.GetTempPath());
+            _db.SaveRichProject(other);
+            _db.AddGitHubPendingNotices(project.Id, "o/r", new[] { new ProjectDatabase.GitHubPendingNotice { Number = 1 } });
+            _db.AddGitHubPendingNotices(other.Id, "o/x", new[] { new ProjectDatabase.GitHubPendingNotice { Number = 2 } });
+
+            Assert.True(_db.UpdateProjectField(project.Id, "gitHubWatchMode", "board"));   // still on: kept
+            Assert.Single(_db.GetGitHubPendingNotices(project.Id));
+
+            Assert.True(_db.UpdateProjectField(project.Id, "gitHubWatchMode", "off"));
+            Assert.Empty(_db.GetGitHubPendingNotices(project.Id));
+
+            Assert.True(_db.DeleteProject(other.Id));
+            Assert.Empty(_db.GetGitHubPendingNotices(other.Id));
+        }
+
         [Fact]
         public void The_agent_message_names_tickets_and_asks_the_owner_and_carries_no_github_text()
         {

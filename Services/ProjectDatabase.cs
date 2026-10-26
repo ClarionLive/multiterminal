@@ -616,6 +616,15 @@ namespace MultiTerminal.Services
                 // tool all write through this method (task 92eeeb47, pipeline Run 2).
                 if (updated && watchField && ShouldResetGitHubWatch(fieldName, oldValue, value))
                     ResetGitHubWatchState(projectId);
+                // Watching turned off: the Owner no longer wants to hear, so drop what was waiting for
+                // the agent (task e4924065, pipeline Run 1).
+                if (updated && fieldName == "github_watch_mode"
+                    && MultiTerminal.Models.GitHubWatchSettings.ParseMode(value) == MultiTerminal.Models.GitHubWatchMode.Off)
+                {
+                    using var drop = new SQLiteCommand("DELETE FROM github_watch_pending WHERE project_id = @id", _connection);
+                    drop.Parameters.AddWithValue("@id", projectId);
+                    drop.ExecuteNonQuery();
+                }
                 return updated;
             }
         }
@@ -680,6 +689,13 @@ namespace MultiTerminal.Services
 #pragma warning restore CA2100
                     child.Parameters.AddWithValue("@id", projectId);
                     child.ExecuteNonQuery();
+                }
+
+                // A deleted project's queued GitHub notices could never be delivered (task e4924065).
+                using (var pending = new SQLiteCommand("DELETE FROM github_watch_pending WHERE project_id = @id", _connection, tx))
+                {
+                    pending.Parameters.AddWithValue("@id", projectId);
+                    pending.ExecuteNonQuery();
                 }
 
                 using var command = new SQLiteCommand("DELETE FROM projects WHERE id = @id", _connection, tx);

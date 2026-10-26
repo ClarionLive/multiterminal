@@ -343,11 +343,6 @@ namespace MultiTerminal.Controls
                         if (target == "repo" || target == "issues" || target == "pulls")
                             GitHubOpenRequested?.Invoke(this, target);
                     }
-                    else if (type == "contentHeight")
-                    {
-                        if (root.TryGetProperty("height", out var hEl) && hEl.ValueKind == JsonValueKind.Number && hEl.TryGetDouble(out double cssHeight))
-                            GrowToFit(cssHeight);
-                    }
                     else if (type == "openFolder")
                     {
                         if (root.TryGetProperty("path", out var pathEl))
@@ -539,23 +534,14 @@ namespace MultiTerminal.Controls
         /// </summary>
         public void SetGitHub(string repoFullName, int? openIssues, int? openPullRequests)
         {
-            _lastGitHubJson = string.IsNullOrEmpty(repoFullName)
+            string json = string.IsNullOrEmpty(repoFullName)
                 ? "null"
                 : JsonSerializer.Serialize(new { repo = repoFullName, issues = openIssues, prs = openPullRequests });
+            // MainForm refreshes every band once a minute; only a change is sent to the page.
+            if (json == _lastGitHubJson) return;
+            _lastGitHubJson = json;
             if (_isInitialized)
                 SendMessage($"github:{_lastGitHubJson}");
-        }
-
-        /// <summary>
-        /// Makes the bar tall enough for its rows when a new one (the GitHub band) appears. Grows only:
-        /// a height the Owner dragged larger is kept, and nothing ever shrinks it below that.
-        /// </summary>
-        private void GrowToFit(double cssHeight)
-        {
-            if (cssHeight <= 0 || cssHeight > 600) return;
-            double scale = (_webView?.ZoomFactor ?? 1.0) * DeviceDpi / 96.0;
-            int needed = (int)Math.Ceiling(cssHeight * scale) + 2;
-            if (needed > Height) Height = needed;
         }
 
         private string _lastAttention = "none";
