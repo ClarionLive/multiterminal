@@ -70,8 +70,12 @@ namespace MultiTerminal.Services
             return launchStartedUtc.HasValue && nowUtc - silentSince.Value >= QuietAfterLaunch;
         }
 
+        // A placeholder the Owner has replied to is NOT silence (pipeline Run 3): typing a prompt only
+        // stamps OwnerRepliedAtUtc and leaves the state Unknown until the agent's first tool event, so
+        // a first turn (and a text-only turn throughout) would otherwise read as a pause. Unknown is
+        // not a pause, so such an entry blocks until its turn ends.
         private static bool IsPlaceholder(AgentAttentionEntry e) =>
-            e.State == AttentionState.Unknown && e.LastActivityAtUtc == null;
+            e.State == AttentionState.Unknown && e.LastActivityAtUtc == null && e.OwnerRepliedAtUtc == null;
 
         private static bool Owns(AgentAttentionEntry e, string sessionId, string agentName) =>
             (!string.IsNullOrEmpty(sessionId) && string.Equals(e.SessionId, sessionId, StringComparison.Ordinal))

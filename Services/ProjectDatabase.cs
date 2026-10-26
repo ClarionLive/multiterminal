@@ -1217,7 +1217,9 @@ namespace MultiTerminal.Services
         /// Queues new issues/PRs to be told to the project's agent (task e4924065). An item already
         /// queued is not queued twice, and nothing is queued while the project's watch is off: a check
         /// that started before the Owner turned it off must not refill the queue the Off just emptied
-        /// (pipeline Run 2). The test is in the INSERT itself, so it cannot race the Off write.
+        /// (pipeline Run 2). The test is in the INSERT itself, so it cannot race the Off write. It reads
+        /// the stored mode the way GitHubWatchSettings.ParseMode does (trimmed, any case, anything but
+        /// notify or board is off), because a REST or MCP write stores the value as given (Run 3).
         /// </summary>
         public void AddGitHubPendingNotices(string projectId, string repo, IEnumerable<GitHubPendingNotice> notices)
         {
@@ -1232,7 +1234,7 @@ namespace MultiTerminal.Services
                     using var command = new SQLiteCommand(@"
                         INSERT OR IGNORE INTO github_watch_pending (project_id, repo, number, is_pr, task_id, url, created_at)
                         SELECT @p, @r, @n, @pr, @t, @u, @at
-                        WHERE EXISTS (SELECT 1 FROM projects WHERE id = @p AND COALESCE(github_watch_mode, 'off') <> 'off')", _connection, tx);
+                        WHERE EXISTS (SELECT 1 FROM projects WHERE id = @p AND lower(trim(github_watch_mode)) IN ('notify', 'board'))", _connection, tx);
                     command.Parameters.AddWithValue("@p", projectId);
                     command.Parameters.AddWithValue("@r", repo);
                     command.Parameters.AddWithValue("@n", n.Number);

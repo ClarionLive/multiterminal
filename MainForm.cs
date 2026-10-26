@@ -624,8 +624,11 @@ namespace MultiTerminal
                         // (a relaunch under the same name and DocId is a different session; pipeline
                         // Run 2), still at a pause, and every notice still queued (watching turned off
                         // or the project deleted removes them).
+                        // ...and the same Claude session: a /clear keeps the launch but starts another,
+                        // and the next sweep can choose afresh for it (pipeline Run 3).
                         bool samePane = string.Equals(broker.GetTerminal(name)?.DocId, docId, StringComparison.OrdinalIgnoreCase)
-                                        && target.LaunchGeneration == launchGeneration;
+                                        && target.LaunchGeneration == launchGeneration
+                                        && (sessionId == null || string.Equals(target.CurrentClaudeSessionId, sessionId, StringComparison.Ordinal));
                         bool stillPaused = Services.GitHubAgentNotices.IsPaneAtPause(
                             broker.AgentAttention?.Snapshot(), sessionId, name, launchStarted, DateTime.UtcNow);
                         var stillQueued = db.GetGitHubPendingNotices(projectId).Select(n => n.Id).ToHashSet();

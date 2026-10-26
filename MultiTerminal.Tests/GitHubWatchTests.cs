@@ -897,6 +897,40 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void A_placeholder_the_owner_has_replied_to_is_a_turn_in_progress_not_silence()
+        {
+            // Pipeline Run 3: typing a prompt only stamps OwnerRepliedAtUtc; the entry stays Unknown until
+            // the agent's first tool event, and a text-only turn never gets one.
+            var now = DateTime.UtcNow;
+            var entry = new MultiTerminal.MCPServer.Services.AgentAttentionEntry
+            {
+                SessionId = "CA",
+                AgentName = "CA",
+                State = MultiTerminal.MCPServer.Services.AttentionState.Unknown,
+                EnteredAtUtc = now.AddMinutes(-2),
+                OwnerRepliedAtUtc = now.AddSeconds(-10),
+            };
+            Assert.False(GitHubAgentNotices.IsPaneAtPause(new[] { entry }, null, "CA", now.AddMinutes(-30), now));
+        }
+
+        [Theory]
+        [InlineData("OFF")]
+        [InlineData(" off ")]
+        [InlineData("")]
+        [InlineData("nonsense")]
+        public void A_watch_mode_that_reads_as_off_queues_nothing_however_it_was_written(string stored)
+        {
+            // Pipeline Run 3: PATCH /api/projects/{id} and update_project store the mode as given; the queue
+            // must read it the way ParseMode does, not compare raw text with 'off'.
+            var (_, _, _, _, project) = Build(GitHubWatchMode.Board);
+            Assert.True(_db.UpdateProjectField(project.Id, "github_watch_mode", stored));
+            Assert.Equal(GitHubWatchMode.Off, GitHubWatchSettings.ParseMode(stored));
+
+            _db.AddGitHubPendingNotices(project.Id, "o/r", new[] { new ProjectDatabase.GitHubPendingNotice { Number = 1 } });
+            Assert.Empty(_db.GetGitHubPendingNotices(project.Id));
+        }
+
+        [Fact]
         public void Nothing_is_queued_for_a_project_whose_watch_is_off()
         {
             // Pipeline Run 2: a check that passed its stale test just before the Owner turned the watch
