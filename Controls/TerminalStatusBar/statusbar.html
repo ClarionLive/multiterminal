@@ -775,6 +775,9 @@
             lastNeededHeight = px;
             postMessage('neededHeight', { px: px });
         }
+        // A zoom change (Ctrl+wheel) changes devicePixelRatio and resizes the viewport. Resizing the bar
+        // itself also lands here, but leaves the needed height unchanged, so nothing is re-sent.
+        window.addEventListener('resize', reportNeededHeight);
 
         function onGitHubClick(target) {
             postMessage('openGitHub', { target: target });
