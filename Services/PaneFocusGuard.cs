@@ -5,11 +5,12 @@ namespace MultiTerminal.Services
     /// <summary>
     /// Keeps keyboard focus in the pane the Owner is typing in (task 2be35d18). Owner report: "when I'm
     /// typing in a terminal in MT, suddenly I won't have focus and I find the cursor has moved to another
-    /// terminal". Two things MT does on an agent's behalf took focus: a helper pane opened by
-    /// <c>spawn_helper</c> (or resumed with its PM) was activated, and a subagent's live panel took focus
-    /// when its page loaded. Each of those sites asks this rule first and leaves focus where it is.
-    /// Nothing the Owner does (a click, Ctrl+Tab, a header button) goes through it, so it cannot undo the
-    /// Owner's own switch. Pure.
+    /// terminal". Things MT does on an agent's behalf took focus: a helper pane opened by
+    /// <c>spawn_helper</c> (or resumed with its PM) was activated, a new terminal focused itself when its
+    /// deferred start ran, and a subagent's live panel or an agent's HUD browser tab could take focus when
+    /// its page loaded. Each of those sites asks this rule and leaves focus where it is. Nothing the Owner
+    /// does (a click, Ctrl+Tab, a header button) goes through it, so it cannot undo the Owner's own switch.
+    /// Pure.
     /// </summary>
     public static class PaneFocusGuard
     {
@@ -17,15 +18,18 @@ namespace MultiTerminal.Services
         public static readonly TimeSpan TypingWindow = TimeSpan.FromSeconds(3);
 
         /// <summary>
-        /// Whether a pane MT is opening for an agent (<paramref name="newPaneId"/>) must leave focus in
-        /// <paramref name="focusedPaneId"/>: true when that is a different pane whose last keystroke
-        /// (<paramref name="typedAtUtc"/>) is within <see cref="TypingWindow"/>.
+        /// Whether something MT is opening for an agent must leave focus in <paramref name="focusedPaneId"/>:
+        /// true when the Owner is typing there, meaning its input line holds text not yet submitted
+        /// (<paramref name="hasUnsentText"/>, however long ago the last key was) or its last keystroke
+        /// (<paramref name="typedAtUtc"/>) is within <see cref="TypingWindow"/>. Never when the new thing
+        /// is that same pane (<paramref name="newPaneId"/>); a panel or browser tab passes null.
         /// </summary>
-        public static bool ShouldKeepFocus(string focusedPaneId, DateTime? typedAtUtc, string newPaneId, DateTime nowUtc)
+        public static bool ShouldKeepFocus(string focusedPaneId, DateTime? typedAtUtc, bool hasUnsentText, string newPaneId, DateTime nowUtc)
         {
-            if (string.IsNullOrEmpty(focusedPaneId) || typedAtUtc == null) return false;
+            if (string.IsNullOrEmpty(focusedPaneId)) return false;
             if (string.Equals(focusedPaneId, newPaneId, StringComparison.Ordinal)) return false;
-            return nowUtc - typedAtUtc.Value <= TypingWindow;
+            if (hasUnsentText) return true;
+            return typedAtUtc.HasValue && nowUtc - typedAtUtc.Value <= TypingWindow;
         }
     }
 }

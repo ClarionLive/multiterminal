@@ -53,6 +53,16 @@ namespace MultiTerminal.Controls
         /// </remarks>
         public event EventHandler<double> ZoomChanged;
 
+        /// <summary>
+        /// Called after every page load (task 2be35d18: a WebView2 can take keyboard focus as it creates
+        /// and loads, so MainForm checks where focus went). A property, not an event, so the open and
+        /// update paths can set it on every call without stacking handlers.
+        /// </summary>
+        public Action<BrowserTabPage> AfterPageLoad { get; set; }
+
+        /// <summary>Whether keyboard focus is inside this tab's web view.</summary>
+        public bool HasKeyboardFocus => _webView.Focused || ContainsFocus;
+
         public BrowserTabPage(string tabId, string title)
         {
             TabId = tabId ?? throw new ArgumentNullException(nameof(tabId));
@@ -151,6 +161,7 @@ namespace MultiTerminal.Controls
                     TitleChanged?.Invoke(this, EventArgs.Empty);
                 }
             }
+            AfterPageLoad?.Invoke(this);
         }
 
         /// <summary>
