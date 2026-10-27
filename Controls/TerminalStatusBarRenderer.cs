@@ -343,6 +343,12 @@ namespace MultiTerminal.Controls
                         if (target == "repo" || target == "issues" || target == "pulls")
                             GitHubOpenRequested?.Invoke(this, target);
                     }
+                    else if (type == "neededHeight")
+                    {
+                        // Ticket c72ec2af: the device pixels the shown rows need, while the GitHub row shows.
+                        if (root.TryGetProperty("px", out var pxEl) && pxEl.ValueKind == JsonValueKind.Number && pxEl.TryGetInt32(out int px))
+                            NeededHeightReported?.Invoke(this, px);
+                    }
                     else if (type == "openFolder")
                     {
                         if (root.TryGetProperty("path", out var pathEl))
@@ -526,6 +532,12 @@ namespace MultiTerminal.Controls
 
         /// <summary>A GitHub band link was clicked: "repo", "issues" or "pulls" (task e4924065).</summary>
         public event EventHandler<string> GitHubOpenRequested;
+
+        /// <summary>
+        /// The page reports the height, in device pixels, its shown rows need, while the GitHub row is
+        /// shown (ticket c72ec2af). Sent only when the value changes.
+        /// </summary>
+        public event EventHandler<int> NeededHeightReported;
 
         /// <summary>
         /// Shows the project's GitHub band (task e4924065): the repo as <c>owner/name</c>, with its open
