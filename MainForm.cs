@@ -4964,7 +4964,7 @@ namespace MultiTerminal
         {
             string pmName = pmDoc.OriginalAgentName ?? pmDoc.CustomTitle;
             string projectRoot = GetLaunchableProjectRoot(project);
-            var resumeStartedUtc = DateTime.UtcNow;
+            uint? inputTickAtStart = Services.OwnerInputClock.LastInputTick();
             SessionCatalog catalog = null;
             try
             {
@@ -5074,7 +5074,7 @@ namespace MultiTerminal
             // Task 2be35d18: only when the Owner has done nothing since the resume began. A click on another
             // pane meanwhile is their choice, and so is typing anywhere.
             if (!pmDoc.IsDisposed && report.Resumed.Count > 0
-                && !Services.PaneFocusGuard.OwnerActedSince(Services.OwnerInputClock.LastInputUtc(), resumeStartedUtc))
+                && !Services.PaneFocusGuard.OwnerActedSinceTick(Services.OwnerInputClock.LastInputTick(), inputTickAtStart))
             {
                 pmDoc.Activate();
                 pmDoc.FocusTerminal();
@@ -7153,7 +7153,7 @@ namespace MultiTerminal
         /// finished loading a page. Decided at load time, from the state then, never from a pane remembered
         /// earlier, so it cannot send the Owner back to a pane they have since left: when the web view holds
         /// keyboard focus, the Owner pressed a key in the active pane within the typing window, and that
-        /// keystroke is the Owner's last input of any kind (<see cref="Services.PaneFocusGuard.OwnerActedSince"/>),
+        /// keystroke is the Owner's last input of any kind (<see cref="Services.PaneFocusGuard.OwnerActedAfterKeystroke"/>),
         /// that pane's terminal gets focus back. So a click into the page, the usual way the Owner puts
         /// focus there, keeps it there; so does a mouse move, which cannot be told apart.
         /// Unsent text alone does not count here, so a page the Owner is reading keeps focus when an agent
@@ -7169,7 +7169,7 @@ namespace MultiTerminal
             // (or a mouse move, which cannot be told apart) means focus stays where it is.
             var typing = active != null && !active.IsDisposed && typedAt.HasValue
                 && Services.PaneFocusGuard.ShouldKeepFocus(active.DocId, typedAt, false, null, DateTime.UtcNow)
-                && !Services.PaneFocusGuard.OwnerActedSince(Services.OwnerInputClock.LastInputUtc(), typedAt.Value)
+                && !Services.PaneFocusGuard.OwnerActedAfterKeystroke(Services.OwnerInputClock.LastInputAge(), DateTime.UtcNow - typedAt.Value)
                 ? active : null;
             _debugLogService?.Info("FocusGuard", typing != null
                 ? $"{what} took focus while you were typing in '{typing.TabText}'; focus given back."

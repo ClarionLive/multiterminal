@@ -48,33 +48,45 @@ namespace MultiTerminal.Tests
             Assert.False(PaneFocusGuard.ShouldKeepFocus("A", Now.AddMilliseconds(-100), true, "A", Now));
         }
 
+        private static readonly TimeSpan KeystrokeAge = TimeSpan.FromSeconds(2);
+
         [Fact]
-        public void The_keystroke_itself_is_not_an_action_since_it()
+        public void The_keystroke_itself_is_not_an_action_after_it()
         {
-            // The key-up and xterm.js's report of the key land within the slack.
-            Assert.False(PaneFocusGuard.OwnerActedSince(Now + PaneFocusGuard.SameInputSlack, Now));
-            Assert.False(PaneFocusGuard.OwnerActedSince(Now.AddMilliseconds(-50), Now));
+            // Its key-up and xterm.js's report of the key land within the slack.
+            Assert.False(PaneFocusGuard.OwnerActedAfterKeystroke(KeystrokeAge - PaneFocusGuard.SameInputSlack, KeystrokeAge));
+            Assert.False(PaneFocusGuard.OwnerActedAfterKeystroke(KeystrokeAge + TimeSpan.FromMilliseconds(50), KeystrokeAge));
         }
 
         [Fact]
         public void A_click_after_the_keystroke_is_an_action()
         {
-            Assert.True(PaneFocusGuard.OwnerActedSince(Now + PaneFocusGuard.SameInputSlack + TimeSpan.FromMilliseconds(1), Now));
+            Assert.True(PaneFocusGuard.OwnerActedAfterKeystroke(KeystrokeAge - PaneFocusGuard.SameInputSlack - TimeSpan.FromMilliseconds(1), KeystrokeAge));
         }
 
         [Fact]
-        public void Unknown_input_time_counts_as_acted_so_focus_is_left_alone()
+        public void Any_input_since_the_baseline_tick_is_an_action_with_no_slack()
         {
-            Assert.True(PaneFocusGuard.OwnerActedSince(null, Now));
+            Assert.False(PaneFocusGuard.OwnerActedSinceTick(1000u, 1000u));
+            Assert.True(PaneFocusGuard.OwnerActedSinceTick(1001u, 1000u));
+            // Across the 2^32 wrap the tick still differs.
+            Assert.True(PaneFocusGuard.OwnerActedSinceTick(5u, uint.MaxValue - 5u));
         }
 
         [Fact]
-        public void The_input_clock_reads_a_utc_time_not_in_the_future()
+        public void Unknown_input_counts_as_acted_so_focus_is_left_alone()
         {
-            var at = OwnerInputClock.LastInputUtc();
-            if (at == null) return;   // a session with no input desktop (a service) reports nothing
-            Assert.Equal(DateTimeKind.Utc, at.Value.Kind);
-            Assert.True(at.Value <= DateTime.UtcNow.AddSeconds(1));
+            Assert.True(PaneFocusGuard.OwnerActedAfterKeystroke(null, KeystrokeAge));
+            Assert.True(PaneFocusGuard.OwnerActedSinceTick(null, 1000u));
+            Assert.True(PaneFocusGuard.OwnerActedSinceTick(1000u, null));
+        }
+
+        [Fact]
+        public void The_input_clock_reads_a_non_negative_age()
+        {
+            var age = OwnerInputClock.LastInputAge();
+            if (age == null) return;   // a session with no input desktop (a service) reports nothing
+            Assert.True(age.Value >= TimeSpan.Zero);
         }
 
         [Fact]

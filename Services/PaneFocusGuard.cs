@@ -32,23 +32,35 @@ namespace MultiTerminal.Services
             return typedAtUtc.HasValue && nowUtc - typedAtUtc.Value <= TypingWindow;
         }
 
+
         /// <summary>
-        /// How much later than a terminal keystroke the system's last-input time may be and still be that
-        /// same keystroke: the key-up, and the delay before xterm.js reports the key to MT.
+        /// How much more recent than a terminal keystroke the system's last input may be and still be that
+        /// same keystroke (its key-up, and xterm.js's delay in reporting the key to MT). Accepted gap: a
+        /// click within this time of a keystroke reads as the keystroke.
         /// </summary>
         public static readonly TimeSpan SameInputSlack = TimeSpan.FromMilliseconds(500);
 
         /// <summary>
-        /// Whether the Owner did anything (a key, a click, a mouse move, anywhere) after
-        /// <paramref name="sinceUtc"/>, plus <see cref="SameInputSlack"/>, judged from the system's
-        /// last-input time (<paramref name="lastSystemInputUtc"/>). Unknown counts as acted, so MT then
-        /// leaves focus alone: a site that moves focus for the Owner may do so only when nothing the
-        /// Owner did since could have been a deliberate switch.
+        /// Whether the Owner did anything (a key, a click, a mouse move, anywhere) after the terminal
+        /// keystroke that is <paramref name="keystrokeAge"/> old, judged from the age of the system's last
+        /// input (<paramref name="lastInputAge"/>), allowing <see cref="SameInputSlack"/> for the keystroke's
+        /// own key-up. Ages, not clock times, so a change of the wall clock cannot reorder them. Unknown
+        /// counts as acted, so MT then leaves focus alone.
         /// </summary>
-        public static bool OwnerActedSince(DateTime? lastSystemInputUtc, DateTime sinceUtc)
+        public static bool OwnerActedAfterKeystroke(TimeSpan? lastInputAge, TimeSpan keystrokeAge)
         {
-            if (lastSystemInputUtc == null) return true;
-            return lastSystemInputUtc.Value > sinceUtc + SameInputSlack;
+            if (lastInputAge == null) return true;
+            return lastInputAge.Value < keystrokeAge - SameInputSlack;
+        }
+
+        /// <summary>
+        /// Whether there was any input since <paramref name="baselineTick"/> was read: the system's
+        /// last-input tick has changed. Exact, with no slack. Unknown (either value null) counts as acted.
+        /// </summary>
+        public static bool OwnerActedSinceTick(uint? lastInputTickNow, uint? baselineTick)
+        {
+            if (lastInputTickNow == null || baselineTick == null) return true;
+            return lastInputTickNow.Value != baselineTick.Value;
         }
     }
 
@@ -66,14 +78,19 @@ namespace MultiTerminal.Services
         [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
         private static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
 
-        /// <summary>The last input time in UTC, or null when Windows does not say.</summary>
-        public static DateTime? LastInputUtc()
+        /// <summary>The tick count (milliseconds since boot, wrapping) of the last input, or null when Windows does not say.</summary>
+        public static uint? LastInputTick()
         {
             var info = new LASTINPUTINFO { cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<LASTINPUTINFO>() };
-            if (!GetLastInputInfo(ref info)) return null;
-            // Both are milliseconds since boot, wrapping at 2^32; unsigned subtraction handles the wrap.
-            uint ageMs = unchecked((uint)Environment.TickCount - info.dwTime);
-            return DateTime.UtcNow - TimeSpan.FromMilliseconds(ageMs);
+            return GetLastInputInfo(ref info) ? info.dwTime : (uint?)null;
+        }
+
+        /// <summary>How long ago the last input was, from the tick clock (unsigned subtraction handles the wrap), or null.</summary>
+        public static TimeSpan? LastInputAge()
+        {
+            uint? tick = LastInputTick();
+            if (tick == null) return null;
+            return TimeSpan.FromMilliseconds(unchecked((uint)Environment.TickCount - tick.Value));
         }
     }
 }
