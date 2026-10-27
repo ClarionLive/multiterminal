@@ -289,9 +289,19 @@ namespace MultiTerminal.Controls
                 }
             }
 
-            _renderer.Focus();
+            if (TakeFocusOnStart)
+                _renderer.Focus();
+            TakeFocusOnStart = true;   // one launch only: the Owner's own relaunch of this pane focuses as usual
             Ready?.Invoke(this, EventArgs.Empty);
         }
+
+        /// <summary>
+        /// Whether the terminal focuses itself once its process starts. A new pane's start is deferred
+        /// until its WebView2 is ready, about a second later, so focusing then moved the cursor out of
+        /// whatever pane the Owner was typing in by that time. False for a pane MT opened for an agent
+        /// while the Owner was typing (task 2be35d18). Applies to the next start only.
+        /// </summary>
+        public bool TakeFocusOnStart { get; set; } = true;
 
         /// <summary>
         /// Stops the terminal process.

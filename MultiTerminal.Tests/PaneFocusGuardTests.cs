@@ -5,63 +5,45 @@ using Xunit;
 namespace MultiTerminal.Tests
 {
     /// <summary>
-    /// Task 2be35d18: while the Owner is typing, only the Owner moves focus to another pane. The rule is
-    /// pure; the wiring (the message filter, the click sources, the restore in OnActiveDocumentChanged)
-    /// runs only live.
+    /// Task 2be35d18: a pane or panel MT opens for an agent leaves focus in the pane the Owner is typing
+    /// in. The rule is pure; the two call sites (AddNewTerminal for spawned and resumed helpers, the
+    /// agent panel's first page load) run only live.
     /// </summary>
     public class PaneFocusGuardTests
     {
         private static readonly DateTime Now = new DateTime(2026, 10, 26, 12, 0, 0, DateTimeKind.Utc);
 
         [Fact]
-        public void Another_pane_taking_focus_while_the_owner_types_is_undone()
+        public void A_new_pane_leaves_focus_where_the_owner_is_typing()
         {
-            Assert.True(PaneFocusGuard.ShouldRestore("B", "A", Now.AddMilliseconds(-200), null, Now));
+            Assert.True(PaneFocusGuard.ShouldKeepFocus("A", Now.AddMilliseconds(-200), "B", Now));
         }
 
         [Fact]
-        public void A_switch_the_owner_pointed_at_is_kept()
+        public void The_window_ends_exactly_at_TypingWindow()
         {
-            // A tab click or a click in pane B, just after typing in A.
-            Assert.False(PaneFocusGuard.ShouldRestore("B", "A", Now.AddMilliseconds(-200), Now.AddMilliseconds(-50), Now));
-            Assert.False(PaneFocusGuard.ShouldRestore("B", "A", Now.AddMilliseconds(-200), Now - PaneFocusGuard.IntentWindow, Now));
+            Assert.True(PaneFocusGuard.ShouldKeepFocus("A", Now - PaneFocusGuard.TypingWindow, "B", Now));
+            Assert.False(PaneFocusGuard.ShouldKeepFocus("A", Now - PaneFocusGuard.TypingWindow - TimeSpan.FromMilliseconds(1), "B", Now));
         }
 
         [Fact]
-        public void An_old_click_does_not_excuse_a_switch()
+        public void A_new_pane_takes_focus_when_nobody_has_typed()
         {
-            Assert.True(PaneFocusGuard.ShouldRestore("B", "A", Now.AddMilliseconds(-200),
-                Now - PaneFocusGuard.IntentWindow - TimeSpan.FromMilliseconds(1), Now));
+            Assert.False(PaneFocusGuard.ShouldKeepFocus("A", null, "B", Now));
+            Assert.False(PaneFocusGuard.ShouldKeepFocus(null, Now.AddMilliseconds(-100), "B", Now));
         }
 
         [Fact]
-        public void Nothing_is_undone_once_the_owner_has_stopped_typing()
+        public void The_typing_pane_itself_is_never_held_against_itself()
         {
-            Assert.False(PaneFocusGuard.ShouldRestore("B", "A", Now - PaneFocusGuard.TypingWindow - TimeSpan.FromMilliseconds(1), null, Now));
-            Assert.True(PaneFocusGuard.ShouldRestore("B", "A", Now - PaneFocusGuard.TypingWindow, null, Now));
+            Assert.False(PaneFocusGuard.ShouldKeepFocus("A", Now.AddMilliseconds(-100), "A", Now));
         }
 
         [Fact]
-        public void The_pane_being_typed_in_becoming_active_is_never_undone()
+        public void A_panel_is_no_pane_so_typing_alone_decides()
         {
-            Assert.False(PaneFocusGuard.ShouldRestore("A", "A", Now.AddMilliseconds(-100), null, Now));
-        }
-
-        [Fact]
-        public void With_no_typing_known_nothing_is_undone()
-        {
-            Assert.False(PaneFocusGuard.ShouldRestore("B", null, Now.AddMilliseconds(-100), null, Now));
-            Assert.False(PaneFocusGuard.ShouldRestore("B", "A", null, null, Now));
-        }
-
-        [Fact]
-        public void A_noted_click_reads_back_as_a_recent_utc_time()
-        {
-            UserFocusIntent.Note();
-            var at = UserFocusIntent.LastUtc;
-            Assert.NotNull(at);
-            Assert.Equal(DateTimeKind.Utc, at.Value.Kind);
-            Assert.True((DateTime.UtcNow - at.Value).TotalSeconds < 5);
+            // The agent panel's load passes no pane id: focus in the typing pane's own panel is still a steal.
+            Assert.True(PaneFocusGuard.ShouldKeepFocus("A", Now.AddMilliseconds(-100), null, Now));
         }
     }
 }
