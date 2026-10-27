@@ -38,7 +38,7 @@ function load() {
   const fn = new Function(
     "PLACEHOLDER_TERMINAL_NAME", "claimedTerminalName", "apiCall", "isClarionEmbedded",
     `${BLOCK}
-     return { resolveSenderIdentity, chooseSender, unregisteredError };`,
+     return { resolveSenderIdentity, chooseSender, unregisteredError, chooseBrowserTabTerminal };`,
   );
   const apiCall = async () => { throw new Error("apiCall must not be reached: tests inject deps.get"); };
   // The real predicate lives outside this block; the CA tests below pass deps.embedded explicitly, so
@@ -47,7 +47,7 @@ function load() {
   return fn("Unassigned", null, apiCall, isClarionEmbedded);
 }
 
-const { resolveSenderIdentity, chooseSender, unregisteredError } = load();
+const { resolveSenderIdentity, chooseSender, unregisteredError, chooseBrowserTabTerminal } = load();
 
 // A lookup that answers for exactly one pid, like the broker: anything else is a 404.
 function liveLookup(map) {
@@ -284,3 +284,39 @@ for (const tool of ["send_message", "broadcast_message"]) {
     assert.ok(/fromTerminalId:\s*\{/.test(def), `${tool}: fromTerminalId property was removed, not made optional`);
   });
 }
+
+// ── chooseBrowserTabTerminal (ticket 2b31dc94) ───────────────────────────────────────────────────────
+// The browser-tab tools close tabs and run scripts, so an omitted terminalId may only default to the
+// AUTHORITATIVE live identity, never to MULTITERMINAL_NAME or the claimed name.
+
+test("browser tab: a given terminalId is used exactly as given", () => {
+  assert.deepEqual(chooseBrowserTabTerminal("Bob", { name: "Alice", authoritative: true }), { terminal: "Bob" });
+  assert.deepEqual(chooseBrowserTabTerminal(" Bob", null), { terminal: " Bob" });
+});
+
+test("browser tab: no terminalId defaults to the live row bound to this claude.exe", () => {
+  assert.deepEqual(chooseBrowserTabTerminal(undefined, { name: "Alice", authoritative: true }), { terminal: "Alice" });
+  assert.deepEqual(chooseBrowserTabTerminal("", { name: "Alice", authoritative: true }), { terminal: "Alice" });
+});
+
+test("browser tab: a default that is not authoritative is refused, not guessed", () => {
+  // e.g. the launch env name after a rename, or a lookup that failed: it may name ANOTHER live terminal.
+  const r = chooseBrowserTabTerminal(undefined, { name: "LaunchName", authoritative: false });
+  assert.ok(r.error && r.error.startsWith("terminalId is required"), JSON.stringify(r));
+  assert.equal(r.terminal, undefined);
+  assert.ok(chooseBrowserTabTerminal(undefined, { name: null, authoritative: false }).error);
+  assert.ok(chooseBrowserTabTerminal(undefined, null).error);
+});
+
+test("browser tab: an unregistered ClarionAssistant tab gets no terminal", async () => {
+  // resolveSenderIdentity answers no live row (404) and the session is embedded with no claim.
+  const { get } = liveLookup({});
+  const resolved = await resolveSenderIdentity({ get, ppid: 4242, held: null, embedded: true, outcome: "refused", env: { MULTITERMINAL_NAME: "CA-x" } });
+  assert.ok(chooseBrowserTabTerminal(undefined, resolved).error);
+});
+
+test("browser tab: a renamed pane with a stale env name still defaults to the live name", async () => {
+  const { get } = liveLookup({ 4242: "Renamed" });
+  const resolved = await resolveSenderIdentity({ get, ppid: 4242, held: null, env: { MULTITERMINAL_NAME: "OldName" } });
+  assert.deepEqual(chooseBrowserTabTerminal(undefined, resolved), { terminal: "Renamed" });
+});
