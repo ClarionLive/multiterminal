@@ -137,6 +137,13 @@ function clampDetail(s) {
     : flat;
 }
 
+// Ticket 2b31dc94: the browser-tab tools act on the caller's own HUD unless told otherwise. A call with
+// no terminalId used to reach MessageBroker.GetTerminal(null) and come back as a bare 500.
+function browserTabTerminal(args) {
+  if (typeof args?.terminalId === "string" && args.terminalId !== "") return args.terminalId;
+  return process.env.MULTITERMINAL_NAME || null;
+}
+
 async function apiCall(endpoint, method = "GET", body = null, timeoutMs = API_TIMEOUT_MS, extraHeaders = null) {
   const url = `${API_BASE}${endpoint}`;
   const options = {
@@ -2265,7 +2272,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Your terminal ID or name (from register_terminal)",
+              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
             },
             title: {
               type: "string",
@@ -2280,7 +2287,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Raw HTML content to display (optional if url provided)",
             },
           },
-          required: ["terminalId", "title"],
+          required: ["title"],
         },
       },
       {
@@ -2353,7 +2360,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Your terminal ID or name (from register_terminal)",
+              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
             },
             tabId: {
               type: "string",
@@ -2372,7 +2379,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "New HTML content to display (optional)",
             },
           },
-          required: ["terminalId", "tabId"],
+          required: ["tabId"],
         },
       },
       {
@@ -2383,14 +2390,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Your terminal ID or name (from register_terminal)",
+              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
             },
             tabId: {
               type: "string",
               description: "Tab ID to close",
             },
           },
-          required: ["terminalId", "tabId"],
+          required: ["tabId"],
         },
       },
       {
@@ -2401,7 +2408,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Your terminal ID or name (from register_terminal)",
+              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
             },
             tabId: {
               type: "string",
@@ -2412,7 +2419,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "JavaScript code to execute in the tab. The return value of the last expression is returned as the result.",
             },
           },
-          required: ["terminalId", "tabId", "script"],
+          required: ["tabId", "script"],
         },
       },
       {
@@ -2423,7 +2430,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Your terminal ID or name (from register_terminal)",
+              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
             },
             tabId: {
               type: "string",
@@ -2434,7 +2441,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Maximum number of log entries to return (most recent first). Default: all.",
             },
           },
-          required: ["terminalId", "tabId"],
+          required: ["tabId"],
         },
       },
       {
@@ -2445,7 +2452,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Your terminal ID or name (from register_terminal)",
+              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
             },
             tabId: {
               type: "string",
@@ -2461,7 +2468,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               default: "textContent",
             },
           },
-          required: ["terminalId", "tabId", "selector"],
+          required: ["tabId", "selector"],
         },
       },
       {
@@ -2472,14 +2479,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Your terminal ID or name (from register_terminal)",
+              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
             },
             tabId: {
               type: "string",
               description: "Tab ID returned from open_browser_tab",
             },
           },
-          required: ["terminalId", "tabId"],
+          required: ["tabId"],
         },
       },
       {
@@ -2490,7 +2497,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Your terminal ID or name (from register_terminal)",
+              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
             },
             tabId: {
               type: "string",
@@ -2501,7 +2508,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "JSON data to send to the page. Will be available as e.data in the message event handler.",
             },
           },
-          required: ["terminalId", "tabId", "data"],
+          required: ["tabId", "data"],
         },
       },
       {
@@ -2512,7 +2519,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Your terminal ID or name (from register_terminal)",
+              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
             },
             tabId: {
               type: "string",
@@ -2523,7 +2530,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Maximum number of messages to return (most recent). Default: all.",
             },
           },
-          required: ["terminalId", "tabId"],
+          required: ["tabId"],
         },
       },
       // WebMCP Tools (W3C Web Model Context Protocol polyfill)
@@ -2535,14 +2542,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Your terminal ID or name (from register_terminal)",
+              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
             },
             tabId: {
               type: "string",
               description: "Tab ID returned from open_browser_tab",
             },
           },
-          required: ["terminalId", "tabId"],
+          required: ["tabId"],
         },
       },
       {
@@ -2553,7 +2560,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Your terminal ID or name (from register_terminal)",
+              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
             },
             tabId: {
               type: "string",
@@ -2568,7 +2575,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Input parameters for the tool, matching the tool's inputSchema",
             },
           },
-          required: ["terminalId", "tabId", "toolName"],
+          required: ["tabId", "toolName"],
         },
       },
       {
@@ -5374,7 +5381,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "open_browser_tab": {
         const result = await apiCall("/api/browser-tabs/open", "POST", {
-          terminalId: args.terminalId,
+          terminalId: browserTabTerminal(args),
           title: args.title,
           url: args.url || null,
           content: args.content || null,
@@ -5391,7 +5398,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "set_browser_content": {
         await apiCall("/api/browser-tabs/update", "POST", {
-          terminalId: args.terminalId,
+          terminalId: browserTabTerminal(args),
           tabId: args.tabId,
           title: args.title || null,
           url: args.url || null,
@@ -5409,7 +5416,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "close_browser_tab": {
         await apiCall("/api/browser-tabs/close", "POST", {
-          terminalId: args.terminalId,
+          terminalId: browserTabTerminal(args),
           tabId: args.tabId,
         });
         return {
@@ -5424,7 +5431,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "execute_browser_script": {
         const result = await apiCall("/api/browser-tabs/execute-script", "POST", {
-          terminalId: args.terminalId,
+          terminalId: browserTabTerminal(args),
           tabId: args.tabId,
           script: args.script,
         });
@@ -5440,7 +5447,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "get_browser_console_logs": {
         const result = await apiCall("/api/browser-tabs/console-logs", "POST", {
-          terminalId: args.terminalId,
+          terminalId: browserTabTerminal(args),
           tabId: args.tabId,
           limit: args.limit || null,
         });
@@ -5457,7 +5464,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "get_browser_element_content": {
         const result = await apiCall("/api/browser-tabs/element-content", "POST", {
-          terminalId: args.terminalId,
+          terminalId: browserTabTerminal(args),
           tabId: args.tabId,
           selector: args.selector,
           property: args.property || "textContent",
@@ -5474,7 +5481,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "capture_browser_screenshot": {
         const result = await apiCall("/api/browser-tabs/capture-screenshot", "POST", {
-          terminalId: args.terminalId,
+          terminalId: browserTabTerminal(args),
           tabId: args.tabId,
         });
         if (!result.imageBase64) {
@@ -5500,7 +5507,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "post_browser_message": {
         await apiCall("/api/browser-tabs/post-message", "POST", {
-          terminalId: args.terminalId,
+          terminalId: browserTabTerminal(args),
           tabId: args.tabId,
           data: typeof args.data === "string" ? args.data : JSON.stringify(args.data),
         });
@@ -5516,7 +5523,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "get_browser_messages": {
         const result = await apiCall("/api/browser-tabs/get-messages", "POST", {
-          terminalId: args.terminalId,
+          terminalId: browserTabTerminal(args),
           tabId: args.tabId,
           limit: args.limit || null,
         });
@@ -5534,7 +5541,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // WebMCP Tools
       case "list_webmcp_tools": {
         const result = await apiCall("/api/browser-tabs/execute-script", "POST", {
-          terminalId: args.terminalId,
+          terminalId: browserTabTerminal(args),
           tabId: args.tabId,
           script: "window.__webmcpListTools ? window.__webmcpListTools() : '[]'",
         });
@@ -5578,7 +5585,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const inputJson = JSON.stringify(args.input || {});
         const script = `(async function() { try { return await window.__webmcpInvoke('${toolName}', ${inputJson}); } catch(e) { return JSON.stringify({error: e.message}); } })()`;
         const result = await apiCall("/api/browser-tabs/execute-script", "POST", {
-          terminalId: args.terminalId,
+          terminalId: browserTabTerminal(args),
           tabId: args.tabId,
           script: script,
         });

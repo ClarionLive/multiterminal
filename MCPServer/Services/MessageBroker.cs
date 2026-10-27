@@ -4152,6 +4152,11 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public TerminalInfo GetTerminal(string idOrNameOrDocId)
         {
+            // Ticket 2b31dc94: no id names no terminal. A null used to throw from TryGetValue, which every
+            // caller (the browser-tab routes among them) passed on as a bare 500.
+            if (string.IsNullOrEmpty(idOrNameOrDocId))
+                return null;
+
             // First try direct lookup by terminalId (dictionary key)
             if (_terminals.TryGetValue(idOrNameOrDocId, out var terminal) && terminal.IsConnected)
                 return terminal;
