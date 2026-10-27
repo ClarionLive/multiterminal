@@ -183,6 +183,9 @@ namespace MultiTerminal
             InitializeComponent();
             // Same .ico as the exe's Win32 icon (GH #36); without this the window shows WinForms' default.
             if (AppIcon.Value != null) Icon = AppIcon.Value;
+            // Task 2be35d18: a mouse press on any of MT's own windows (tabs, toolbar, menus, splitters)
+            // is the Owner pointing somewhere, which may move focus to another pane.
+            Application.AddMessageFilter(_focusIntentFilter);
             InitializeDockPanel();
             InitializeDashboardHeader();
             LoadSettings();
@@ -4408,6 +4411,8 @@ namespace MultiTerminal
         /// </summary>
         private void OnStartScreenProjectLaunched(object sender, StartScreenLaunchEventArgs e)
         {
+            // A click on a start-screen page: the pane it activates is the Owner's choice (task 2be35d18).
+            Services.UserFocusIntent.Note();
             _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] ===== ENTER ===== projectId='{e?.ProjectId}'");
             if (sender is not TerminalDocument doc)
             {
@@ -5502,6 +5507,7 @@ namespace MultiTerminal
         /// </summary>
         private void OnStartScreenOpenPowerShell(object sender, EventArgs e)
         {
+            Services.UserFocusIntent.Note();   // a start-screen click (task 2be35d18)
             if (sender is not TerminalDocument doc) return;
 
             try
@@ -5540,6 +5546,7 @@ namespace MultiTerminal
         /// </summary>
         private void OnStartScreenJustClaude(object sender, EventArgs e)
         {
+            Services.UserFocusIntent.Note();   // a start-screen click (task 2be35d18)
             if (sender is not TerminalDocument doc) return;
 
             try
@@ -5650,6 +5657,7 @@ namespace MultiTerminal
         /// </summary>
         private void OnStartScreenNewProject(object sender, EventArgs e)
         {
+            Services.UserFocusIntent.Note();   // a start-screen click (task 2be35d18)
             if (sender is not TerminalDocument sourceDoc) return;
 
             var teamLeads = _sharedProjectDatabase?.GetTeamLeadProfiles()
@@ -7101,11 +7109,82 @@ namespace MultiTerminal
             }
         }
 
+        // Task 2be35d18. The filter records the Owner's mouse presses on MT's own windows; the flag stops
+        // the restore's own activation from being judged again.
+        private readonly FocusIntentFilter _focusIntentFilter = new FocusIntentFilter();
+        private bool _restoringTypingFocus;
+
+        /// <summary>Notes a mouse press on any window of this process (WebView2 content is another process and is noted separately).</summary>
+        private sealed class FocusIntentFilter : IMessageFilter
+        {
+            private const int WM_LBUTTONDOWN = 0x0201;
+            private const int WM_RBUTTONDOWN = 0x0204;
+            private const int WM_MBUTTONDOWN = 0x0207;
+            private const int WM_NCLBUTTONDOWN = 0x00A1;
+            private const int WM_NCRBUTTONDOWN = 0x00A4;
+            private const int WM_NCMBUTTONDOWN = 0x00A7;
+
+            public bool PreFilterMessage(ref System.Windows.Forms.Message m)
+            {
+                switch (m.Msg)
+                {
+                    case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN:
+                    case WM_NCLBUTTONDOWN: case WM_NCRBUTTONDOWN: case WM_NCMBUTTONDOWN:
+                        UserFocusIntent.Note();
+                        break;
+                }
+                return false;   // only watching; every message goes on as before
+            }
+        }
+
+        /// <summary>
+        /// When <paramref name="activated"/> took focus while the Owner was typing in another pane, with
+        /// nothing from the Owner to explain it (<see cref="PaneFocusGuard.ShouldRestore"/>), gives focus
+        /// back to the pane being typed in, logs it, and returns true. UI thread.
+        /// </summary>
+        private bool TryRestoreTypingFocus(TerminalDocument activated)
+        {
+            TerminalDocument typing = null;
+            DateTime? typedAt = null;
+            foreach (var doc in _dockPanel.Contents.OfType<TerminalDocument>())
+            {
+                if (doc == null || doc.IsDisposed) continue;
+                var at = doc.Terminal?.LastUserInputUtc;
+                if (at.HasValue && (typedAt == null || at.Value > typedAt.Value)) { typing = doc; typedAt = at; }
+            }
+            if (typing == null) return false;
+
+            if (!PaneFocusGuard.ShouldRestore(activated.DocId, typing.DocId, typedAt, UserFocusIntent.LastUtc, DateTime.UtcNow))
+                return false;
+
+            _debugLogService?.Info("FocusGuard",
+                $"'{activated.TabText}' took focus with no click from you while you were typing in '{typing.TabText}'; focus given back to '{typing.TabText}'.");
+            var restore = typing;
+            BeginInvoke(new Action(() =>
+            {
+                if (restore.IsDisposed) return;
+                _restoringTypingFocus = true;
+                try
+                {
+                    restore.Activate();
+                    restore.FocusTerminal();
+                    _lastActiveTerminal = restore;
+                }
+                finally { _restoringTypingFocus = false; }
+            }));
+            return true;
+        }
+
         private void OnActiveDocumentChanged(object sender, EventArgs e)
         {
             try
             {
                 var activeDoc = _dockPanel.ActiveDocument as TerminalDocument;
+
+                // Task 2be35d18: a pane MT created for an agent (a subagent's panel, a spawned helper)
+                // takes focus when it appears, which used to move the cursor out of the pane the Owner
+                // was typing in. Undo such a switch: no FocusTerminal below, and focus goes back.
+                if (activeDoc != null && !_restoringTypingFocus && TryRestoreTypingFocus(activeDoc)) return;
 
                 // The Attention Rail's highlight has to follow focus changed by clicking a TAB,
                 // not just focus it requested itself (task 42052f0c, pipeline run 1).
@@ -10114,6 +10193,8 @@ namespace MultiTerminal
         /// </returns>
         private bool FocusTerminalForSession(string sessionKey)
         {
+            // An Attention card click: the Owner asked for this pane (task 2be35d18).
+            Services.UserFocusIntent.Note();
             if (string.IsNullOrWhiteSpace(sessionKey)) return false;
 
             string agentName = _mcpServer?.Broker?.AgentAttention?.Get(sessionKey)?.AgentName;
@@ -10456,6 +10537,7 @@ namespace MultiTerminal
         {
             if (disposing)
             {
+                Application.RemoveMessageFilter(_focusIntentFilter);
                 _oracleDigestTimer?.Stop();
                 _oracleDigestTimer?.Dispose();
                 _oracleService?.Dispose();

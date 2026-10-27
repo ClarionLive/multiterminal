@@ -904,6 +904,9 @@ namespace MultiTerminal.Docking
             _terminal.ClaudeCodeDetected += (s, e) => ClaudeCodeDetected?.Invoke(this, EventArgs.Empty);
             _terminal.TerminalClicked += (s, args) =>
             {
+                // The Owner clicked in this terminal: a switch to it is theirs (task 2be35d18).
+                Services.UserFocusIntent.Note();
+
                 // Close any open context menu
                 _currentContextMenu?.Close();
 
