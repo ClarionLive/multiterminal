@@ -1997,7 +1997,10 @@ namespace MultiTerminal
                     // on demand via get_browser_messages — no push wiring needed. (Previously every
                     // page postMessage was written to the agent's inbox, which the now-removed
                     // InboxMonitor turned into a [cm] nudge typed into the host terminal.)
-                    targetDoc.AddBrowserTab(e.TabId, e.Title, e.Url, e.HtmlContent, _currentTheme.IsDark);
+                    var page = targetDoc.AddBrowserTab(e.TabId, e.Title, e.Url, e.HtmlContent, _currentTheme.IsDark);
+                    // Task 2be35d18: an agent's tab does not keep focus it took while loading.
+                    if (page != null)
+                        page.AfterPageLoad = p => { if (!p.IsDisposed) KeepFocusAfterWebLoad($"Browser tab '{p.Title}'", p.HasKeyboardFocus); };
                     break;
                 case "update":
                     targetDoc.SetBrowserContent(e.TabId, e.Title, e.Url, e.HtmlContent);
@@ -2565,7 +2568,8 @@ namespace MultiTerminal
                             atomicIdentityUniqueness: true,
                             inheritedClaudeProfileName: spawnerProfileName,
                             onClaudeProfileRefused: refusal => profileRefusal = refusal,
-                            launchKind: Services.PaneLaunchKind.From(kind));
+                            launchKind: Services.PaneLaunchKind.From(kind),
+                            yieldFocusToTyping: true);
 
                         // Task 7d20e94c: the helper's launch row points at the launch its PROVEN spawner
                         // pane is running (spawnerDocId comes from the caller's launch nonce, never from
@@ -4244,8 +4248,11 @@ namespace MultiTerminal
         /// <paramref name="workingDirectory"/> exactly, with no active-task repo-root or worktree move.
         /// <paramref name="launchKind"/> (pipeline Run 1) is the <see cref="Services.PaneLaunchKind"/> for the
         /// launch record when the caller knows it; null derives it from the command.</para>
+        /// <para>Task 2be35d18: <paramref name="yieldFocusToTyping"/> is for panes MT opens on an agent's
+        /// behalf (spawn_helper, helpers resumed with their PM). Focus then stays in the pane the Owner is
+        /// typing in (<see cref="Services.PaneFocusGuard.ShouldKeepFocus"/>).</para>
         /// </summary>
-        public (string Name, string DocId) AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, bool atomicIdentityUniqueness = false, bool failClosedIdentity = false, Models.ClaudeProfile decidedClaudeProfile = null, string inheritedClaudeProfileName = null, Action<string> onClaudeProfileRefused = null, string resumeSessionId = null, bool pinWorkingDirectory = false, string launchKind = null)
+        public (string Name, string DocId) AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, bool atomicIdentityUniqueness = false, bool failClosedIdentity = false, Models.ClaudeProfile decidedClaudeProfile = null, string inheritedClaudeProfileName = null, Action<string> onClaudeProfileRefused = null, string resumeSessionId = null, bool pinWorkingDirectory = false, string launchKind = null, bool yieldFocusToTyping = false)
         {
             _debugLogService?.Trace("AddNewTerminal", "===== START =====");
 
@@ -4284,8 +4291,15 @@ namespace MultiTerminal
             _debugLogService?.Trace("AddNewTerminal", $"autoRunCommand: '{autoRunCommand ?? "null"}'");
             _debugLogService?.Trace("AddNewTerminal", $"projectId: '{projectId ?? "null"}'");
             _debugLogService?.Trace("AddNewTerminal", $"isTeamLead: '{isTeamLead}'");
+            // Task 2be35d18: a pane opened for an agent does not take focus from the pane the Owner is typing in.
+            TerminalDocument keepFocusIn = yieldFocusToTyping ? OwnerTypingPane(null) : null;
+
             _debugLogService?.Trace("AddNewTerminal", "Creating TerminalDocument...");
+            // The dock panel owns the pane once it is shown. CA2000 used to be satisfied only by the
+            // unconditional _lastActiveTerminal assignment, which a pane kept out of focus skips.
+#pragma warning disable CA2000
             var doc = new TerminalDocument();
+#pragma warning restore CA2000
             _debugLogService?.Trace("AddNewTerminal", "TerminalDocument created");
 
             doc.Terminal.SetDebugLogService(_debugLogService);
@@ -4352,6 +4366,14 @@ namespace MultiTerminal
                     default:
                         throw new InvalidOperationException($"Unhandled terminal placement '{placement.Kind}'.");
                 }
+            }
+
+            // Show activated the new pane; hand focus straight back, before anything slow runs.
+            if (keepFocusIn != null)
+            {
+                keepFocusIn.Activate();
+                keepFocusIn.FocusTerminal();
+                _debugLogService?.Info("FocusGuard", $"Opened '{identityName}' without taking focus: you are typing in '{keepFocusIn.TabText}'.");
             }
             _debugLogService?.Trace("AddNewTerminal", "Terminal shown in DockPanel");
 
@@ -4479,11 +4501,14 @@ namespace MultiTerminal
             }
 
             // Focus the new terminal and track it as last active
-            _debugLogService?.Trace("AddNewTerminal", "Focusing terminal...");
-            doc.Activate();
-            if (!doc.IsStartScreenVisible)
-                doc.FocusTerminal();
-            _lastActiveTerminal = doc;
+            if (keepFocusIn == null)
+            {
+                _debugLogService?.Trace("AddNewTerminal", "Focusing terminal...");
+                doc.Activate();
+                if (!doc.IsStartScreenVisible)
+                    doc.FocusTerminal();
+                _lastActiveTerminal = doc;
+            }
             _debugLogService?.Trace("AddNewTerminal", "Completed");
             if (identityRefusal != null)
                 ShowProjectIdentityRefused(identityName, identityRefusal);
@@ -5192,6 +5217,7 @@ namespace MultiTerminal
         {
             string pmName = pmDoc.OriginalAgentName ?? pmDoc.CustomTitle;
             string projectRoot = GetLaunchableProjectRoot(project);
+            uint? inputTickAtStart = Services.OwnerInputClock.LastInputTick();
             SessionCatalog catalog = null;
             try
             {
@@ -5254,7 +5280,8 @@ namespace MultiTerminal
                         onClaudeProfileRefused: refusal => profileRefusal = refusal,
                         resumeSessionId: entry.SessionId,
                         pinWorkingDirectory: true,
-                        launchKind: Services.PaneLaunchKind.Claude);
+                        launchKind: Services.PaneLaunchKind.Claude,
+                        yieldFocusToTyping: true);
 
                     if (profileRefusal != null)
                     {
@@ -5296,8 +5323,11 @@ namespace MultiTerminal
                 }
             }
 
-            // The PM pane was focused by its own launch; AddNewTerminal focused each helper in turn.
-            if (!pmDoc.IsDisposed && report.Resumed.Count > 0)
+            // The PM pane was focused by its own launch; AddNewTerminal may have focused helpers in turn.
+            // Task 2be35d18: only when the Owner has done nothing since the resume began. A click on another
+            // pane meanwhile is their choice, and so is typing anywhere.
+            if (!pmDoc.IsDisposed && report.Resumed.Count > 0
+                && !Services.PaneFocusGuard.OwnerActedSinceTick(Services.OwnerInputClock.LastInputTick(), inputTickAtStart))
             {
                 pmDoc.Activate();
                 pmDoc.FocusTerminal();
@@ -7354,11 +7384,86 @@ namespace MultiTerminal
             }
         }
 
+        /// <summary>
+        /// The active terminal pane, when the Owner is typing in it (<see cref="Services.PaneFocusGuard.ShouldKeepFocus"/>:
+        /// unsent text on its input line, or a keystroke within the typing window) and it is not
+        /// <paramref name="newPaneId"/>; else null (task 2be35d18). Only the ACTIVE pane is a candidate:
+        /// <c>LastUserInputUtc</c> also counts text MT types into a pane itself, and MT types into panes the
+        /// Owner is not in (a new helper's first prompt). UI thread.
+        /// </summary>
+        private TerminalDocument OwnerTypingPane(string newPaneId)
+        {
+            if (!(_dockPanel.ActiveDocument is TerminalDocument active) || active.IsDisposed) return null;
+            return IsOwnerTypingIn(active, newPaneId) ? active : null;
+        }
+
+        private static bool IsOwnerTypingIn(TerminalDocument pane, string newPaneId) =>
+            Services.PaneFocusGuard.ShouldKeepFocus(pane.DocId, pane.Terminal?.LastUserInputUtc,
+                pane.Terminal?.InputLineHasTypedText == true, newPaneId, DateTime.UtcNow);
+
+        /// <summary>
+        /// Task 2be35d18: a web view MT added for an agent (a subagent's panel, an agent's HUD browser tab)
+        /// finished loading a page. Decided at load time, from the state then, never from a pane remembered
+        /// earlier, so it cannot send the Owner back to a pane they have since left: when the web view holds
+        /// keyboard focus, the Owner pressed a key in the active pane within the typing window, and that
+        /// keystroke is the Owner's last input of any kind (<see cref="Services.PaneFocusGuard.OwnerActedAfterKeystroke"/>),
+        /// that pane's terminal gets focus back. So a click into the page, the usual way the Owner puts
+        /// focus there, keeps it there; so does a mouse move, which cannot be told apart.
+        /// Unsent text alone does not count here, so a page the Owner is reading keeps focus when an agent
+        /// reloads it. Logged when the web view holds focus, so a live steal can be told from a path this
+        /// does not cover. UI thread.
+        /// </summary>
+        private void KeepFocusAfterWebLoad(string what, bool webViewHasFocus)
+        {
+            if (!webViewHasFocus) return;
+            var active = _dockPanel.ActiveDocument as TerminalDocument;
+            var typedAt = active?.Terminal?.LastUserInputUtc;
+            // The Owner's last input of any kind must be that keystroke: a click into the page since then
+            // (or a mouse move, which cannot be told apart) means focus stays where it is.
+            var typing = active != null && !active.IsDisposed && typedAt.HasValue
+                && Services.PaneFocusGuard.ShouldKeepFocus(active.DocId, typedAt, false, null, DateTime.UtcNow)
+                && !Services.PaneFocusGuard.OwnerActedAfterKeystroke(Services.OwnerInputClock.LastInputAge(), DateTime.UtcNow - typedAt.Value)
+                ? active : null;
+            _debugLogService?.Info("FocusGuard", typing != null
+                ? $"{what} took focus while you were typing in '{typing.TabText}'; focus given back."
+                : $"{what} has focus; you were not typing in the active pane, or did something since, so it keeps it.");
+            if (typing == null) return;
+            typing.FocusTerminal();
+            _lastActiveTerminal = typing;
+        }
+
+        private TerminalDocument _previousActiveDoc;
+
+        /// <summary>
+        /// Task 2be35d18, evidence only: logs a switch to another pane while the Owner was typing in the
+        /// pane that was active, with MT's calling methods. An Owner's tab click shows few or no MT frames
+        /// (it comes through DockPanelSuite); a steal shows the MT code that did it. It sees only switches
+        /// DockPanelSuite reports, not a web view taking focus inside a pane. Changes nothing.
+        /// </summary>
+        private void LogSwitchAfterTyping(TerminalDocument activeDoc)
+        {
+            if (activeDoc == null) return;
+            var previous = _previousActiveDoc;
+            _previousActiveDoc = activeDoc;
+            if (previous == null || previous == activeDoc || previous.IsDisposed) return;
+            if (!IsOwnerTypingIn(previous, activeDoc.DocId)) return;
+
+            // MT's own frames only: DockPanelSuite and framework frames would use up the list first.
+            var callers = (new System.Diagnostics.StackTrace(1, false).GetFrames() ?? Array.Empty<System.Diagnostics.StackFrame>())
+                .Select(f => f.GetMethod())
+                .Where(m => m?.DeclaringType?.Namespace?.StartsWith("MultiTerminal", StringComparison.Ordinal) == true)
+                .Select(m => $"{m.DeclaringType.Name}.{m.Name}")
+                .Take(12);
+            _debugLogService?.Info("FocusGuard",
+                $"'{activeDoc.TabText}' became active while you were typing in '{previous.TabText}'. Called from: {string.Join(" < ", callers)}");
+        }
+
         private void OnActiveDocumentChanged(object sender, EventArgs e)
         {
             try
             {
                 var activeDoc = _dockPanel.ActiveDocument as TerminalDocument;
+                LogSwitchAfterTyping(activeDoc);
 
                 // The Attention Rail's highlight has to follow focus changed by clicking a TAB,
                 // not just focus it requested itself (task 42052f0c, pipeline run 1).
@@ -9205,6 +9310,10 @@ namespace MultiTerminal
 
             var slot = targetTerminal.EmbeddedAgentPanel.AddAgentSlot(agentName);
             var control = new AgentPanelControl { Dock = DockStyle.Fill, DebugLogService = _debugLogService };
+            control.PageLoaded += (s, e) =>
+            {
+                if (!control.IsDisposed) KeepFocusAfterWebLoad($"Agent panel '{agentName}'", control.HasKeyboardFocus);
+            };
             slot.Controls.Add(control);
             control.AttachAgent(source, agentName, taskDescription, subagentType, isTeamAgent);
             control.ApplyTheme(_currentTheme.IsDark);

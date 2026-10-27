@@ -68,6 +68,15 @@ namespace MultiTerminal.AgentPanel
         public event EventHandler<double> ZoomChanged;
 
         /// <summary>
+        /// Raised once, when the panel's page has finished its first load (task 2be35d18: a WebView2 can
+        /// take keyboard focus as it creates and loads, so MainForm checks where focus went).
+        /// </summary>
+        public event EventHandler PageLoaded;
+
+        /// <summary>Whether keyboard focus is inside this panel's web view.</summary>
+        public bool HasKeyboardFocus => _webView.Focused || ContainsFocus;
+
+        /// <summary>
         /// Set the zoom factor for this panel. Applies immediately if initialized, otherwise deferred.
         /// </summary>
         public void SetZoomFactor(double zoom)
@@ -122,6 +131,8 @@ namespace MultiTerminal.AgentPanel
                 return;
             }
 
+            _webView.CoreWebView2.NavigationCompleted += OnFirstNavigationCompleted;
+
             var htmlPath = GetHtmlPath();
             if (File.Exists(htmlPath))
                 _webView.CoreWebView2.Navigate(new Uri(htmlPath).AbsoluteUri);
@@ -134,6 +145,12 @@ namespace MultiTerminal.AgentPanel
             _webView.ZoomFactorChanged += (s, e) => ZoomChanged?.Invoke(this, _webView.ZoomFactor);
             if (Math.Abs(_pendingZoom - 1.0) > 0.01)
                 _webView.ZoomFactor = _pendingZoom;
+        }
+
+        private void OnFirstNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
+        {
+            _webView.CoreWebView2.NavigationCompleted -= OnFirstNavigationCompleted;
+            PageLoaded?.Invoke(this, EventArgs.Empty);
         }
 
         private string GetHtmlPath()

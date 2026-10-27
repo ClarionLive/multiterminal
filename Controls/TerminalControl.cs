@@ -289,8 +289,22 @@ namespace MultiTerminal.Controls
                 }
             }
 
-            _renderer.Focus();
+            if (IsInActiveDocument())
+                _renderer.Focus();
             Ready?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// Whether this terminal's pane is the dock panel's active document, decided when the start runs
+        /// (task 2be35d18). A new pane's start is deferred until its WebView2 is ready, about a second
+        /// later; focusing it unconditionally then moved the cursor out of whatever pane the Owner was
+        /// typing in by that time. A terminal outside a dock panel (the Oracle window) always focuses.
+        /// </summary>
+        private bool IsInActiveDocument()
+        {
+            var content = FindForm() as WeifenLuo.WinFormsUI.Docking.DockContent;
+            var dockPanel = content?.DockPanel;
+            return dockPanel == null || dockPanel.ActiveDocument == content;
         }
 
         /// <summary>
