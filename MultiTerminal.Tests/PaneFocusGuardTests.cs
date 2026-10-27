@@ -49,6 +49,35 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void The_keystroke_itself_is_not_an_action_since_it()
+        {
+            // The key-up and xterm.js's report of the key land within the slack.
+            Assert.False(PaneFocusGuard.OwnerActedSince(Now + PaneFocusGuard.SameInputSlack, Now));
+            Assert.False(PaneFocusGuard.OwnerActedSince(Now.AddMilliseconds(-50), Now));
+        }
+
+        [Fact]
+        public void A_click_after_the_keystroke_is_an_action()
+        {
+            Assert.True(PaneFocusGuard.OwnerActedSince(Now + PaneFocusGuard.SameInputSlack + TimeSpan.FromMilliseconds(1), Now));
+        }
+
+        [Fact]
+        public void Unknown_input_time_counts_as_acted_so_focus_is_left_alone()
+        {
+            Assert.True(PaneFocusGuard.OwnerActedSince(null, Now));
+        }
+
+        [Fact]
+        public void The_input_clock_reads_a_utc_time_not_in_the_future()
+        {
+            var at = OwnerInputClock.LastInputUtc();
+            if (at == null) return;   // a session with no input desktop (a service) reports nothing
+            Assert.Equal(DateTimeKind.Utc, at.Value.Kind);
+            Assert.True(at.Value <= DateTime.UtcNow.AddSeconds(1));
+        }
+
+        [Fact]
         public void A_panel_is_no_pane_so_typing_alone_decides()
         {
             // A panel or browser tab passes no pane id: focus in the typing pane's own panel is still a steal.

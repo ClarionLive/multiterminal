@@ -4964,6 +4964,7 @@ namespace MultiTerminal
         {
             string pmName = pmDoc.OriginalAgentName ?? pmDoc.CustomTitle;
             string projectRoot = GetLaunchableProjectRoot(project);
+            var resumeStartedUtc = DateTime.UtcNow;
             SessionCatalog catalog = null;
             try
             {
@@ -5070,8 +5071,10 @@ namespace MultiTerminal
             }
 
             // The PM pane was focused by its own launch; AddNewTerminal may have focused helpers in turn.
-            // Not while the Owner is typing in another pane (task 2be35d18).
-            if (!pmDoc.IsDisposed && report.Resumed.Count > 0 && OwnerTypingPane(pmDoc.DocId) == null)
+            // Task 2be35d18: only when the Owner has done nothing since the resume began. A click on another
+            // pane meanwhile is their choice, and so is typing anywhere.
+            if (!pmDoc.IsDisposed && report.Resumed.Count > 0
+                && !Services.PaneFocusGuard.OwnerActedSince(Services.OwnerInputClock.LastInputUtc(), resumeStartedUtc))
             {
                 pmDoc.Activate();
                 pmDoc.FocusTerminal();
@@ -7149,22 +7152,28 @@ namespace MultiTerminal
         /// Task 2be35d18: a web view MT added for an agent (a subagent's panel, an agent's HUD browser tab)
         /// finished loading a page. Decided at load time, from the state then, never from a pane remembered
         /// earlier, so it cannot send the Owner back to a pane they have since left: when the web view holds
-        /// keyboard focus and the Owner pressed a key in the active pane within the typing window, that
-        /// pane's terminal gets focus back. Unsent text alone does not count here, so a page the Owner is
-        /// reading keeps focus when an agent reloads it. Accepted gap: an Owner who clicks into a page that
-        /// is still loading within the typing window of a keystroke is sent back to the terminal. Logged
-        /// when the web view holds focus, so a live steal can be told from a path this does not cover. UI thread.
+        /// keyboard focus, the Owner pressed a key in the active pane within the typing window, and that
+        /// keystroke is the Owner's last input of any kind (<see cref="Services.PaneFocusGuard.OwnerActedSince"/>),
+        /// that pane's terminal gets focus back. So a click into the page, the usual way the Owner puts
+        /// focus there, keeps it there; so does a mouse move, which cannot be told apart.
+        /// Unsent text alone does not count here, so a page the Owner is reading keeps focus when an agent
+        /// reloads it. Logged when the web view holds focus, so a live steal can be told from a path this
+        /// does not cover. UI thread.
         /// </summary>
         private void KeepFocusAfterWebLoad(string what, bool webViewHasFocus)
         {
             if (!webViewHasFocus) return;
             var active = _dockPanel.ActiveDocument as TerminalDocument;
-            var typing = active != null && !active.IsDisposed
-                && Services.PaneFocusGuard.ShouldKeepFocus(active.DocId, active.Terminal?.LastUserInputUtc, false, null, DateTime.UtcNow)
+            var typedAt = active?.Terminal?.LastUserInputUtc;
+            // The Owner's last input of any kind must be that keystroke: a click into the page since then
+            // (or a mouse move, which cannot be told apart) means focus stays where it is.
+            var typing = active != null && !active.IsDisposed && typedAt.HasValue
+                && Services.PaneFocusGuard.ShouldKeepFocus(active.DocId, typedAt, false, null, DateTime.UtcNow)
+                && !Services.PaneFocusGuard.OwnerActedSince(Services.OwnerInputClock.LastInputUtc(), typedAt.Value)
                 ? active : null;
             _debugLogService?.Info("FocusGuard", typing != null
                 ? $"{what} took focus while you were typing in '{typing.TabText}'; focus given back."
-                : $"{what} took focus; you were not typing in the active pane, so it keeps it.");
+                : $"{what} has focus; you were not typing in the active pane, or did something since, so it keeps it.");
             if (typing == null) return;
             typing.FocusTerminal();
             _lastActiveTerminal = typing;
