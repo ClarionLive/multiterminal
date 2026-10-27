@@ -758,7 +758,26 @@
                 counts.classList.add('hidden');
             }
             row.classList.remove('hidden');
+            reportNeededHeight();
         }
+
+        // Ticket c72ec2af: a bar height saved before the GitHub row existed is too short for it, so
+        // the row was clipped until the Owner dragged the bar taller. While the row shows, tell C#
+        // how many device pixels the rows need (its bottom edge plus the container's 1px border,
+        // times devicePixelRatio, which carries Windows scaling and page zoom). C# only ever grows the
+        // bar to it. Sent only when the value changes, so a height the Owner drags afterwards stays.
+        var lastNeededHeight = 0;
+        function reportNeededHeight() {
+            var row = document.getElementById('row-github');
+            if (!row || row.classList.contains('hidden')) return;
+            var px = Math.ceil((row.getBoundingClientRect().bottom + 1) * (window.devicePixelRatio || 1));
+            if (!(px > 0) || px === lastNeededHeight) return;
+            lastNeededHeight = px;
+            postMessage('neededHeight', { px: px });
+        }
+        // A zoom change (Ctrl+wheel) changes devicePixelRatio and resizes the viewport. Resizing the bar
+        // itself also lands here, but leaves the needed height unchanged, so nothing is re-sent.
+        window.addEventListener('resize', reportNeededHeight);
 
         function onGitHubClick(target) {
             postMessage('openGitHub', { target: target });
@@ -882,6 +901,7 @@
             // C# keeps re-pushing while a folder it sent isn't shown yet, so an empty-folder delivery
             // can't falsely satisfy the loop and leave the folder band hidden (task d14048ef).
             postMessage('statuslineRendered', { folderShown: folderShown, seq: seq });
+            reportNeededHeight();
         }
 
         // Token meter (task f2702f69): cumulative tokens, est. cost, burn rate.

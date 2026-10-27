@@ -852,6 +852,14 @@ namespace MultiTerminal.Docking
             // DIAGNOSTIC (task d14048ef): tag this renderer with its owning doc identity so statusline
             // traces can be matched to the visible instance vs a duplicate/ghost one.
             _statusBar.SetOwnerTag($"Inst{InstanceId}/Doc{_docId}");
+            // Ticket c72ec2af: a saved height too short for the GitHub row grows to fit it. This pane
+            // only, and not saved: the saved height changes only when the Owner drags the splitter.
+            _statusBar.NeededHeightReported += (s, needed) =>
+            {
+                if (_statusBar == null || _statusBar.IsDisposed) return;
+                if (Services.StatusBarFit.GrowTo(_statusBar.Height, needed) is int grow)
+                    _statusBar.Height = grow;
+            };
             _statusBar.Ready += (s, e) =>
             {
                 // Only update status bar if we have a name and broker set
