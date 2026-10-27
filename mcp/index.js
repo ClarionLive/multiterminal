@@ -137,11 +137,15 @@ function clampDetail(s) {
     : flat;
 }
 
-// Ticket 2b31dc94: the browser-tab tools act on the caller's own HUD unless told otherwise. A call with
-// no terminalId used to reach MessageBroker.GetTerminal(null) and come back as a bare 500.
-function browserTabTerminal(args) {
-  if (typeof args?.terminalId === "string" && args.terminalId !== "") return args.terminalId;
-  return process.env.MULTITERMINAL_NAME || null;
+// Ticket 2b31dc94: the terminal whose HUD a browser-tab tool acts on. A call with no terminalId used to
+// reach MessageBroker.GetTerminal(null) and come back as a bare 500. The rule is chooseBrowserTabTerminal
+// (in the sender-identity block); this throws its refusal so the tool reports it.
+async function browserTabTerminal(args) {
+  const given = args?.terminalId;
+  const hasGiven = typeof given === "string" && given !== "";
+  const choice = chooseBrowserTabTerminal(given, hasGiven ? null : await resolveSenderIdentity());
+  if (choice.error) throw new Error(choice.error);
+  return choice.terminal;
 }
 
 async function apiCall(endpoint, method = "GET", body = null, timeoutMs = API_TIMEOUT_MS, extraHeaders = null) {
@@ -2272,7 +2276,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
+              description: "Terminal ID or name whose HUD holds the tab. Omit it to use this session's own terminal, as MultiTerminal has it registered; the call fails instead of guessing when MultiTerminal cannot confirm that.",
             },
             title: {
               type: "string",
@@ -2360,7 +2364,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
+              description: "Terminal ID or name whose HUD holds the tab. Omit it to use this session's own terminal, as MultiTerminal has it registered; the call fails instead of guessing when MultiTerminal cannot confirm that.",
             },
             tabId: {
               type: "string",
@@ -2390,7 +2394,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
+              description: "Terminal ID or name whose HUD holds the tab. Omit it to use this session's own terminal, as MultiTerminal has it registered; the call fails instead of guessing when MultiTerminal cannot confirm that.",
             },
             tabId: {
               type: "string",
@@ -2408,7 +2412,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
+              description: "Terminal ID or name whose HUD holds the tab. Omit it to use this session's own terminal, as MultiTerminal has it registered; the call fails instead of guessing when MultiTerminal cannot confirm that.",
             },
             tabId: {
               type: "string",
@@ -2430,7 +2434,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
+              description: "Terminal ID or name whose HUD holds the tab. Omit it to use this session's own terminal, as MultiTerminal has it registered; the call fails instead of guessing when MultiTerminal cannot confirm that.",
             },
             tabId: {
               type: "string",
@@ -2452,7 +2456,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
+              description: "Terminal ID or name whose HUD holds the tab. Omit it to use this session's own terminal, as MultiTerminal has it registered; the call fails instead of guessing when MultiTerminal cannot confirm that.",
             },
             tabId: {
               type: "string",
@@ -2479,7 +2483,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
+              description: "Terminal ID or name whose HUD holds the tab. Omit it to use this session's own terminal, as MultiTerminal has it registered; the call fails instead of guessing when MultiTerminal cannot confirm that.",
             },
             tabId: {
               type: "string",
@@ -2497,7 +2501,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
+              description: "Terminal ID or name whose HUD holds the tab. Omit it to use this session's own terminal, as MultiTerminal has it registered; the call fails instead of guessing when MultiTerminal cannot confirm that.",
             },
             tabId: {
               type: "string",
@@ -2519,7 +2523,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
+              description: "Terminal ID or name whose HUD holds the tab. Omit it to use this session's own terminal, as MultiTerminal has it registered; the call fails instead of guessing when MultiTerminal cannot confirm that.",
             },
             tabId: {
               type: "string",
@@ -2542,7 +2546,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
+              description: "Terminal ID or name whose HUD holds the tab. Omit it to use this session's own terminal, as MultiTerminal has it registered; the call fails instead of guessing when MultiTerminal cannot confirm that.",
             },
             tabId: {
               type: "string",
@@ -2560,7 +2564,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Terminal ID or name whose HUD holds the tab. Defaults to this terminal (MULTITERMINAL_NAME).",
+              description: "Terminal ID or name whose HUD holds the tab. Omit it to use this session's own terminal, as MultiTerminal has it registered; the call fails instead of guessing when MultiTerminal cannot confirm that.",
             },
             tabId: {
               type: "string",
@@ -5381,7 +5385,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "open_browser_tab": {
         const result = await apiCall("/api/browser-tabs/open", "POST", {
-          terminalId: browserTabTerminal(args),
+          terminalId: await browserTabTerminal(args),
           title: args.title,
           url: args.url || null,
           content: args.content || null,
@@ -5398,7 +5402,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "set_browser_content": {
         await apiCall("/api/browser-tabs/update", "POST", {
-          terminalId: browserTabTerminal(args),
+          terminalId: await browserTabTerminal(args),
           tabId: args.tabId,
           title: args.title || null,
           url: args.url || null,
@@ -5416,7 +5420,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "close_browser_tab": {
         await apiCall("/api/browser-tabs/close", "POST", {
-          terminalId: browserTabTerminal(args),
+          terminalId: await browserTabTerminal(args),
           tabId: args.tabId,
         });
         return {
@@ -5431,7 +5435,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "execute_browser_script": {
         const result = await apiCall("/api/browser-tabs/execute-script", "POST", {
-          terminalId: browserTabTerminal(args),
+          terminalId: await browserTabTerminal(args),
           tabId: args.tabId,
           script: args.script,
         });
@@ -5447,7 +5451,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "get_browser_console_logs": {
         const result = await apiCall("/api/browser-tabs/console-logs", "POST", {
-          terminalId: browserTabTerminal(args),
+          terminalId: await browserTabTerminal(args),
           tabId: args.tabId,
           limit: args.limit || null,
         });
@@ -5464,7 +5468,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "get_browser_element_content": {
         const result = await apiCall("/api/browser-tabs/element-content", "POST", {
-          terminalId: browserTabTerminal(args),
+          terminalId: await browserTabTerminal(args),
           tabId: args.tabId,
           selector: args.selector,
           property: args.property || "textContent",
@@ -5481,7 +5485,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "capture_browser_screenshot": {
         const result = await apiCall("/api/browser-tabs/capture-screenshot", "POST", {
-          terminalId: browserTabTerminal(args),
+          terminalId: await browserTabTerminal(args),
           tabId: args.tabId,
         });
         if (!result.imageBase64) {
@@ -5507,7 +5511,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "post_browser_message": {
         await apiCall("/api/browser-tabs/post-message", "POST", {
-          terminalId: browserTabTerminal(args),
+          terminalId: await browserTabTerminal(args),
           tabId: args.tabId,
           data: typeof args.data === "string" ? args.data : JSON.stringify(args.data),
         });
@@ -5523,7 +5527,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "get_browser_messages": {
         const result = await apiCall("/api/browser-tabs/get-messages", "POST", {
-          terminalId: browserTabTerminal(args),
+          terminalId: await browserTabTerminal(args),
           tabId: args.tabId,
           limit: args.limit || null,
         });
@@ -5541,7 +5545,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // WebMCP Tools
       case "list_webmcp_tools": {
         const result = await apiCall("/api/browser-tabs/execute-script", "POST", {
-          terminalId: browserTabTerminal(args),
+          terminalId: await browserTabTerminal(args),
           tabId: args.tabId,
           script: "window.__webmcpListTools ? window.__webmcpListTools() : '[]'",
         });
@@ -5585,7 +5589,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const inputJson = JSON.stringify(args.input || {});
         const script = `(async function() { try { return await window.__webmcpInvoke('${toolName}', ${inputJson}); } catch(e) { return JSON.stringify({error: e.message}); } })()`;
         const result = await apiCall("/api/browser-tabs/execute-script", "POST", {
-          terminalId: browserTabTerminal(args),
+          terminalId: await browserTabTerminal(args),
           tabId: args.tabId,
           script: script,
         });
@@ -6258,6 +6262,18 @@ function chooseSender(given, resolved) {
     return { from: own, note: `Sent as ${own} (your MultiTerminal name); you passed fromTerminalId "${given}".` };
   }
   return { from: given, note: null };
+}
+/**
+ * Which terminal's HUD a browser-tab tool acts on (ticket 2b31dc94). Pure. { terminal } or { error }.
+ * A given terminalId is used as given. Without one, ONLY the authoritative live identity (the row bound
+ * to this session's claude.exe) is used, never MULTITERMINAL_NAME or the claimed name: either can name
+ * another live terminal after a rename or in a ClarionAssistant tab, and these tools close tabs and run
+ * scripts there. A Task-tool subagent resolves to its parent's pane, whose HUD is where its tab belongs.
+ */
+function chooseBrowserTabTerminal(given, resolved) {
+  if (typeof given === "string" && given !== "") return { terminal: given };
+  if (resolved && resolved.authoritative && resolved.name) return { terminal: resolved.name };
+  return { error: "terminalId is required: MultiTerminal could not confirm which terminal this session is, so the browser tab's terminal is not guessed" };
 }
 // ── end sender identity ──
 
