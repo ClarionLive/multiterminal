@@ -372,5 +372,33 @@ namespace MultiTerminal.Terminal
         {
             return GetForegroundWindow();
         }
+
+        private const int SW_RESTORE = 9;
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsIconic(IntPtr hWnd);
+
+        /// <summary>
+        /// Restores a minimised window to the state it had before it was minimised (a maximised window
+        /// comes back maximised), for surfacing a pane in a minimised floating window (GH #74). Does
+        /// nothing to a window that is not minimised.
+        ///
+        /// <para>Measured in the test host: the FIRST restore of a minimised window was ignored, for this
+        /// app's floating window and the library's own alike, and a second one worked. That matches
+        /// Windows letting a process's start-up show state override its first ShowWindow call (the test
+        /// host is started hidden). Whether MultiTerminal, started normally, is affected was not
+        /// measured, so the restore is retried once while the window is still minimised.</para>
+        /// </summary>
+        internal static void RestoreIfMinimized(IntPtr windowHandle)
+        {
+            if (windowHandle == IntPtr.Zero) return;
+            for (int attempt = 0; attempt < 2 && IsIconic(windowHandle); attempt++)
+                ShowWindow(windowHandle, SW_RESTORE);
+        }
     }
 }

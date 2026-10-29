@@ -78,6 +78,42 @@ namespace MultiTerminal.Docking
             => dockPanel?.ActiveContent as TerminalDocument ?? dockPanel?.ActiveDocument;
 
         /// <summary>
+        /// The active content of type <typeparamref name="T"/> that lives in <paramref name="window"/>
+        /// (GH #74), for a key pressed there. In a floating window: the panel's active content only when
+        /// it is in that window, else null, so a key never acts on a pane in another window. In the main
+        /// window: the active content when it is in the document area, else the active document (a
+        /// floated active content belongs to another window, however stale the library's tracking).
+        /// </summary>
+        public static T ActiveContentIn<T>(DockPanel dockPanel, System.Windows.Forms.Form window)
+            where T : class
+        {
+            if (dockPanel == null) return null;
+            var active = dockPanel.ActiveContent;
+
+            if (window is FloatWindow floatWindow)
+                return active is T inWindow && active.DockHandler.Pane?.FloatWindow == floatWindow ? inWindow : null;
+
+            if (active is T docked && active.DockHandler.DockState == DockState.Document)
+                return docked;
+            return dockPanel.ActiveDocument as T;
+        }
+
+        /// <summary>
+        /// Brings <paramref name="content"/> in front of the Owner (GH #74): restores its floating window
+        /// first when that is minimised (maximised again if it was maximised before), then activates it.
+        /// <c>Activate</c> alone only moves focus, which on a minimised window leaves the Owner looking
+        /// at nothing while keystrokes go to it. See <c>NativeMethods.RestoreIfMinimized</c>.
+        /// </summary>
+        public static void Surface(DockContent content)
+        {
+            if (content == null) return;
+            var floatWindow = content.DockState == DockState.Float ? content.Pane?.FloatWindow : null;
+            if (floatWindow != null && floatWindow.IsHandleCreated)
+                MultiTerminal.Terminal.NativeMethods.RestoreIfMinimized(floatWindow.Handle);
+            content.Activate();
+        }
+
+        /// <summary>
         /// Applies a grid preset to the current terminal documents.
         /// </summary>
         public void ApplyPreset(GridPreset preset)
