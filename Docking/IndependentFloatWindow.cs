@@ -29,6 +29,14 @@ namespace MultiTerminal.Docking
     /// WinForms re-applied its hidden owner window (the one it gives a form with
     /// <c>ShowInTaskbar = false</c>) after creation. Such a window would still minimise on its own.</para>
     ///
+    /// <para><b>The title bar is native (phase 4).</b> A drag on it is handed to Windows (so Windows'
+    /// own move and snapping apply), a double-click on the frame and a right-click on the title bar go
+    /// to Windows' default handling; the library would turn them into docking actions. Tests pin the
+    /// switch that hands the drag over and the double-click maximise; the drag, snapping and the system menu are live checks.
+    /// Dragging a tab still docks the tab and moves it between windows (the library code path is cited
+    /// where <c>AllowEndUserDocking</c> is set), and that is how a pane goes back into the main window:
+    /// a whole window is no longer re-docked by its title bar.</para>
+    ///
     /// <para><b>Known limit:</b> a window maximised when the layout is saved comes back as a normal
     /// window at its maximised size. DockPanelSuite's layout file keeps bounds only (it special-cases
     /// a minimised window, saving its restore bounds), not the window state.</para>
@@ -42,6 +50,9 @@ namespace MultiTerminal.Docking
         private const int WS_EX_APPWINDOW = 0x00040000;
         private const int WM_SETICON = 0x0080;
         private const int WM_CLOSE = 0x0010;
+        private const int WM_NCLBUTTONDBLCLK = 0x00A3;
+        private const int WM_NCRBUTTONDOWN = 0x00A4;
+        private const int HTCAPTION = 2;
 
         /// <summary>How far below the window's top edge must also lie on the same screen: the title
         /// bar, generously (a caption is about 23 pixels at 100% scaling and grows with it).</summary>
@@ -80,6 +91,16 @@ namespace MultiTerminal.Docking
             // The base constructor made the main window the owner. Owned windows sit above their
             // owner and are hidden when it minimises; this window must do neither.
             Owner = null;
+
+            // Phase 4: the title bar behaves like any window's. The library turns a mouse-down on the
+            // title bar into its own docking drag when this is true, so Windows never moved the window
+            // and drag-to-snap could not happen; false hands the mouse-down to Windows. The library reads
+            // this flag in that one place only (FloatWindow.WndProc, WM_NCLBUTTONDOWN): dragging a tab out
+            // of a strip (DockPaneStripBase) and dropping a tab onto a floating window
+            // (DockPanel.DockDragHandler) check the dock panel's and the content's flags, so tabs still
+            // dock and move between windows. A double-click is handled in WndProc instead; the library's
+            // DoubleClickTitleBarToDock is deliberately left on (see there).
+            AllowEndUserDocking = false;
             if (IsHandleCreated) return false;
 
             // With no owner and ShowInTaskbar false, WinForms would give the window a hidden owner of
@@ -125,6 +146,21 @@ namespace MultiTerminal.Docking
                 var appIcon = DockPanel?.FindForm()?.Icon;
                 if (appIcon != null)
                     m.LParam = appIcon.Handle;
+            }
+            else if (m.Msg == WM_NCLBUTTONDBLCLK || (m.Msg == WM_NCRBUTTONDOWN && m.WParam == (IntPtr)HTCAPTION))
+            {
+                // Phase 4: a double-click anywhere on the frame does what it does on any window (title
+                // bar: maximise or restore; top edge: stretch to full height; icon: close), and a
+                // right-click on the title bar shows the system menu. The library re-docks the whole
+                // window on a title-bar double-click, and its DoubleClickTitleBarToDock = false does not
+                // help: that makes it decide with Win32Helper.HitTestCaption, which compares the SCREEN
+                // cursor with a strip at the window's own origin, so EVERY frame double-click near the
+                // top-left of the screen (a maximised or top-snapped window's icon or top edge) would
+                // re-dock it (pipeline debugger and adversary). So every frame double-click skips the
+                // library and goes to Windows' default handling; on a right-click the library would show
+                // a tab menu instead of the system menu.
+                DefWndProc(ref m);
+                return;
             }
             else if (m.Msg == WM_CLOSE && NestedPanes.Count > 0 && _closeHandler != null && _closeHandler(this))
             {
