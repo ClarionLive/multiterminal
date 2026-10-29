@@ -1505,19 +1505,34 @@ namespace MultiTerminal.Docking
         {
             if (DockPanel == null) return;
 
-            CloseBatch(DockPanel.Documents
-                .OfType<TerminalDocument>()
-                .ToList());
+            CloseBatch(TerminalsInMyWindow());
         }
 
         private void CloseAllButThis()
         {
             if (DockPanel == null) return;
 
-            CloseBatch(DockPanel.Documents
-                .OfType<TerminalDocument>()
+            CloseBatch(TerminalsInMyWindow()
                 .Where(doc => doc != this)
                 .ToList());
+        }
+
+        /// <summary>
+        /// The terminals in the window this tab is in, which is what Close All Tabs and Close all but
+        /// this mean (GH #74): the docked ones for a tab in the main window, as before, and that floating
+        /// window's own for a tab in a floating window, the way a browser's tab menu works.
+        /// </summary>
+        private List<TerminalDocument> TerminalsInMyWindow()
+        {
+            var floatWindow = DockState == DockState.Float ? Pane?.FloatWindow : null;
+            if (floatWindow == null)
+                return DockPanel.Documents.OfType<TerminalDocument>().ToList();
+
+            return floatWindow.NestedPanes
+                .SelectMany(pane => pane.Contents)
+                .OfType<TerminalDocument>()
+                .Where(doc => doc.DockState == DockState.Float)
+                .ToList();
         }
 
         private void CloseBatch(List<TerminalDocument> docsToClose)

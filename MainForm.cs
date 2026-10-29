@@ -323,7 +323,7 @@ namespace MultiTerminal
                     return;
 
                 var answer = MessageBox.Show(
-                    this,
+                    DialogOwner(),
                     Services.ClaudeIntegrationCheck.BuildMessage(problems, indexJs, pluginDirs),
                     "MultiTerminal: agent tools unavailable",
                     MessageBoxButtons.YesNo,
@@ -884,8 +884,52 @@ namespace MultiTerminal
         /// </summary>
         private void InstallFloatWindowFactory()
         {
-            _floatWindowFactory ??= new IndependentFloatWindowFactory(HandleGlobalShortcut);
+            _floatWindowFactory ??= new IndependentFloatWindowFactory(HandleGlobalShortcut, CloseFloatingWindow);
             _floatWindowFactory.InstallOn(_dockPanel);
+        }
+
+        /// <summary>
+        /// A floating window's close button (GH #74, phase 3). Its terminals close as ONE batch
+        /// (<see cref="CloseTerminalBatch"/>): every "also close helpers?" question first, then the
+        /// panes; a Cancel closes nothing in the window, its tool panels included. Then the other panes
+        /// close the way the library would close them (hidden when they hide on close). Returns false
+        /// while MT is shutting down, leaving the close to the library: the shutdown has already saved
+        /// the session and owns every pane.
+        /// </summary>
+        private bool CloseFloatingWindow(FloatWindow window)
+        {
+            if (window == null || _paneLaunches?.IsShuttingDown == true)
+                return false;
+
+            // The library's own rule for what its close button closes: floated contents with a close button.
+            var contents = window.NestedPanes
+                .SelectMany(pane => pane.Contents)
+                .Where(c => c.DockHandler.DockState == DockState.Float && c.DockHandler.CloseButton)
+                .ToList();
+
+            if (!CloseTerminalBatch(contents.OfType<TerminalDocument>().ToList()))
+                return true;
+
+            // MT may have begun exiting while a question was up; its shutdown pass owns the panels now.
+            if (_paneLaunches?.IsShuttingDown == true)
+                return true;
+
+            foreach (var content in contents.Where(c => !(c is TerminalDocument)))
+            {
+                try
+                {
+                    if (content.DockHandler.HideOnClose)
+                        content.DockHandler.Hide();
+                    else
+                        content.DockHandler.Close();
+                }
+                catch (Exception ex)
+                {
+                    _debugLogService?.Error("MainForm", $"Closing a floating window's panel failed: {ex.Message}");
+                }
+            }
+
+            return true;
         }
 
         private void InitializeDockPanel()
@@ -4052,7 +4096,7 @@ namespace MultiTerminal
         private void ShowOwnerProfileDialog()
         {
             var dialog = new Dialogs.OwnerProfileDialog();
-            new WindowInteropHelper(dialog) { Owner = this.Handle };
+            new WindowInteropHelper(dialog) { Owner = DialogOwner().Handle };
 
             // Pre-populate if profile exists (editing)
             var existing = _ownerProfileService.GetProfile();
@@ -4075,7 +4119,7 @@ namespace MultiTerminal
         {
             string homeViewBefore = _settings.GetStartScreenHomeView();
             var dialog = new SettingsWpfDialog(_settings, _currentTheme.IsDark, _ownerProfileService, _sourceControlAccountService);
-            new WindowInteropHelper(dialog) { Owner = this.Handle };
+            new WindowInteropHelper(dialog) { Owner = DialogOwner().Handle };
             if (dialog.ShowDialog() == true)
             {
                 ApplySettingsFromDialog(dialog);
@@ -4088,7 +4132,7 @@ namespace MultiTerminal
         {
             using (var dialog = new Dialogs.AboutDialog(_currentTheme))
             {
-                dialog.ShowDialog(this);
+                dialog.ShowDialog(DialogOwner());
             }
         }
 
@@ -4096,7 +4140,7 @@ namespace MultiTerminal
         {
             using (var dialog = new Dialogs.ChatHistoryDialog(_chatTaskDatabase, _currentTheme))
             {
-                dialog.ShowDialog(this);
+                dialog.ShowDialog(DialogOwner());
             }
         }
 
@@ -4117,7 +4161,7 @@ namespace MultiTerminal
             else
             {
                 MessageBox.Show(
-                    this,
+                    DialogOwner(),
                     "Documentation was not found at:\n" + docsPath,
                     "Help & Documentation",
                     MessageBoxButtons.OK,
@@ -4748,7 +4792,7 @@ namespace MultiTerminal
             if (!result.Success)
             {
                 MessageBox.Show(
-                    owner ?? this,
+                    owner ?? DialogOwner(),
                     result.Error ?? "Failed to delete project.",
                     "Delete Project",
                     MessageBoxButtons.OK,
@@ -5031,7 +5075,7 @@ namespace MultiTerminal
                         {
                             var identities = GetAvailableIdentities(launchDir);
                             using var picker = new Dialogs.IdentityPickerDialog(terminalName, identities, _currentTheme);
-                            if (picker.ShowDialog(this) == DialogResult.OK)
+                            if (picker.ShowDialog(DialogOwner()) == DialogResult.OK)
                             {
                                 terminalName = picker.SelectedIdentity;
                                 isTeamLead = false; // Alternative identity, not the designated team lead
@@ -5181,7 +5225,7 @@ namespace MultiTerminal
             {
                 // Not the same as "nothing to resume" (pipeline Run 1): say so, and let the user choose
                 // between a new session and launching nothing, in Ask and Continue mode alike.
-                var answer = MessageBox.Show(this,
+                var answer = MessageBox.Show(DialogOwner(),
                     $"Could not read this project's session history:\n{decision.Model.LoadError}\n\nOK starts a new session. Cancel launches nothing.",
                     "Launch project", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
                 _debugLogService?.Info("LaunchSession", $"Project '{project.Name}': history unreadable; user chose {(answer == DialogResult.OK ? "new session" : "cancel")}");
@@ -5200,7 +5244,7 @@ namespace MultiTerminal
             }
 
             using var dialog = new Dialogs.LaunchSessionDialog(project.Name, decision.Model, newSessionName, _currentTheme, DateTime.UtcNow, decision.DefaultChoice);
-            if (dialog.ShowDialog(this) != DialogResult.OK)
+            if (dialog.ShowDialog(DialogOwner()) != DialogResult.OK)
             {
                 _debugLogService?.Info("LaunchSession", $"Project '{project.Name}': launch prompt cancelled; nothing launched");
                 return false;
@@ -5262,7 +5306,7 @@ namespace MultiTerminal
                     _debugLogService?.Info("LaunchSession", $"Helper resume for '{pmName}': {report.Resumed.Count} resumed, {report.Skipped.Count} skipped, {report.Renamed.Count} renamed.");
                     string summary = report.BuildSummary(pmName);
                     if (summary != null)
-                        MessageBox.Show(this, summary, "Resume helpers", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        MessageBox.Show(DialogOwner(), summary, "Resume helpers", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
                 catch (Exception ex)
                 {
@@ -5554,7 +5598,7 @@ namespace MultiTerminal
                 using (var dialog = new Dialogs.StartupRestoreDialog(model, _currentTheme))
                 {
                     // Anything but Resume unticks every row (the dialog's contract), so this is Don't restore.
-                    dialog.ShowDialog(this);
+                    dialog.ShowDialog(DialogOwner());
                 }
 
                 RunStartupRestore(model);
@@ -5636,7 +5680,7 @@ namespace MultiTerminal
 
             if (skipped.Count > 0)
             {
-                MessageBox.Show(this,
+                MessageBox.Show(DialogOwner(),
                     "These terminals were not resumed:\n\n" + string.Join("\n", skipped.Select(s => "• " + s)),
                     "Restore terminals", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -6012,7 +6056,7 @@ namespace MultiTerminal
                     describeProfileChoice: DescribeClaudeProfileChoice,
                     profileHint: DescribeClaudeProfileHint);
 
-                if (picker.ShowDialog(this) != DialogResult.OK)
+                if (picker.ShowDialog(DialogOwner()) != DialogResult.OK)
                     return; // User cancelled
 
                 // "Unassigned" (the picker's default since ae3d0193) launches under its OWN unique, non-team
@@ -6108,7 +6152,9 @@ namespace MultiTerminal
                 findExistingProject: folder => _mcpServer?.Broker?.FindExistingProjectAtPath(folder)
                                                ?? Services.ExistingProjectMatch.None);
             var helper = new System.Windows.Interop.WindowInteropHelper(wpfDialog);
-            helper.Owner = this.Handle;
+            // Owned by the window holding the start screen it was opened from (GH #74: that may be a
+            // floating window while the main window is minimised).
+            helper.Owner = DialogOwner(sourceDoc).Handle;
             if (wpfDialog.ShowDialog() != true) return;
 
             // The folder already had a project and the user chose Open or Rename (task 9f95ab0c).
@@ -6739,7 +6785,7 @@ namespace MultiTerminal
                 return;
             }
 
-            MessageBox.Show(this, refusal, "Claude Profile", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(DialogOwner(), refusal, "Claude Profile", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
         /// <summary>
@@ -7752,6 +7798,15 @@ namespace MultiTerminal
         // PM's answer handled (Yes: closed with it; No: keep running). Null outside a batch.
         private Dictionary<string, IReadOnlyList<string>> _batchHelpersHandled;
 
+        // GH #74: true while a batch close is asking its questions (before anything closes), so a second
+        // batch started from inside a question is ignored.
+        private bool _batchQuestionsOpen;
+
+        // GH #74: while a batch close is CLOSING, each PM's recorded answer and the helpers its question
+        // named. OnPaneFormClosing uses it and asks nothing: a PM with no recorded answer keeps its
+        // helpers. Null outside the closing phase of a batch.
+        private Dictionary<string, PaneBatchCloseQuestions.Recorded> _batchAnswers;
+
         /// <summary>
         /// The tab menu's Close All Tabs / Close all but this (task 7d20e94c item 8 review fix). Closing a
         /// fixed list one by one used to close a helper whose tab comes before its PM as a plain
@@ -7762,32 +7817,85 @@ namespace MultiTerminal
         /// </summary>
         private void OnPaneBatchCloseRequested(object sender, PaneBatchCloseRequestedEventArgs e)
         {
-            if (e == null || e.Panes.Count == 0)
-                return;
-            if (_batchHelpersHandled != null)
+            if (e != null)
+                CloseTerminalBatch(e.Panes);
+        }
+
+        /// <summary>
+        /// Closes several panes as one batch: the tab menu's Close All Tabs and Close all but this, and
+        /// a floating window's close button (GH #74). Every "also close its helpers?" question is asked
+        /// FIRST (<see cref="PaneBatchCloseQuestions"/>), so a Cancel closes nothing at all; then the panes
+        /// close in <see cref="PaneBatchClose"/> order with those answers. True when every pane was
+        /// handled; false when the batch was cancelled or stopped.
+        /// </summary>
+        private bool CloseTerminalBatch(IReadOnlyList<TerminalDocument> panes)
+        {
+            if (panes == null || panes.Count == 0)
+                return true;
+            if (_batchHelpersHandled != null || _batchQuestionsOpen)
             {
                 // A batch inside a batch (a menu click while a question is up): ignore it.
-                return;
+                return false;
             }
 
             var byId = new Dictionary<string, TerminalDocument>(StringComparer.Ordinal);
-            foreach (var pane in e.Panes)
+            foreach (var pane in panes)
             {
                 if (pane != null && !string.IsNullOrEmpty(pane.DocId))
                     byId.TryAdd(pane.DocId, pane);
             }
 
             var plan = new PaneBatchClose(
-                e.Panes.Where(p => p != null).Select(p => p.DocId),
+                panes.Where(p => p != null).Select(p => p.DocId),
                 id => _paneLaunches?.GetOpenHelperDocIds(id));
 
+            // Every question before any close, repeated until a pass asks nobody new (a question pumps
+            // messages, so a helper can be spawned while it is up). While one is showing, a second batch
+            // is ignored above.
+            Dictionary<string, PaneBatchCloseQuestions.Recorded> answers;
+            _batchQuestionsOpen = true;
+            try
+            {
+                answers = PaneBatchCloseQuestions.AskAll(
+                    plan.Order,
+                    id => byId.TryGetValue(id, out var pm) && !pm.IsDisposed
+                        ? OpenHelperPanesOf(pm).Select(h => h.DocId).ToList()
+                        : null,
+                    (id, helperIds) => AskCloseHelpers(
+                        byId[id],
+                        OpenHelperPanesOf(byId[id]).Where(h => helperIds.Contains(h.DocId, StringComparer.Ordinal)).ToList()));
+            }
+            finally
+            {
+                _batchQuestionsOpen = false;
+            }
+
+            if (answers == null)
+            {
+                _debugLogService?.Info("MainForm", "Batch close cancelled before anything closed (GH #74).");
+                return false;
+            }
+
+            // MT may have begun exiting while a question was up; its shutdown pass owns every pane now.
+            if (_paneLaunches?.IsShuttingDown == true)
+                return false;
+
+            _batchAnswers = answers;
             _batchHelpersHandled = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
             try
             {
                 for (var id = plan.Next(); id != null; id = plan.Next())
                 {
                     if (!byId.TryGetValue(id, out var doc) || doc.IsDisposed || doc.DockPanel == null)
+                    {
+                        // Already gone: the Owner closed it by hand in another window while a question
+                        // was up (floating windows are not disabled by it). The helpers its recorded
+                        // answer covered leave the batch, as they would have had the batch closed it:
+                        // that close asked its own question, and its answer stands (pipeline debugger).
+                        if (_batchAnswers.TryGetValue(id, out var recordedForGone))
+                            plan.ReportHelpersHandled(recordedForGone.Helpers);
                         continue;
+                    }
 
                     _batchHelpersHandled.Clear();
                     doc.Close();
@@ -7805,7 +7913,73 @@ namespace MultiTerminal
             finally
             {
                 _batchHelpersHandled = null;
+                _batchAnswers = null;
             }
+
+            return !plan.Stopped;
+        }
+
+        /// <summary>The helper panes of <paramref name="pm"/>'s current launch that are still open.</summary>
+        private List<TerminalDocument> OpenHelperPanesOf(TerminalDocument pm)
+        {
+            var helperDocIds = _paneLaunches?.GetOpenHelperDocIds(pm.DocId);
+            if (helperDocIds == null || helperDocIds.Count == 0)
+                return new List<TerminalDocument>();
+
+            return _dockPanel.Contents.OfType<TerminalDocument>()
+                .Where(d => d != pm && !d.IsDisposed && helperDocIds.Contains(d.DocId, StringComparer.Ordinal))
+                .ToList();
+        }
+
+        /// <summary>
+        /// Shows "also close <paramref name="pm"/>'s helpers?", owned by the window that holds the PM
+        /// (GH #74: a floating window, or the main one), and returns the answer.
+        /// </summary>
+        private PaneBatchCloseQuestions.Answer AskCloseHelpers(TerminalDocument pm, List<TerminalDocument> helpers)
+        {
+            DialogResult answer;
+            _helperClosePromptOpen.Add(pm.DocId);
+            try
+            {
+                answer = MessageBox.Show(
+                    DialogOwner(pm),
+                    HelperCloseWithPm.Question(pm.CustomTitle, helpers.Select(h => h.CustomTitle).ToList()),
+                    "Close helpers too?",
+                    MessageBoxButtons.YesNoCancel,
+                    MessageBoxIcon.Question,
+                    MessageBoxDefaultButton.Button1);
+            }
+            finally
+            {
+                _helperClosePromptOpen.Remove(pm.DocId);
+            }
+
+            return answer == DialogResult.Yes ? PaneBatchCloseQuestions.Answer.CloseHelpersToo
+                : answer == DialogResult.No ? PaneBatchCloseQuestions.Answer.KeepHelpers
+                : PaneBatchCloseQuestions.Answer.Cancel;
+        }
+
+        /// <summary>
+        /// The window a dialog should belong to (GH #74): the one holding <paramref name="context"/> when
+        /// given, else the active form, else the main window, else any floating window, skipping any that
+        /// is hidden or minimised. A dialog owned by a minimised window is hidden with it, and with
+        /// floating windows the main window is often minimised while the Owner works elsewhere.
+        /// </summary>
+        private System.Windows.Forms.IWin32Window DialogOwner(Control context = null)
+        {
+            var candidates = new List<Form>
+            {
+                context?.TopLevelControl as Form,
+                Form.ActiveForm,
+                this,
+            };
+            if (_dockPanel != null)
+                candidates.AddRange(_dockPanel.FloatWindows);
+
+            // Never null: this window is always a candidate, so it is the fallback when none is usable.
+            return DialogOwnerChoice.Pick(
+                candidates,
+                f => !f.IsDisposed && f.Visible && f.WindowState != FormWindowState.Minimized) ?? this;
         }
 
         /// <summary>
@@ -7833,34 +8007,33 @@ namespace MultiTerminal
                 return;
             }
 
-            var helperDocIds = _paneLaunches.GetOpenHelperDocIds(pm.DocId);
-            if (helperDocIds.Count == 0)
-                return;
-
-            var helpers = _dockPanel.Contents.OfType<TerminalDocument>()
-                .Where(d => d != pm && !d.IsDisposed && helperDocIds.Contains(d.DocId, StringComparer.Ordinal))
-                .ToList();
+            var helpers = OpenHelperPanesOf(pm);
             if (helpers.Count == 0)
                 return;
 
-            DialogResult answer;
-            _helperClosePromptOpen.Add(pm.DocId);
-            try
+            PaneBatchCloseQuestions.Answer answer;
+            if (_batchAnswers == null)
             {
-                answer = MessageBox.Show(
-                    this,
-                    HelperCloseWithPm.Question(pm.CustomTitle, helpers.Select(h => h.CustomTitle).ToList()),
-                    "Close helpers too?",
-                    MessageBoxButtons.YesNoCancel,
-                    MessageBoxIcon.Question,
-                    MessageBoxDefaultButton.Button1);
+                answer = AskCloseHelpers(pm, helpers);
             }
-            finally
+            else if (_batchAnswers.TryGetValue(pm.DocId, out var recorded))
             {
-                _helperClosePromptOpen.Remove(pm.DocId);
+                // A batch closing: the question was asked before anything closed (GH #74), and the answer
+                // covers only the helpers it named, not one spawned since.
+                answer = recorded.Answer;
+                helpers = helpers.Where(h => recorded.Helpers.Contains(h.DocId, StringComparer.Ordinal)).ToList();
+            }
+            else
+            {
+                // A batch closing, and this PM gained helpers after its questions were asked. Nothing is
+                // asked once closing has started, because a Cancel now would leave the batch half closed:
+                // the PM closes and these helpers keep running (or close later as part of the batch, if
+                // it named them).
+                _debugLogService?.Info("MainForm", $"'{pm.CustomTitle}' gained helpers after the batch's questions; closing it without asking, its helpers keep running (GH #74).");
+                return;
             }
 
-            if (answer == DialogResult.Cancel)
+            if (answer == PaneBatchCloseQuestions.Answer.Cancel)
             {
                 e.Cancel = true;
                 return;
@@ -7871,7 +8044,7 @@ namespace MultiTerminal
             _batchHelpersHandled?.TryAdd(pm.DocId, helpers.Select(h => h.DocId).ToList());
 
             // MT may have begun exiting while the question was up; its shutdown pass owns every pane now.
-            if (answer != DialogResult.Yes || _paneLaunches.IsShuttingDown)
+            if (answer != PaneBatchCloseQuestions.Answer.CloseHelpersToo || _paneLaunches.IsShuttingDown)
                 return;
 
             foreach (var helper in helpers)
@@ -8109,7 +8282,7 @@ namespace MultiTerminal
                 using var profilePicker = new Dialogs.IdentityPickerProfileDialog(
                     identityName, predictedFolder, pickerProfiles,
                     paneProfileName, _currentTheme, DescribeClaudeProfileHint);
-                if (profilePicker.ShowDialog(this) != DialogResult.OK)
+                if (profilePicker.ShowDialog(DialogOwner()) != DialogResult.OK)
                     return;
 
                 pickedProfileName = profilePicker.SelectedClaudeProfileName;
@@ -8252,7 +8425,7 @@ namespace MultiTerminal
                     _exitConfirmDialogOpen = true;
                     try
                     {
-                        confirm = TaskDialog.ShowDialog(this, page);
+                        confirm = TaskDialog.ShowDialog(DialogOwner(), page);
                     }
                     finally
                     {
@@ -8539,6 +8712,17 @@ namespace MultiTerminal
             foreach (var doc in _gridManager.GetAllTerminalDocuments())
             {
                 try { doc.Dispose(); } catch { }
+            }
+
+            // GH #74: floating windows have no owner, so they no longer close with this window. Every
+            // terminal, floated ones included, was stopped and disposed just above (a window left with
+            // no panes disposes itself); what can remain is a floating window of panels (Oracle, Tasks).
+            // Close those now rather than leave them on screen. CloseFloatingWindow declines while
+            // shutting down, so the library closes or hides their panes; the layout was saved earlier.
+            foreach (var floatWindow in _dockPanel.FloatWindows.ToList())
+            {
+                try { floatWindow.Close(); }
+                catch (Exception ex) { _debugLogService?.Error("MainForm", $"Closing a floating window at exit: {ex.Message}"); }
             }
         }
 
@@ -9618,7 +9802,7 @@ namespace MultiTerminal
                     if (control.HasActiveAgent)
                     {
                         var result = MessageBox.Show(
-                            this,
+                            DialogOwner(),
                             "An agent is still running in this panel.\n\nTerminate the agent process?",
                             "Close Agent Panel",
                             MessageBoxButtons.YesNoCancel,
@@ -11066,7 +11250,7 @@ namespace MultiTerminal
                     }
                 }
 
-                if (dialog.ShowDialog(this) == DialogResult.OK)
+                if (dialog.ShowDialog(DialogOwner()) == DialogResult.OK)
                 {
                     var prompt = existingPrompt ?? new Prompt();
                     prompt.Category = dialog.Category;

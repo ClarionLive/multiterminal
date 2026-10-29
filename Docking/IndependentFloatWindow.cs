@@ -41,6 +41,7 @@ namespace MultiTerminal.Docking
         private const int WS_EX_TOOLWINDOW = 0x00000080;
         private const int WS_EX_APPWINDOW = 0x00040000;
         private const int WM_SETICON = 0x0080;
+        private const int WM_CLOSE = 0x0010;
 
         /// <summary>How far below the window's top edge must also lie on the same screen: the title
         /// bar, generously (a caption is about 23 pixels at 100% scaling and grows with it).</summary>
@@ -50,18 +51,21 @@ namespace MultiTerminal.Docking
         internal const int MinimumVisibleTitleWidth = 120;
 
         private readonly Func<Form, Keys, bool>? _shortcutHandler;
+        private readonly Func<FloatWindow, bool>? _closeHandler;
 
-        public IndependentFloatWindow(DockPanel dockPanel, DockPane pane, Func<Form, Keys, bool>? shortcutHandler)
+        public IndependentFloatWindow(DockPanel dockPanel, DockPane pane, Func<Form, Keys, bool>? shortcutHandler, Func<FloatWindow, bool>? closeHandler = null)
             : base(dockPanel, pane)
         {
             _shortcutHandler = shortcutHandler;
+            _closeHandler = closeHandler;
             StylesSetBeforeWindowExisted = BecomeIndependent();
         }
 
-        public IndependentFloatWindow(DockPanel dockPanel, DockPane pane, Rectangle bounds, Func<Form, Keys, bool>? shortcutHandler)
+        public IndependentFloatWindow(DockPanel dockPanel, DockPane pane, Rectangle bounds, Func<Form, Keys, bool>? shortcutHandler, Func<FloatWindow, bool>? closeHandler = null)
             : base(dockPanel, pane, bounds)
         {
             _shortcutHandler = shortcutHandler;
+            _closeHandler = closeHandler;
             StylesSetBeforeWindowExisted = BecomeIndependent();
         }
 
@@ -121,6 +125,14 @@ namespace MultiTerminal.Docking
                 var appIcon = DockPanel?.FindForm()?.Icon;
                 if (appIcon != null)
                     m.LParam = appIcon.Handle;
+            }
+            else if (m.Msg == WM_CLOSE && NestedPanes.Count > 0 && _closeHandler != null && _closeHandler(this))
+            {
+                // The close button (phase 3). The library would close the window's panes one by one,
+                // so a Cancel on one "also close helpers?" question left the ones before it closed.
+                // The handler closes them as one batch instead, and returns false to leave it to the
+                // library (MT shutting down). Either way the window disposes itself once empty.
+                return;
             }
 
             base.WndProc(ref m);
@@ -216,19 +228,23 @@ namespace MultiTerminal.Docking
     public sealed class IndependentFloatWindowFactory : DockPanelExtender.IFloatWindowFactory
     {
         private readonly Func<Form, Keys, bool>? _shortcutHandler;
+        private readonly Func<FloatWindow, bool>? _closeHandler;
 
         /// <param name="shortcutHandler">The main window's shortcut handler, given the window the key
         /// was pressed in; true when it handled the key.</param>
-        public IndependentFloatWindowFactory(Func<Form, Keys, bool>? shortcutHandler)
+        /// <param name="closeHandler">Closes a floating window's panes when its close button is used;
+        /// true when it handled the close, false to leave it to the library.</param>
+        public IndependentFloatWindowFactory(Func<Form, Keys, bool>? shortcutHandler, Func<FloatWindow, bool>? closeHandler = null)
         {
             _shortcutHandler = shortcutHandler;
+            _closeHandler = closeHandler;
         }
 
         public FloatWindow CreateFloatWindow(DockPanel dockPanel, DockPane pane)
-            => new IndependentFloatWindow(dockPanel, pane, _shortcutHandler);
+            => new IndependentFloatWindow(dockPanel, pane, _shortcutHandler, _closeHandler);
 
         public FloatWindow CreateFloatWindow(DockPanel dockPanel, DockPane pane, Rectangle bounds)
-            => new IndependentFloatWindow(dockPanel, pane, bounds, _shortcutHandler);
+            => new IndependentFloatWindow(dockPanel, pane, bounds, _shortcutHandler, _closeHandler);
 
         /// <summary>Installs this factory on <paramref name="dockPanel"/>'s current theme.</summary>
         public void InstallOn(DockPanel dockPanel)

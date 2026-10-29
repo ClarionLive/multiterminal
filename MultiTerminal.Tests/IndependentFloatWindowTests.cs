@@ -21,7 +21,9 @@ namespace MultiTerminal.Tests
     /// a window turned the two off-screen facts red. After pipeline run 1: ignoring which window a key
     /// came from, surfacing without the restore, and dropping the icon swap each turned their one fact
     /// red; the old "any overlap" reachability rule turned the top-edge and near-bottom facts red (the
-    /// sliver fact stayed green, as predicted: the old rule also rejected a 20-pixel overlap).
+    /// sliver fact stayed green, as predicted: the old rule also rejected a 20-pixel overlap). Phase 3: not
+    /// routing WM_CLOSE to the handler turned the close-button fact red (the declined-close fact stayed
+    /// green, as predicted: the library closes the panes either way).
     ///
     /// <para>The child-handle fact stands in for WebView2: a terminal survives a move only if the
     /// native windows inside the pane are re-parented, never destroyed and rebuilt. A plain child
@@ -87,7 +89,7 @@ namespace MultiTerminal.Tests
             failure?.Throw();
         }
 
-        private static void WithHost(bool independent, Action<Form, DockPanel, IndependentFloatWindowFactory?> body, Func<Form, Keys, bool>? shortcuts = null)
+        private static void WithHost(bool independent, Action<Form, DockPanel, IndependentFloatWindowFactory?> body, Func<Form, Keys, bool>? shortcuts = null, Func<FloatWindow, bool>? close = null)
         {
             RunOnSta(() =>
             {
@@ -103,7 +105,7 @@ namespace MultiTerminal.Tests
                 IndependentFloatWindowFactory? factory = null;
                 if (independent)
                 {
-                    factory = new IndependentFloatWindowFactory(shortcuts);
+                    factory = new IndependentFloatWindowFactory(shortcuts, close);
                     factory.InstallOn(panel);
                 }
 
@@ -394,6 +396,60 @@ namespace MultiTerminal.Tests
                 Assert.Null(GridLayoutManager.ActiveContentIn<Pane>(panel, fw));
                 Assert.Same(docked, GridLayoutManager.ActiveContentIn<Pane>(panel, form));
             });
+        }
+
+        /// <summary>
+        /// Phase 3: the close button hands the window to MainForm, which closes its terminals as one
+        /// batch. While the handler holds the close (a Cancel), the library must not close the panes
+        /// one by one behind it, which is what it does on its own.
+        /// </summary>
+        [Fact]
+        public void The_close_button_goes_to_the_handler_and_the_library_closes_nothing_when_it_holds_the_close()
+        {
+            FloatWindow? handedOver = null;
+            WithHost(
+                true,
+                (form, panel, _) =>
+                {
+                    var first = new Pane();
+                    first.Show(panel, FloatBounds);
+                    var fw = first.Pane!.FloatWindow!;
+                    var second = new Pane();
+                    second.Show(first.Pane, null);
+
+                    fw.Close();
+                    Application.DoEvents();
+
+                    Assert.Same(fw, handedOver);
+                    Assert.False(first.IsDisposed);
+                    Assert.False(second.IsDisposed);
+                    Assert.Same(panel, first.DockPanel);
+                    Assert.Same(panel, second.DockPanel);
+                },
+                close: window =>
+                {
+                    handedOver = window;
+                    return true;
+                });
+        }
+
+        /// <summary>A handler that declines (MT shutting down) leaves the close to the library, which closes the panes.</summary>
+        [Fact]
+        public void A_declined_close_is_left_to_the_library_which_closes_the_panes()
+        {
+            WithHost(
+                true,
+                (form, panel, _) =>
+                {
+                    var pane = new Pane();
+                    pane.Show(panel, FloatBounds);
+
+                    pane.Pane!.FloatWindow!.Close();
+                    Application.DoEvents();
+
+                    Assert.True(pane.IsDisposed || pane.DockPanel == null);
+                },
+                close: _ => false);
         }
 
         private static readonly Rectangle Primary = new Rectangle(0, 0, 1920, 1040);

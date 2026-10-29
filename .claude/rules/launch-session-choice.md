@@ -204,9 +204,22 @@ Alice's 2 helpers (TestA, TestB)? They'll come back when you resume Alice." (`He
   one by one: `TerminalDocument.BatchCloseRequested` hands the panes (tab order) to
   `MainForm.OnPaneBatchCloseRequested`, and the pure `PaneBatchClose` (tests: `PaneBatchCloseTests`)
   decides order and skips. A pane is closed after every PM in the batch that lists it as an open
-  helper, so the PM is asked before a helper whose tab comes first could be closed `pane_closed`. A
-  close left docked (Cancel, or any other veto) STOPS the batch: nothing after it closes, its helpers
-  included. Helpers handled by a PM's answer leave the batch: Yes already closed them; **No means they
+  helper, so the PM is asked before a helper whose tab comes first could be closed `pane_closed`.
+  **Every question is asked before anything closes** (GH #74, `MainForm.CloseTerminalBatch` with the
+  pure `PaneBatchCloseQuestions`; tests: `BatchCloseQuestionsTests`), so a Cancel on any PM's question
+  closes nothing; `OnPaneFormClosing` then reuses the recorded answer instead of asking again. The
+  questions repeat until a pass asks nobody new (a question pumps messages, so a helper can be spawned
+  while it is up); a pane an earlier answer settled (a helper with helpers of its own) is not asked;
+  an answer covers only the helpers its question named. Once closing has started NOTHING is asked: a
+  PM with no recorded answer (it gained helpers after the questions) closes and its helpers keep
+  running, except a helper the batch itself named, which still closes later in the batch as an
+  ordinary `pane_closed`. A close
+  still vetoed once closing has started (anything but the question) STOPS the batch: nothing after it
+  closes, its helpers included. The same batch runs for a FLOATING WINDOW's close button
+  (`IndependentFloatWindow` hands `WM_CLOSE` to `MainForm.CloseFloatingWindow`; after the terminals,
+  its other panels close or hide as the library would, and a Cancel leaves the whole window as it
+  was), and Close All Tabs / Close all but this on a tab in a floating window act on that window's
+  tabs only (`TerminalDocument.TerminalsInMyWindow`). Helpers handled by a PM's answer leave the batch: Yes already closed them; **No means they
   keep running even though Close All named them** (the Owner just said not to close them). A helper
   whose PM is NOT in the batch (Close all but this, on the PM) closes as an ordinary `pane_closed`;
   a PM's Yes closes every open helper it listed, including a "this" pane of Close all but this.
