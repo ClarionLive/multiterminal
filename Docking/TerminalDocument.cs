@@ -2212,8 +2212,9 @@ namespace MultiTerminal.Docking
                 StartPosition = _diffPopupBounds.HasValue
                     ? FormStartPosition.Manual
                     : FormStartPosition.CenterParent,
-                // The main window's icon: this pane's own Icon is its tab's attention dot (51a8a17b).
-                Icon = (TopLevelControl as Form)?.Icon
+                // The main window's icon: this pane's own Icon is its tab's attention dot (51a8a17b),
+                // and so is a floating window's Icon property (GH #74: it only swaps what Windows shows).
+                Icon = DockPanel?.FindForm()?.Icon ?? (TopLevelControl as Form)?.Icon
             };
 #pragma warning restore CA2000
 

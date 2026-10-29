@@ -161,6 +161,9 @@ namespace MultiTerminal
         // already shown is skipped.
         private TerminalDocument _activeTerminalShown;
 
+        // Supplies the dock panel's floating windows (GH #74); see InstallFloatWindowFactory.
+        private IndependentFloatWindowFactory _floatWindowFactory;
+
         // Tracks agent names (CustomTitle) already materialized during the current restore so a
         // drifted layout.xml can't spawn a second same-named TerminalDocument — the durable half
         // of the duplicate-identity-restore status-bar fix (task d14048ef). Reset per RestoreSession.
@@ -839,13 +842,50 @@ namespace MultiTerminal
         /// </summary>
         protected override bool ProcessCmdKey(ref System.Windows.Forms.Message msg, Keys keyData)
         {
+            if (HandleGlobalShortcut(this, keyData))
+                return true;
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        /// <summary>
+        /// The global shortcuts, for this window and for every floating window (GH #74): keys reach the
+        /// TOP-LEVEL form's ProcessCmdKey, which for a pane in a floating window is that window, so it
+        /// hands them here with itself. A shortcut acts only on a pane in the window it was pressed in
+        /// (<see cref="GridLayoutManager.ActiveContentIn{T}"/>): Ctrl+Shift+H stops a terminal, and from a
+        /// floating window whose active pane is not a terminal it must not reach for one the Owner cannot
+        /// see (pipeline security finding). True when the key was handled.
+        /// </summary>
+        private bool HandleGlobalShortcut(Form source, Keys keyData)
+        {
             if (keyData == (Keys.Control | Keys.Shift | Keys.H))
             {
-                var activeTerminal = ActiveTerminalPane();
+                var activeTerminal = GridLayoutManager.ActiveContentIn<TerminalDocument>(_dockPanel, source);
                 activeTerminal?.ReturnToStartScreen();
                 return true;
             }
-            return base.ProcessCmdKey(ref msg, keyData);
+
+            return false;
+        }
+
+        /// <summary>
+        /// The one way to change the dock panel's theme after construction: a new theme carries the
+        /// library's default floating-window factory, so the factory is installed again with it.
+        /// </summary>
+        private void SetDockPanelTheme(ThemeBase theme)
+        {
+            _dockPanel.Theme = theme;
+            InstallFloatWindowFactory();
+        }
+
+        /// <summary>
+        /// Makes every floating window an ordinary application window (GH #74): taskbar button,
+        /// minimise and restore of its own, shortcuts handed to <see cref="HandleGlobalShortcut"/>. The
+        /// factory lives on the dock panel's theme, so this runs after EVERY theme assignment.
+        /// </summary>
+        private void InstallFloatWindowFactory()
+        {
+            _floatWindowFactory ??= new IndependentFloatWindowFactory(HandleGlobalShortcut);
+            _floatWindowFactory.InstallOn(_dockPanel);
         }
 
         private void InitializeDockPanel()
@@ -863,6 +903,11 @@ namespace MultiTerminal
 
             // Configure dock panel
             _dockPanel.DockBackColor = Color.FromArgb(30, 30, 30);
+
+            // Floating windows are real windows (GH #74). A pane floated without a size of its own
+            // (DockState.Float) opens at this size; the library's default is 300x300.
+            _dockPanel.DefaultFloatWindowSize = new Size(900, 600);
+            InstallFloatWindowFactory();
 
             // Handle active document changes
             _dockPanel.ActiveDocumentChanged += OnActiveDocumentChanged;
@@ -3676,7 +3721,7 @@ namespace MultiTerminal
                 .FirstOrDefault(d => d.IsStartScreenVisible && !d.IsHidden);
             if (home != null)
             {
-                home.Activate();
+                GridLayoutManager.Surface(home);
                 return home;
             }
 
@@ -4209,7 +4254,7 @@ namespace MultiTerminal
                 // Only set DockPanel theme on initial load (before any documents are open)
                 if (isInitialLoad)
                 {
-                    _dockPanel.Theme = new WeifenLuo.WinFormsUI.Docking.VS2015DarkTheme();
+                    SetDockPanelTheme(new WeifenLuo.WinFormsUI.Docking.VS2015DarkTheme());
                 }
             }
             else
@@ -4219,7 +4264,7 @@ namespace MultiTerminal
                 // Only set DockPanel theme on initial load (before any documents are open)
                 if (isInitialLoad)
                 {
-                    _dockPanel.Theme = new WeifenLuo.WinFormsUI.Docking.VS2015LightTheme();
+                    SetDockPanelTheme(new WeifenLuo.WinFormsUI.Docking.VS2015LightTheme());
                 }
             }
 
@@ -5076,7 +5121,7 @@ namespace MultiTerminal
                     resumeSessionId: resumeSession?.Entry.SessionId, launchKind: Services.PaneLaunchKind.From(kind));
                 _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] After StartTerminal: doc.CustomTitle='{doc.CustomTitle}' doc.TabText='{doc.TabText}' doc.Text='{doc.Text}'");
 
-                doc.Activate();
+                GridLayoutManager.Surface(doc);
                 doc.FocusTerminal();
                 _lastActiveTerminal = doc;
 
@@ -5925,7 +5970,7 @@ namespace MultiTerminal
 
                 doc.StartTerminal(dir, terminalName, claudeProfile: claudeProfile, launchKind: Services.PaneLaunchKind.PowerShell);
 
-                doc.Activate();
+                GridLayoutManager.Surface(doc);
                 doc.FocusTerminal();
                 _lastActiveTerminal = doc;
             }
@@ -6034,7 +6079,7 @@ namespace MultiTerminal
                 doc.StartTerminal(workingDir, terminalName, launch.AutoRunCommand, isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath, claudeProfile: claudeProfile,
                     launchKind: Services.PaneLaunchKind.Claude, launchQuietStart: true);
 
-                doc.Activate();
+                GridLayoutManager.Surface(doc);
                 doc.FocusTerminal();
                 _lastActiveTerminal = doc;
             }
@@ -6243,7 +6288,7 @@ namespace MultiTerminal
                     projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile2, taskWorktreePath: taskWorktreePath2,
                     claudeProfile: claudeProfile2, launchKind: Services.PaneLaunchKind.From(terminalKind));
 
-                sourceDoc.Activate();
+                GridLayoutManager.Surface(sourceDoc);
                 sourceDoc.FocusTerminal();
                 _lastActiveTerminal = sourceDoc;
 
@@ -10733,7 +10778,8 @@ namespace MultiTerminal
                 return false;
             }
 
-            doc.Activate();
+            // Surface, not Activate: the pane may be in a minimised floating window (GH #74).
+            GridLayoutManager.Surface(doc);
             doc.FocusTerminal();
             _lastActiveTerminal = doc;
             return true;
