@@ -23,7 +23,8 @@ namespace MultiTerminal.Tests
     /// red; the old "any overlap" reachability rule turned the top-edge and near-bottom facts red (the
     /// sliver fact stayed green, as predicted: the old rule also rejected a 20-pixel overlap). Phase 3: not
     /// routing WM_CLOSE to the handler turned the close-button fact red (the declined-close fact stayed
-    /// green, as predicted: the library closes the panes either way).
+    /// green, as predicted: the library closes the panes either way). Phase 4: leaving the library's
+    /// title-bar drag on turned the title-bar switch fact red; for the double-click fact see its own doc.
     ///
     /// <para>The child-handle fact stands in for WebView2: a terminal survives a move only if the
     /// native windows inside the pane are re-parented, never destroyed and rebuilt. A plain child
@@ -450,6 +451,81 @@ namespace MultiTerminal.Tests
                     Assert.True(pane.IsDisposed || pane.DockPanel == null);
                 },
                 close: _ => false);
+        }
+
+        private const int WM_NCLBUTTONDBLCLK = 0x00A3;
+        private const int HTCAPTION = 2;
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsZoomed(IntPtr hWnd);
+
+        /// <summary>A point in the middle of a window's title bar, in screen coordinates, packed for lParam.</summary>
+        private static IntPtr TitleBarPoint(Form window)
+        {
+            int clientTop = window.PointToScreen(Point.Empty).Y;
+            int x = window.Left + (window.Width / 2);
+            int y = window.Top + ((clientTop - window.Top) / 2);
+            return (IntPtr)((y << 16) | (x & 0xFFFF));
+        }
+
+        /// <summary>
+        /// Phase 4. The library turns a mouse-down on the title bar into its own docking drag unless the
+        /// window's AllowEndUserDocking is false, so Windows never moved the window and drag-to-snap could
+        /// not happen. The drag itself is a modal Windows loop no test can drive; this pins the switch,
+        /// against the library default.
+        /// </summary>
+        [Fact]
+        public void The_title_bar_is_handed_to_windows_for_moving_unlike_the_library_default()
+        {
+            foreach (bool independent in new[] { false, true })
+            {
+                WithHost(independent, (form, panel, _) =>
+                {
+                    var pane = new Pane();
+                    pane.Show(panel, FloatBounds);
+                    Assert.Equal(!independent, pane.Pane!.FloatWindow!.AllowEndUserDocking);
+                });
+            }
+        }
+
+        /// <summary>
+        /// Phase 4. A double-click on the title bar maximises the window, as on any window; the library's
+        /// own window puts the pane back into the main window instead.
+        ///
+        /// <para>What this pins, measured by falsification: removing the WndProc intercept turns it red
+        /// (the library's own hit test finds the title bar and re-docks the pane). The library's
+        /// DoubleClickTitleBarToDock is left on: switched off, the library decides EVERY frame double-click
+        /// with a hit test against the screen cursor, which re-docked a maximised window from its icon or
+        /// top edge (pipeline run 1). A double-click on those parts and the right-click system menu are
+        /// live checks: a test would have to place the real cursor or open a modal menu.</para>
+        /// </summary>
+        [Fact]
+        public void A_title_bar_double_click_maximises_the_window_where_the_library_default_docks_the_pane()
+        {
+            foreach (bool independent in new[] { false, true })
+            {
+                WithHost(independent, (form, panel, _) =>
+                {
+                    var pane = new Pane();
+                    pane.Show(panel, FloatBounds);
+                    var fw = pane.Pane!.FloatWindow!;
+                    Application.DoEvents();
+
+                    SendMessage(fw.Handle, WM_NCLBUTTONDBLCLK, (IntPtr)HTCAPTION, TitleBarPoint(fw));
+                    Application.DoEvents();
+
+                    if (independent)
+                    {
+                        Assert.Equal(DockState.Float, pane.DockState);
+                        Assert.True(IsZoomed(fw.Handle), "the window should be maximised");
+                    }
+                    else
+                    {
+                        Assert.Equal(DockState.Document, pane.DockState);
+                    }
+                });
+            }
         }
 
         private static readonly Rectangle Primary = new Rectangle(0, 0, 1920, 1040);
