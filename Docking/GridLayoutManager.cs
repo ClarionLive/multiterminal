@@ -39,12 +39,43 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
-        /// Gets all terminal documents currently in the dock panel.
+        /// The terminals DOCKED in the main window's document area. Not floated ones:
+        /// <c>DockPanel.Documents</c> yields only <see cref="DockState.Document"/> contents. Use this
+        /// for grid arrangement and pane placement, which are about the docked area; anything about
+        /// "every terminal" wants <see cref="GetAllTerminalDocuments"/>.
         /// </summary>
-        public List<TerminalDocument> GetTerminalDocuments()
+        public List<TerminalDocument> GetDockedTerminalDocuments()
         {
             return _dockPanel.Documents.OfType<TerminalDocument>().ToList();
         }
+
+        /// <summary>
+        /// Every terminal shown in the dock panel, docked or in a floating window (GH #74), in the
+        /// panel's content order, which is also the order layout.xml lists them in.
+        /// </summary>
+        public List<TerminalDocument> GetAllTerminalDocuments()
+        {
+            return _dockPanel.Contents.OfType<TerminalDocument>()
+                .Where(d => IsListedState(d.DockState))
+                .ToList();
+        }
+
+        /// <summary>
+        /// Whether a terminal in <paramref name="state"/> is one of <see cref="GetAllTerminalDocuments"/>:
+        /// docked or floated. Hidden and not-yet-shown contents are not, the same as for the docked list.
+        /// </summary>
+        public static bool IsListedState(DockState state)
+            => state == DockState.Document || state == DockState.Float;
+
+        /// <summary>
+        /// The pane the Owner is in (GH #74): the panel's active content when that is a terminal,
+        /// else its active document. <c>ActiveDocument</c> alone is never a floated pane, so anything
+        /// asking "which terminal is active" from it would answer with a docked one while the Owner
+        /// works in a floating window. The one rule for MainForm and for a terminal deciding whether
+        /// to take focus when it starts.
+        /// </summary>
+        public static IDockContent ActiveTerminalOrDocument(DockPanel dockPanel)
+            => dockPanel?.ActiveContent as TerminalDocument ?? dockPanel?.ActiveDocument;
 
         /// <summary>
         /// Applies a grid preset to the current terminal documents.
@@ -84,7 +115,7 @@ namespace MultiTerminal.Docking
         /// <param name="cols">Number of columns</param>
         public void ArrangeAsGrid(int rows, int cols)
         {
-            var documents = GetTerminalDocuments();
+            var documents = GetDockedTerminalDocuments();
             if (documents.Count == 0) return;
 
             int totalCells = rows * cols;
@@ -174,7 +205,7 @@ namespace MultiTerminal.Docking
         /// </summary>
         public void ResetToTabs()
         {
-            var documents = GetTerminalDocuments();
+            var documents = GetDockedTerminalDocuments();
             if (documents.Count == 0) return;
 
             // Show first document

@@ -4590,11 +4590,12 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
-        /// Gets the persist string for layout serialization.
+        /// Gets the persist string for layout serialization: the type name and this pane's
+        /// <see cref="PaneKey"/>, so the restore pairs the entry with its saved session by key (GH #74).
         /// </summary>
         protected override string GetPersistString()
         {
-            return typeof(TerminalDocument).FullName;
+            return TerminalPersistString.For(PaneKey);
         }
     }
 
