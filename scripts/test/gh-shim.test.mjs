@@ -454,3 +454,43 @@ test('buildChildEnv adds the token only when the environment has none', () => {
   assert.equal(hasExplicitToken({ GITHUB_TOKEN: 'x' }), true);
   assert.equal(hasExplicitToken({}), false);
 });
+
+// ─── No App configured is not a fault (GH #68) ─────────────────────────────────────────────
+//
+// On an install that never registered an App, every gh command used to open with "refused to mint a
+// token (HTTP 503)" plus two attribution lines. Using your own login is exactly what that user wants,
+// so it gets ONE neutral line. A real 503 keeps the loud warning, now with the server's reason.
+
+test('no App configured: one neutral line, and gh runs under the user\'s own login', async () => {
+  const broker = await startFakeBroker({
+    status: 503,
+    body: { error: 'No GitHub App is configured (missing app id or private key). Register the App first.' },
+  });
+  try {
+    const { stdout, stderr, code } = await runShim({
+      env: { MT_API_URL: broker.url, MULTITERMINAL_LAUNCH_NONCE: 'nonce-abc' },
+    });
+
+    assert.equal(stderr.trim(),
+      '[gh-multiterminal] No MultiTerminal bot account is set up, so gh will use your own GitHub login.');
+    assert.match(stdout, /GH_TOKEN=\(none\)/);
+    assert.equal(code, 0);
+  } finally {
+    await broker.close();
+  }
+});
+
+test('a real 503 still warns loudly and shows the server\'s reason', async () => {
+  const broker = await startFakeBroker({ status: 503, body: { error: 'GitHub refused the installation.' } });
+  try {
+    const { stderr } = await runShim({
+      env: { MT_API_URL: broker.url, MULTITERMINAL_LAUNCH_NONCE: 'nonce-abc' },
+    });
+
+    assert.match(stderr, /refused to mint a token \(HTTP 503\): GitHub refused the installation\./);
+    assert.match(stderr, /not to the bot/i, 'the attribution warning stays for a real failure');
+    assert.doesNotMatch(stderr, /bot account is set up/i);
+  } finally {
+    await broker.close();
+  }
+});

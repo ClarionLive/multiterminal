@@ -293,6 +293,29 @@ test('a failed mint warns that git has no other helper to fall back to', async (
   }
 });
 
+// GH #68: on an install with no App, "refused (HTTP 503)" read like a fault. It is the normal state, so
+// it is said plainly, but the prompt warning stays: git still has no credential.
+test('no App configured: no "refused", and the prompt warning stays', async () => {
+  const broker = await startFakeBroker({
+    status: 503,
+    body: { error: 'No GitHub App is configured (missing app id or private key). Register the App first.' },
+  });
+  try {
+    const { stdout, stderr, code } = await runHelper({
+      stdin: githubRequest,
+      env: { MT_API_URL: broker.url, MULTITERMINAL_LAUNCH_NONCE: 'nonce-abc' },
+    });
+
+    assert.equal(stdout, '');
+    assert.equal(code, 0);
+    assert.doesNotMatch(stderr, /refused|HTTP 503/i);
+    assert.match(stderr, /No MultiTerminal bot account is set up/);
+    assert.match(stderr, /ONLY credential helper/i);
+  } finally {
+    await broker.close();
+  }
+});
+
 // ─── The deliberate Owner escape hatch reaches git too (item 8) ───────────────────────────
 //
 // One variable governs identity for BOTH tools. A hatch that covered `gh issue comment` but silently

@@ -148,6 +148,17 @@ async function browserTabTerminal(args) {
   return choice.terminal;
 }
 
+// GH #18: the self-scoped read tools passed an omitted name straight into seg(), which threw "apiCall path
+// segment is required (got undefined)". The rule is chooseSelfIdentity (in the sender-identity block); this
+// throws its refusal so the tool reports it.
+async function selfIdentityArg(args, argName) {
+  const given = args?.[argName];
+  const hasGiven = given !== undefined && given !== null && given !== "";
+  const choice = chooseSelfIdentity(argName, given, hasGiven ? null : await resolveSenderIdentity());
+  if (choice.error) throw new Error(choice.error);
+  return choice.name;
+}
+
 async function apiCall(endpoint, method = "GET", body = null, timeoutMs = API_TIMEOUT_MS, extraHeaders = null) {
   const url = `${API_BASE}${endpoint}`;
   const options = {
@@ -904,10 +915,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Your terminal ID",
+              description: "Your terminal ID or name. Omit to use your own name (the terminal this session runs in); if MultiTerminal cannot confirm it, the call fails rather than guess. Reading drains the queue, so pass another terminal's id only on purpose.",
             },
           },
-          required: ["terminalId"],
         },
       },
       // Kanban Workflow: Enhanced Checklist Tools
@@ -1073,14 +1083,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             agentName: {
               type: "string",
-              description: "Your terminal/agent name (from MULTITERMINAL_NAME env var)",
+              description: "Your terminal/agent name. Omit to use your own name (the terminal this session runs in); if MultiTerminal cannot confirm it, the call fails rather than guess.",
             },
             projectId: {
               type: "string",
               description: "Project scope. Omit to use the terminal's resolved project. Pass \"all\" for any project (legacy unscoped behavior).",
             },
           },
-          required: ["agentName"],
         },
       },
       {
@@ -1091,14 +1100,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             agentName: {
               type: "string",
-              description: "Your terminal/agent name (from MULTITERMINAL_NAME env var)",
+              description: "Your terminal/agent name. Omit to use your own name (the terminal this session runs in); if MultiTerminal cannot confirm it, the call fails rather than guess.",
             },
             projectId: {
               type: "string",
               description: "Project scope. Omit to use the terminal's resolved project. Pass \"all\" for any project (legacy unscoped behavior).",
             },
           },
-          required: ["agentName"],
         },
       },
       {
@@ -1212,14 +1220,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             agentName: {
               type: "string",
-              description: "Your terminal/agent name (from MULTITERMINAL_NAME env var)",
+              description: "Your terminal/agent name. Omit to use your own name (the terminal this session runs in); if MultiTerminal cannot confirm it, the call fails rather than guess.",
             },
             projectId: {
               type: "string",
               description: "Project scope override. Omit to use the terminal's resolved project. Pass \"all\" to force the legacy cross-project agent-centric view.",
             },
           },
-          required: ["agentName"],
         },
       },
       {
@@ -1301,7 +1308,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             userId: {
               type: "string",
-              description: "User ID to get inbox for (e.g., the owner's first name)",
+              description: "User ID to get inbox for (e.g., the owner's first name). Omit to use your own name (the terminal this session runs in); if MultiTerminal cannot confirm it, the call fails rather than guess.",
             },
             unreadOnly: {
               type: "boolean",
@@ -1314,7 +1321,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               default: 50,
             },
           },
-          required: ["userId"],
         },
       },
       {
@@ -3522,7 +3528,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_messages": {
-        const messages = await apiCall(`/api/messaging/messages/${seg(args.terminalId)}`);
+        const messages = await apiCall(`/api/messaging/messages/${seg(await selfIdentityArg(args, "terminalId"))}`);
         if (!messages || messages.length === 0) {
           return {
             content: [
@@ -3815,6 +3821,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_my_active_task": {
+        const agentName = await selfIdentityArg(args, "agentName");
         // Project-first surfacing: scope the active-task lookup to the terminal's resolved project so a
         // project-X terminal doesn't surface the agent's active task from project Y. "all" forces the
         // legacy unscoped lookup. Fails CLOSED (loud) when project context is indicated but unresolvable.
@@ -3822,14 +3829,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (degradedText) {
           return { content: [{ type: "text", text: degradedText }], isError: true };
         }
-        let activeUrl = `/api/tasks/active/${seg(args.agentName)}`;
+        let activeUrl = `/api/tasks/active/${seg(agentName)}`;
         if (projectId) activeUrl += `?projectId=${encodeURIComponent(projectId)}`;
         const result = await apiCall(activeUrl);
         const task = result.task;
         if (!task) {
           // Prefer the server's message — it distinguishes "no active task at all" from
           // "your active task belongs to a different project" (cross-project note).
-          const noTaskMsg = result.message || `No active task for ${args.agentName}.`;
+          const noTaskMsg = result.message || `No active task for ${agentName}.`;
           return { content: [{ type: "text", text: `${noTaskMsg} Use list_tasks or get_my_pickable_tasks to find work.` }] };
         }
         const summary = result.checklistSummary;
@@ -3889,6 +3896,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_active_worktree": {
+        const agentName = await selfIdentityArg(args, "agentName");
         // Project-first surfacing: scope the active-worktree lookup to the terminal's resolved project so a
         // project-X terminal doesn't surface the agent's active worktree from project Y. "all" forces the
         // legacy unscoped lookup. Fails CLOSED (loud) when project context is indicated but unresolvable.
@@ -3896,7 +3904,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (degradedText) {
           return { content: [{ type: "text", text: degradedText }], isError: true };
         }
-        let worktreeUrl = `/api/worktrees/active/${seg(args.agentName)}`;
+        let worktreeUrl = `/api/worktrees/active/${seg(agentName)}`;
         if (projectId) worktreeUrl += `?projectId=${encodeURIComponent(projectId)}`;
         const result = await apiCall(worktreeUrl);
         if (!result.worktreePath) {
@@ -3909,13 +3917,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ? result.message
             : result.taskId
               ? `Task '${result.taskTitle}' [${result.taskId}] is active but has no worktree (worktree mode off, project unregistered, or git failed).`
-              : `No active task for ${args.agentName}.`;
+              : `No active task for ${agentName}.`;
           return {
             content: [{ type: "text", text: `No active worktree. ${reason}` }],
           };
         }
 
-        let text = `🌳 Active worktree for ${args.agentName}:\n`;
+        let text = `🌳 Active worktree for ${agentName}:\n`;
         text += `  taskId:       ${result.taskId}\n`;
         text += `  taskTitle:    ${result.taskTitle}\n`;
         text += `  worktreePath: ${result.worktreePath}\n`;
@@ -4111,6 +4119,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_my_pickable_tasks": {
+        const agentName = await selfIdentityArg(args, "agentName");
         // Project-first surfacing (task cf32b08f): scope to the terminal's resolved project so the
         // "next ticket" is always a ticket of THIS project, whoever it's assigned to. "all" gives the
         // legacy cross-project agent-centric view. Fails CLOSED (loud) when project context is
@@ -4119,7 +4128,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (degradedText) {
           return { content: [{ type: "text", text: degradedText }], isError: true };
         }
-        let url = `/api/tasks/pickable/${seg(args.agentName)}`;
+        let url = `/api/tasks/pickable/${seg(agentName)}`;
         if (projectId) url += `?projectId=${encodeURIComponent(projectId)}`;
         const result = await apiCall(url);
         const tasks = result.tasks;
@@ -4129,7 +4138,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           : "";
         if (!tasks || tasks.length === 0) {
           return {
-            content: [{ type: "text", text: `No tasks available for ${args.agentName}${scopeNote}. The board is clear!` }],
+            content: [{ type: "text", text: `No tasks available for ${agentName}${scopeNote}. The board is clear!` }],
           };
         }
 
@@ -4179,7 +4188,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         if (projectId) {
-          text = `Project ${projectId} tasks for ${args.agentName}:\n\n${text}`;
+          text = `Project ${projectId} tasks for ${agentName}:\n\n${text}`;
         }
 
         return {
@@ -4318,7 +4327,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "get_inbox": {
         const unreadOnly = args.unreadOnly || false;
         const limit = args.limit || 50;
-        const result = await apiCall(`/api/tasks/inbox/${seg(args.userId)}?unreadOnly=${encodeURIComponent(unreadOnly)}&limit=${encodeURIComponent(limit)}`);
+        const result = await apiCall(`/api/tasks/inbox/${seg(await selfIdentityArg(args, "userId"))}?unreadOnly=${encodeURIComponent(unreadOnly)}&limit=${encodeURIComponent(limit)}`);
         return {
           content: [{ type: "text", text: formatInbox(result) }],
         };
@@ -6274,6 +6283,18 @@ function chooseBrowserTabTerminal(given, resolved) {
   if (typeof given === "string" && given !== "") return { terminal: given };
   if (resolved && resolved.authoritative && resolved.name) return { terminal: resolved.name };
   return { error: "terminalId is required: MultiTerminal could not confirm which terminal this session is, so the browser tab's terminal is not guessed" };
+}
+/**
+ * The name a self-scoped read tool (get_messages, get_inbox, get_my_pickable_tasks, get_my_active_task,
+ * get_active_worktree) reads for (GH #18). Pure. { name } or { error }. Same rule as
+ * chooseBrowserTabTerminal: a given value is used as given; without one, ONLY the authoritative live
+ * identity, never MULTITERMINAL_NAME or the claimed name. A stale default would read another terminal's
+ * data, and get_messages DRAINS the queue it reads, so a wrong guess loses that terminal's messages.
+ */
+function chooseSelfIdentity(argName, given, resolved) {
+  if (given !== undefined && given !== null && given !== "") return { name: given };
+  if (resolved && resolved.authoritative && resolved.name) return { name: resolved.name };
+  return { error: `${argName} is required: MultiTerminal could not confirm which terminal this session is, so your name is not guessed` };
 }
 // ── end sender identity ──
 
