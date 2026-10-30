@@ -3586,8 +3586,11 @@ namespace MultiTerminal
         /// else any open tab that is, else a new one. Reusing a Home tab means cancelling a dialog
         /// never leaves a growing row of empty Home tabs behind (task 4cac608c).
         /// </summary>
-        private TerminalDocument GetOrCreateHomeTab()
+        private TerminalDocument GetOrCreateHomeTab() => GetOrCreateHomeTab(out _);
+
+        private TerminalDocument GetOrCreateHomeTab(out bool created)
         {
+            created = false;
             if (_dockPanel.ActiveDocument is TerminalDocument active && active.IsStartScreenVisible)
                 return active;
 
@@ -3600,14 +3603,33 @@ namespace MultiTerminal
             }
 
             var (_, docId) = AddNewTerminal();
+            created = true;
             return _dockPanel.Documents.OfType<TerminalDocument>().FirstOrDefault(d => d.DocId == docId);
         }
 
-        /// <summary>Runs a start-screen button's handler as if it had been clicked in a Home tab.</summary>
+        /// <summary>
+        /// Runs a start-screen button's handler as if it had been clicked in a Home tab. A tab created
+        /// just for this is closed again when the action was cancelled, so a cancelled dialog leaves
+        /// no empty pane behind (see <see cref="Services.HomeTabCleanup"/>).
+        /// </summary>
         private void RunOnHomeTab(EventHandler startScreenHandler)
         {
-            var doc = GetOrCreateHomeTab();
-            if (doc != null) startScreenHandler(doc, EventArgs.Empty);
+            var doc = GetOrCreateHomeTab(out bool created);
+            if (doc == null) return;
+
+            // Every handler routed here shows a modal dialog and returns once it is answered, so the
+            // pane's state afterwards says whether anything was launched in it.
+            startScreenHandler(doc, EventArgs.Empty);
+
+            if (Services.HomeTabCleanup.ShouldClose(
+                    createdForAction: created,
+                    isDisposed: doc.IsDisposed,
+                    startScreenVisible: doc.IsStartScreenVisible,
+                    terminalStarted: doc.IsTerminalStarted,
+                    terminalPaneCount: _dockPanel.Documents.OfType<TerminalDocument>().Count()))
+            {
+                doc.Close();
+            }
         }
 
         /// <summary>The header's Launch Project list: every registered project, and the current one.</summary>
