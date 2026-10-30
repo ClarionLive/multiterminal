@@ -43,10 +43,33 @@ namespace MultiTerminal.Tests
             {
                 foreach (var f in new[] { basePath, basePath + "-wal", basePath + "-shm" })
                 {
-                    if (File.Exists(f)) File.Delete(f);
+                    // Best-effort, as in the other temp-database tests: on a CI runner the file can still be
+                    // open (an unreleased handle, or a scanner), and failing to delete a temp file must not
+                    // fail a test whose assertions passed.
+                    try
+                    {
+                        if (File.Exists(f)) File.Delete(f);
+                    }
+                    catch (IOException)
+                    {
+                    }
+                    catch (UnauthorizedAccessException)
+                    {
+                    }
                 }
             }
-            if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
+
+            try
+            {
+                if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+
             Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_DB", null);
             Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_MSGDB", null);
             GC.SuppressFinalize(this);
