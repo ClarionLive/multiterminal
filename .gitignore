@@ -24,6 +24,9 @@ node_modules/
 # Build-staged MCP server for the installer (git-sourced index.js + npm-installed
 # deps, populated by the StageMcpForInstaller csproj target; ticket ec97c446)
 installer/mcp-dist/
+# Installer build output: the compiled setup .exe and the plugin marketplace staged
+# from GitHub by build-installer.ps1 (task 4dc459e4)
+installer/Output/
 
 # Sensitive files
 .mcp.json

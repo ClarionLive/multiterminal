@@ -5,10 +5,20 @@
 #   .\build-installer.ps1                 # Full build (publish + installer)
 #   .\build-installer.ps1 -SkipPublish    # Installer only (reuse last publish)
 #   .\build-installer.ps1 -Verbose        # Show detailed build output
+#   .\build-installer.ps1 -PluginRef v3.0.1            # Bundle the plugin from a tag/branch/sha (default: main)
+#   .\build-installer.ps1 -PluginSource <local clone>  # Offline: bundle a clean local marketplace clone's HEAD
+#   .\build-installer.ps1 -StageOnly      # Stage, validate and stamp the plugin only, then exit
+#
+# The Claude Code plugin marketplace is staged from GitHub (ClarionLive/multiterminal-marketplace),
+# never from this machine's live plugin folder: 3.0.0 shipped a local branch that was 20 commits
+# ahead of GitHub and missing a same-day fix (task 4dc459e4).
 
 param(
     [switch]$SkipPublish,
-    [switch]$Verbose
+    [switch]$Verbose,
+    [string]$PluginRef = 'main',
+    [string]$PluginSource,
+    [switch]$StageOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,6 +49,127 @@ $InnoCompiler = @(
 function Write-Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)   { Write-Host "    $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "    $msg" -ForegroundColor Yellow }
+
+# --- Plugin marketplace staging (task 4dc459e4) ---
+$PluginRepo       = 'ClarionLive/multiterminal-marketplace'
+$PluginRepoUrl    = "https://github.com/$PluginRepo"
+$PluginStagingDir = Join-Path $InstallerDir 'Output\plugin-staging'
+$PluginStampName  = '.mt-plugin-source.json'
+
+# Runs git and returns its combined output as strings. Windows PowerShell 5.1 turns native
+# stderr into a terminating error under 'Stop', and git writes progress there, so the
+# preference is relaxed for the call and the exit code decides instead.
+function Invoke-Git {
+    param([string[]]$GitArgs, [switch]$AllowFail)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = & git -c core.longpaths=true @GitArgs 2>&1 | ForEach-Object { "$_" }
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $prev }
+    $script:GitExitCode = $code
+    if ($code -ne 0 -and -not $AllowFail) {
+        throw "git $($GitArgs -join ' ') failed (exit code $code):`n$($out -join "`n")"
+    }
+    return $out
+}
+
+# Deletes a folder tree. rd handles the \\?\ prefix, so a vendored node_modules path longer
+# than MAX_PATH (and git's read-only pack files) cannot leave half a tree behind.
+function Remove-Tree($path) {
+    if (-not (Test-Path -LiteralPath $path)) { return }
+    & cmd /c rd /s /q "\\?\$path"
+    if (Test-Path -LiteralPath $path) { throw "Could not delete $path" }
+}
+
+# Stages the plugin marketplace into $PluginStagingDir at an exact commit, validates it,
+# removes .git and writes the stamp file MT reads to know which commit is installed.
+# Returns @{ Ref; Commit; Dir }.
+function Invoke-PluginStaging {
+    param([string]$Ref, [string]$Source)
+
+    Write-Step "Staging plugin marketplace..."
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw "git is required to stage the plugin marketplace" }
+
+    if ($Source) {
+        # Offline build from a local clone: it must be clean, a clone of the real repo, and its
+        # HEAD must be on an origin branch, so nothing unpushed can ship.
+        if (-not (Test-Path -LiteralPath (Join-Path $Source '.git'))) { throw "-PluginSource '$Source' is not a git checkout" }
+        $Source = (Resolve-Path -LiteralPath $Source).Path
+        $originUrl = (Invoke-Git @('-C', $Source, 'remote', 'get-url', 'origin') -AllowFail) -join ''
+        if ($originUrl -notmatch '[/:]ClarionLive/multiterminal-marketplace(\.git)?/?$') {
+            throw "-PluginSource '$Source': origin is '$originUrl', not $PluginRepoUrl"
+        }
+        $dirty = @(Invoke-Git @('-C', $Source, 'status', '--porcelain'))
+        if (@($dirty | Where-Object { $_ }).Count -gt 0) {
+            throw "-PluginSource '$Source' has uncommitted changes; commit and push them, or bundle from GitHub:`n$($dirty -join "`n")"
+        }
+        $commit = ((Invoke-Git @('-C', $Source, 'rev-parse', 'HEAD')) -join '').Trim()
+        # Remote-tracking refs are as fresh as the clone's last fetch; a commit found there was on origin then.
+        $onOrigin = @(Invoke-Git @('-C', $Source, 'branch', '-r', '--contains', $commit) |
+            ForEach-Object { $_.Trim() } | Where-Object { $_ -like 'origin/*' -and $_ -notlike 'origin/HEAD*' })
+        if ($onOrigin.Count -eq 0) {
+            throw "-PluginSource '$Source': HEAD $commit is on no origin branch (unpushed?). Push it, or bundle from GitHub."
+        }
+        $Ref = if ($onOrigin -contains "origin/$Ref") { $Ref } else { $onOrigin[0] -replace '^origin/', '' }
+        $fetchFrom = $Source
+        $fetchRef  = $commit
+    } else {
+        $fetchFrom = "$PluginRepoUrl.git"
+        $fetchRef  = $Ref
+    }
+
+    Remove-Tree $PluginStagingDir
+    New-Item -ItemType Directory -Path $PluginStagingDir -Force | Out-Null
+
+    # init + fetch (rather than clone --branch) also accepts a bare commit sha as the ref.
+    Invoke-Git @('-C', $PluginStagingDir, 'init', '-q') | Out-Null
+    $fetch = Invoke-Git @('-C', $PluginStagingDir, 'fetch', '-q', '--depth', '1', '--no-tags', $fetchFrom, $fetchRef) -AllowFail
+    if ($script:GitExitCode -ne 0) {
+        throw "Plugin ref '$fetchRef' does not resolve on $fetchFrom (no such branch, tag or commit):`n$($fetch -join "`n")"
+    }
+    Invoke-Git @('-C', $PluginStagingDir, 'checkout', '-q', '--detach', 'FETCH_HEAD') | Out-Null
+    $staged = ((Invoke-Git @('-C', $PluginStagingDir, 'rev-parse', 'HEAD')) -join '').Trim()
+    if ($staged -notmatch '^[0-9a-f]{40}$') { throw "Could not resolve the staged plugin commit (got '$staged')" }
+    if ($Source -and $staged -ne $commit) { throw "Staged $staged but -PluginSource HEAD is $commit" }
+
+    Assert-PluginStaging $PluginStagingDir
+
+    Remove-Tree (Join-Path $PluginStagingDir '.git')
+    if (Test-Path -LiteralPath (Join-Path $PluginStagingDir '.git')) { throw ".git is still present in $PluginStagingDir" }
+
+    # The stamp's shape is a contract with MT's plugin updater (PluginUpdateService): keep the
+    # field names and order. UTF-8 without BOM, which Windows PowerShell's Set-Content cannot write.
+    $stamp = [ordered]@{
+        repo      = $PluginRepo
+        ref       = $Ref
+        commit    = $staged
+        stampedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+        stampedBy = 'installer'
+    }
+    [System.IO.File]::WriteAllText((Join-Path $PluginStagingDir $PluginStampName),
+        ($stamp | ConvertTo-Json), (New-Object System.Text.UTF8Encoding $false))
+
+    Write-Ok "Plugin: $PluginRepo @ $Ref = $staged"
+    Write-Ok "Staged to $PluginStagingDir"
+    return @{ Ref = $Ref; Commit = $staged; Dir = $PluginStagingDir }
+}
+
+# Refuses a staged tree that is not the marketplace: the installer would otherwise ship
+# whatever the ref happened to contain.
+function Assert-PluginStaging($dir) {
+    foreach ($rel in @('.claude-plugin\marketplace.json', 'plugins\multiterminal\.claude-plugin\plugin.json')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $dir $rel))) {
+            throw "Staged plugin marketplace is missing $rel ($dir). Wrong ref or wrong repository?"
+        }
+    }
+}
+
+$plugin = Invoke-PluginStaging -Ref $PluginRef -Source $PluginSource
+if ($StageOnly) {
+    Write-Step "Plugin staged (-StageOnly): skipping publish and installer"
+    exit 0
+}
 
 # --- Publish MultiTerminal ---
 if (-not $SkipPublish) {
@@ -108,13 +239,14 @@ Write-Ok "MCP Gateway:   $gwCount files, exe=$gwSize MB"
 Write-Step "Compiling Inno Setup installer..."
 if (-not $InnoCompiler) {
     Write-Warn "Inno Setup 6 not found. Publish complete - run ISCC.exe manually:"
-    Write-Host "    ISCC.exe `"$IssFile`""
+    Write-Host "    ISCC.exe /DPluginMarketplaceDir=`"$($plugin.Dir)`" `"$IssFile`""
     exit 0
 }
 
 Push-Location $InstallerDir
 try {
-    & $InnoCompiler $IssFile
+    # The define overrides the .iss default (the build machine's live plugin folder).
+    & $InnoCompiler "/DPluginMarketplaceDir=$($plugin.Dir)" $IssFile
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed (exit code $LASTEXITCODE)" }
 } finally { Pop-Location }
 
@@ -127,3 +259,4 @@ if ($installer) {
     $instSize = [math]::Round($installer.Length / 1MB, 1)
     Write-Ok "Installer: $($installer.FullName) ($instSize MB)"
 }
+Write-Ok "Plugin:    $PluginRepo @ $($plugin.Ref) = $($plugin.Commit)"

@@ -21,8 +21,14 @@
 ; publish-installer (not bin\publish) — live gateways run from bin\publish and lock
 ; its DLLs, so the release publish targets this dedicated staging dir (task df1f521f).
 #define McpGatewayPublishDir "..\..\McpGateway\bin\publish-installer\win-x64"
-; Claude Code plugin marketplace (hooks, agents, skills, CLAUDE.md, channel MCP)
-#define PluginMarketplaceDir GetEnv("USERPROFILE") + "\.claude\plugins\marketplaces\multiterminal-marketplace"
+; Claude Code plugin marketplace (hooks, agents, skills, CLAUDE.md, channel MCP).
+; build-installer.ps1 passes /DPluginMarketplaceDir=<installer\Output\plugin-staging>: a
+; clean checkout of the marketplace's GitHub ref, .git removed, stamped with
+; .mt-plugin-source.json (task 4dc459e4). The default below is only for a bare ISCC run,
+; and ships whatever branch the build machine's live plugin folder is on.
+#ifndef PluginMarketplaceDir
+  #define PluginMarketplaceDir GetEnv("USERPROFILE") + "\.claude\plugins\marketplaces\multiterminal-marketplace"
+#endif
 #define ToolsDir "..\tools"
 #define DocsDir "..\docs\html"
 
@@ -258,7 +264,9 @@ Source: "{#DocsDir}\*"; DestDir: "{app}\docs\html"; Components: docs; Flags: ign
 ; --- Claude Code config profile can use. GetPluginDir returns exactly the
 ; --- old path for the default choice.
 ; ============================================================
-Source: "{#PluginMarketplaceDir}\*"; DestDir: "{code:GetPluginDir}"; Components: claude\plugin; Flags: ignoreversion recursesubdirs createallsubdirs
+; Excludes .git: the staged copy has none; this keeps a bare ISCC run from shipping the
+; build machine's repository too (task 4dc459e4).
+Source: "{#PluginMarketplaceDir}\*"; DestDir: "{code:GetPluginDir}"; Excludes: ".git"; Components: claude\plugin; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; ============================================================
 ; --- MCP Server (to %APPDATA%\multiterminal\mcp) ---
