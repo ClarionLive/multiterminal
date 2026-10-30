@@ -222,6 +222,54 @@ namespace MultiTerminal.Tests
             Assert.Equal(kept, entry.SessionId);
         }
 
+        // The first user line of a headless `claude -p --input-format stream-json` run, as Claude Code
+        // 2.1.314 wrote it (probe on 2026-10-30): content is a block array and entrypoint is "sdk-cli".
+        // An interactive pane writes entrypoint "cli".
+        private static string EntrypointUser(string text, string cwd, string entrypoint)
+            => JsonSerializer.Serialize(new
+            {
+                parentUuid = (string)null,
+                isSidechain = false,
+                type = "user",
+                message = new { role = "user", content = new object[] { new { type = "text", text } } },
+                uuid = Guid.NewGuid().ToString(),
+                promptSource = "sdk",
+                entrypoint,
+                cwd,
+            });
+
+        [Fact]
+        public void Gloss_writer_transcripts_are_not_offered_and_TryGetEntry_says_why()
+        {
+            // GH #67: MT run from a worktree's build output starts its gloss writer in a folder under
+            // that worktree, so the writer's transcript lands in a folder this catalog scans.
+            var prompt = GlossBackfillPlanner.PromptOpening + "\na reader can LEARN what the plan does instead of approving it on trust.\n\nTASK: x";
+            var writer = Write(_worktreeFolder, Now.AddHours(-1),
+                EntrypointUser(prompt, _worktreeDir, "sdk-cli"), Assistant("saved", _worktreeDir));
+            var work = WriteSimple(_worktreeFolder, Now.AddHours(-2));
+
+            var entry = Assert.Single(List());
+            Assert.Equal(work, entry.SessionId);
+
+            var catalog = Catalog();
+            Assert.Null(catalog.TryGetEntry(_projectRoot, writer, new HashSet<string>(), Now));
+            Assert.Equal("it is a background gloss writer MultiTerminal ran for a checklist, not a work session", catalog.LastMissReason);
+        }
+
+        [Fact]
+        public void The_gloss_prompt_typed_into_an_interactive_pane_or_a_different_headless_prompt_is_still_offered()
+        {
+            // The match needs BOTH the writer's opening line and a headless entrypoint.
+            var pasted = Write(_worktreeFolder, Now.AddHours(-1),
+                EntrypointUser(GlossBackfillPlanner.PromptOpening + " ...", _worktreeDir, "cli"), Assistant("ok", _worktreeDir));
+            var otherHeadless = Write(_worktreeFolder, Now.AddHours(-2),
+                EntrypointUser("Review the diff and report.", _worktreeDir, "sdk-cli"), Assistant("ok", _worktreeDir));
+
+            var ids = List().Select(e => e.SessionId).ToHashSet();
+            Assert.Contains(pasted, ids);
+            Assert.Contains(otherHeadless, ids);
+        }
+
         [Fact]
         public void Recent_write_is_PossiblyOpenElsewhere_and_older_is_Available()
         {

@@ -585,6 +585,11 @@ namespace MultiTerminal.MCPServer.Services
                 missReason = "its transcript holds no conversation";
                 return null; // empty or aborted session: nothing to resume
             }
+            if (scan.IsGlossWriter)
+            {
+                missReason = "it is a background gloss writer MultiTerminal ran for a checklist, not a work session";
+                return null;
+            }
 
             // ResolveCwd returns only a path that passed ValidateResumeCwd, so the existence check below
             // is the first filesystem call any transcript-supplied path reaches (pipeline Run 1).
@@ -1069,6 +1074,12 @@ namespace MultiTerminal.MCPServer.Services
 
             public string FirstPrompt { get; set; }
 
+            // A transcript of MT's headless gloss writer (GH #67): its first prompt starts with
+            // GlossBackfillPlanner.PromptOpening AND that line came from `claude -p`
+            // (entrypoint "sdk-cli"), so the same text pasted into an interactive pane still lists.
+            // Only writers run before --no-session-persistence leave a transcript at all.
+            public bool IsGlossWriter { get; set; }
+
             public int? ContextTokens { get; set; }
 
             public string ContextModel { get; set; }
@@ -1339,7 +1350,12 @@ namespace MultiTerminal.MCPServer.Services
                         case "assistant":
                             HasTurns = true;
                             if (type == "user" && FirstPrompt == null)
+                            {
                                 FirstPrompt = GetPromptText(obj);
+                                IsGlossWriter = FirstPrompt != null &&
+                                    string.Equals(GetString(obj, "entrypoint"), "sdk-cli", StringComparison.Ordinal) &&
+                                    FirstPrompt.StartsWith(GlossBackfillPlanner.PromptOpening, StringComparison.Ordinal);
+                            }
                             break;
                         case "agent-name":
                             agentNameRecord ??= GetString(obj, "agentName");

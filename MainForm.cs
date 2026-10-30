@@ -2881,10 +2881,14 @@ namespace MultiTerminal
                         try { agent.Dispose(); } catch { /* teardown is best-effort */ }
                     };
 
+                    // --no-session-persistence: the writer is never resumed, and a saved transcript
+                    // was offered as a resumable "(unknown agent)" session at project launch whenever
+                    // the app directory lies inside a project (GH #67).
                     await agent.SpawnAsync(
                         prompt: prompt,
                         workingDir: AppDomain.CurrentDomain.BaseDirectory,
                         mcpConfigPath: mcpConfigPath,
+                        extraArgs: new[] { "--no-session-persistence" },
                         claudeProfile: glossProfile.Profile);
 
                     pending = null;   // the exit handler owns it from here
