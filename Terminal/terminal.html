@@ -122,12 +122,17 @@
         // renderer on its own. Which renderer a pane ended up on is logged to the host.
         let webglAddon = null;
         function enableWebglRenderer() {
+            if (webglTurnedOff()) {
+                sendToHost({ type: 'log', level: 'info', message: 'renderer: dom (webgl turned off by MULTITERMINAL_TERMINAL_WEBGL)' });
+                return;
+            }
             if (typeof WebglAddon === 'undefined') {
                 sendToHost({ type: 'log', level: 'info', message: 'renderer: dom (webgl addon not loaded)' });
                 return;
             }
+            let addon = null;
             try {
-                const addon = new WebglAddon.WebglAddon();
+                addon = new WebglAddon.WebglAddon();
                 addon.onContextLoss(() => {
                     try { addon.dispose(); } catch (e) { }
                     if (webglAddon === addon) webglAddon = null;
@@ -137,7 +142,20 @@
                 webglAddon = addon;
                 sendToHost({ type: 'log', level: 'info', message: 'renderer: webgl' });
             } catch (e) {
-                sendToHost({ type: 'log', level: 'info', message: 'renderer: dom (webgl unavailable: ' + e + ')' });
+                // loadAddon registers the addon before activating it, so a failed start leaves it
+                // registered unless it is disposed here.
+                if (addon) { try { addon.dispose(); } catch (e2) { } }
+                sendToHost({ type: 'log', level: 'info', message: 'renderer: dom (webgl unavailable: ' + (e && e.message ? e.message : e) + ')' });
+            }
+        }
+
+        // &webgl=0 in the URL: the host's MULTITERMINAL_TERMINAL_WEBGL off switch, for a GPU or driver the
+        // WebGL renderer misrenders on.
+        function webglTurnedOff() {
+            try {
+                return new URLSearchParams(window.location.search).get('webgl') === '0';
+            } catch (e) {
+                return false;
             }
         }
 
@@ -723,6 +741,8 @@
                             break;
 
                         case 'fontSize':
+                            // A size set by the host wins over a wheel zoom still settling.
+                            cancelWheelZoom();
                             setFontSize(parseFloat(data));
                             break;
 
@@ -875,6 +895,15 @@
                 // Notify C# of the font size change so it can be saved
                 sendToHost({ type: 'fontSizeChanged', fontSize: size });
             }, WHEEL_ZOOM_SETTLE_MS);
+        }
+
+        function cancelWheelZoom() {
+            pendingWheelFontSize = null;
+            clearTimeout(wheelZoomSettleTimer);
+            if (wheelZoomFrame) {
+                cancelAnimationFrame(wheelZoomFrame);
+                wheelZoomFrame = 0;
+            }
         }
 
         // Set font size
