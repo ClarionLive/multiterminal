@@ -294,6 +294,9 @@ Source: "{#McpSnapItDir}\package.json"; DestDir: "{app}\mcps\windowssnapit"; Fla
 Source: "{#McpEverythingDir}\build\*"; DestDir: "{app}\mcps\everything-search\build"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: IsMcpSelected('everything-search')
 Source: "{#McpEverythingDir}\node_modules\*"; DestDir: "{app}\mcps\everything-search\node_modules"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: IsMcpSelected('everything-search')
 Source: "{#McpEverythingDir}\package.json"; DestDir: "{app}\mcps\everything-search"; Flags: ignoreversion; Check: IsMcpSelected('everything-search')
+; build\index.js loads <pkg>\EverythingSDK\dll\Everything64.dll (Everything32.dll on non-x64 Node) and exits if missing (GH #42)
+Source: "{#McpEverythingDir}\EverythingSDK\dll\Everything64.dll"; DestDir: "{app}\mcps\everything-search\EverythingSDK\dll"; Flags: ignoreversion; Check: IsMcpSelected('everything-search')
+Source: "{#McpEverythingDir}\EverythingSDK\dll\Everything32.dll"; DestDir: "{app}\mcps\everything-search\EverythingSDK\dll"; Flags: ignoreversion; Check: IsMcpSelected('everything-search')
 
 ; --- Post-install/uninstall scripts (temp) ---
 Source: "post-install.js"; DestDir: "{tmp}"; Flags: deleteafterinstall
