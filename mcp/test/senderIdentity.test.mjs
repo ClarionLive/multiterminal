@@ -38,7 +38,7 @@ function load() {
   const fn = new Function(
     "PLACEHOLDER_TERMINAL_NAME", "claimedTerminalName", "apiCall", "isClarionEmbedded",
     `${BLOCK}
-     return { resolveSenderIdentity, chooseSender, unregisteredError, chooseBrowserTabTerminal };`,
+     return { resolveSenderIdentity, chooseSender, unregisteredError, chooseBrowserTabTerminal, chooseSelfIdentity };`,
   );
   const apiCall = async () => { throw new Error("apiCall must not be reached: tests inject deps.get"); };
   // The real predicate lives outside this block; the CA tests below pass deps.embedded explicitly, so
@@ -47,7 +47,7 @@ function load() {
   return fn("Unassigned", null, apiCall, isClarionEmbedded);
 }
 
-const { resolveSenderIdentity, chooseSender, unregisteredError, chooseBrowserTabTerminal } = load();
+const { resolveSenderIdentity, chooseSender, unregisteredError, chooseBrowserTabTerminal, chooseSelfIdentity } = load();
 
 // A lookup that answers for exactly one pid, like the broker: anything else is a 404.
 function liveLookup(map) {
@@ -319,4 +319,54 @@ test("browser tab: a renamed pane with a stale env name still defaults to the li
   const { get } = liveLookup({ 4242: "Renamed" });
   const resolved = await resolveSenderIdentity({ get, ppid: 4242, held: null, env: { MULTITERMINAL_NAME: "OldName" } });
   assert.deepEqual(chooseBrowserTabTerminal(undefined, resolved), { terminal: "Renamed" });
+});
+
+// ── chooseSelfIdentity (GH #18) ──────────────────────────────────────────────────────────────────────
+// get_messages, get_inbox, get_my_pickable_tasks, get_my_active_task and get_active_worktree passed an
+// omitted name into seg(), which threw "apiCall path segment is required (got undefined)". get_messages
+// DRAINS the queue it reads, so a guessed name would consume another terminal's messages: only the live
+// row may stand in for an omitted name.
+
+test("self identity: a given name is used exactly as given, even when the live row differs", () => {
+  // Reading someone else's inbox or pickable tasks on purpose is legitimate; nothing is corrected.
+  assert.deepEqual(chooseSelfIdentity("agentName", "Bob", { name: "Alice", authoritative: true }), { name: "Bob" });
+  assert.deepEqual(chooseSelfIdentity("terminalId", " t-42", null), { name: " t-42" });
+});
+
+test("self identity: an omitted name defaults to the live row bound to this claude.exe", () => {
+  assert.deepEqual(chooseSelfIdentity("terminalId", undefined, { name: "Alice", authoritative: true }), { name: "Alice" });
+  assert.deepEqual(chooseSelfIdentity("userId", "", { name: "Alice", authoritative: true }), { name: "Alice" });
+  assert.deepEqual(chooseSelfIdentity("agentName", null, { name: "Alice", authoritative: true }), { name: "Alice" });
+});
+
+test("self identity: a default that is not authoritative is refused with the argument named", () => {
+  // The launch env name after a rename, or the claimed name: either may be ANOTHER live terminal.
+  const r = chooseSelfIdentity("terminalId", undefined, { name: "LaunchName", authoritative: false });
+  assert.ok(r.error && r.error.startsWith("terminalId is required:"), JSON.stringify(r));
+  assert.equal(r.name, undefined);
+  const u = chooseSelfIdentity("agentName", undefined, { name: "Stale", authoritative: false, unconfirmed: "MT down" });
+  assert.ok(u.error && u.error.startsWith("agentName is required:"), JSON.stringify(u));
+  assert.ok(chooseSelfIdentity("userId", undefined, { name: null, authoritative: false }).error.startsWith("userId is required:"));
+  assert.ok(chooseSelfIdentity("userId", undefined, null).error);
+});
+
+test("self identity: a renamed pane with a stale env name reads under its live name", async () => {
+  const { get } = liveLookup({ 4242: "Renamed" });
+  const resolved = await resolveSenderIdentity({ get, ppid: 4242, held: null, env: { MULTITERMINAL_NAME: "OldName" } });
+  assert.deepEqual(chooseSelfIdentity("terminalId", undefined, resolved), { name: "Renamed" });
+});
+
+test("self identity: no live row means no default, even with MULTITERMINAL_NAME set", async () => {
+  const { get } = liveLookup({});
+  const resolved = await resolveSenderIdentity({ get, ppid: 4242, held: null, env: { MULTITERMINAL_NAME: "OldName" } });
+  assert.equal(resolved.name, "OldName", "precondition: the sender default would have used the env name");
+  assert.ok(chooseSelfIdentity("terminalId", undefined, resolved).error);
+});
+
+test("self identity: allowSelf false (get_inbox) never defaults, even to an authoritative live name", () => {
+  // The inbox is addressed to the Owner; a self default would show an empty inbox and look like success.
+  const r = chooseSelfIdentity("userId", undefined, { name: "Alice", authoritative: true }, { allowSelf: false });
+  assert.ok(r.error && r.error.startsWith("userId is required:"), JSON.stringify(r));
+  assert.equal(r.name, undefined);
+  assert.deepEqual(chooseSelfIdentity("userId", "John", null, { allowSelf: false }), { name: "John" });
 });

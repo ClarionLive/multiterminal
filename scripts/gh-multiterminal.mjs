@@ -176,12 +176,17 @@ async function main() {
     warn('GH_TOKEN/GITHUB_TOKEN is already set, so gh will use it instead of MultiTerminal\'s bot identity.');
     warn('Anything this command publishes will be attributed to whoever owns THAT token, not to the bot.');
   } else {
+    // GH #68: no App configured is the normal state of an install that never registered one, not a
+    // fault. It gets ONE neutral line instead of the attribution warning below, which reads like
+    // something broke; using your own login is exactly what such a user expects.
+    let notConfigured = false;
     token = await mintInstallationToken({
       nonce: process.env.MULTITERMINAL_LAUNCH_NONCE,
       installationId: process.env.MULTITERMINAL_GITHUB_INSTALLATION_ID || null,
       apiUrl: MT_API_URL,
       timeoutMs: MINT_TIMEOUT_MS,
       warn,
+      onNotConfigured: () => { notConfigured = true; },
     });
 
     // Rule (1): no token is not an error. gh runs exactly as it would have without this shim.
@@ -193,7 +198,9 @@ async function main() {
     // the Owner's own account, and an agent's words appearing under it is the exact harm this whole
     // ticket exists to end. A reader who has to already understand the design in order to decode the
     // warning is not being warned.
-    if (!token) {
+    if (!token && notConfigured) {
+      warn('No MultiTerminal bot account is set up, so gh will use your own GitHub login.');
+    } else if (!token) {
       warn('No MultiTerminal bot token, so gh will use whatever account it is already signed in to.');
       warn('Anything this command publishes — a comment, an issue, a pull request, a push — will be'
         + ' attributed to THAT account, not to the bot.');

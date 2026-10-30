@@ -170,6 +170,10 @@ async function main() {
     apiUrl: MT_API_URL,
     timeoutMs: MINT_TIMEOUT_MS,
     warn,
+    // GH #68: no App configured is not a fault, so it is not reported as a refusal. The library's
+    // default line ("your own GitHub login will be used") is true for gh but not for git here, where
+    // the prompt warning below is what actually happens.
+    onNotConfigured: () => warn('No MultiTerminal bot account is set up, so this helper has no credential to give git.'),
   });
 
   // Every failure lands here identically, and every one of them means the same thing to git:
