@@ -837,8 +837,10 @@ namespace MultiTerminal
         }
 
         /// <summary>
-        /// Handle global keyboard shortcuts that must work even when WebView2 has focus.
-        /// Ctrl+Shift+H: stop terminal and return to start screen on the active tab.
+        /// Global keyboard shortcuts pressed in a WinForms control of the main window. A key pressed
+        /// inside a WebView2 never arrives here (the WinForms WebView2 raises its accelerator keys as
+        /// KeyDown on itself and never calls ProcessCmdKey), so Ctrl+Shift+H inside a terminal is
+        /// handled by that terminal (<see cref="WebViewTerminalRenderer.IsReturnToStartScreenKey"/>).
         /// </summary>
         protected override bool ProcessCmdKey(ref System.Windows.Forms.Message msg, Keys keyData)
         {
@@ -848,7 +850,8 @@ namespace MultiTerminal
         }
 
         /// <summary>
-        /// The global shortcuts, for this window and for every floating window (GH #74): keys reach the
+        /// The global shortcuts, for this window and for every floating window (GH #74), for keys
+        /// pressed in WinForms controls only (see <see cref="ProcessCmdKey"/>): such keys reach the
         /// TOP-LEVEL form's ProcessCmdKey, which for a pane in a floating window is that window, so it
         /// hands them here with itself and the control the key was addressed to. A shortcut acts only on
         /// a pane in the window it was pressed in, the pane holding that control when there is one
@@ -858,7 +861,7 @@ namespace MultiTerminal
         /// </summary>
         private bool HandleGlobalShortcut(Form source, Control origin, Keys keyData)
         {
-            if (keyData == (Keys.Control | Keys.Shift | Keys.H))
+            if (WebViewTerminalRenderer.IsReturnToStartScreenKey(keyData))
             {
                 var terminal = GridLayoutManager.ContentForKey<TerminalDocument>(_dockPanel, source, origin);
                 if (terminal != null)

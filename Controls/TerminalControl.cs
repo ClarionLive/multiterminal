@@ -93,6 +93,12 @@ namespace MultiTerminal.Controls
         public event EventHandler ContextMenuDismissRequested;
 
         /// <summary>
+        /// Event fired when Ctrl+Shift+H is pressed in the terminal; an owner that returns the pane to
+        /// its start screen sets Handled.
+        /// </summary>
+        public event EventHandler<System.ComponentModel.HandledEventArgs> ReturnToStartScreenRequested;
+
+        /// <summary>
         /// Event fired when the terminal is clicked.
         /// </summary>
         public event EventHandler TerminalClicked;
@@ -165,6 +171,7 @@ namespace MultiTerminal.Controls
             _renderer.AltVKeyPressed += OnRendererAltVKeyPressed;
             _renderer.ContextMenuRequested += OnRendererContextMenuRequested;
             _renderer.ContextMenuDismissRequested += OnRendererContextMenuDismissRequested;
+            _renderer.ReturnToStartScreenRequested += OnRendererReturnToStartScreenRequested;
             _renderer.TerminalClicked += OnRendererTerminalClicked;
 
             Controls.Add(_renderer);
@@ -1092,6 +1099,11 @@ namespace MultiTerminal.Controls
             ContextMenuDismissRequested?.Invoke(this, e);
         }
 
+        private void OnRendererReturnToStartScreenRequested(object sender, System.ComponentModel.HandledEventArgs e)
+        {
+            ReturnToStartScreenRequested?.Invoke(this, e);
+        }
+
         /// <summary>
         /// Handles terminal click from the renderer.
         /// </summary>
@@ -1120,6 +1132,7 @@ namespace MultiTerminal.Controls
                     _renderer.AltVKeyPressed -= OnRendererAltVKeyPressed;
                     _renderer.ContextMenuRequested -= OnRendererContextMenuRequested;
                     _renderer.ContextMenuDismissRequested -= OnRendererContextMenuDismissRequested;
+                    _renderer.ReturnToStartScreenRequested -= OnRendererReturnToStartScreenRequested;
                     _renderer.TerminalClicked -= OnRendererTerminalClicked;
                 }
 

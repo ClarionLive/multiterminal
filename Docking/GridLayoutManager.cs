@@ -104,12 +104,12 @@ namespace MultiTerminal.Docking
         /// lives in <paramref name="window"/>. Falls back to <see cref="ActiveContentIn{T}"/> when the
         /// origin is unknown or not inside such a pane.
         ///
-        /// <para>Why: Ctrl+Shift+H pressed in a floating terminal did nothing (live check 3). The likely
-        /// cause, not yet confirmed live, is that the library's active content was stale: a click into a
-        /// terminal's WebView2 puts focus in the browser's own window, which the library's focus
-        /// tracking may not see, so no active terminal was found in that window. The main window would
-        /// hide the same gap by falling back to the active document. If the key still does nothing,
-        /// MainForm logs that no terminal pane was found.</para>
+        /// <para>This covers a key that reaches a window's <c>ProcessCmdKey</c>, i.e. one pressed in a
+        /// WinForms control. A key pressed INSIDE a terminal never gets here: the WinForms WebView2 turns
+        /// its accelerator keys into <c>OnKeyDown</c> only, so Ctrl+Shift+H in a terminal is caught by
+        /// <c>WebViewTerminalRenderer.IsReturnToStartScreenKey</c> in that pane instead (live check 3,
+        /// which failed docked and floating alike). When no terminal pane is found here, MainForm logs
+        /// it.</para>
         /// </summary>
         public static T ContentForKey<T>(DockPanel dockPanel, System.Windows.Forms.Form window, System.Windows.Forms.Control origin)
             where T : class

@@ -927,6 +927,7 @@ namespace MultiTerminal.Docking
             _terminal.ProcessExited += OnTerminalProcessExited;
             _terminal.ContextMenuRequested += OnTerminalContextMenuRequested;
             _terminal.ContextMenuDismissRequested += OnTerminalContextMenuDismissRequested;
+            _terminal.ReturnToStartScreenRequested += OnTerminalReturnToStartScreenRequested;
             _terminal.Ready += (s, e) => TerminalReady?.Invoke(this, EventArgs.Empty);
             _terminal.StartFailed += OnTerminalStartFailed;
             _terminal.RendererReady += (s, e) => RendererReady?.Invoke(this, EventArgs.Empty);
@@ -2878,6 +2879,13 @@ namespace MultiTerminal.Docking
             _currentContextMenu?.Close();
         }
 
+        // Ctrl+Shift+H pressed inside this pane's terminal (GH #74 live check 3).
+        private void OnTerminalReturnToStartScreenRequested(object sender, System.ComponentModel.HandledEventArgs e)
+        {
+            e.Handled = true;
+            ReturnToStartScreen();
+        }
+
         /// <summary>
         /// Injects a ProjectDatabase (and optional ProjectService) so the start screen can list projects.
         /// Call after construction, before the document is shown.
@@ -4595,6 +4603,7 @@ namespace MultiTerminal.Docking
                     _terminal.ProcessExited -= OnTerminalProcessExited;
                     _terminal.ContextMenuRequested -= OnTerminalContextMenuRequested;
                     _terminal.ContextMenuDismissRequested -= OnTerminalContextMenuDismissRequested;
+                    _terminal.ReturnToStartScreenRequested -= OnTerminalReturnToStartScreenRequested;
                     _terminal.Stop();
                     _terminal.Dispose();
                     _terminal = null;
