@@ -512,6 +512,30 @@
                                   FontSize="13"
                                   Margin="0,12,0,0"
                                   VerticalContentAlignment="Center"/>
+                        <!-- MultiTerminal plugin version and updater (task 4dc459e4) -->
+                        <TextBlock x:Name="PluginVersionText"
+                                   Text="MultiTerminal plugin: …"
+                                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                   FontWeight="SemiBold" Margin="0,12,0,6"
+                                   TextWrapping="Wrap"/>
+                        <StackPanel Orientation="Horizontal">
+                            <Button x:Name="PluginCheckButton"
+                                    Content="Check for update"
+                                    Style="{StaticResource SmallActionButton}"
+                                    Height="28"
+                                    Click="PluginCheckButton_Click"/>
+                            <Button x:Name="PluginUpdateButton"
+                                    Content="Update now"
+                                    Style="{StaticResource SmallActionButton}"
+                                    Height="28"
+                                    Margin="6,0,0,0"
+                                    IsEnabled="False"
+                                    Click="PluginUpdateButton_Click"/>
+                        </StackPanel>
+                        <TextBlock x:Name="PluginStatusText"
+                                   Foreground="#808080" FontFamily="Segoe UI" FontSize="11"
+                                   TextWrapping="Wrap" Margin="0,4,0,0"
+                                   Text="Updates the plugin folder MultiTerminal gives to every terminal from GitHub main, replacing it whole."/>
                     </StackPanel>
                 </GroupBox>
 
