@@ -429,6 +429,40 @@ namespace MultiTerminal
             }
         }
 
+        /// <summary>
+        /// The quiet plugin check (task 4dc459e4): three minutes after startup, at most once a day, posts one
+        /// Inbox notice to the Owner when GitHub main has a newer plugin. Never installs; the Owner does that
+        /// from Settings. <c>MULTITERMINAL_PLUGIN_UPDATE_CHECK=0</c> turns it off.
+        /// </summary>
+        private void StartPluginUpdateCheck()
+        {
+            var broker = _mcpServer?.Broker;
+            var settings = _settings;
+            if (broker == null || settings == null) return;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMinutes(3)).ConfigureAwait(false);
+                    using var updater = new Services.PluginUpdateService();
+                    await updater.RunStartupCheckAsync(
+                        settings,
+                        postNotice: text =>
+                        {
+                            string owner = broker.DefaultInboxRecipient;
+                            return !string.IsNullOrEmpty(owner)
+                                && broker.CreateInboxNotification(owner, null, null, null, null,
+                                    Services.PluginUpdateService.InboxType, text, Services.PluginUpdateService.SenderName)?.Success == true;
+                        },
+                        log: message => _debugLogService?.Info("PluginUpdate", message)).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _debugLogService?.Error("PluginUpdate", $"Startup check failed: {ex.Message}");
+                }
+            });
+        }
+
         private Services.GitHubWatchService _gitHubWatch;
 
         /// <summary>
@@ -1448,6 +1482,9 @@ namespace MultiTerminal
 
                         // Checks projects' GitHub repos for new issues and PRs (task 92eeeb47).
                         StartGitHubWatch();
+
+                        // Once a day, asks GitHub whether a newer MultiTerminal plugin exists (task 4dc459e4).
+                        StartPluginUpdateCheck();
 
                         // Wire terminal stream resolver: resolves any terminal identifier
                         // (terminal ID, DocId, or agent name) to its ConPtyTerminal instance

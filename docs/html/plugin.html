@@ -172,6 +172,17 @@ claude plugin install multiterminal@multiterminal-marketplace
 claude plugin marketplace update multiterminal-marketplace</code></pre>
         <p>Or use the interactive <code>/plugin</code> menu inside Claude Code and pick <strong>multiterminal</strong> from the <code>multiterminal-marketplace</code> source. Requirements: a <strong>recent Claude Code version</strong> — one that supports the args-array hook form (<code>args: string[]</code>) and plugin channels, <strong>Node.js 24</strong> on <code>PATH</code> (hooks and the MCP server run under Node; the bundled DB binary the hooks use is built for Node 24, so on any other major version the activity feed, Attention clearing and session state stop working), and for that DB binary, a <strong>win32-x64</strong> runtime (other platforms work after a one-line <code>npm rebuild</code>).</p>
 
+        <h3 id="mt-update">How MultiTerminal updates its own plugin</h3>
+        <p>The MultiTerminal installer registers the marketplace as a <em>local folder</em>, so <code>claude plugin marketplace update</code> has nothing to fetch on an installed machine. MultiTerminal updates that folder itself, from the marketplace's GitHub <code>main</code>:</p>
+        <ul>
+          <li><strong>Which folder.</strong> The one MultiTerminal gives every terminal with <code>--plugin-dir</code>: the shared location the installer chose, else <code>%USERPROFILE%\.claude\plugins\marketplaces\multiterminal-marketplace</code>.</li>
+          <li><strong>What is installed.</strong> The folder's <code>.mt-plugin-source.json</code> records the GitHub commit it was made from (written by the installer and by each update). Without it the installed version shows as <em>unknown origin</em>.</li>
+          <li><strong>Settings &gt; General &gt; MultiTerminal plugin.</strong> <em>Check for update</em> asks GitHub for <code>main</code>'s newest commit. <em>Update now</em> downloads exactly that commit, checks the archive (no entry may land outside the folder; both manifests must be present), and swaps the whole folder: the old one becomes <code>&lt;folder&gt;.previous</code>, and any failure puts it back. Files the new commit no longer has are gone afterwards, which a reinstall over the old folder does not do.</li>
+          <li><strong>A git checkout with local work is left alone.</strong> If the folder is a git clone with uncommitted changes or commits that are not on GitHub <code>main</code>, MultiTerminal refuses and tells you to update it with git. A leftover <code>.git</code> without local work (3.0.0 installs carry one) is replaced like any other folder; it is kept in <code>.previous</code>.</li>
+          <li><strong>Once a day at startup</strong> MultiTerminal checks quietly and posts one Inbox notice when a newer plugin exists. It never installs on its own. Set <code>MULTITERMINAL_PLUGIN_UPDATE_CHECK=0</code> to turn the startup check off; the Settings buttons still work.</li>
+          <li><strong>Running terminals keep the plugin they started with.</strong> Terminals started after an update use the new one.</li>
+        </ul>
+
         <h2 id="relationship">Plugin vs. the desktop app</h2>
         <p>MultiTerminal has two halves that work together:</p>
         <ul>
