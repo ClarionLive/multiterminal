@@ -1,3 +1,4 @@
+using System;
 using MultiTerminal.Services;
 using Xunit;
 
@@ -32,5 +33,40 @@ namespace MultiTerminal.Tests
         [InlineData(false, false)]
         public void A_disposed_form_runs_nothing(bool onUiThread, bool handleCreated)
             => Assert.Equal(UiDispatch.Drop, UiThreadDispatch.Decide(onUiThread, handleCreated, disposed: true));
+
+        // PR #60 review: the wait path must tell a failure of Invoke (swallowed) from a failure inside the
+        // action (reaches the caller). The fake invoke stands in for Control.Invoke, which runs the delegate
+        // and rethrows what it throws on the calling thread; MainForm's call is wiring no test executes.
+
+        [Fact]
+        public void A_failing_invoke_is_swallowed_and_the_action_never_runs()
+        {
+            bool ran = false;
+            UiThreadDispatch.InvokeRethrowingActionFailure(
+                _ => throw new InvalidOperationException("handle destroyed"),
+                () => ran = true);
+            Assert.False(ran);
+        }
+
+        [Fact]
+        public void A_disposed_form_at_invoke_time_is_swallowed()
+            => UiThreadDispatch.InvokeRethrowingActionFailure(_ => throw new ObjectDisposedException("MainForm"), () => { });
+
+        [Fact]
+        public void An_InvalidOperationException_thrown_by_the_action_reaches_the_caller()
+        {
+            var thrown = new InvalidOperationException("panel creation failed");
+            var caught = Assert.Throws<InvalidOperationException>(() =>
+                UiThreadDispatch.InvokeRethrowingActionFailure(work => work(), () => throw thrown));
+            Assert.Same(thrown, caught);
+        }
+
+        [Fact]
+        public void An_action_that_succeeds_runs_once_and_nothing_is_thrown()
+        {
+            int runs = 0;
+            UiThreadDispatch.InvokeRethrowingActionFailure(work => work(), () => runs++);
+            Assert.Equal(1, runs);
+        }
     }
 }

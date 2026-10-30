@@ -504,6 +504,14 @@
                                   Style="{StaticResource DarkComboBox}"
                                   Height="28"
                                   ToolTip="What the Home button and a new tab open on. Browse All Projects is still a click away."/>
+                        <!-- Exit confirmation (GitHub #19) -->
+                        <CheckBox x:Name="ConfirmExitCheck"
+                                  Content="Ask before exiting MultiTerminal"
+                                  Foreground="#E0E0E0"
+                                  FontFamily="Segoe UI"
+                                  FontSize="13"
+                                  Margin="0,12,0,0"
+                                  VerticalContentAlignment="Center"/>
                     </StackPanel>
                 </GroupBox>
 
