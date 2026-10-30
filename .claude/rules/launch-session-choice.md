@@ -71,7 +71,7 @@ with `—` context or its fallback summary. The 256KB head and 64KB tail are alw
 
 `session_lineage` has no rows for spawned helpers and its `session_file_path` goes stale when Claude
 Code moves a transcript into a worktree's folder. `SessionCatalog` therefore reads Claude Code's own
-folders: `~/.claude/projects/<encoded root>` and every `<encoded root>--claude-worktrees-*`. Encoding
+folders: `~/.claude/projects/<encoded root>` and every `<encoded root>--claude-worktrees-*` (plus `<encoded repo root>--claude-worktrees-*` for a project below its repo root, ticket 3fd3c9a7). Encoding
 is `[^A-Za-z0-9] -> '-'`. It reads only a bounded head and tail of each transcript and caps the number
 of transcripts read. Agent names and summaries come from injected DB lookups, with the transcript as
 fallback.
@@ -84,7 +84,7 @@ fallback.
   offering one that fails with "No conversation found".
 - **Transcript content is untrusted.** `ValidateResumeCwd` checks the cwd *as a string* before any
   filesystem call: a local drive path, canonicalised, equal to the project root or under
-  `<root>\.claude\worktrees\<id>`. A UNC path would otherwise make Windows authenticate to a remote
+  `<root>\.claude\worktrees\<id>`, or, for a project registered at a SUBFOLDER of its git repo (ClarionAssistant), under `<repo root>\.claude\worktrees\<id>` (ticket 3fd3c9a7; the repo root is `SessionCatalog.FindRepoRoot` of the project root, used only as a strict non-drive ancestor, and carried on the entry as `WorktreeBase` so the re-checks use the same one). The repo-root worktrees are shared by every project in the repo, so a session admitted only through the repo root must also have BEGUN in this project: its first recorded cwd is exactly the project root (not below it: a registered project nested inside it would otherwise be offered here too), else it is skipped as "began in another project's folder of the same repository" (Codex review). A helper whose transcript starts directly in a repo-root worktree is therefore not offered (fail closed). A UNC path would otherwise make Windows authenticate to a remote
   host just by opening the chooser. It is re-validated immediately before `BuildCommand`. Junctions
   are not resolved (local-trust model).
 - **Never two processes on one transcript.** The live set is every MT pane's
