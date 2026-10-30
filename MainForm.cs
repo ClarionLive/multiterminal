@@ -198,10 +198,19 @@ namespace MultiTerminal
                     break;
 
                 case Services.UiDispatch.InvokeThroughHandle:
+                    if (wait)
+                    {
+                        // A failure INSIDE the action reaches the caller (PR #60 review: a spawn whose
+                        // panel failed was otherwise reported as a success); only a failure of Invoke
+                        // itself (closed or handle destroyed in between) is swallowed, by the helper.
+                        // Deliberately outside the try below, whose catches would swallow it again.
+                        Services.UiThreadDispatch.InvokeRethrowingActionFailure(work => Invoke(work), action);
+                        break;
+                    }
+
                     try
                     {
-                        if (wait) Invoke(action);
-                        else BeginInvoke(action);
+                        BeginInvoke(action);
                     }
                     catch (ObjectDisposedException) { /* closed in between */ }
                     catch (InvalidOperationException) { /* handle destroyed in between */ }
@@ -8118,27 +8127,45 @@ namespace MultiTerminal
                     return;
                 }
 
-                DialogResult confirm;
-                _exitConfirmDialogOpen = true;
-                try
+                // GitHub #19: the question can be turned off ("Don't ask again" below, or Settings >
+                // General). Skipping it only skips the dialog; everything after this block still runs.
+                var settings = _settings ?? SettingsService.Default;
+                if (settings.GetConfirmExit())
                 {
-                    confirm = MessageBox.Show(
-                        this,
-                        "Are you sure you want to exit MultiTerminal?",
-                        "Exit MultiTerminal",
-                        MessageBoxButtons.YesNo,
-                        MessageBoxIcon.Question,
-                        MessageBoxDefaultButton.Button2); // default to No \u2014 accidental Enter won't exit
-                }
-                finally
-                {
-                    _exitConfirmDialogOpen = false;
-                }
+                    // TaskDialog, not MessageBox: its verification checkbox is the "Don't ask again".
+                    var yesButton = TaskDialogButton.Yes;
+                    var noButton = TaskDialogButton.No;
+                    var page = new TaskDialogPage
+                    {
+                        Caption = "Exit MultiTerminal",
+                        Heading = "Are you sure you want to exit MultiTerminal?",
+                        Text = "You can turn this question back on in Settings > General.",
+                        Icon = TaskDialogIcon.Information,
+                        DefaultButton = noButton, // default to No \u2014 accidental Enter won't exit
+                        Verification = new TaskDialogVerificationCheckBox("Don't ask again"),
+                    };
+                    page.Buttons.Add(yesButton);
+                    page.Buttons.Add(noButton);
 
-                if (confirm != DialogResult.Yes)
-                {
-                    e.Cancel = true;
-                    return;
+                    TaskDialogButton confirm;
+                    _exitConfirmDialogOpen = true;
+                    try
+                    {
+                        confirm = TaskDialog.ShowDialog(this, page);
+                    }
+                    finally
+                    {
+                        _exitConfirmDialogOpen = false;
+                    }
+
+                    if (confirm != yesButton)
+                    {
+                        e.Cancel = true;
+                        return;
+                    }
+
+                    // Saved only on Yes: ticking it and then answering No changes nothing.
+                    if (page.Verification.Checked) settings.SetConfirmExit(false);
                 }
             }
 

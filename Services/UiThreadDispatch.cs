@@ -1,3 +1,6 @@
+using System;
+using System.Runtime.ExceptionServices;
+
 namespace MultiTerminal.Services
 {
     /// <summary>How work raised on some thread reaches the UI thread (GitHub #38, task 8f0d527b).</summary>
@@ -41,6 +44,40 @@ namespace MultiTerminal.Services
             if (disposed) return UiDispatch.Drop;
             if (onUiThread) return UiDispatch.RunHere;
             return handleCreated ? UiDispatch.InvokeThroughHandle : UiDispatch.PostToUiContext;
+        }
+
+        /// <summary>
+        /// Runs <paramref name="action"/> through <paramref name="invoke"/> (a blocking <c>Control.Invoke</c>),
+        /// swallowing only the failures of the invoke itself: the form closed or its handle was destroyed in
+        /// between (<see cref="ObjectDisposedException"/>, <see cref="InvalidOperationException"/>). Anything
+        /// the action throws, those two types included, is rethrown to the caller with its original stack.
+        /// </summary>
+        /// <remarks>
+        /// PR #60 review: a plain try/catch around <c>Invoke(action)</c> cannot tell the two apart, because
+        /// Invoke rethrows the action's exception on the calling thread, so a spawn whose panel creation
+        /// threw an InvalidOperationException was reported as a success.
+        /// </remarks>
+        internal static void InvokeRethrowingActionFailure(Action<Action> invoke, Action action)
+        {
+            ExceptionDispatchInfo actionFailure = null;
+            try
+            {
+                invoke(() =>
+                {
+                    try
+                    {
+                        action();
+                    }
+                    catch (Exception ex)
+                    {
+                        actionFailure = ExceptionDispatchInfo.Capture(ex);
+                    }
+                });
+            }
+            catch (ObjectDisposedException) { /* closed in between */ }
+            catch (InvalidOperationException) { /* handle destroyed in between */ }
+
+            actionFailure?.Throw();
         }
     }
 }

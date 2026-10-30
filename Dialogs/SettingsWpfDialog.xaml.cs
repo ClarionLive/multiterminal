@@ -198,6 +198,7 @@ namespace MultiTerminal.Dialogs
             // Default working directory
             DefaultWorkingDirText.Text = _settings.GetDefaultWorkingDirectory() ?? "";
             HomeViewCombo.SelectedIndex = Math.Max(0, Array.IndexOf(HomeViewChoice, _settings.GetStartScreenHomeView()));
+            ConfirmExitCheck.IsChecked = _settings.GetConfirmExit();
 
             // Git: per-task worktree isolation
             WorktreeModeCheck.IsChecked = string.Equals(
@@ -248,6 +249,7 @@ namespace MultiTerminal.Dialogs
 
                 _settings.SetDefaultWorkingDirectory(DefaultWorkingDirText.Text?.Trim());
                 _settings.SetStartScreenHomeView(HomeViewChoice[Math.Max(0, HomeViewCombo.SelectedIndex)]);
+                _settings.SetConfirmExit(ConfirmExitCheck.IsChecked == true);
 
                 _settings.SetWorktreeMode(
                     WorktreeModeCheck.IsChecked == true

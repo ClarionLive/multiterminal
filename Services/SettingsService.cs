@@ -304,6 +304,21 @@ namespace MultiTerminal.Services
             Set(WorktreeModeKey, normalized);
         }
 
+        // ── Exit confirmation (GitHub #19) ─────────────────────────────────────────
+        private const string ConfirmExitKey = "ConfirmExit";
+
+        /// <summary>Whether closing the main window asks "Are you sure you want to exit". On unless turned off.</summary>
+        public bool GetConfirmExit() => ParseConfirmExit(Get(ConfirmExitKey));
+
+        public void SetConfirmExit(bool confirm) => Set(ConfirmExitKey, confirm ? "true" : "false");
+
+        /// <summary>
+        /// Only a stored "false" (any case, trimmed) turns the question off; blank or anything else keeps it,
+        /// so a damaged value can never make MT quit on one click.
+        /// </summary>
+        internal static bool ParseConfirmExit(string raw) =>
+            !string.Equals(raw?.Trim(), "false", StringComparison.OrdinalIgnoreCase);
+
         // ── Start screen (Home) preferences (ticket e20e2ce0 item 8) ──────────────
         private const string StartScreenHomeViewKey = "StartScreenHomeView";
         private const string StartScreenSortKey = "StartScreenSort";
