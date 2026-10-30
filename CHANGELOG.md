@@ -49,6 +49,10 @@ each other without Claude Code's development channel.
 - **Attention pane.** A card for every session: what it is doing, who is waiting
   on you and for how long, its project and context used, with the 5h/7d quota
   left in the header and configurable activity and alarm styles.
+- **Attention: "asks you" or "Your turn".** A question the agent asks in chat
+  shows as asking you; every other turn end shows a softer "Your turn".
+- **A pane's header and tab show when its agent needs you**, and the header shows
+  the project name larger.
 - **Attention pane By team grouping.** Each PM card has its helpers listed under
   it, a team with anyone blocked goes to the top, and a PM card says "<helper>
   needs you". The grouping survives a restart, text meets 4.5:1 contrast in both
@@ -71,6 +75,11 @@ each other without Claude Code's development channel.
 - **GitHub bot identity for agents.** A one-click GitHub App registration lets
   agents' `git push` and `gh` act as the bot instead of as you, with a short-lived
   token per command and each comment signed with the agent's name.
+- **GitHub watch.** A per-project setting (off by default) checks the project's
+  github.com repo: new issues and PRs become To Do tickets, are told to the
+  project's agent at its next pause, and push you a summary. Each terminal header
+  gets a GitHub row with a link to the repo and the open issue and PR counts, and
+  the header grows to fit it.
 - **Header and Home.** Browse All, New Project, Just Claude, Open PowerShell and
   Launch Project are header pills, and the M menu is an HTML popup. Settings >
   General picks list or cards for Home; Browse All remembers a 3-column sort.
@@ -118,6 +127,9 @@ each other without Claude Code's development channel.
   one calm line and uses your own login (GH #68).
 - **xterm.js is told it runs on ConPTY**, turning on its Windows-specific handling,
   notably reflow on resize (GH #51, PR #57 by Mark Sarson).
+- **Panes MT opens for agents no longer steal focus while you are typing**; focus
+  stays where you are working.
+- **Browser-tab tools default to the calling terminal** when no terminal id is given.
 
 ### Fixed
 
@@ -144,6 +156,12 @@ each other without Claude Code's development channel.
 - **Text boxes in Settings and New Project clipped their text.**
 - **`get_task_detail` and `get_my_active_task` now include the task description**
   (GH #13).
+- **Each terminal started ~77 git.exe processes every 10 seconds** to refresh the
+  HUD's changed-files state; the poll now reuses what it already knows.
+- **An empty pane behind the New Project dialog was solid green**; the focus border
+  is now drawn as an outline.
+- **A blank terminal id in a browser-tab tool** now gives a clear "not found" error
+  instead of a server error.
 - **A spawned helper could start in another repository** when an older agent with
   the same name had an active task there; it now stays in the folder it was spawned into.
 - **Resume missed worktree sessions of a project registered below its git repo
