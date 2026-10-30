@@ -89,6 +89,7 @@ function boot() {
     write() {}
   }
   class Stub { fit() {} proposeDimensions() { return { cols: 80, rows: 24 }; } }
+  class WebglStub { onContextLoss() {} dispose() {} }
 
   win.chrome = {
     webview: {
@@ -111,6 +112,7 @@ function boot() {
     FitAddon: { FitAddon: Stub },
     WebLinksAddon: { WebLinksAddon: Stub },
     Unicode11Addon: { Unicode11Addon: Stub },
+    WebglAddon: { WebglAddon: WebglStub },
     ResizeObserver: class { observe() {} },
     setInterval: () => 0,
     setTimeout: () => 0,
@@ -124,7 +126,8 @@ function boot() {
   assert.ok(domReady, 'page registered no DOMContentLoaded handler');
   domReady();
   assert.ok(keyHandler, 'page attached no xterm custom key handler');
-  assert.deepEqual(sent.map((m) => m.type), ['ready'], 'boot sent something other than ready');
+  // Boot may also send diagnostic log lines (the renderer in use, GitHub #51); anything else is a bug.
+  assert.deepEqual(sent.filter((m) => m.type !== 'log').map((m) => m.type), ['ready'], 'boot sent something other than ready');
   sent.length = 0;
 
   const mods = (m = {}) => ({ shiftKey: !!m.shift, ctrlKey: !!m.ctrl, altKey: !!m.alt, metaKey: !!m.meta, repeat: !!m.repeat });
