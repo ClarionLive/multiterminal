@@ -99,7 +99,10 @@ so the prompt text is the only evidence on disk. The same prompt typed in an int
   transcript whose 64KB tail held only subfolder cwds was dropped). This derives from a validated cwd,
   never from the folder name. Order: exact in tail, derived from tail, exact in head, derived from
   head, then the root fallback. A derived cwd still goes through `BeganInProject` when admitted only
-  through the repo root.
+  through the repo root. The encoding is lossy (`foo-bar` and `foo_bar` share a folder), so for a
+  worktree folder the existing worktrees under the project root and `WorktreeBase` are listed once per
+  call (`WorktreesNamingFolder`): two or more naming the folder refuse the transcript ("matches more
+  than one worktree"), exactly one admits only cwds inside it, and a failed listing refuses.
 - **Transcript content is untrusted.** `ValidateResumeCwd` checks the cwd *as a string* before any
   filesystem call: a local drive path, canonicalised, equal to the project root or under
   `<root>\.claude\worktrees\<id>`, or, for a project registered at a SUBFOLDER of its git repo (ClarionAssistant), under `<repo root>\.claude\worktrees\<id>` (ticket 3fd3c9a7; the repo root is `SessionCatalog.FindRepoRoot` of the project root, used only as a strict non-drive ancestor, and carried on the entry as `WorktreeBase` so the re-checks use the same one). The repo-root worktrees are shared by every project in the repo, so a session admitted only through the repo root must also have BEGUN in this project: its first recorded cwd is exactly the project root (not below it: a registered project nested inside it would otherwise be offered here too), else it is skipped as "began in another project's folder of the same repository" (Codex review). A helper whose transcript starts directly in a repo-root worktree is therefore not offered (fail closed). A UNC path would otherwise make Windows authenticate to a remote

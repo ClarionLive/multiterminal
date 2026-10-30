@@ -120,6 +120,64 @@ namespace MultiTerminal.Tests
             Assert.Null(entry.WorktreeId);
         }
 
+        // Codex, 056bc6b6: the encoding is lossy, so worktrees foo-bar and foo_bar share one transcript
+        // folder. Neither a derived nor an exact cwd can say which one the session belongs to.
+        [Fact]
+        public void A_subfolder_cwd_in_a_folder_two_worktrees_share_is_refused()
+        {
+            var root = NewProject("ClarionClone");
+            var dash = Worktree(root, "foo-bar");
+            Worktree(root, "foo_bar");
+            var sub = Path.Combine(dash, "tests", "ClarionClone.Tests");
+            var id = WriteSession(dash, sub, sub);
+
+            var catalog = Catalog();
+            Assert.Empty(catalog.List(root, new HashSet<string>(), Now));
+            Assert.Null(catalog.TryGetEntry(root, id, new HashSet<string>(), Now));
+            Assert.Equal(SessionCatalog.AmbiguousWorktreeReason, catalog.LastMissReason);
+        }
+
+        [Fact]
+        public void An_exact_cwd_in_a_folder_two_worktrees_share_is_refused()
+        {
+            var root = NewProject("ClarionClone");
+            Worktree(root, "foo-bar");
+            var underscore = Worktree(root, "foo_bar");
+            var id = WriteSession(underscore, underscore, underscore);
+
+            var catalog = Catalog();
+            Assert.Empty(catalog.List(root, new HashSet<string>(), Now));
+            Assert.Null(catalog.TryGetEntry(root, id, new HashSet<string>(), Now));
+            Assert.Equal(SessionCatalog.AmbiguousWorktreeReason, catalog.LastMissReason);
+        }
+
+        // With one existing worktree naming the folder, an exact cwd in a sibling path that encodes the
+        // same way (foo_bar, deleted or never a worktree) is not that worktree and is not used.
+        [Fact]
+        public void A_single_matching_worktree_accepts_only_cwds_inside_it()
+        {
+            var root = NewProject("ClarionClone");
+            var dash = Worktree(root, "foo-bar");
+            var other = Path.Combine(root, ".claude", "worktrees", "foo_bar");
+            var id = WriteSession(dash, other);
+
+            var catalog = Catalog();
+            Assert.Empty(catalog.List(root, new HashSet<string>(), Now));
+            Assert.Null(catalog.TryGetEntry(root, id, new HashSet<string>(), Now));
+            Assert.Equal(FolderReason, catalog.LastMissReason);
+        }
+
+        [Fact]
+        public void WorktreesNamingFolder_counts_every_worktree_whose_path_encodes_to_the_folder()
+        {
+            var a = @"C:\p\.claude\worktrees\foo-bar";
+            var b = @"C:\p\.claude\worktrees\foo_bar";
+            var c = @"C:\p\.claude\worktrees\foobar";
+            var folder = SessionCatalog.EncodeProjectPath(a);
+            Assert.Equal(new[] { a, b }, SessionCatalog.WorktreesNamingFolder(folder, new[] { a, b, c }));
+            Assert.Equal(new[] { c }, SessionCatalog.WorktreesNamingFolder(SessionCatalog.EncodeProjectPath(c), new[] { a, b, c }));
+        }
+
         [Fact]
         public void A_repo_root_worktree_subfolder_resolves_with_the_repo_root_as_base()
         {
