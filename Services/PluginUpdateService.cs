@@ -85,7 +85,41 @@ namespace MultiTerminal.Services
         bool DirectoryExists(string path);
         void DeleteDirectory(string path);
         void MoveDirectory(string from, string to);
+        void WriteAllText(string path, string text);
+        void DeleteFile(string path);
     }
+
+    /// <summary>What the startup/check reconcile does about a marketplace root and its sibling folders.</summary>
+    internal enum PluginFolderRepair
+    {
+        /// <summary>Nothing to do: the root is in place with no leftover, or nothing was ever installed here.</summary>
+        None,
+        /// <summary>The root is in place; a <c>.incoming</c> beside it never became live and is deleted.</summary>
+        DeleteStaleIncoming,
+        /// <summary>The root is missing and a valid <c>.incoming</c> is waiting: the crash came after rename 1. Move it in.</summary>
+        FinishSwap,
+        /// <summary>The root is missing, no valid <c>.incoming</c>, a valid <c>.previous*</c>: move that back.</summary>
+        RestorePrevious,
+        /// <summary>The root is missing and nothing beside it is valid. Nothing is deleted; logged loudly.</summary>
+        NothingValid,
+    }
+
+    /// <summary>A <c>&lt;root&gt;.previous</c> or <c>&lt;root&gt;.previous-&lt;yyyyMMddHHmmss&gt;</c> folder and whether it passes the manifest checks.</summary>
+    internal readonly record struct PluginPreviousFolder(string Path, bool Valid);
+
+    /// <summary>The three folders of one marketplace root as the reconcile found them.</summary>
+    internal sealed class PluginFolderSnapshot
+    {
+        public bool RootExists { get; init; }
+        public bool IncomingExists { get; init; }
+        public bool IncomingValid { get; init; }
+
+        /// <summary>Most preferred first: the one the swap journal names, then plain <c>.previous</c>, then newest timestamp.</summary>
+        public IReadOnlyList<PluginPreviousFolder> Previous { get; init; } = Array.Empty<PluginPreviousFolder>();
+        public bool JournalExists { get; init; }
+    }
+
+    internal readonly record struct PluginFolderDecision(PluginFolderRepair Action, string RestoreFrom, bool DeleteIncomingAfter, bool DeleteJournal);
 
     /// <summary>
     /// Keeps MultiTerminal's Claude Code plugin current from the marketplace's GitHub main (task 4dc459e4).
@@ -102,7 +136,13 @@ namespace MultiTerminal.Services
     /// <para><b>Swap:</b> the zipball is downloaded under <c>%LOCALAPPDATA%\MultiTerminal\plugin-update</c>
     /// and extracted BESIDE the live root (<c>&lt;root&gt;.incoming</c>), so the swap is two renames on one
     /// volume (the shared location may be on another drive than %LOCALAPPDATA%). The live root becomes
-    /// <c>&lt;root&gt;.previous</c> (one kept); any failure after that moves it back.</para>
+    /// <c>&lt;root&gt;.previous</c> (one kept), or <c>&lt;root&gt;.previous-&lt;yyyyMMddHHmmss&gt;</c> when it held a
+    /// <c>.git</c> (never deleted by MT); any failure after that moves it back.</para>
+    ///
+    /// <para><b>Crash between the renames:</b> <see cref="ReconcileRoots"/> runs at MT startup, before any
+    /// terminal can launch, and at the start of every check and update. <see cref="DecideRepair"/> finishes
+    /// the swap, restores the previous folder or deletes a stale <c>.incoming</c>; it never deletes anything
+    /// while the root is missing.</para>
     ///
     /// Running terminals keep the plugin they loaded; terminals started afterwards use the new one.
     /// </summary>
@@ -112,6 +152,16 @@ namespace MultiTerminal.Services
         public const string Ref = "main";
         public const string StampFileName = ".mt-plugin-source.json";
         public const string StampedByUpdate = "mt-update";
+
+        internal const string IncomingSuffix = ".incoming";
+        internal const string PreviousSuffix = ".previous";
+
+        /// <summary>
+        /// Beside the root during a swap: the leaf name of the folder the live root was moved to, so a
+        /// reconcile after a crash restores THAT one rather than an older <c>.previous*</c>.
+        /// </summary>
+        internal const string JournalSuffix = ".swap-previous";
+        private const string PreviousStampFormat = "yyyyMMddHHmmss";
 
         /// <summary>SettingsService key: when the startup check last ran (ISO-8601 UTC).</summary>
         public const string LastCheckSettingKey = "PluginUpdateLastCheckUtc";
@@ -154,13 +204,19 @@ namespace MultiTerminal.Services
 
         private readonly HttpClient _http;
         private readonly Func<string> _pluginDir;
+        private readonly Func<IEnumerable<string>> _pluginDirCandidates;
         private readonly string _downloadFolder;
 
+        /// <summary>Where reconcile messages go (the debug log in MT); null drops them.</summary>
+        public Action<string> Log { get; set; }
+
         /// <param name="handler">Null for the real network; tests pass a stub.</param>
-        /// <param name="pluginDir">The plugin folder MT loads; null for <see cref="LaunchCommandBuilder.GetMtPluginPath"/>.</param>
+        /// <param name="pluginDir">The plugin folder MT loads; null for <see cref="LaunchCommandBuilder.GetMtPluginPath"/>.
+        /// A test's folder is also the only one reconciled; otherwise every <see cref="LaunchCommandBuilder.ExpectedMtPluginPaths"/> is.</param>
         /// <param name="downloadFolder">Where the zipball is saved; null for <c>%LOCALAPPDATA%\MultiTerminal\plugin-update</c>.</param>
         public PluginUpdateService(HttpMessageHandler handler = null, Func<string> pluginDir = null, string downloadFolder = null)
         {
+            _pluginDirCandidates = pluginDir != null ? () => new[] { pluginDir() } : () => LaunchCommandBuilder.ExpectedMtPluginPaths;
             // No redirects: both URLs answer directly, and a redirect must not take the download to another host.
             // CA2000: the HttpClient owns the handler it creates (disposeHandler: true).
 #pragma warning disable CA2000
@@ -329,20 +385,16 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Pure: why the folder must not be replaced, or null. A <c>.git</c> (folder, or a worktree's file) is
-        /// probed with <paramref name="probeGit"/> and decided by <see cref="GitCheckoutRefuseReason"/>:
-        /// 3.0.0's installer copied the build machine's clone, <c>.git</c> included, and Inno never deletes it,
-        /// so a <c>.git</c> on its own is a leftover, not a developer's clone.
+        /// probed with <paramref name="probeGit"/> and decided by <see cref="GitCheckoutRefuseReason"/>.
         /// </summary>
         internal static string RefuseReason(string marketplaceRoot, Func<string, bool> directoryExists, Func<string, bool> fileExists,
             Func<string, bool> isWritable, Func<string, GitProbe> probeGit)
         {
             if (string.IsNullOrWhiteSpace(marketplaceRoot) || !directoryExists(marketplaceRoot))
                 return "The MultiTerminal plugin folder was not found.";
-            string git = Path.Combine(marketplaceRoot, ".git");
-            if (directoryExists(git) || fileExists(git))
+            if (HasGit(marketplaceRoot, directoryExists, fileExists))
             {
-                var probe = probeGit(marketplaceRoot);
-                string refuse = GitCheckoutRefuseReason(marketplaceRoot, probe.GitAvailable, probe.Dirty, probe.AheadCount, probe.FetchFailed);
+                string refuse = GitCheckoutRefuseReason(marketplaceRoot, probeGit(marketplaceRoot));
                 if (refuse != null) return refuse;
             }
             if (!isWritable(marketplaceRoot))
@@ -350,22 +402,155 @@ namespace MultiTerminal.Services
             return null;
         }
 
-        /// <summary>What <c>git</c> said about a marketplace root that has a <c>.git</c>.</summary>
-        internal readonly record struct GitProbe(bool GitAvailable, bool Dirty, int AheadCount, bool FetchFailed);
+        /// <summary>Pure: whether <paramref name="folder"/> has a <c>.git</c> folder, or a worktree's <c>.git</c> file.</summary>
+        internal static bool HasGit(string folder, Func<string, bool> directoryExists, Func<string, bool> fileExists)
+        {
+            string git = Path.Combine(folder, ".git");
+            return directoryExists(git) || fileExists(git);
+        }
+
+        /// <summary>One git command's outcome. <see cref="TimedOut"/> runs report exit code -1 and no output.</summary>
+        internal readonly record struct GitCommandResult(int ExitCode, string Output, bool TimedOut = false)
+        {
+            public bool Succeeded => !TimedOut && ExitCode == 0;
+        }
 
         /// <summary>
-        /// Pure: refuse only a git checkout with local work, uncommitted changes or commits GitHub main lacks.
-        /// No git, a status git could not answer (reported as not dirty), or a failed fetch all read as a
-        /// leftover <c>.git</c> and the update goes ahead: the swap moves the whole old root, <c>.git</c>
-        /// included, to <c>&lt;root&gt;.previous</c>, so nothing is lost.
+        /// What git said about a root that has a <c>.git</c>, one result per command in the order they run.
+        /// A command after the first failure is not run and stays null.
         /// </summary>
-        internal static string GitCheckoutRefuseReason(string marketplaceRoot, bool gitAvailable, bool dirty, int aheadCount, bool fetchFailed)
+        internal sealed record GitProbe(bool GitAvailable, GitCommandResult? Status = null, GitCommandResult? Stash = null,
+            GitCommandResult? Fetch = null, GitCommandResult? Ahead = null);
+
+        /// <summary>
+        /// Pure: fails CLOSED. When git is on PATH, a root with a <c>.git</c> is replaced only if
+        /// <c>status --porcelain --ignored</c> succeeds and is empty (our stamp file excluded), <c>stash list</c>
+        /// succeeds and is empty, the fetch of GitHub main succeeds, and <c>rev-list --count FETCH_HEAD..HEAD</c>
+        /// succeeds and is 0. Any failed, timed-out or unrun command refuses with "could not check the git
+        /// checkout". When git is NOT on PATH the <c>.git</c> is a 3.0.0 leftover (its installer copied the build
+        /// machine's clone and Inno never deletes it; a developer always has git) and the update goes ahead,
+        /// moving the old root to <c>&lt;root&gt;.previous-&lt;time&gt;</c>, which MT never deletes.
+        /// </summary>
+        internal static string GitCheckoutRefuseReason(string marketplaceRoot, GitProbe probe)
         {
-            if (!gitAvailable) return null;
-            if (dirty) return $"{marketplaceRoot} is a git checkout with uncommitted changes. Update it with git instead.";
-            if (fetchFailed) return null;
-            if (aheadCount > 0) return $"{marketplaceRoot} is a git checkout with commits that are not on GitHub main. Update it with git instead.";
+            if (probe == null) return CouldNotCheck(marketplaceRoot, "git was not asked");
+            if (!probe.GitAvailable) return null;
+
+            // In command order, so the reason names the first thing that is wrong.
+            string failed = Failed("git status", probe.Status);
+            if (failed != null) return CouldNotCheck(marketplaceRoot, failed);
+            if (!string.IsNullOrWhiteSpace(probe.Status.Value.Output))
+                return $"{marketplaceRoot} is a git checkout with uncommitted changes or ignored files. Update it with git instead.";
+
+            failed = Failed("git stash list", probe.Stash);
+            if (failed != null) return CouldNotCheck(marketplaceRoot, failed);
+            if (!string.IsNullOrWhiteSpace(probe.Stash.Value.Output))
+                return $"{marketplaceRoot} is a git checkout with stashed changes. Update it with git instead.";
+
+            failed = Failed("the fetch of GitHub main", probe.Fetch) ?? Failed("git rev-list", probe.Ahead);
+            if (failed != null) return CouldNotCheck(marketplaceRoot, failed);
+            if (!int.TryParse(probe.Ahead.Value.Output?.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out int ahead))
+                return CouldNotCheck(marketplaceRoot, "git rev-list did not print a count");
+            if (ahead > 0)
+                return $"{marketplaceRoot} is a git checkout with commits that are not on GitHub main. Update it with git instead.";
             return null;
+        }
+
+        private static string Failed(string what, GitCommandResult? result)
+        {
+            if (result == null) return what + " was not run";
+            if (result.Value.TimedOut) return what + " timed out";
+            if (result.Value.ExitCode != 0) return $"{what} failed (exit {result.Value.ExitCode})";
+            return null;
+        }
+
+        private static string CouldNotCheck(string marketplaceRoot, string why) =>
+            $"MultiTerminal could not check the git checkout in {marketplaceRoot}: {why}. Nothing was changed; update it with git, or try again.";
+
+        /// <summary>
+        /// Pure: where the swap moves the live root, and whether an existing folder there is deleted first.
+        /// A root with a <c>.git</c> goes to <c>&lt;root&gt;.previous-&lt;yyyyMMddHHmmss&gt;</c> and is never
+        /// deleted by MT. Otherwise to <c>&lt;root&gt;.previous</c>, replacing the one there, unless that one
+        /// itself holds a <c>.git</c>: it is then left alone and the timestamped name is used.
+        /// </summary>
+        internal static (string Target, bool DeleteExisting) PreviousTarget(string liveRoot, bool rootHasGit,
+            bool plainPreviousExists, bool plainPreviousHasGit, DateTimeOffset now)
+        {
+            string plain = liveRoot + PreviousSuffix;
+            if (rootHasGit || (plainPreviousExists && plainPreviousHasGit))
+                return (plain + "-" + now.UtcDateTime.ToString(PreviousStampFormat, CultureInfo.InvariantCulture), false);
+            return (plain, plainPreviousExists);
+        }
+
+        /// <summary>
+        /// Pure: what to do about one root after a possible crash mid-swap.
+        /// <list type="bullet">
+        /// <item>Root present: delete a <c>.incoming</c> (it never became live) and the journal.</item>
+        /// <item>Root missing, valid <c>.incoming</c>: the crash came after rename 1, the new tree (stamp inside)
+        /// is complete. Finish the swap.</item>
+        /// <item>Root missing, no valid <c>.incoming</c>, a valid <c>.previous*</c>: restore the most preferred
+        /// one; an invalid <c>.incoming</c> is deleted only once the root is back.</item>
+        /// <item>Root missing and nothing valid: delete nothing. <see cref="PluginFolderRepair.NothingValid"/> when
+        /// something is there to explain; plain <see cref="PluginFolderRepair.None"/> when this location was simply
+        /// never installed (the other candidate location is in use).</item>
+        /// </list>
+        /// </summary>
+        internal static PluginFolderDecision DecideRepair(PluginFolderSnapshot s)
+        {
+            if (s.RootExists)
+                return new PluginFolderDecision(s.IncomingExists ? PluginFolderRepair.DeleteStaleIncoming : PluginFolderRepair.None,
+                    null, false, s.JournalExists);
+            if (s.IncomingExists && s.IncomingValid)
+                return new PluginFolderDecision(PluginFolderRepair.FinishSwap, null, false, s.JournalExists);
+            foreach (var previous in s.Previous)
+            {
+                if (previous.Valid)
+                    return new PluginFolderDecision(PluginFolderRepair.RestorePrevious, previous.Path, s.IncomingExists, s.JournalExists);
+            }
+            bool anything = s.IncomingExists || s.Previous.Count > 0 || s.JournalExists;
+            return new PluginFolderDecision(anything ? PluginFolderRepair.NothingValid : PluginFolderRepair.None, null, false, false);
+        }
+
+        /// <summary>
+        /// Pure: the <c>.previous*</c> folder names beside <paramref name="liveRoot"/> in preference order: the one
+        /// the swap journal names, then plain <c>.previous</c>, then timestamped ones newest first. A journal
+        /// naming anything that is not one of these is ignored (it is a file on disk, not trusted).
+        /// </summary>
+        internal static IReadOnlyList<string> OrderPreviousFolders(string liveRoot, IEnumerable<string> siblingDirs, string journalLeaf)
+        {
+            string leaf = Path.GetFileName(liveRoot);
+            string plainLeaf = leaf + PreviousSuffix;
+            var plain = new List<string>();
+            var stamped = new List<(string Stamp, string Path)>();
+            foreach (string dir in siblingDirs)
+            {
+                string name = Path.GetFileName(dir);
+                if (string.Equals(name, plainLeaf, StringComparison.OrdinalIgnoreCase))
+                {
+                    plain.Add(dir);
+                }
+                else if (name.Length == plainLeaf.Length + 1 + PreviousStampFormat.Length
+                         && name.StartsWith(plainLeaf + "-", StringComparison.OrdinalIgnoreCase)
+                         && name.AsSpan(plainLeaf.Length + 1).IndexOfAnyExceptInRange('0', '9') < 0)
+                {
+                    stamped.Add((name.Substring(plainLeaf.Length + 1), dir));
+                }
+            }
+            stamped.Sort((a, b) => string.CompareOrdinal(b.Stamp, a.Stamp));
+
+            var ordered = new List<string>(plain);
+            foreach (var s in stamped) ordered.Add(s.Path);
+            if (!string.IsNullOrWhiteSpace(journalLeaf))
+            {
+                int named = ordered.FindIndex(p => string.Equals(Path.GetFileName(p), journalLeaf.Trim(), StringComparison.OrdinalIgnoreCase));
+                if (named > 0)
+                {
+                    string first = ordered[named];
+                    ordered.RemoveAt(named);
+                    ordered.Insert(0, first);
+                }
+            }
+            return ordered;
         }
 
         /// <summary>
@@ -541,6 +726,13 @@ namespace MultiTerminal.Services
         /// <summary>Asks GitHub for main's newest commit and compares it with the installed stamp. Never throws.</summary>
         public async Task<PluginCheckResult> CheckAsync(CancellationToken cancellationToken = default)
         {
+            // An update in progress owns .incoming; its own reconcile ran when it started.
+            if (UpdateGate.Wait(0))
+            {
+                try { ReconcileRoots(SafeCandidates(), RealSwapFileSystem.Instance, Log); }
+                finally { UpdateGate.Release(); }
+            }
+
             string root = ResolveMarketplaceRoot();
             if (root == null) return Decide(null, null, null, null);
             var installed = ReadStamp(root);
@@ -588,16 +780,20 @@ namespace MultiTerminal.Services
             if (!IsValidCommit(sha))
                 return PluginUpdateResult.Fail("The update has no valid commit id.");
 
-            string root = ResolveMarketplaceRoot();
-            if (root == null || !string.Equals(root, check.MarketplaceRoot, StringComparison.OrdinalIgnoreCase))
-                return PluginUpdateResult.Fail("The plugin folder changed since the check. Check for an update again.");
-
             if (!await UpdateGate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
                 return PluginUpdateResult.Fail("An update is already running.");
             string zipPath = null;
-            string incoming = root + ".incoming";
+            string root = null;
+            string incoming = null;
             try
             {
+                ReconcileRoots(SafeCandidates(), RealSwapFileSystem.Instance, Log);
+
+                root = ResolveMarketplaceRoot();
+                if (root == null || !string.Equals(root, check.MarketplaceRoot, StringComparison.OrdinalIgnoreCase))
+                    return PluginUpdateResult.Fail("The plugin folder changed since the check. Check for an update again.");
+                incoming = root + IncomingSuffix;
+
                 string refuse = RefuseReason(root, Directory.Exists, File.Exists, IsWritable, ProbeGit);
                 if (refuse != null) return PluginUpdateResult.Fail(refuse);
 
@@ -615,7 +811,11 @@ namespace MultiTerminal.Services
 
                 File.WriteAllText(Path.Combine(incoming, StampFileName), BuildStampJson(sha, DateTimeOffset.UtcNow, StampedByUpdate));
 
-                return Swap(root, incoming, RealSwapFileSystem.Instance);
+                string plainPrevious = root + PreviousSuffix;
+                bool plainExists = Directory.Exists(plainPrevious);
+                var (previous, deleteExisting) = PreviousTarget(root, HasGit(root, Directory.Exists, File.Exists),
+                    plainExists, plainExists && HasGit(plainPrevious, Directory.Exists, File.Exists), DateTimeOffset.UtcNow);
+                return Swap(root, incoming, RealSwapFileSystem.Instance, previous, deleteExisting);
             }
             catch (InvalidDataException ex)
             {
@@ -628,7 +828,9 @@ namespace MultiTerminal.Services
             finally
             {
                 TryDeleteFile(zipPath);
-                TryDeleteDirectory(incoming);
+                // Never while the root is missing: a failed rollback can leave the only valid tree in .incoming,
+                // and the next reconcile finishes the swap from it.
+                if (root != null && Directory.Exists(root)) TryDeleteDirectory(incoming);
                 UpdateGate.Release();
             }
         }
@@ -708,22 +910,26 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Swaps <paramref name="incoming"/> in for <paramref name="liveRoot"/>: delete an older
-        /// <c>&lt;root&gt;.previous</c>, move the live root there, move the new tree in, check it. Any failure
-        /// after the live root moved puts it back. Public steps go through <paramref name="fs"/> so a test can
-        /// fail any one of them.
+        /// Swaps <paramref name="incoming"/> in for <paramref name="liveRoot"/>: delete the old
+        /// <paramref name="previous"/> when <paramref name="deleteExistingPrevious"/>, write the journal, move the
+        /// live root to <paramref name="previous"/>, move the new tree in, check it. Any failure after the live
+        /// root moved puts it back, by RENAMING the new tree back to <c>.incoming</c> rather than deleting it, so
+        /// every state a crash can leave is one <see cref="DecideRepair"/> handles. Steps go through
+        /// <paramref name="fs"/> so a test can fail any one of them.
         /// </summary>
-        internal static PluginUpdateResult Swap(string liveRoot, string incoming, IPluginSwapFileSystem fs)
+        internal static PluginUpdateResult Swap(string liveRoot, string incoming, IPluginSwapFileSystem fs, string previous, bool deleteExistingPrevious)
         {
-            string previous = liveRoot + ".previous";
+            string journal = liveRoot + JournalSuffix;
             try
             {
-                if (fs.DirectoryExists(previous)) fs.DeleteDirectory(previous);
+                if (deleteExistingPrevious && fs.DirectoryExists(previous)) fs.DeleteDirectory(previous);
+                fs.WriteAllText(journal, Path.GetFileName(previous));
                 fs.MoveDirectory(liveRoot, previous);
             }
             catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
             {
                 // Nothing has moved yet (a failed rename leaves the source where it was).
+                TryFs(() => fs.DeleteFile(journal));
                 return PluginUpdateResult.Fail("The plugin folder could not be moved aside (a file in it may be in use): "
                     + (GitHubIssueFeed.Sanitize(ex.Message, 300) ?? "disk error") + ". Nothing was changed.");
             }
@@ -733,6 +939,7 @@ namespace MultiTerminal.Services
                 fs.MoveDirectory(incoming, liveRoot);
                 string invalid = fs.DirectoryExists(liveRoot) ? ValidateTree(liveRoot) : "the new folder is not in place";
                 if (invalid != null) throw new IOException(invalid);
+                TryFs(() => fs.DeleteFile(journal));
                 return PluginUpdateResult.Ok(UpdatedMessage);
             }
             catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
@@ -740,8 +947,9 @@ namespace MultiTerminal.Services
                 string why = GitHubIssueFeed.Sanitize(ex.Message, 300) ?? "disk error";
                 try
                 {
-                    if (fs.DirectoryExists(liveRoot)) fs.DeleteDirectory(liveRoot);
+                    if (fs.DirectoryExists(liveRoot)) fs.MoveDirectory(liveRoot, incoming);
                     fs.MoveDirectory(previous, liveRoot);
+                    TryFs(() => fs.DeleteFile(journal));
                     return PluginUpdateResult.Fail("The update failed (" + why + "). The previous plugin was put back.");
                 }
                 catch (Exception rollback) when (rollback is IOException || rollback is UnauthorizedAccessException)
@@ -751,6 +959,118 @@ namespace MultiTerminal.Services
                         + ". Rename it to " + liveRoot + " to restore it.");
                 }
             }
+        }
+
+        /// <summary>
+        /// Reconciles the marketplace root of every plugin folder MT might hand to a terminal. MT calls it once
+        /// at startup, before any terminal can launch: while the shared root is missing,
+        /// <see cref="LaunchCommandBuilder.GetMtPluginPath"/> would silently fall through to the default
+        /// location. Never throws; each root's outcome goes to <paramref name="log"/>.
+        /// </summary>
+        internal static void ReconcileRoots(IEnumerable<string> pluginDirs, IPluginSwapFileSystem fs, Action<string> log)
+        {
+            if (pluginDirs == null) return;
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string pluginDir in pluginDirs)
+            {
+                string root = MarketplaceRootFromPluginDir(pluginDir);
+                if (root != null && seen.Add(root)) ReconcileRoot(root, fs, log);
+            }
+        }
+
+        /// <summary>Reconciles one root (see <see cref="DecideRepair"/>) and returns what was decided. Never throws.</summary>
+        internal static PluginFolderDecision ReconcileRoot(string root, IPluginSwapFileSystem fs, Action<string> log)
+        {
+            string incoming = root + IncomingSuffix;
+            string journal = root + JournalSuffix;
+            PluginFolderDecision decision;
+            try
+            {
+                decision = DecideRepair(Snapshot(root));
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is System.Security.SecurityException)
+            {
+                log?.Invoke($"Could not inspect {root} for an interrupted update: {ex.Message}");
+                return new PluginFolderDecision(PluginFolderRepair.None, null, false, false);
+            }
+
+            try
+            {
+                switch (decision.Action)
+                {
+                    case PluginFolderRepair.DeleteStaleIncoming:
+                        fs.DeleteDirectory(incoming);
+                        log?.Invoke($"Deleted {incoming}, left by an update that never went live.");
+                        break;
+                    case PluginFolderRepair.FinishSwap:
+                        fs.MoveDirectory(incoming, root);
+                        log?.Invoke($"An update was interrupted after the old plugin moved aside; finished it by moving {incoming} to {root}.");
+                        break;
+                    case PluginFolderRepair.RestorePrevious:
+                        fs.MoveDirectory(decision.RestoreFrom, root);
+                        log?.Invoke($"An update was interrupted with no usable new plugin; restored {decision.RestoreFrom} to {root}.");
+                        if (decision.DeleteIncomingAfter) fs.DeleteDirectory(incoming);
+                        break;
+                    case PluginFolderRepair.NothingValid:
+                        log?.Invoke($"PROBLEM: the MultiTerminal plugin folder {root} is missing and nothing beside it ({incoming}, {root}{PreviousSuffix}*) "
+                            + "is a valid plugin. Nothing was deleted. Reinstall MultiTerminal or restore the folder by hand.");
+                        break;
+                }
+                if (decision.DeleteJournal) fs.DeleteFile(journal);
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                log?.Invoke($"PROBLEM: repairing {root} after an interrupted update failed ({decision.Action}): {ex.Message}");
+            }
+            return decision;
+        }
+
+        private static PluginFolderSnapshot Snapshot(string root)
+        {
+            string incoming = root + IncomingSuffix;
+            string journal = root + JournalSuffix;
+            string parent = Path.GetDirectoryName(root);
+            string[] siblings = parent != null && Directory.Exists(parent)
+                ? Directory.GetDirectories(parent, Path.GetFileName(root) + PreviousSuffix + "*")
+                : Array.Empty<string>();
+
+            string journalLeaf = null;
+            bool journalExists = File.Exists(journal);
+            if (journalExists && new FileInfo(journal).Length <= 1024)
+                journalLeaf = File.ReadAllText(journal);
+
+            var previous = new List<PluginPreviousFolder>();
+            foreach (string dir in OrderPreviousFolders(root, siblings, journalLeaf))
+                previous.Add(new PluginPreviousFolder(dir, ValidateTree(dir) == null));
+
+            bool incomingExists = Directory.Exists(incoming);
+            return new PluginFolderSnapshot
+            {
+                RootExists = Directory.Exists(root),
+                IncomingExists = incomingExists,
+                IncomingValid = incomingExists && ValidateTree(incoming) == null,
+                Previous = previous,
+                JournalExists = journalExists,
+            };
+        }
+
+        private IEnumerable<string> SafeCandidates()
+        {
+            try
+            {
+                return _pluginDirCandidates();
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is System.Security.SecurityException)
+            {
+                Log?.Invoke("Could not list the plugin folders to check for an interrupted update: " + ex.Message);
+                return Array.Empty<string>();
+            }
+        }
+
+        private static void TryFs(Action action)
+        {
+            try { action(); }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { }
         }
 
         /// <summary>
@@ -770,6 +1090,13 @@ namespace MultiTerminal.Services
 
             public void MoveDirectory(string from, string to) =>
                 Retry(() => Directory.Move(from, to), () => Directory.Exists(from) && !Directory.Exists(to));
+
+            public void WriteAllText(string path, string text) => File.WriteAllText(path, text);
+
+            public void DeleteFile(string path)
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
 
             private static void Retry(Action action, Func<bool> worthRetrying)
             {
@@ -852,28 +1179,35 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Asks git about a root with a <c>.git</c>: <c>status --porcelain</c>, then a fetch of main from the
-        /// constant GitHub URL (never the folder's own <c>origin</c>, which is whatever the build machine had)
-        /// and <c>rev-list --count FETCH_HEAD..HEAD</c>. No prompts (<c>GIT_TERMINAL_PROMPT=0</c>, no
-        /// credential helper) and no fsmonitor hook from the folder's config.
+        /// Asks git about a root with a <c>.git</c>, stopping at the first command that already decides
+        /// (<see cref="GitCheckoutRefuseReason"/> reads what ran): <c>status --porcelain --ignored</c> (our stamp
+        /// file excluded: the installer and each update write it, so it is not local work), <c>stash list</c>,
+        /// a fetch of main from the constant GitHub URL (never the folder's own <c>origin</c>, which is whatever
+        /// the build machine had) and <c>rev-list --count FETCH_HEAD..HEAD</c>. No prompts
+        /// (<c>GIT_TERMINAL_PROMPT=0</c>, no credential helper) and no fsmonitor hook from the folder's config.
         /// </summary>
         private static GitProbe ProbeGit(string marketplaceRoot)
         {
-            var status = RunGit(marketplaceRoot, TimeSpan.FromSeconds(20), "status", "--porcelain");
-            if (status.NotFound) return new GitProbe(false, false, 0, true);
-            bool dirty = status.ExitCode == 0 && !string.IsNullOrWhiteSpace(status.Output);
+            var status = RunGit(marketplaceRoot, TimeSpan.FromSeconds(20), "status", "--porcelain", "--ignored",
+                "--", ".", ":(exclude)" + StampFileName);
+            if (status.NotFound) return new GitProbe(false);
+            var probe = new GitProbe(true, Status: status.Result);
+            if (!status.Result.Succeeded || !string.IsNullOrWhiteSpace(status.Result.Output)) return probe;
+
+            var stash = RunGit(marketplaceRoot, TimeSpan.FromSeconds(20), "stash", "list");
+            probe = probe with { Stash = stash.Result };
+            if (!stash.Result.Succeeded || !string.IsNullOrWhiteSpace(stash.Result.Output)) return probe;
 
             var fetch = RunGit(marketplaceRoot, TimeSpan.FromSeconds(60), "fetch", "--quiet", "--no-tags",
                 "https://github.com/" + Repo + ".git", Ref);
-            if (fetch.ExitCode != 0) return new GitProbe(true, dirty, 0, true);
+            probe = probe with { Fetch = fetch.Result };
+            if (!fetch.Result.Succeeded) return probe;
 
             var ahead = RunGit(marketplaceRoot, TimeSpan.FromSeconds(20), "rev-list", "--count", "FETCH_HEAD..HEAD");
-            if (ahead.ExitCode != 0 || !int.TryParse(ahead.Output?.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out int count))
-                return new GitProbe(true, dirty, 0, true);
-            return new GitProbe(true, dirty, count, false);
+            return probe with { Ahead = ahead.Result };
         }
 
-        private readonly record struct GitRun(bool NotFound, int ExitCode, string Output);
+        private readonly record struct GitRun(bool NotFound, GitCommandResult Result);
 
         private static GitRun RunGit(string workingDirectory, TimeSpan timeout, params string[] args)
         {
@@ -894,7 +1228,7 @@ namespace MultiTerminal.Services
             try
             {
                 using var process = System.Diagnostics.Process.Start(psi);
-                if (process == null) return new GitRun(true, -1, null);
+                if (process == null) return new GitRun(true, new GitCommandResult(-1, null));
                 process.StandardInput.Close();
                 var stdout = process.StandardOutput.ReadToEndAsync();
                 var stderr = process.StandardError.ReadToEndAsync();
@@ -902,14 +1236,14 @@ namespace MultiTerminal.Services
                 {
                     try { process.Kill(entireProcessTree: true); }
                     catch (Exception ex) when (ex is InvalidOperationException || ex is System.ComponentModel.Win32Exception) { }
-                    return new GitRun(false, -1, null);
+                    return new GitRun(false, new GitCommandResult(-1, null, TimedOut: true));
                 }
                 _ = stderr.Result;
-                return new GitRun(false, process.ExitCode, stdout.Result);
+                return new GitRun(false, new GitCommandResult(process.ExitCode, stdout.Result));
             }
             catch (System.ComponentModel.Win32Exception)
             {
-                return new GitRun(true, -1, null); // git is not on PATH
+                return new GitRun(true, new GitCommandResult(-1, null)); // git is not on PATH
             }
         }
 

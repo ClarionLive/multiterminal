@@ -444,7 +444,7 @@ namespace MultiTerminal
                 try
                 {
                     await Task.Delay(TimeSpan.FromMinutes(3)).ConfigureAwait(false);
-                    using var updater = new Services.PluginUpdateService();
+                    using var updater = new Services.PluginUpdateService { Log = m => _debugLogService?.Warning("PluginUpdate", m) };
                     await updater.RunStartupCheckAsync(
                         settings,
                         postNotice: text =>
@@ -955,6 +955,14 @@ namespace MultiTerminal
 
             // The launch-time .mcp.json heal (a796e5f9) logs what it did, so a repair at launch is traceable.
             Services.LaunchCommandBuilder.SetLogger(_debugLogService);
+
+            // Task 4dc459e4: repair a plugin update interrupted between its two renames, before anything can
+            // launch a terminal (with the shared root missing, GetMtPluginPath would fall through to the
+            // default location). On the UI thread on purpose: a background run could race the first launch,
+            // and the normal case is a few existence checks; only a real repair moves a folder.
+            Services.PluginUpdateService.ReconcileRoots(LaunchCommandBuilder.ExpectedMtPluginPaths,
+                Services.PluginUpdateService.RealSwapFileSystem.Instance,
+                m => _debugLogService?.Warning("PluginUpdate", m));
 
             // Initialize McpConfigService — used by the project settings form's Sync MCP config and at launch
             // Pass debug log callback so CLI errors are visible in the debug panel
