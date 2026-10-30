@@ -842,7 +842,7 @@ namespace MultiTerminal
         /// </summary>
         protected override bool ProcessCmdKey(ref System.Windows.Forms.Message msg, Keys keyData)
         {
-            if (HandleGlobalShortcut(this, keyData))
+            if (HandleGlobalShortcut(this, Control.FromChildHandle(msg.HWnd), keyData))
                 return true;
             return base.ProcessCmdKey(ref msg, keyData);
         }
@@ -850,17 +850,21 @@ namespace MultiTerminal
         /// <summary>
         /// The global shortcuts, for this window and for every floating window (GH #74): keys reach the
         /// TOP-LEVEL form's ProcessCmdKey, which for a pane in a floating window is that window, so it
-        /// hands them here with itself. A shortcut acts only on a pane in the window it was pressed in
-        /// (<see cref="GridLayoutManager.ActiveContentIn{T}"/>): Ctrl+Shift+H stops a terminal, and from a
-        /// floating window whose active pane is not a terminal it must not reach for one the Owner cannot
-        /// see (pipeline security finding). True when the key was handled.
+        /// hands them here with itself and the control the key was addressed to. A shortcut acts only on
+        /// a pane in the window it was pressed in, the pane holding that control when there is one
+        /// (<see cref="GridLayoutManager.ContentForKey{T}"/>): Ctrl+Shift+H stops a terminal, and from a
+        /// floating window whose pane is not a terminal it must not reach for one the Owner cannot see
+        /// (pipeline security finding). True when the key was handled.
         /// </summary>
-        private bool HandleGlobalShortcut(Form source, Keys keyData)
+        private bool HandleGlobalShortcut(Form source, Control origin, Keys keyData)
         {
             if (keyData == (Keys.Control | Keys.Shift | Keys.H))
             {
-                var activeTerminal = GridLayoutManager.ActiveContentIn<TerminalDocument>(_dockPanel, source);
-                activeTerminal?.ReturnToStartScreen();
+                var terminal = GridLayoutManager.ContentForKey<TerminalDocument>(_dockPanel, source, origin);
+                if (terminal != null)
+                    terminal.ReturnToStartScreen();
+                else
+                    _debugLogService?.Info("MainForm", $"Ctrl+Shift+H in {(source is FloatWindow ? "a floating window" : "the main window")}: no terminal pane there, nothing stopped");
                 return true;
             }
 
@@ -3793,7 +3797,9 @@ namespace MultiTerminal
                     isDisposed: doc.IsDisposed,
                     startScreenVisible: doc.IsStartScreenVisible,
                     terminalStarted: doc.IsTerminalStarted,
-                    terminalPaneCount: _dockPanel.Documents.OfType<TerminalDocument>().Count()))
+                    // Docked panes only (GH #74): the tab is closed only if the MAIN window keeps a
+                    // terminal; terminals in floating windows do not stop it emptying.
+                    terminalPaneCount: _gridManager.GetDockedTerminalDocuments().Count))
             {
                 doc.Close();
             }
