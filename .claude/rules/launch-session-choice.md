@@ -76,6 +76,18 @@ is `[^A-Za-z0-9] -> '-'`. It reads only a bounded head and tail of each transcri
 of transcripts read. Agent names and summaries come from injected DB lookups, with the transcript as
 fallback.
 
+**Background gloss writers are never offered (GH #67).** The headless gloss writer
+(`MainForm.SpawnGlossWriterAsync`, see checklist-graph.md) starts in the app directory, which lies inside
+a project when MT runs from a worktree's build output, so its transcript used to be listed as an
+"(unknown agent)" worktree session and could become Continue last. It now runs with
+`--no-session-persistence` and leaves no transcript. For transcripts written before that, the scan marks a
+session whose first prompt starts with `GlossBackfillPlanner.PromptOpening` AND whose line has
+`entrypoint` `sdk-cli` (headless `claude -p`); `BuildEntry` drops it, so Continue last, the list, helper
+resume and the startup restore all skip it, and `TryGetEntry`'s `LastMissReason` says it is a background
+gloss writer. The writer has no MT name, environment marker or launch row that reaches its transcript,
+so the prompt text is the only evidence on disk. The same prompt typed in an interactive pane
+(`entrypoint` `cli`) is still offered. Named headless agents (`OnSpawnAgentRequested`) are not affected.
+
 ## The rules that keep a resume safe
 
 - **The resume cwd is the transcript's own folder.** Claude finds a session only from the directory

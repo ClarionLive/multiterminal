@@ -23,6 +23,13 @@ namespace MultiTerminal.MCPServer.Services
         public const int MaxItemsPerRun = 25;
 
         /// <summary>
+        /// The first line of every gloss-writer prompt. <see cref="SessionCatalog"/> matches it to keep
+        /// writer transcripts written before the writer ran with <c>--no-session-persistence</c> out of
+        /// the launch-time resume offer (GH #67), so changing it stops that match for those files.
+        /// </summary>
+        public const string PromptOpening = "You are writing plain-language explanations for the steps of one work plan, so that";
+
+        /// <summary>
         /// Indices of items that need an explanation written: the item has real text, and no
         /// gloss carrying content is present.
         /// <para>A blank-but-present gloss counts as absent, matching
@@ -74,7 +81,7 @@ namespace MultiTerminal.MCPServer.Services
 
             var sb = new StringBuilder();
 
-            sb.AppendLine("You are writing plain-language explanations for the steps of one work plan, so that");
+            sb.AppendLine(PromptOpening);
             sb.AppendLine("a reader can LEARN what the plan does instead of approving it on trust.");
             sb.AppendLine();
             sb.AppendLine($"TASK: {task.Title}");
