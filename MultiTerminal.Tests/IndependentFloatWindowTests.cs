@@ -246,12 +246,12 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
-        /// Live check 3: Ctrl+Shift+H in a floating terminal did nothing; the likely cause (unconfirmed
-        /// until a live retest) is the library's active content staying on a pane elsewhere while focus
-        /// is inside WebView2. The key is now resolved from the control it was addressed to. This fact
-        /// SIMULATES the stale state with <c>Activate()</c> on the docked pane and addresses the key to a
-        /// plain child control of the floated one, through the window's real ProcessCmdKey: it pins that
-        /// the addressed control wins over the active content, not what WebView2 puts in the message.
+        /// A key that reaches a window's ProcessCmdKey is resolved from the control it was addressed to,
+        /// not from the library's active content. This fact SIMULATES a stale active content with
+        /// <c>Activate()</c> on the docked pane and addresses the key to a plain child control of the
+        /// floated one, through the window's real ProcessCmdKey. It says nothing about terminals: the
+        /// live retest of check 3 showed a key pressed inside a WebView2 never reaches ProcessCmdKey at
+        /// all (see <c>ReturnToStartScreenKeyTests</c>).
         /// </summary>
         [Fact]
         public void A_shortcut_acts_on_the_pane_it_was_pressed_in_even_when_the_library_reports_another_pane_active()

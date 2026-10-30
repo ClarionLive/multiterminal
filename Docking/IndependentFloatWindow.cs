@@ -237,10 +237,11 @@ namespace MultiTerminal.Docking
         /// Keyboard shortcuts the main window handles (Ctrl+Shift+H, ...). Keys reach the top-level
         /// form's <c>ProcessCmdKey</c>, which for a pane in this window is this window, so they are
         /// handed over together with this window and the control the key was addressed to: a shortcut
-        /// must act on a pane IN this window, never on whatever the main window has active. For a
-        /// terminal the key comes from its WebView2, whose accelerator handling addresses the message to
-        /// the WebView2 control; <see cref="Control.FromChildHandle"/> also finds the control for a
-        /// native child window inside it.
+        /// must act on a pane IN this window, never on whatever the main window has active. Only keys
+        /// pressed in WinForms controls arrive here: a WebView2 (a terminal included) raises its
+        /// accelerator keys as <c>KeyDown</c> on itself and never calls <c>ProcessCmdKey</c>, so
+        /// Ctrl+Shift+H inside a terminal is handled by that terminal's renderer
+        /// (<c>WebViewTerminalRenderer.IsReturnToStartScreenKey</c>).
         /// </summary>
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
