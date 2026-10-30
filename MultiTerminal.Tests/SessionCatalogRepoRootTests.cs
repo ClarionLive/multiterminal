@@ -121,6 +121,23 @@ namespace MultiTerminal.Tests
             Assert.Null(SessionCatalog.ValidateResumeCwd(_projectRoot, Path.Combine(_repoRoot, "src"), _repoRoot));
         }
 
+        // Codex (3fd3c9a7): the repo-root worktrees are shared by every project in the repo, so a sibling
+        // project must not be offered a session that began in this one.
+        [Fact]
+        public void A_sibling_project_in_the_same_repo_is_not_offered_the_session()
+        {
+            var id = WriteRepoWorktreeSession();
+            var sibling = Path.Combine(_repoRoot, "Sibling");
+            Directory.CreateDirectory(sibling);
+
+            var catalog = Catalog();
+            Assert.Empty(catalog.List(sibling, new HashSet<string>(), Now));
+            Assert.Null(catalog.TryGetEntry(sibling, id, new HashSet<string>(), Now));
+            Assert.Equal("it began in another project's folder of the same repository", catalog.LastMissReason);
+
+            Assert.NotNull(Catalog().TryGetEntry(_projectRoot, id, new HashSet<string>(), Now));
+        }
+
         [Fact]
         public void A_live_session_is_reported_as_already_open()
         {

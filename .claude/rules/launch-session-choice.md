@@ -84,7 +84,7 @@ fallback.
   offering one that fails with "No conversation found".
 - **Transcript content is untrusted.** `ValidateResumeCwd` checks the cwd *as a string* before any
   filesystem call: a local drive path, canonicalised, equal to the project root or under
-  `<root>\.claude\worktrees\<id>`, or, for a project registered at a SUBFOLDER of its git repo (ClarionAssistant), under `<repo root>\.claude\worktrees\<id>` (ticket 3fd3c9a7; the repo root is `SessionCatalog.FindRepoRoot` of the project root, used only as a strict non-drive ancestor, and carried on the entry as `WorktreeBase` so the re-checks use the same one). A UNC path would otherwise make Windows authenticate to a remote
+  `<root>\.claude\worktrees\<id>`, or, for a project registered at a SUBFOLDER of its git repo (ClarionAssistant), under `<repo root>\.claude\worktrees\<id>` (ticket 3fd3c9a7; the repo root is `SessionCatalog.FindRepoRoot` of the project root, used only as a strict non-drive ancestor, and carried on the entry as `WorktreeBase` so the re-checks use the same one). The repo-root worktrees are shared by every project in the repo, so a session admitted only through the repo root must also have BEGUN in this project: its first recorded cwd is the project root or below it, else it is skipped as "began in another project's folder of the same repository" (Codex review). A helper whose transcript starts directly in a repo-root worktree is therefore not offered (fail closed). A UNC path would otherwise make Windows authenticate to a remote
   host just by opening the chooser. It is re-validated immediately before `BuildCommand`. Junctions
   are not resolved (local-trust model).
 - **Never two processes on one transcript.** The live set is every MT pane's
