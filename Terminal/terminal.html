@@ -54,6 +54,7 @@
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.12.0/lib/addon-web-links.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.9.0/lib/addon-unicode11.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.19.0/lib/addon-webgl.min.js"></script>
 
     <script>
         // Theme definitions matching TerminalTheme.cs
@@ -113,6 +114,51 @@
         let currentFontSize = 10;
         let isInitialized = false;
 
+        // xterm.js's GPU renderer (GitHub #51). Much cheaper than the default DOM renderer for the
+        // constant redraws of a full-screen app like Claude Code. Whenever WebGL is not available here
+        // (the script did not load, no GPU context, some RDP/VM setups) the terminal simply keeps the
+        // DOM renderer; if the GPU context is lost later (a driver reset, or the browser reclaiming
+        // contexts when many panes are open) the addon is disposed and xterm goes back to the DOM
+        // renderer on its own. Which renderer a pane ended up on is logged to the host.
+        let webglAddon = null;
+        function enableWebglRenderer() {
+            if (webglTurnedOff()) {
+                sendToHost({ type: 'log', level: 'info', message: 'renderer: dom (webgl turned off by MULTITERMINAL_TERMINAL_WEBGL)' });
+                return;
+            }
+            if (typeof WebglAddon === 'undefined') {
+                sendToHost({ type: 'log', level: 'info', message: 'renderer: dom (webgl addon not loaded)' });
+                return;
+            }
+            let addon = null;
+            try {
+                addon = new WebglAddon.WebglAddon();
+                addon.onContextLoss(() => {
+                    try { addon.dispose(); } catch (e) { }
+                    if (webglAddon === addon) webglAddon = null;
+                    sendToHost({ type: 'log', level: 'warning', message: 'renderer: webgl context lost, back to dom' });
+                });
+                term.loadAddon(addon);
+                webglAddon = addon;
+                sendToHost({ type: 'log', level: 'info', message: 'renderer: webgl' });
+            } catch (e) {
+                // loadAddon registers the addon before activating it, so a failed start leaves it
+                // registered unless it is disposed here.
+                if (addon) { try { addon.dispose(); } catch (e2) { } }
+                sendToHost({ type: 'log', level: 'info', message: 'renderer: dom (webgl unavailable: ' + (e && e.message ? e.message : e) + ')' });
+            }
+        }
+
+        // &webgl=0 in the URL: the host's MULTITERMINAL_TERMINAL_WEBGL off switch, for a GPU or driver the
+        // WebGL renderer misrenders on.
+        function webglTurnedOff() {
+            try {
+                return new URLSearchParams(window.location.search).get('webgl') === '0';
+            } catch (e) {
+                return false;
+            }
+        }
+
         // The Windows build number the host puts in the URL (&winbuild=). Tells xterm.js it is talking
         // to ConPTY, which changes how it handles reflow on resize (GitHub #51). Missing or not a
         // positive whole number: leave windowsPty unset, xterm's default behaviour.
@@ -166,6 +212,9 @@
 
             // Open terminal in container
             term.open(container);
+
+            // The GPU renderer attaches to an opened terminal only.
+            enableWebglRenderer();
 
             // Initial fit
             fitAddon.fit();
@@ -386,16 +435,22 @@
             // tracking or the alternate screen (Claude Code does), xterm.js consumes the wheel
             // and stops propagation, so a bubble-phase listener never saw it. stopPropagation
             // here keeps xterm from also forwarding the wheel to the app.
+            //
+            // A fast spin sends several wheel events in a fraction of a second. Each size change
+            // rebuilds the renderer's glyph cache, and each fit() resizes the pty, which makes the
+            // app (Claude Code) repaint its whole screen; doing all of that per notch flickers. So the
+            // size shown follows the wheel at most once per frame, and the fit, the pty resize and the
+            // save to the host happen once, when the wheel has been still for WHEEL_ZOOM_SETTLE_MS.
             container.addEventListener('wheel', (e) => {
                 if (e.ctrlKey) {
                     e.preventDefault();
                     e.stopPropagation();
                     const delta = e.deltaY > 0 ? -1 : 1;
-                    const newSize = Math.max(6, Math.min(32, currentFontSize + delta));
-                    if (newSize !== currentFontSize) {
-                        setFontSize(newSize);
-                        // Notify C# of font size change so it can be saved
-                        sendToHost({ type: 'fontSizeChanged', fontSize: newSize });
+                    const base = pendingWheelFontSize !== null ? pendingWheelFontSize : currentFontSize;
+                    const newSize = Math.max(6, Math.min(32, base + delta));
+                    if (newSize !== base) {
+                        pendingWheelFontSize = newSize;
+                        scheduleWheelZoom();
                     }
                 }
             }, { capture: true, passive: false });
@@ -686,6 +741,8 @@
                             break;
 
                         case 'fontSize':
+                            // A size set by the host wins over a wheel zoom still settling.
+                            cancelWheelZoom();
                             setFontSize(parseFloat(data));
                             break;
 
@@ -808,6 +865,44 @@
             if (term) {
                 term.options.theme = theme;
                 document.body.style.backgroundColor = theme.background;
+            }
+        }
+
+        // Ctrl+wheel zoom, coalesced (see the wheel listener): the newest size is drawn once per
+        // animation frame without a fit; the fit and the host notification run once when the wheel
+        // has been still for WHEEL_ZOOM_SETTLE_MS.
+        const WHEEL_ZOOM_SETTLE_MS = 150;
+        let pendingWheelFontSize = null;
+        let wheelZoomFrame = 0;
+        let wheelZoomSettleTimer = 0;
+
+        function scheduleWheelZoom() {
+            if (!wheelZoomFrame) {
+                wheelZoomFrame = requestAnimationFrame(() => {
+                    wheelZoomFrame = 0;
+                    if (pendingWheelFontSize !== null && term) {
+                        currentFontSize = pendingWheelFontSize;
+                        term.options.fontSize = pendingWheelFontSize;
+                    }
+                });
+            }
+            clearTimeout(wheelZoomSettleTimer);
+            wheelZoomSettleTimer = setTimeout(() => {
+                const size = pendingWheelFontSize;
+                pendingWheelFontSize = null;
+                if (size === null) return;
+                setFontSize(size);
+                // Notify C# of the font size change so it can be saved
+                sendToHost({ type: 'fontSizeChanged', fontSize: size });
+            }, WHEEL_ZOOM_SETTLE_MS);
+        }
+
+        function cancelWheelZoom() {
+            pendingWheelFontSize = null;
+            clearTimeout(wheelZoomSettleTimer);
+            if (wheelZoomFrame) {
+                cancelAnimationFrame(wheelZoomFrame);
+                wheelZoomFrame = 0;
             }
         }
 

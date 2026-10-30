@@ -257,7 +257,11 @@ namespace MultiTerminal.Terminal
                     // serve a stale copy of the document on the same file:// URL.
                     string baseUri = new Uri(htmlPath).AbsoluteUri;
                     long bust = File.GetLastWriteTimeUtc(htmlPath).Ticks;
-                    string navUri = BuildTerminalPageUri(baseUri, bust, Environment.OSVersion.Version.Build);
+                    string webglRaw = Environment.GetEnvironmentVariable(WebglEnvVar);
+                    bool webglOff = IsWebglTurnedOff(webglRaw);
+                    if (!webglOff && !IsWebglSwitchValueRecognized(webglRaw))
+                        DebugLogService?.Warning("WebViewTerminalRenderer", $"{WebglEnvVar}='{webglRaw.Trim()}' is not a recognized on/off value; treating as on.");
+                    string navUri = BuildTerminalPageUri(baseUri, bust, Environment.OSVersion.Version.Build, webglOff);
                     _webView.CoreWebView2.Navigate(navUri);
                 }
                 else
@@ -279,17 +283,45 @@ namespace MultiTerminal.Terminal
         /// <c>windowsPty.buildNumber</c> so xterm applies its ConPTY-specific handling (GitHub #51).
         /// The page builds the terminal on load, before any host message, so it has to arrive with the URL.
         /// A build of 0 or less (unknown) is left out and the page falls back to xterm's defaults.
+        /// <c>&amp;webgl=0</c> keeps the page on xterm's DOM renderer (see <see cref="WebglEnvVar"/>).
         /// </summary>
-        internal static string BuildTerminalPageUri(string baseUri, long cacheBust, int windowsBuild)
+        internal static string BuildTerminalPageUri(string baseUri, long cacheBust, int windowsBuild, bool webglOff = false)
         {
             string uri = baseUri + "?v=" + cacheBust.ToString(System.Globalization.CultureInfo.InvariantCulture);
             if (windowsBuild > 0)
                 uri += "&" + WindowsBuildParam + "=" + windowsBuild.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (webglOff)
+                uri += "&" + WebglParam + "=0";
             return uri;
         }
 
         /// <summary>The query parameter terminal.html's <c>readWindowsPty</c> reads. A string contract across files.</summary>
         internal const string WindowsBuildParam = "winbuild";
+
+        /// <summary>The query parameter terminal.html's <c>webglTurnedOff</c> reads. A string contract across files.</summary>
+        internal const string WebglParam = "webgl";
+
+        /// <summary>
+        /// Off switch for the WebGL renderer (GitHub #51 part 2), for a GPU or driver it misrenders on:
+        /// <c>0</c>/<c>false</c>/<c>off</c>/<c>no</c>/<c>disabled</c> (any case) keep every terminal on the
+        /// DOM renderer. Set it before starting MT; it then applies to every terminal in that run. Any other
+        /// value except the on values (<c>1</c>/<c>true</c>/<c>on</c>/<c>yes</c>/<c>enabled</c>) is logged
+        /// and treated as on, like <c>MULTITERMINAL_CODEGRAPH_WATCH</c>.
+        /// </summary>
+        internal const string WebglEnvVar = "MULTITERMINAL_TERMINAL_WEBGL";
+
+        private static readonly HashSet<string> WebglOffValues =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "0", "false", "off", "no", "disabled" };
+        private static readonly HashSet<string> WebglOnValues =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "1", "true", "on", "yes", "enabled" };
+
+        /// <summary>Pure. True when <paramref name="raw"/> is one of the off values of <see cref="WebglEnvVar"/>.</summary>
+        internal static bool IsWebglTurnedOff(string raw)
+            => !string.IsNullOrWhiteSpace(raw) && WebglOffValues.Contains(raw.Trim());
+
+        /// <summary>Pure. True when <paramref name="raw"/> is unset, an on value or an off value.</summary>
+        internal static bool IsWebglSwitchValueRecognized(string raw)
+            => string.IsNullOrWhiteSpace(raw) || WebglOffValues.Contains(raw.Trim()) || WebglOnValues.Contains(raw.Trim());
 
         private string GetTerminalHtmlPath()
         {

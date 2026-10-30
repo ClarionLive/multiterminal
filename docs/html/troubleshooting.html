@@ -208,6 +208,10 @@ Copy-Item "$src\messages.db" $dst</code></pre>
         </ul>
         <p><strong>Fix:</strong> for a registered project, just wait for the startup sweep (or check it's eligible / not disabled). To index any directory immediately &mdash; including one that isn't a registered project &mdash; run the <code>index_code_graph</code> MCP tool or <code>POST /api/code-graph/index</code> with the project directory. You generally don't need to re-index after edits anymore; the watcher handles that.</p>
 
+        <h2 id="terminal-renderer">Terminal text looks garbled, clipped or flickers</h2>
+        <p>Terminals draw with xterm.js's WebGL (GPU) renderer when it can start, and fall back to the slower DOM renderer when it cannot (no GPU context, some remote-desktop or VM setups). On a few graphics drivers the WebGL renderer can misdraw text. To keep every terminal on the DOM renderer, set the environment variable <code>MULTITERMINAL_TERMINAL_WEBGL</code> to <code>0</code> (or <code>false</code>/<code>off</code>/<code>no</code>/<code>disabled</code>) and <strong>restart MultiTerminal</strong>; it applies to every terminal in that run.</p>
+        <p>The Debug panel shows which renderer each terminal ended up on: <code>renderer: webgl</code>, <code>renderer: dom (webgl turned off by MULTITERMINAL_TERMINAL_WEBGL)</code>, <code>renderer: dom (webgl unavailable: ...)</code>, or <code>renderer: webgl context lost, back to dom</code> (the GPU reset, or many terminals are open and the browser reclaimed the oldest one's context).</p>
+
         <h2 id="logs">Where to see logs</h2>
         <ul>
           <li><strong>Debug panel.</strong> The in-app Debug panel is the first place to look — it streams live diagnostic output (including remote-mode changes, worktree strands, and service warnings). Toggle it from the toolbar.</li>
