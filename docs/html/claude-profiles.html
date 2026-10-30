@@ -98,6 +98,8 @@
             <li><a href="#default">The Default profile</a></li>
             <li><a href="#not-yet">What is not separated yet</a></li>
             <li><a href="#installer">Installer: shared plugin location</a></li>
+            <li><a href="#installer-switching">Switching an existing install</a></li>
+            <li><a href="#installer-clarionassistant">ClarionAssistant and the shared location</a></li>
           </ol>
         </div>
 
@@ -251,7 +253,23 @@
 
         <h2 id="installer">Installer: shared plugin location</h2>
         <p>The installer has a <strong>Plugin location</strong> page. The default installs the MultiTerminal plugin into your Default profile, as earlier versions did. If you use more than one profile, choose <strong>Shared location</strong> instead: one copy is installed outside every profile, and MultiTerminal terminals use it whichever profile they run under. An upgrade keeps whichever choice you made before.</p>
-        <p>An optional further page can make the plugin marketplace known to other profiles, for plain <code>claude</code> sessions started outside MultiTerminal. That adds the marketplace only; it does not install or enable the plugin there. MultiTerminal's own terminals do not need it.</p>
+        <p>An optional further page can make the plugin marketplace known to other profiles, for plain <code>claude</code> sessions started outside MultiTerminal. That adds the marketplace only; it does not install or enable the plugin there. MultiTerminal's own terminals do not need it. That page skips the Default profile (<code>%USERPROFILE%\.claude</code>); only extra profiles are registered there.</p>
+
+        <h3 id="installer-switching">Switching an existing install to the shared location</h3>
+        <p>MultiTerminal never enables its plugin in a profile: it hands the plugin's folder to every terminal it starts (<code>--plugin-dir</code>). On a shared install the installer records that folder in <code>HKCU\Software\MultiTerminal\PluginMarketplacePath</code>, and MultiTerminal looks there first, then in <code>%USERPROFILE%\.claude\plugins\marketplaces\multiterminal-marketplace</code>. So after you switch, every MultiTerminal terminal uses the shared copy, whatever profile it runs under. You do not have to remove anything.</p>
+        <ul>
+          <li><strong>The old copy is left in place.</strong> The installer never deletes a plugin folder it did not create, so the copy in <code>%USERPROFILE%\.claude\plugins\marketplaces\multiterminal-marketplace</code> stays. MultiTerminal no longer uses it, and later installs no longer update it. The same applies when you switch from one shared folder to another, or back to Default.</li>
+          <li><strong>Deleting it is up to you,</strong> but check two things first. If you also run plain <code>claude</code> sessions in your Default profile with the MultiTerminal plugin enabled there, that profile still points at the old folder: point it at the shared folder with <code>/plugin marketplace</code> rather than deleting the old one. And if you use ClarionAssistant, read the next section.</li>
+          <li><strong>Uninstalling</strong> removes the shared folder only if this installer created it, and removes the profile registrations it recorded.</li>
+        </ul>
+
+        <h3 id="installer-clarionassistant">ClarionAssistant and the shared location</h3>
+        <p>ClarionAssistant's own plugin has its own marketplace (<code>clarionassistant-marketplace</code>) and its own shared-location choice in its installer; it never uses MultiTerminal's folder for its plugin. Its tabs do also load the MultiTerminal plugin, for MultiTerminal messaging, and they find it this way (ClarionAssistant does not read MultiTerminal's registry setting):</p>
+        <ol>
+          <li>Next to ClarionAssistant's shared folder, but only when that folder keeps its default name. Both installers suggest the same parent, <code>%LOCALAPPDATA%\ClarionLive\claude-plugins\marketplaces\</code>, with <code>clarionassistant-marketplace</code> and <code>multiterminal-marketplace</code> side by side, so accepting both suggestions makes ClarionAssistant use MultiTerminal's shared copy.</li>
+          <li>Otherwise the profile folders: the active profile's, then <code>%USERPROFILE%\.claude\plugins\marketplaces\multiterminal-marketplace</code>, which is the old copy.</li>
+        </ol>
+        <p>So if you choose a custom MultiTerminal folder, or leave ClarionAssistant's plugin in the Default profile, ClarionAssistant tabs keep using the old copy: deleting it costs them MultiTerminal messaging, and keeping it means they run a copy that MultiTerminal updates no longer reach. The safe path is to accept the suggested shared folder in both installers, then remove the old copy only after a ClarionAssistant tab shows MultiTerminal messaging working. This describes ClarionAssistant versions with the shared-location lookup; older ones look only in the profile folders.</p>
 
       </div>
     </main>
