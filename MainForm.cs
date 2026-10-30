@@ -2855,7 +2855,8 @@ namespace MultiTerminal
             {
                 _debugLogService.Info("MainForm", $"AgentProcess spawn requested: {agentName} by {spawnerName}");
 
-                if (string.IsNullOrWhiteSpace(workingDir))
+                bool folderNamed = !string.IsNullOrWhiteSpace(workingDir);
+                if (!folderNamed)
                 {
                     workingDir = Path.Combine(
                         Directory.GetParent(Directory.GetCurrentDirectory())?.FullName ?? "",
@@ -2867,7 +2868,20 @@ namespace MultiTerminal
                 // When this identity owns an active task with a materialized
                 // worktree, override cwd AND inject MULTITERMINAL_TASK_WORKTREE
                 // so MCP tools that read the env var see the right path.
+                // Not when the spawner named a folder in another repo (ticket 28d71d14): the
+                // task found by name may be an older same-name agent's.
                 string taskWorktreePath = ResolveTaskWorktreePath(agentName);
+                if (taskWorktreePath != null)
+                {
+                    var decision = SpawnDirRule.Decide(workingDir, folderNamed, taskWorktreePath,
+                        _mcpServer?.Broker?.ResolveTaskRepoRoot(agentName), Directory.Exists);
+                    if (decision.TaskInAnotherRepo)
+                    {
+                        _debugLogService.Info("MainForm",
+                            $"AgentProcess spawn: '{agentName}' has active-task worktree '{taskWorktreePath}' outside the repo of '{workingDir}'; starting in '{workingDir}' (ticket 28d71d14)");
+                        taskWorktreePath = null;
+                    }
+                }
                 Dictionary<string, string> spawnEnv = null;
                 if (taskWorktreePath != null)
                 {
@@ -4206,33 +4220,26 @@ namespace MultiTerminal
         // picker) pass it; the override then only applies when that target lives
         // inside the active task's repo. Otherwise the user's choice wins and the
         // active-task worktree cd is suppressed — Diana's active MT task must not
-        // hijack a launch aimed at a different project. Sites with only a default
-        // destination (AddNewTerminal, "Launch as...") pass null and keep the
-        // unconditional AC7 behavior.
+        // hijack a launch aimed at a different project. AddNewTerminal passes the folder
+        // its caller named (spawn_helper's working folder; ticket 28d71d14), and null when
+        // the caller named none. Sites with only a default destination ("Launch as...")
+        // pass null and keep the unconditional AC7 behavior.
+        // The decision itself is Services.SpawnDirRule (pure, tested).
         private string ResolveSpawnDir(string terminalName, string fallbackDir, out string taskWorktreePath, string explicitTargetDir = null)
         {
-            taskWorktreePath = ResolveTaskWorktreePath(terminalName);
-            if (taskWorktreePath == null) return fallbackDir;
-            string repoRoot = _mcpServer?.Broker?.ResolveTaskRepoRoot(terminalName);
-            bool repoRootUsable = !string.IsNullOrEmpty(repoRoot) && System.IO.Directory.Exists(repoRoot);
-
-            if (explicitTargetDir != null)
+            string worktree = ResolveTaskWorktreePath(terminalName);
+            string repoRoot = worktree == null ? null : _mcpServer?.Broker?.ResolveTaskRepoRoot(terminalName);
+            var decision = Services.SpawnDirRule.Decide(
+                explicitTargetDir ?? fallbackDir, explicitTargetDir != null, worktree, repoRoot, System.IO.Directory.Exists);
+            if (decision.TaskInAnotherRepo)
             {
-                // Compare against the repo root when it resolved; otherwise the
-                // worktree path is the best available anchor for the task's repo.
-                string taskRepoAnchor = repoRootUsable ? repoRoot : taskWorktreePath;
-                if (!Services.LaunchCommandBuilder.IsWithinRepo(explicitTargetDir, taskRepoAnchor))
-                {
-                    _debugLogService?.Info("ResolveSpawnDir",
-                        $"'{terminalName}' has active-task worktree '{taskWorktreePath}' but explicit target '{explicitTargetDir}' is outside its repo — honoring explicit target (task f1f74a8f)");
-                    taskWorktreePath = null;
-                    return fallbackDir;
-                }
+                _debugLogService?.Info("ResolveSpawnDir",
+                    $"'{terminalName}' has active-task worktree '{worktree}' but explicit target '{explicitTargetDir}' is outside its repo — honoring explicit target (tasks f1f74a8f, 28d71d14)");
+                taskWorktreePath = null;
+                return fallbackDir;
             }
-
-            if (repoRootUsable)
-                return repoRoot;
-            return taskWorktreePath;
+            taskWorktreePath = decision.TaskWorktreePath;
+            return decision.TaskWorktreePath == null ? fallbackDir : decision.Dir;
         }
 
         /// <summary>
@@ -4446,9 +4453,14 @@ namespace MultiTerminal
                 // folder, often a worktree, because Claude finds a session only from the directory it
                 // ran in. ResolveSpawnDir would move it to the repo root ("No conversation found"), and
                 // its task-worktree cd could move it again, so neither applies.
+                //
+                // A folder the CALLER named (a spawn's working folder) is an explicit target (ticket
+                // 28d71d14): the name's active task may belong to an older agent of the same name in
+                // another repo, and must not move this launch there. A launch with no folder still
+                // follows the task.
                 string taskWorktreePath = null;
                 if (!pinWorkingDirectory)
-                    dir = ResolveSpawnDir(terminalName, dir, out taskWorktreePath);
+                    dir = ResolveSpawnDir(terminalName, dir, out taskWorktreePath, explicitTargetDir: workingDirectory);
 
                 _debugLogService?.Trace("AddNewTerminal", $"Starting terminal...");
                 _debugLogService?.Trace("AddNewTerminal", $"dir: '{dir}'");
