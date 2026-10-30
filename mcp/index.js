@@ -151,10 +151,13 @@ async function browserTabTerminal(args) {
 // GH #18: the self-scoped read tools passed an omitted name straight into seg(), which threw "apiCall path
 // segment is required (got undefined)". The rule is chooseSelfIdentity (in the sender-identity block); this
 // throws its refusal so the tool reports it.
-async function selfIdentityArg(args, argName) {
+// allowSelf: false (get_inbox) never defaults: an inbox is addressed to the Owner, so a self default would
+// silently show an empty one. It still goes through chooseSelfIdentity for the one clear error.
+async function selfIdentityArg(args, argName, { allowSelf = true } = {}) {
   const given = args?.[argName];
   const hasGiven = given !== undefined && given !== null && given !== "";
-  const choice = chooseSelfIdentity(argName, given, hasGiven ? null : await resolveSenderIdentity());
+  const resolved = hasGiven || !allowSelf ? null : await resolveSenderIdentity();
+  const choice = chooseSelfIdentity(argName, given, resolved, { allowSelf });
   if (choice.error) throw new Error(choice.error);
   return choice.name;
 }
@@ -915,7 +918,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             terminalId: {
               type: "string",
-              description: "Your terminal ID or name. Omit to use your own name (the terminal this session runs in); if MultiTerminal cannot confirm it, the call fails rather than guess. Reading drains the queue, so pass another terminal's id only on purpose.",
+              description: "Your terminal ID or name. Omit to use your own name (the terminal this session runs in); if MultiTerminal cannot confirm it, the call fails rather than guess. Reading drains the queue, so pass another terminal's id only on purpose. A Task-tool subagent shares its parent's name, so it drains the parent's queue.",
             },
           },
         },
@@ -1308,7 +1311,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             userId: {
               type: "string",
-              description: "User ID to get inbox for (e.g., the owner's first name). Omit to use your own name (the terminal this session runs in); if MultiTerminal cannot confirm it, the call fails rather than guess.",
+              description: "User ID to get inbox for (e.g., the owner's first name)",
             },
             unreadOnly: {
               type: "boolean",
@@ -1321,6 +1324,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               default: 50,
             },
           },
+          required: ["userId"],
         },
       },
       {
@@ -4327,7 +4331,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "get_inbox": {
         const unreadOnly = args.unreadOnly || false;
         const limit = args.limit || 50;
-        const result = await apiCall(`/api/tasks/inbox/${seg(await selfIdentityArg(args, "userId"))}?unreadOnly=${encodeURIComponent(unreadOnly)}&limit=${encodeURIComponent(limit)}`);
+        const result = await apiCall(`/api/tasks/inbox/${seg(await selfIdentityArg(args, "userId", { allowSelf: false }))}?unreadOnly=${encodeURIComponent(unreadOnly)}&limit=${encodeURIComponent(limit)}`);
         return {
           content: [{ type: "text", text: formatInbox(result) }],
         };
@@ -6290,9 +6294,11 @@ function chooseBrowserTabTerminal(given, resolved) {
  * chooseBrowserTabTerminal: a given value is used as given; without one, ONLY the authoritative live
  * identity, never MULTITERMINAL_NAME or the claimed name. A stale default would read another terminal's
  * data, and get_messages DRAINS the queue it reads, so a wrong guess loses that terminal's messages.
+ * allowSelf: false is for an argument with no self default (get_inbox's userId, addressed to the Owner).
  */
-function chooseSelfIdentity(argName, given, resolved) {
+function chooseSelfIdentity(argName, given, resolved, { allowSelf = true } = {}) {
   if (given !== undefined && given !== null && given !== "") return { name: given };
+  if (!allowSelf) return { error: `${argName} is required: this tool has no default for it (an inbox is addressed to its recipient, usually the Owner's first name)` };
   if (resolved && resolved.authoritative && resolved.name) return { name: resolved.name };
   return { error: `${argName} is required: MultiTerminal could not confirm which terminal this session is, so your name is not guessed` };
 }

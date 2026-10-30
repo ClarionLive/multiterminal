@@ -362,3 +362,11 @@ test("self identity: no live row means no default, even with MULTITERMINAL_NAME 
   assert.equal(resolved.name, "OldName", "precondition: the sender default would have used the env name");
   assert.ok(chooseSelfIdentity("terminalId", undefined, resolved).error);
 });
+
+test("self identity: allowSelf false (get_inbox) never defaults, even to an authoritative live name", () => {
+  // The inbox is addressed to the Owner; a self default would show an empty inbox and look like success.
+  const r = chooseSelfIdentity("userId", undefined, { name: "Alice", authoritative: true }, { allowSelf: false });
+  assert.ok(r.error && r.error.startsWith("userId is required:"), JSON.stringify(r));
+  assert.equal(r.name, undefined);
+  assert.deepEqual(chooseSelfIdentity("userId", "John", null, { allowSelf: false }), { name: "John" });
+});
