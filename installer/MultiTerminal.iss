@@ -56,6 +56,16 @@ SolidCompression=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
+; Refuse to install (or uninstall) while MultiTerminal runs: MT holds this mutex for its whole process
+; life (SingleInstanceGuard.MutexName; case-sensitive, keep the two in step). Besides never copying over
+; a running MT's files, this keeps setup's plugin copy into the live marketplace root ([Files], plugin
+; entry) from racing MT's Update plugin action, which swaps that root under its own per-root lock that
+; setup does not take (task 4dc459e4). Setup checks at startup and shows "close all instances, then OK or
+; Cancel" until MT exits; /SILENT still shows that box, /SUPPRESSMSGBOXES answers Cancel and setup exits
+; without installing. Gap: the mutex is Local\, so an MT running in ANOTHER Windows session (another
+; user, RDP) is not seen, and that MT's plugin update lock is not taken either. No Global\ form is
+; listed because MT never creates one.
+AppMutex=Local\MultiTerminal.SingleInstance
 UsedUserAreasWarning=no
 WizardStyle=modern
 SetupIconFile=..\Assets\MultiTerminal.ico
