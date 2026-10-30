@@ -54,6 +54,18 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void A_repo_root_that_does_not_contain_the_worktree_is_not_trusted()
+        {
+            // Two lookups by name disagreed: the worktree is MultiTerminal's, the root ClarionClone's.
+            var d = SpawnDirRule.Decide(ClarionClone, requestedExplicitly: true, MtWorktree, ClarionClone, AllExist);
+            Assert.True(d.TaskInAnotherRepo);
+            Assert.Null(d.TaskWorktreePath);
+
+            var unnamed = SpawnDirRule.Decide(ClarionClone, requestedExplicitly: false, MtWorktree, ClarionClone, AllExist);
+            Assert.Equal(MtWorktree, unnamed.Dir);   // never the mismatched root
+        }
+
+        [Fact]
         public void Without_a_usable_repo_root_the_worktree_is_the_anchor_and_the_start_folder()
         {
             var outside = SpawnDirRule.Decide(ClarionClone, requestedExplicitly: true, MtWorktree, Mt, _ => false);

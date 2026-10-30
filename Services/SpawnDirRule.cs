@@ -43,7 +43,11 @@ namespace MultiTerminal.Services
             if (string.IsNullOrEmpty(taskWorktreePath))
                 return new Decision(requestedDir, null, false);
 
-            bool repoRootUsable = !string.IsNullOrEmpty(taskRepoRoot) && directoryExists(taskRepoRoot);
+            // The worktree and the root come from two lookups by name, so they can disagree if the name's
+            // task changed in between (Codex, 28d71d14). A root that does not contain the worktree is not
+            // that worktree's repo: the worktree itself is then the anchor and the start folder.
+            bool repoRootUsable = !string.IsNullOrEmpty(taskRepoRoot) && directoryExists(taskRepoRoot)
+                && LaunchCommandBuilder.IsWithinRepo(taskWorktreePath, taskRepoRoot);
 
             if (requestedExplicitly)
             {
