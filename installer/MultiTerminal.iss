@@ -266,6 +266,11 @@ Source: "{#DocsDir}\*"; DestDir: "{app}\docs\html"; Components: docs; Flags: ign
 ; ============================================================
 ; Excludes .git: the staged copy has none; this keeps a bare ISCC run from shipping the
 ; build machine's repository too (task 4dc459e4).
+; Known gaps on an upgrade (Owner decision, task 4dc459e4): Inno never deletes, so a .git
+; left by 3.0.0 and any file a newer plugin commit dropped both survive in the installed
+; folder. Setup does not remove them: without git it cannot tell a developer's clone from a
+; leftover, and losing unpushed work is worse. MT's "Update plugin" action, which swaps the
+; whole folder, is the clean path.
 Source: "{#PluginMarketplaceDir}\*"; DestDir: "{code:GetPluginDir}"; Excludes: ".git"; Components: claude\plugin; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; ============================================================
