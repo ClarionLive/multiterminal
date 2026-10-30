@@ -90,7 +90,7 @@ namespace MultiTerminal.Tests
             failure?.Throw();
         }
 
-        private static void WithHost(bool independent, Action<Form, DockPanel, IndependentFloatWindowFactory?> body, Func<Form, Keys, bool>? shortcuts = null, Func<FloatWindow, bool>? close = null)
+        private static void WithHost(bool independent, Action<Form, DockPanel, IndependentFloatWindowFactory?> body, Func<Form, Control?, Keys, bool>? shortcuts = null, Func<FloatWindow, bool>? close = null)
         {
             RunOnSta(() =>
             {
@@ -237,12 +237,133 @@ namespace MultiTerminal.Tests
                     Assert.Equal(Keys.Control | Keys.Shift | Keys.H, seen);
                     Assert.Same(fw, from);
                 },
-                shortcuts: (window, k) =>
+                shortcuts: (window, origin, k) =>
                 {
                     from = window;
                     seen = k;
                     return k == (Keys.Control | Keys.Shift | Keys.H);
                 });
+        }
+
+        /// <summary>
+        /// Live check 3: Ctrl+Shift+H in a floating terminal did nothing; the likely cause (unconfirmed
+        /// until a live retest) is the library's active content staying on a pane elsewhere while focus
+        /// is inside WebView2. The key is now resolved from the control it was addressed to. This fact
+        /// SIMULATES the stale state with <c>Activate()</c> on the docked pane and addresses the key to a
+        /// plain child control of the floated one, through the window's real ProcessCmdKey: it pins that
+        /// the addressed control wins over the active content, not what WebView2 puts in the message.
+        /// </summary>
+        [Fact]
+        public void A_shortcut_acts_on_the_pane_it_was_pressed_in_even_when_the_library_reports_another_pane_active()
+        {
+            Pane? target = null;
+            DockPanel? dock = null;
+            WithHost(
+                true,
+                (form, panel, _) =>
+                {
+                    dock = panel;
+                    var docked = new Pane();
+                    docked.Show(panel, DockState.Document);
+                    var floated = new Pane();
+                    floated.Show(panel, FloatBounds);
+                    var fw = floated.Pane!.FloatWindow!;
+                    docked.Activate();
+                    Application.DoEvents();
+                    Assert.Same(docked, panel.ActiveContent); // the simulated stale state
+
+                    var method = typeof(IndependentFloatWindow).GetMethod("ProcessCmdKey", BindingFlags.Instance | BindingFlags.NonPublic);
+                    var msg = Message.Create(floated.Child.Handle, 0x0100, IntPtr.Zero, IntPtr.Zero);
+                    object[] args = { msg, Keys.Control | Keys.Shift | Keys.H };
+                    Assert.True((bool)method!.Invoke(fw, args)!);
+
+                    Assert.Same(floated, target);
+                },
+                shortcuts: (window, origin, k) =>
+                {
+                    target = GridLayoutManager.ContentForKey<Pane>(dock!, window, origin);
+                    return true;
+                });
+        }
+
+        /// <summary>
+        /// The control a key names is trusted only inside the window it was pressed in: a key reported
+        /// by a floating window but addressed to a control in a DOCKED pane never acts on that pane.
+        /// </summary>
+        [Fact]
+        public void A_shortcut_never_acts_on_a_pane_in_another_window_whatever_control_the_key_names()
+        {
+            WithHost(true, (form, panel, _) =>
+            {
+                var docked = new Pane();
+                docked.Show(panel, DockState.Document);
+                var floated = new Pane();
+                floated.Show(panel, FloatBounds);
+                var fw = floated.Pane!.FloatWindow!;
+                docked.Activate();
+                Application.DoEvents();
+
+                Assert.Null(GridLayoutManager.ContentForKey<Pane>(panel, fw, docked.Child));
+                Assert.Same(docked, GridLayoutManager.ContentForKey<Pane>(panel, form, docked.Child));
+                Assert.Same(docked, GridLayoutManager.ContentForKey<Pane>(panel, form, floated.Child));
+            });
+        }
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetSystemMenu(IntPtr hWnd, [MarshalAs(UnmanagedType.Bool)] bool bRevert);
+
+        [DllImport("user32.dll")]
+        private static extern int GetMenuItemCount(IntPtr hMenu);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetMenuItemID(IntPtr hMenu, int nPos);
+
+        private const int WM_SYSCOMMAND = 0x0112;
+
+        /// <summary>
+        /// Live check (phase 4): a floating window holding one pane has no tab strip (the library draws
+        /// one only for two or more), and its title bar now belongs to Windows, so nothing put the pane
+        /// back. The window's system menu carries a Dock back command; choosing it docks the pane.
+        /// </summary>
+        [Fact]
+        public void The_system_menu_dock_back_command_puts_a_one_pane_window_back_into_the_main_window()
+        {
+            WithHost(true, (form, panel, _) =>
+            {
+                var pane = new Pane();
+                pane.Show(panel, FloatBounds);
+                var fw = pane.Pane!.FloatWindow!;
+
+                IntPtr menu = GetSystemMenu(fw.Handle, false);
+                int count = GetMenuItemCount(menu);
+                Assert.Equal((uint)IndependentFloatWindow.DockBackCommandId, GetMenuItemID(menu, count - 1));
+
+                SendMessage(fw.Handle, WM_SYSCOMMAND, (IntPtr)IndependentFloatWindow.DockBackCommandId, IntPtr.Zero);
+                Application.DoEvents();
+
+                Assert.Equal(DockState.Document, pane.DockState);
+                Assert.Same(panel, pane.DockPanel);
+            });
+        }
+
+        /// <summary>Every pane of the window goes back, not only the one showing.</summary>
+        [Fact]
+        public void Dock_back_returns_every_pane_of_the_window()
+        {
+            WithHost(true, (form, panel, _) =>
+            {
+                var first = new Pane();
+                first.Show(panel, FloatBounds);
+                var second = new Pane();
+                second.Show(first.Pane, null);
+                var fw = first.Pane!.FloatWindow!;
+
+                SendMessage(fw.Handle, WM_SYSCOMMAND, (IntPtr)IndependentFloatWindow.DockBackCommandId, IntPtr.Zero);
+                Application.DoEvents();
+
+                Assert.Equal(DockState.Document, first.DockState);
+                Assert.Equal(DockState.Document, second.DockState);
+            });
         }
 
         /// <summary>

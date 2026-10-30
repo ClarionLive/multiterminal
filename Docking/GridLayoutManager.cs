@@ -99,6 +99,39 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
+        /// The pane a key was pressed in (GH #74): the content of type <typeparamref name="T"/> that holds
+        /// <paramref name="origin"/>, the control the key message was addressed to, when that content
+        /// lives in <paramref name="window"/>. Falls back to <see cref="ActiveContentIn{T}"/> when the
+        /// origin is unknown or not inside such a pane.
+        ///
+        /// <para>Why: Ctrl+Shift+H pressed in a floating terminal did nothing (live check 3). The likely
+        /// cause, not yet confirmed live, is that the library's active content was stale: a click into a
+        /// terminal's WebView2 puts focus in the browser's own window, which the library's focus
+        /// tracking may not see, so no active terminal was found in that window. The main window would
+        /// hide the same gap by falling back to the active document. If the key still does nothing,
+        /// MainForm logs that no terminal pane was found.</para>
+        /// </summary>
+        public static T ContentForKey<T>(DockPanel dockPanel, System.Windows.Forms.Form window, System.Windows.Forms.Control origin)
+            where T : class
+        {
+            if (dockPanel == null) return null;
+
+            for (var control = origin; control != null; control = control.Parent)
+            {
+                if (control is T match && control is IDockContent content
+                    && content.DockHandler.DockPanel == dockPanel && IsIn(content, window))
+                    return match;
+            }
+
+            return ActiveContentIn<T>(dockPanel, window);
+        }
+
+        private static bool IsIn(IDockContent content, System.Windows.Forms.Form window)
+            => window is FloatWindow floatWindow
+                ? content.DockHandler.DockState == DockState.Float && content.DockHandler.Pane?.FloatWindow == floatWindow
+                : content.DockHandler.DockState == DockState.Document;
+
+        /// <summary>
         /// Brings <paramref name="content"/> in front of the Owner (GH #74): restores its floating window
         /// first when that is minimised (maximised again if it was maximised before), then activates it.
         /// <c>Activate</c> alone only moves focus, which on a minimised window leaves the Owner looking

@@ -373,6 +373,29 @@ namespace MultiTerminal.Terminal
             return GetForegroundWindow();
         }
 
+        private const uint MF_STRING = 0x0000;
+        private const uint MF_SEPARATOR = 0x0800;
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetSystemMenu(IntPtr hWnd, [MarshalAs(UnmanagedType.Bool)] bool bRevert);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AppendMenu(IntPtr hMenu, uint uFlags, UIntPtr uIDNewItem, string lpNewItem);
+
+        /// <summary>
+        /// Adds a separator and a command to a window's system menu (GH #74). The command arrives as
+        /// WM_SYSCOMMAND with <paramref name="commandId"/> in wParam; Windows uses wParam's low four bits
+        /// itself, so the id must have them clear and lie below the SC_* range (0xF000).
+        /// </summary>
+        public static bool AppendSystemMenuCommand(IntPtr windowHandle, int commandId, string text)
+        {
+            IntPtr menu = GetSystemMenu(windowHandle, false);
+            if (menu == IntPtr.Zero) return false;
+            return AppendMenu(menu, MF_SEPARATOR, UIntPtr.Zero, null)
+                && AppendMenu(menu, MF_STRING, (UIntPtr)(uint)commandId, text);
+        }
+
         private const int SW_RESTORE = 9;
 
         [DllImport("user32.dll")]

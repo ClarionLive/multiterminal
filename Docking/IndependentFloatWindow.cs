@@ -1,6 +1,7 @@
 #nullable enable
 using System;
 using System.Drawing;
+using System.Linq;
 using System.Windows.Forms;
 using WeifenLuo.WinFormsUI.Docking;
 
@@ -34,8 +35,10 @@ namespace MultiTerminal.Docking
     /// to Windows' default handling; the library would turn them into docking actions. Tests pin the
     /// switch that hands the drag over and the double-click maximise; the drag, snapping and the system menu are live checks.
     /// Dragging a tab still docks the tab and moves it between windows (the library code path is cited
-    /// where <c>AllowEndUserDocking</c> is set), and that is how a pane goes back into the main window:
-    /// a whole window is no longer re-docked by its title bar.</para>
+    /// where <c>AllowEndUserDocking</c> is set). A whole window is no longer re-docked by its title bar,
+    /// and the library shows no tab strip for a window holding one pane, so the window's system menu
+    /// (right-click the title bar, or Alt+Space) carries <see cref="DockBackCommandText"/>, which puts
+    /// every pane of the window back into the main window (<see cref="DockBack"/>).</para>
     ///
     /// <para><b>Known limit:</b> a window maximised when the layout is saved comes back as a normal
     /// window at its maximised size. DockPanelSuite's layout file keeps bounds only (it special-cases
@@ -52,7 +55,15 @@ namespace MultiTerminal.Docking
         private const int WM_CLOSE = 0x0010;
         private const int WM_NCLBUTTONDBLCLK = 0x00A3;
         private const int WM_NCRBUTTONDOWN = 0x00A4;
+        private const int WM_SYSCOMMAND = 0x0112;
         private const int HTCAPTION = 2;
+
+        /// <summary>The system-menu command that docks the window's panes back. Below the
+        /// <c>SC_*</c> range (0xF000) and with its low four bits clear, which WM_SYSCOMMAND uses
+        /// itself.</summary>
+        internal const int DockBackCommandId = 0x0EB0;
+
+        internal const string DockBackCommandText = "Dock back into MultiTerminal";
 
         /// <summary>How far below the window's top edge must also lie on the same screen: the title
         /// bar, generously (a caption is about 23 pixels at 100% scaling and grows with it).</summary>
@@ -61,10 +72,10 @@ namespace MultiTerminal.Docking
         /// <summary>How much of the title bar must be on that screen, side to side, to grab it.</summary>
         internal const int MinimumVisibleTitleWidth = 120;
 
-        private readonly Func<Form, Keys, bool>? _shortcutHandler;
+        private readonly Func<Form, Control?, Keys, bool>? _shortcutHandler;
         private readonly Func<FloatWindow, bool>? _closeHandler;
 
-        public IndependentFloatWindow(DockPanel dockPanel, DockPane pane, Func<Form, Keys, bool>? shortcutHandler, Func<FloatWindow, bool>? closeHandler = null)
+        public IndependentFloatWindow(DockPanel dockPanel, DockPane pane, Func<Form, Control?, Keys, bool>? shortcutHandler, Func<FloatWindow, bool>? closeHandler = null)
             : base(dockPanel, pane)
         {
             _shortcutHandler = shortcutHandler;
@@ -72,7 +83,7 @@ namespace MultiTerminal.Docking
             StylesSetBeforeWindowExisted = BecomeIndependent();
         }
 
-        public IndependentFloatWindow(DockPanel dockPanel, DockPane pane, Rectangle bounds, Func<Form, Keys, bool>? shortcutHandler, Func<FloatWindow, bool>? closeHandler = null)
+        public IndependentFloatWindow(DockPanel dockPanel, DockPane pane, Rectangle bounds, Func<Form, Control?, Keys, bool>? shortcutHandler, Func<FloatWindow, bool>? closeHandler = null)
             : base(dockPanel, pane, bounds)
         {
             _shortcutHandler = shortcutHandler;
@@ -162,6 +173,11 @@ namespace MultiTerminal.Docking
                 DefWndProc(ref m);
                 return;
             }
+            else if (m.Msg == WM_SYSCOMMAND && ((long)m.WParam & 0xFFF0) == DockBackCommandId)
+            {
+                DockBack();
+                return;
+            }
             else if (m.Msg == WM_CLOSE && NestedPanes.Count > 0 && _closeHandler != null && _closeHandler(this))
             {
                 // The close button (phase 3). The library would close the window's panes one by one,
@@ -174,15 +190,61 @@ namespace MultiTerminal.Docking
             base.WndProc(ref m);
         }
 
+        /// <summary>Adds <see cref="DockBackCommandText"/> to the system menu. A rebuilt window gets a
+        /// fresh system menu, so this runs for every window handle.</summary>
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            MultiTerminal.Terminal.NativeMethods.AppendSystemMenuCommand(Handle, DockBackCommandId, DockBackCommandText);
+        }
+
+        /// <summary>
+        /// Puts every pane of this window back into the main window: a pane that can be a document
+        /// becomes one (as a tab dropped on the document area does), any other goes to its own
+        /// docked home (<c>ShowHint</c>) when that is a docked position it allows, else stays. The pane
+        /// that was showing is activated afterwards. The library disposes the window once it is empty.
+        /// </summary>
+        internal void DockBack()
+        {
+            var contents = NestedPanes
+                .SelectMany(pane => pane.Contents)
+                .Where(content => content.DockHandler.DockState == DockState.Float)
+                .ToList();
+            if (contents.Count == 0) return;
+
+            var shown = DockPanel?.ActiveContent is IDockContent active && contents.Contains(active)
+                ? active
+                : NestedPanes.FirstOrDefault(pane => pane.ActiveContent != null)?.ActiveContent;
+
+            foreach (var content in contents)
+            {
+                var handler = content.DockHandler;
+                if (handler.IsDockStateValid(DockState.Document))
+                    handler.DockState = DockState.Document;
+                else if (IsDockedState(handler.ShowHint) && handler.IsDockStateValid(handler.ShowHint))
+                    handler.DockState = handler.ShowHint;
+            }
+
+            if (shown != null && shown.DockHandler.DockState != DockState.Float)
+                shown.DockHandler.Activate();
+        }
+
+        private static bool IsDockedState(DockState state)
+            => state == DockState.DockLeft || state == DockState.DockRight
+               || state == DockState.DockTop || state == DockState.DockBottom;
+
         /// <summary>
         /// Keyboard shortcuts the main window handles (Ctrl+Shift+H, ...). Keys reach the top-level
         /// form's <c>ProcessCmdKey</c>, which for a pane in this window is this window, so they are
-        /// handed over together with this window: a shortcut must act on a pane IN this window, never
-        /// on whatever the main window has active.
+        /// handed over together with this window and the control the key was addressed to: a shortcut
+        /// must act on a pane IN this window, never on whatever the main window has active. For a
+        /// terminal the key comes from its WebView2, whose accelerator handling addresses the message to
+        /// the WebView2 control; <see cref="Control.FromChildHandle"/> also finds the control for a
+        /// native child window inside it.
         /// </summary>
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
-            if (_shortcutHandler != null && _shortcutHandler(this, keyData))
+            if (_shortcutHandler != null && _shortcutHandler(this, Control.FromChildHandle(msg.HWnd), keyData))
                 return true;
             return base.ProcessCmdKey(ref msg, keyData);
         }
@@ -263,14 +325,15 @@ namespace MultiTerminal.Docking
     /// </summary>
     public sealed class IndependentFloatWindowFactory : DockPanelExtender.IFloatWindowFactory
     {
-        private readonly Func<Form, Keys, bool>? _shortcutHandler;
+        private readonly Func<Form, Control?, Keys, bool>? _shortcutHandler;
         private readonly Func<FloatWindow, bool>? _closeHandler;
 
         /// <param name="shortcutHandler">The main window's shortcut handler, given the window the key
-        /// was pressed in; true when it handled the key.</param>
+        /// was pressed in and the control the key was addressed to (null when unknown); true when it
+        /// handled the key.</param>
         /// <param name="closeHandler">Closes a floating window's panes when its close button is used;
         /// true when it handled the close, false to leave it to the library.</param>
-        public IndependentFloatWindowFactory(Func<Form, Keys, bool>? shortcutHandler, Func<FloatWindow, bool>? closeHandler = null)
+        public IndependentFloatWindowFactory(Func<Form, Control?, Keys, bool>? shortcutHandler, Func<FloatWindow, bool>? closeHandler = null)
         {
             _shortcutHandler = shortcutHandler;
             _closeHandler = closeHandler;
