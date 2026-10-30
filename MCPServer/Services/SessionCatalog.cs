@@ -47,8 +47,13 @@ namespace MultiTerminal.MCPServer.Services
         // One line, at most 160 chars; null when nothing usable was found.
         public string Summary { get; set; }
 
-        // e.g. "5d94ac91" when Cwd is under <projectRoot>\.claude\worktrees\<id>, else null.
+        // e.g. "5d94ac91" when Cwd is under <projectRoot>\.claude\worktrees\<id> (or the repo root's), else null.
         public string WorktreeId { get; set; }
+
+        // The git repo root whose .claude\worktrees the cwd may be under, when the project folder is a
+        // subfolder of its repo (ticket 3fd3c9a7), else null. Derived from the project root, never from
+        // the transcript; pass it back to SessionCatalog.ValidateResumeCwd when re-checking the cwd.
+        public string WorktreeBase { get; set; }
 
         public SessionCatalogStatus Status { get; set; }
 
@@ -194,6 +199,22 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         internal Func<string, bool> DirectoryExists { get; set; } = Directory.Exists;
 
+        /// <summary>
+        /// Test seam: the git repo root of a project folder (<see cref="FindRepoRoot"/>). Ticket 3fd3c9a7:
+        /// a project registered at a subfolder of its repo (ClarionAssistant at
+        /// <c>H:\DevLaptop\ClarionAssistant\ClarionAssistant</c>, repo at <c>H:\DevLaptop\ClarionAssistant</c>)
+        /// has its worktrees at the REPO root, so a session that ended in one is filed under
+        /// <c>&lt;encoded repo root&gt;--claude-worktrees-&lt;id&gt;</c>, which the project root's own prefix never matches.
+        /// </summary>
+        internal Func<string, string> RepoRootOf { get; set; } = FindRepoRoot;
+
+        /// <summary>
+        /// Why the last <see cref="TryGetEntry"/> call returned null, as a phrase that completes "its
+        /// session cannot be resumed: ...", or null after a hit (ticket 3fd3c9a7: the skip message used to
+        /// list every possible reason at once).
+        /// </summary>
+        public string LastMissReason { get; private set; }
+
         /// <summary>Test seam: how many transcripts the last <see cref="List"/> call opened.</summary>
         internal int TranscriptsReadLastList { get; private set; }
 
@@ -261,9 +282,10 @@ namespace MultiTerminal.MCPServer.Services
                 return results;
 
             var live = ToLiveSet(liveSessionIds);
+            var worktreeBase = WorktreeBaseFor(root);
 
             var candidates = new List<(string Path, string FolderName, DateTime LastWriteUtc)>();
-            foreach (var folder in GetCandidateFolders(root))
+            foreach (var folder in GetCandidateFolders(root, worktreeBase))
             {
                 IEnumerable<string> files;
                 try
@@ -302,7 +324,7 @@ namespace MultiTerminal.MCPServer.Services
                     continue;
 
                 TranscriptsReadLastList++;
-                var entry = TryBuildEntry(root, candidate.Path, candidate.FolderName, candidate.LastWriteUtc, utcNow, meter);
+                var entry = TryBuildEntry(root, worktreeBase, candidate.Path, candidate.FolderName, candidate.LastWriteUtc, utcNow, meter, out _);
                 BytesReadLastList = meter.Used;
                 if (entry != null)
                     results.Add(entry);
@@ -328,18 +350,20 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public SessionCatalogEntry TryGetEntry(string projectRoot, string sessionId, ISet<string> liveSessionIds, DateTime utcNow)
         {
+            LastMissReason = null;
             if (!Guid.TryParseExact(sessionId, "D", out _))
-                return null;
+                return Miss("no session id was recorded for it");
             if (!TryGetRoot(projectRoot, out var root))
-                return null;
+                return Miss("the project's folder is not a local drive folder");
             var live = ToLiveSet(liveSessionIds);
             if (live.Contains(sessionId))
-                return null;
+                return Miss("it is already open in this MultiTerminal");
 
+            var worktreeBase = WorktreeBaseFor(root);
             string newestPath = null;
             string newestFolder = null;
             var newestWriteUtc = DateTime.MinValue;
-            foreach (var folder in GetCandidateFolders(root))
+            foreach (var folder in GetCandidateFolders(root, worktreeBase))
             {
                 List<string> files;
                 try
@@ -369,8 +393,63 @@ namespace MultiTerminal.MCPServer.Services
             }
 
             if (newestPath == null)
+                return Miss("its transcript was not found in this project's session folders (it may have run in another project's folder)");
+            var entry = TryBuildEntry(root, worktreeBase, newestPath, newestFolder, newestWriteUtc, utcNow, new ReadMeter(ReadByteBudget), out var why);
+            return entry ?? Miss(why ?? "its transcript could not be read");
+        }
+
+        private SessionCatalogEntry Miss(string reason)
+        {
+            LastMissReason = reason;
+            return null;
+        }
+
+        /// <summary>
+        /// The git repo root of <paramref name="projectRoot"/>: the nearest folder at or above it holding a
+        /// <c>.git</c> (directory or gitlink file), canonical, or null. Filesystem calls on the PROJECT root
+        /// only, which comes from the project database, never from a transcript.
+        /// </summary>
+        public static string FindRepoRoot(string projectRoot)
+        {
+            if (!TryCanonicalLocalPath(projectRoot, out var cursor))
                 return null;
-            return TryBuildEntry(root, newestPath, newestFolder, newestWriteUtc, utcNow, new ReadMeter(ReadByteBudget));
+            try
+            {
+                for (var i = 0; i < 64 && !string.IsNullOrEmpty(cursor); i++)
+                {
+                    var git = Path.Combine(cursor, ".git");
+                    if (Directory.Exists(git) || File.Exists(git))
+                        return TrimDir(cursor);
+                    cursor = Path.GetDirectoryName(cursor);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[SessionCatalog] cannot find the repo root of '{projectRoot}': {ex.Message}");
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// The repo root whose <c>.claude\worktrees</c> also holds this project's worktrees, when it is a
+        /// strict ancestor of <paramref name="root"/>; else null (the project root is the repo root, or
+        /// no repo). A repo root that is a drive root is not used.
+        /// </summary>
+        private string WorktreeBaseFor(string root)
+        {
+            string repoRoot;
+            try
+            {
+                repoRoot = RepoRootOf?.Invoke(root);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[SessionCatalog] repo root lookup for '{root}' failed: {ex.Message}");
+                return null;
+            }
+            if (!TryCanonicalLocalPath(repoRoot, out var canonical) || canonical.EndsWith(":\\", StringComparison.Ordinal))
+                return null;
+            return root.StartsWith(canonical + "\\", StringComparison.OrdinalIgnoreCase) ? canonical : null;
         }
 
         /// <summary>
@@ -418,36 +497,41 @@ namespace MultiTerminal.MCPServer.Services
             }
         }
 
-        private SessionCatalogEntry TryBuildEntry(string root, string path, string folderName, DateTime lastWriteUtc, DateTime utcNow, ReadMeter meter)
+        private SessionCatalogEntry TryBuildEntry(string root, string worktreeBase, string path, string folderName, DateTime lastWriteUtc, DateTime utcNow, ReadMeter meter, out string missReason)
         {
+            missReason = null;
             try
             {
-                return BuildEntry(root, path, folderName, lastWriteUtc, utcNow, meter);
+                return BuildEntry(root, worktreeBase, path, folderName, lastWriteUtc, utcNow, meter, out missReason);
             }
             catch (Exception ex)
             {
                 // Belt and braces: one bad transcript must never take down the whole list.
                 Debug.WriteLine($"[SessionCatalog] skipped {path}: {ex.Message}");
+                missReason = "its transcript could not be read";
                 return null;
             }
         }
 
-        private IEnumerable<string> GetCandidateFolders(string root)
+        private IEnumerable<string> GetCandidateFolders(string root, string worktreeBase)
         {
             if (!Directory.Exists(_claudeProjectsRoot))
                 return Array.Empty<string>();
 
-            var worktreesPrefix = root + @"\.claude\worktrees\";
             var exactNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
                 EncodeProjectPath(root),
                 SessionDiscovery.GetProjectFolderName(root),
             };
-            var prefixes = new[]
+            // Each prefix with the base whose .claude\worktrees it names: the project root always, and the
+            // repo root when the project is a subfolder of its repo (ticket 3fd3c9a7).
+            var prefixes = new List<(string Prefix, string Base)>();
+            foreach (var b in worktreeBase == null ? new[] { root } : new[] { root, worktreeBase })
             {
-                EncodeProjectPath(worktreesPrefix),
-                SessionDiscovery.GetProjectFolderName(worktreesPrefix),
-            };
+                var worktreesPrefix = b + @"\.claude\worktrees\";
+                prefixes.Add((EncodeProjectPath(worktreesPrefix), b));
+                prefixes.Add((SessionDiscovery.GetProjectFolderName(worktreesPrefix), b));
+            }
 
             try
             {
@@ -457,8 +541,8 @@ namespace MultiTerminal.MCPServer.Services
                         var name = Path.GetFileName(d);
                         if (exactNames.Contains(name))
                             return true;
-                        var prefix = prefixes.FirstOrDefault(p => name.Length > p.Length && name.StartsWith(p, StringComparison.OrdinalIgnoreCase));
-                        return prefix != null && WorktreeMayExist(root, name.Substring(prefix.Length));
+                        var match = prefixes.FirstOrDefault(p => name.Length > p.Prefix.Length && name.StartsWith(p.Prefix, StringComparison.OrdinalIgnoreCase));
+                        return match.Prefix != null && WorktreeMayExist(match.Base, name.Substring(match.Prefix.Length));
                     })
                     .ToList();
             }
@@ -492,17 +576,29 @@ namespace MultiTerminal.MCPServer.Services
             }
         }
 
-        private SessionCatalogEntry BuildEntry(string root, string path, string folderName, DateTime lastWriteUtc, DateTime utcNow, ReadMeter meter)
+        private SessionCatalogEntry BuildEntry(string root, string worktreeBase, string path, string folderName, DateTime lastWriteUtc, DateTime utcNow, ReadMeter meter, out string missReason)
         {
+            missReason = null;
             var scan = TranscriptScan.Read(path, meter);
             if (scan == null || !scan.HasTurns)
+            {
+                missReason = "its transcript holds no conversation";
                 return null; // empty or aborted session: nothing to resume
+            }
 
             // ResolveCwd returns only a path that passed ValidateResumeCwd, so the existence check below
             // is the first filesystem call any transcript-supplied path reaches (pipeline Run 1).
-            var cwd = ResolveCwd(root, folderName, scan);
-            if (string.IsNullOrEmpty(cwd) || !DirectoryExists(cwd))
+            var cwd = ResolveCwd(root, worktreeBase, folderName, scan);
+            if (string.IsNullOrEmpty(cwd))
+            {
+                missReason = "it ran in a folder that is not this project's folder or one of its worktrees";
+                return null;
+            }
+            if (!DirectoryExists(cwd))
+            {
+                missReason = $"the folder it ran in no longer exists ({ToDisplayText(cwd)})";
                 return null; // e.g. a deleted worktree: `claude --resume` could not start there
+            }
 
             // Only now, for an entry that will be listed, the optional (budgeted) reads.
             var isHelper = scan.SpawnedBy != null || scan.IsSpawnedAgent;
@@ -528,7 +624,8 @@ namespace MultiTerminal.MCPServer.Services
                 Summary = (isHelper ? scan.SpawnJobSummary : null) ??
                           ToSummaryLine(CleanLookup(_summaryLookup, sessionId)) ??
                           ToSummaryLine(scan.FirstPrompt),
-                WorktreeId = GetWorktreeId(root, cwd),
+                WorktreeId = GetWorktreeId(root, cwd) ?? (worktreeBase == null ? null : GetWorktreeId(worktreeBase, cwd)),
+                WorktreeBase = worktreeBase,
                 Status = utcNow - lastWriteUtc < RecentWriteWindow
                     ? SessionCatalogStatus.PossiblyOpenElsewhere
                     : SessionCatalogStatus.Available,
@@ -554,7 +651,7 @@ namespace MultiTerminal.MCPServer.Services
         /// the encoding is lossy, and a derived path would also mask a reader that never looked at the
         /// tail.</para>
         /// </summary>
-        private static string ResolveCwd(string root, string folderName, TranscriptScan scan)
+        private static string ResolveCwd(string root, string worktreeBase, string folderName, TranscriptScan scan)
         {
             bool EncodesToFolder(string dir) =>
                 string.Equals(EncodeProjectPath(dir), folderName, StringComparison.OrdinalIgnoreCase) ||
@@ -564,7 +661,7 @@ namespace MultiTerminal.MCPServer.Services
             {
                 for (var i = cwds.Count - 1; i >= 0; i--)
                 {
-                    var valid = ValidateResumeCwd(root, cwds[i]);
+                    var valid = ValidateResumeCwd(root, cwds[i], worktreeBase);
                     if (valid != null && EncodesToFolder(valid))
                         return valid;
                 }
@@ -595,19 +692,36 @@ namespace MultiTerminal.MCPServer.Services
         /// point anywhere. That is the local-trust model: whoever can create a junction in the project
         /// can already run code as this user. Chasing one would mean filesystem calls on an unvalidated
         /// target, which is what this method exists to prevent.</para>
+        /// <para>Ticket 3fd3c9a7: <paramref name="repoRoot"/> (the entry's <see cref="SessionCatalogEntry.WorktreeBase"/>)
+        /// also admits <c>&lt;repoRoot&gt;\.claude\worktrees\&lt;one segment&gt;</c>, for a project registered at
+        /// a subfolder of its repo, whose worktrees live at the repo root. Used only when it is a local
+        /// drive path that is a strict ancestor of the project root and not a drive root; anything else
+        /// is ignored, never widened.</para>
         /// </summary>
-        public static string ValidateResumeCwd(string projectRoot, string cwd)
+        public static string ValidateResumeCwd(string projectRoot, string cwd, string repoRoot = null)
         {
             if (!TryCanonicalLocalPath(projectRoot, out var root) || !TryCanonicalLocalPath(cwd, out var dir))
                 return null;
             if (string.Equals(dir, root, StringComparison.OrdinalIgnoreCase))
                 return dir;
 
-            var worktrees = root.TrimEnd('\\') + @"\.claude\worktrees\";
+            if (IsUnderWorktrees(root, dir))
+                return dir;
+            if (TryCanonicalLocalPath(repoRoot, out var repo)
+                && !repo.EndsWith(":\\", StringComparison.Ordinal)
+                && root.StartsWith(repo + "\\", StringComparison.OrdinalIgnoreCase)
+                && IsUnderWorktrees(repo, dir))
+                return dir;
+            return null;
+        }
+
+        // dir is at or below <baseDir>\.claude\worktrees\<one non-empty segment>.
+        private static bool IsUnderWorktrees(string baseDir, string dir)
+        {
+            var worktrees = baseDir.TrimEnd('\\') + @"\.claude\worktrees\";
             if (!dir.StartsWith(worktrees, StringComparison.OrdinalIgnoreCase))
-                return null;
-            var segment = dir.Substring(worktrees.Length).Split('\\')[0];
-            return segment.Length == 0 ? null : dir;
+                return false;
+            return dir.Substring(worktrees.Length).Split('\\')[0].Length > 0;
         }
 
         /// <summary>

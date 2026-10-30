@@ -4760,7 +4760,7 @@ namespace MultiTerminal
                 string resumeCwd = null;
                 if (resumeSession != null)
                 {
-                    resumeCwd = SessionCatalog.ValidateResumeCwd(GetLaunchableProjectRoot(project), resumeSession.Entry.Cwd);
+                    resumeCwd = SessionCatalog.ValidateResumeCwd(GetLaunchableProjectRoot(project), resumeSession.Entry.Cwd, resumeSession.Entry.WorktreeBase);
                     if (resumeCwd == null)
                     {
                         _debugLogService?.Warning("LaunchSession", $"Project '{project.Name}': resume of {resumeSession.Entry.SessionId} refused, cwd is not the project root or one of its worktrees");
@@ -5245,7 +5245,8 @@ namespace MultiTerminal
                         helper, entry, live, projectRoot,
                         TryGetTranscriptWriteUtc,
                         Directory.Exists,
-                        _paneLaunchRecorder?.GetPriorLaunchState(helper?.SessionId) ?? PriorLaunchState.NoRecord);
+                        _paneLaunchRecorder?.GetPriorLaunchState(helper?.SessionId) ?? PriorLaunchState.NoRecord,
+                        catalog.LastMissReason);
                     if (!check.CanResume)
                     {
                         _debugLogService?.Info("LaunchSession", $"Helper resume: '{helperName}' ({helper?.SessionId}) skipped: {check.SkipReason}");
@@ -5554,7 +5555,8 @@ namespace MultiTerminal
                     ToOpenHelper(pm.Pane), entry, live, projectRoot,
                     TryGetTranscriptWriteUtc,
                     Directory.Exists,
-                    _paneLaunchRecorder?.GetPriorLaunchState(pm.Pane.SessionId) ?? PriorLaunchState.NoRecord);
+                    _paneLaunchRecorder?.GetPriorLaunchState(pm.Pane.SessionId) ?? PriorLaunchState.NoRecord,
+                    catalog.LastMissReason);
                 if (!check.CanResume)
                 {
                     _debugLogService?.Info("StartupRestore", $"'{name}' ({pm.Pane.SessionId}) skipped: {check.SkipReason}");

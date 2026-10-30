@@ -68,7 +68,8 @@ namespace MultiTerminal.Services
         /// <see cref="PriorLaunchState.OpenInCurrentRun"/> skips it as already open, and
         /// <see cref="PriorLaunchState.OpenElsewhere"/> (a previous run left it open and that MT is not
         /// provably gone) skips it as "may still be open elsewhere"; <see cref="LaunchSessionChoiceModel.RecheckResume"/> passes; and its cwd validates
-        /// against the project root and still exists.
+        /// against the project root (or the entry's repo-root worktree base, ticket 3fd3c9a7) and still exists.
+        /// <paramref name="catalogMissReason"/> is <see cref="SessionCatalog.LastMissReason"/>, shown when the catalog refused it.
         /// </summary>
         public static HelperResumeCheck Check(
             OpenHelper helper,
@@ -77,14 +78,15 @@ namespace MultiTerminal.Services
             string projectRoot,
             Func<string, DateTime?> transcriptLastWriteUtc,
             Func<string, bool> directoryExists,
-            PriorLaunchState prior = PriorLaunchState.NoRecord)
+            PriorLaunchState prior = PriorLaunchState.NoRecord,
+            string catalogMissReason = null)
         {
             if (helper == null) return HelperResumeCheck.Skip("nothing was recorded for it");
             if (string.IsNullOrWhiteSpace(helper.TerminalName)) return HelperResumeCheck.Skip("it has no recorded name");
             if (!string.IsNullOrEmpty(helper.Kind) && !string.Equals(helper.Kind, "claude", StringComparison.OrdinalIgnoreCase))
                 return HelperResumeCheck.Skip("it is not a Claude session, and only Claude sessions can be resumed");
             if (entry == null)
-                return HelperResumeCheck.Skip("its session cannot be resumed: it is already open, or its folder or transcript is gone");
+                return HelperResumeCheck.Skip("its session cannot be resumed: " + (catalogMissReason ?? "the session catalog did not find it"));
 
             var panes = (livePanes ?? Enumerable.Empty<PaneSessionState>()).ToList();
             var model = new LaunchSessionChoiceModel(new[] { entry }, panes, _ => prior);
@@ -104,7 +106,7 @@ namespace MultiTerminal.Services
             if (recheck != null)
                 return HelperResumeCheck.Skip(recheck.TrimEnd('.'));
 
-            string cwd = SessionCatalog.ValidateResumeCwd(projectRoot, entry.Cwd);
+            string cwd = SessionCatalog.ValidateResumeCwd(projectRoot, entry.Cwd, entry.WorktreeBase);
             if (cwd == null)
                 return HelperResumeCheck.Skip("it ran in a folder that is not this project's folder or one of its worktrees");
             if (directoryExists == null || !directoryExists(cwd))
