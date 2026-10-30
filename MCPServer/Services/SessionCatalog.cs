@@ -656,13 +656,22 @@ namespace MultiTerminal.MCPServer.Services
         /// <c>.claude\worktrees\c8ee0eec\Docking</c>, and resuming from there would not find it.
         ///
         /// <para>Every recorded cwd is untrusted transcript text: only one that passes
-        /// <see cref="ValidateResumeCwd"/> is considered at all. Order: matching tail cwd, then matching
-        /// head cwd. A cwd that does not encode to the folder is NEVER returned (pipeline Run 1): Claude
-        /// would answer "No conversation found" from it. The one fallback is the project root for a
-        /// transcript stored in the root's own folder, because the root's encoding IS that folder's
-        /// name. Otherwise the session is dropped. Deliberately no "decode the folder name" fallback:
-        /// the encoding is lossy, and a derived path would also mask a reader that never looked at the
-        /// tail.</para>
+        /// <see cref="ValidateResumeCwd"/> is considered at all. A cwd that does not encode to the folder
+        /// is NEVER returned (pipeline Run 1): Claude would answer "No conversation found" from it.</para>
+        ///
+        /// <para>Task 056bc6b6: a validated cwd BELOW a worktree (<c>&lt;base&gt;\.claude\worktrees\&lt;id&gt;\tests\X</c>,
+        /// base = the project root or the entry's worktree base) also yields its worktree root, which is
+        /// re-validated and returned only if THAT encodes to the folder. A 46 MB transcript's 64 KB tail
+        /// held only such subfolder cwds, its last exact worktree-root cwd ~79 KB from the end, so it was
+        /// dropped. This derives from a validated cwd's own path; it is NOT the forbidden "decode the
+        /// folder name" fallback (the folder name is only compared against, never parsed).</para>
+        ///
+        /// <para>Order: an exact match anywhere in the tail, then a worktree root derived from the tail,
+        /// then exact from the head, then derived from the head. The tail is the session's latest
+        /// location, so it beats the head in either form; within one region an exact match beats a
+        /// derived one because it needs no inference. Within each pass the newest cwd wins. The one
+        /// fallback is the project root for a transcript stored in the root's own folder, because the
+        /// root's encoding IS that folder's name. Otherwise the session is dropped.</para>
         /// </summary>
         private static string ResolveCwd(string root, string worktreeBase, string folderName, TranscriptScan scan)
         {
@@ -670,19 +679,42 @@ namespace MultiTerminal.MCPServer.Services
                 string.Equals(EncodeProjectPath(dir), folderName, StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(SessionDiscovery.GetProjectFolderName(dir), folderName, StringComparison.OrdinalIgnoreCase);
 
-            string LastMatching(List<string> cwds)
+            // The worktree root a validated cwd lies in, re-validated, if it names the folder.
+            string DerivedWorktreeRoot(string valid)
             {
-                for (var i = cwds.Count - 1; i >= 0; i--)
+                foreach (var b in new[] { root, worktreeBase })
                 {
-                    var valid = ValidateResumeCwd(root, cwds[i], worktreeBase);
-                    if (valid != null && EncodesToFolder(valid))
-                        return valid;
+                    if (!TryCanonicalLocalPath(b, out var baseDir) || !IsUnderWorktrees(baseDir, valid))
+                        continue;
+                    var id = GetWorktreeId(baseDir, valid);
+                    if (id == null)
+                        continue;
+                    var wt = ValidateResumeCwd(root, Path.Combine(baseDir, ".claude", "worktrees", id), worktreeBase);
+                    if (wt != null && !string.Equals(wt, valid, StringComparison.OrdinalIgnoreCase) && EncodesToFolder(wt))
+                        return wt;
                 }
                 return null;
             }
 
-            return LastMatching(scan.TailCwds) ??
-                   LastMatching(scan.HeadCwds) ??
+            string LastMatching(List<string> cwds, bool derive)
+            {
+                for (var i = cwds.Count - 1; i >= 0; i--)
+                {
+                    var valid = ValidateResumeCwd(root, cwds[i], worktreeBase);
+                    if (valid == null)
+                        continue;
+                    if (!derive && EncodesToFolder(valid))
+                        return valid;
+                    if (derive && DerivedWorktreeRoot(valid) is string wt)
+                        return wt;
+                }
+                return null;
+            }
+
+            return LastMatching(scan.TailCwds, derive: false) ??
+                   LastMatching(scan.TailCwds, derive: true) ??
+                   LastMatching(scan.HeadCwds, derive: false) ??
+                   LastMatching(scan.HeadCwds, derive: true) ??
                    (EncodesToFolder(root) ? root : null);
         }
 
