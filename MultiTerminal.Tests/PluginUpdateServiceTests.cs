@@ -255,26 +255,54 @@ namespace MultiTerminal.Tests
 
         // ------------------------------------------------------------------ refuse rules
 
-        [Theory]
-        [InlineData(false, false, 0, false, false)] // git not installed: a leftover .git, update
-        [InlineData(false, true, 5, false, false)]  // not installed: dirty/ahead were never asked
-        [InlineData(true, true, 0, false, true)]    // uncommitted changes: refuse
-        [InlineData(true, true, 0, true, true)]     // dirty refuses even when the fetch failed
-        [InlineData(true, false, 3, false, true)]   // commits not on main: refuse
-        [InlineData(true, false, 3, true, false)]   // fetch failed: ahead unknown, leftover, update
-        [InlineData(true, false, 0, false, false)]  // clean and level with main: update
-        public void A_git_checkout_is_refused_only_with_local_work(bool gitAvailable, bool dirty, int ahead, bool fetchFailed, bool refused)
+        private static PluginUpdateService.GitCommandResult Ok(string output = "") => new PluginUpdateService.GitCommandResult(0, output);
+        private static PluginUpdateService.GitCommandResult Exit(int code) => new PluginUpdateService.GitCommandResult(code, null);
+        private static PluginUpdateService.GitCommandResult TimedOut() => new PluginUpdateService.GitCommandResult(-1, null, TimedOut: true);
+
+        /// <summary>A checkout git fully vouches for: clean, no stash, fetched, level with main.</summary>
+        private static PluginUpdateService.GitProbe CleanProbe() => new PluginUpdateService.GitProbe(true, Ok(), Ok(), Ok(), Ok("0\n"));
+
+        [Fact]
+        public void A_clean_checkout_level_with_main_is_replaced_and_no_git_on_path_is_a_leftover()
         {
-            string reason = PluginUpdateService.GitCheckoutRefuseReason(@"C:\m", gitAvailable, dirty, ahead, fetchFailed);
-            Assert.Equal(refused, reason != null);
-            if (refused) Assert.Contains("Update it with git", reason);
+            Assert.Null(PluginUpdateService.GitCheckoutRefuseReason(@"C:\m", CleanProbe()));
+            Assert.Null(PluginUpdateService.GitCheckoutRefuseReason(@"C:\m", new PluginUpdateService.GitProbe(false)));
+        }
+
+        private static IEnumerable<(string Label, PluginUpdateService.GitProbe Probe, string Expected)> FailingGitProbes()
+        {
+            var clean = CleanProbe();
+            yield return ("status exit", clean with { Status = Exit(128) }, "could not check");
+            yield return ("status timeout", clean with { Status = TimedOut() }, "timed out");
+            yield return ("status not run", clean with { Status = null }, "could not check");
+            yield return ("stash exit", clean with { Stash = Exit(1) }, "could not check");
+            yield return ("fetch exit", clean with { Fetch = Exit(128) }, "could not check");
+            yield return ("fetch timeout", clean with { Fetch = TimedOut() }, "timed out");
+            yield return ("fetch not run", clean with { Fetch = null }, "could not check");
+            yield return ("rev-list exit", clean with { Ahead = Exit(128) }, "could not check");
+            yield return ("rev-list garbage", clean with { Ahead = Ok("not a number") }, "could not check");
+            yield return ("uncommitted", clean with { Status = Ok(" M hooks/x.js\n") }, "uncommitted");
+            yield return ("ignored only", clean with { Status = Ok("!! node_modules/\n") }, "ignored files");
+            yield return ("stash", clean with { Stash = Ok("stash@{0}: WIP on main\n") }, "stashed");
+            yield return ("ahead", clean with { Ahead = Ok("3\n") }, "not on GitHub main");
+        }
+
+        [Fact]
+        public void A_git_checkout_fails_closed_on_any_failed_command_or_local_work()
+        {
+            foreach (var (label, probe, expected) in FailingGitProbes())
+            {
+                string reason = PluginUpdateService.GitCheckoutRefuseReason(@"C:\m", probe);
+                Assert.True(reason != null, label + " was not refused");
+                Assert.True(reason.Contains(expected, StringComparison.Ordinal), label + ": " + reason);
+            }
         }
 
         [Fact]
         public void Git_is_asked_only_when_the_root_has_a_git_folder_or_file()
         {
             int probes = 0;
-            PluginUpdateService.GitProbe Dirty(string root) { probes++; return new PluginUpdateService.GitProbe(true, true, 0, false); }
+            PluginUpdateService.GitProbe Dirty(string root) { probes++; return CleanProbe() with { Status = Ok("?? x\n") }; }
 
             // No .git: not asked, no refusal.
             Assert.Null(PluginUpdateService.RefuseReason(@"C:\m", p => p == @"C:\m", _ => false, _ => true, Dirty));
@@ -283,6 +311,17 @@ namespace MultiTerminal.Tests
             // A worktree's .git FILE counts.
             Assert.NotNull(PluginUpdateService.RefuseReason(@"C:\m", p => p == @"C:\m", p => p == @"C:\m\.git", _ => true, Dirty));
             Assert.Equal(1, probes);
+        }
+
+        [Fact]
+        public void A_root_with_git_goes_to_a_timestamped_previous_that_is_never_deleted()
+        {
+            var now = new DateTimeOffset(2026, 10, 30, 18, 5, 9, TimeSpan.Zero);
+            Assert.Equal((@"C:\m.previous-20261030180509", false), PluginUpdateService.PreviousTarget(@"C:\m", true, true, false, now));
+            // A plain .previous is replaced only when it holds no .git.
+            Assert.Equal((@"C:\m.previous", true), PluginUpdateService.PreviousTarget(@"C:\m", false, true, false, now));
+            Assert.Equal((@"C:\m.previous", false), PluginUpdateService.PreviousTarget(@"C:\m", false, false, false, now));
+            Assert.Equal((@"C:\m.previous-20261030180509", false), PluginUpdateService.PreviousTarget(@"C:\m", false, true, true, now));
         }
 
         [Fact]
@@ -313,7 +352,13 @@ namespace MultiTerminal.Tests
                 if (_failMoves.Contains(++_moves)) throw new IOException($"injected fault on move {_moves}");
                 PluginUpdateService.RealSwapFileSystem.Instance.MoveDirectory(from, to);
             }
+            public void WriteAllText(string path, string text) => PluginUpdateService.RealSwapFileSystem.Instance.WriteAllText(path, text);
+            public void DeleteFile(string path) => PluginUpdateService.RealSwapFileSystem.Instance.DeleteFile(path);
         }
+
+        /// <summary>A swap of a root with no .git: to plain .previous, replacing the one there.</summary>
+        private static PluginUpdateResult Swap(string root, string incoming, IPluginSwapFileSystem fs) =>
+            PluginUpdateService.Swap(root, incoming, fs, root + ".previous", deleteExistingPrevious: true);
 
         private string MakeTree(string path, string marker, bool valid = true)
         {
@@ -335,7 +380,7 @@ namespace MultiTerminal.Tests
             MakeTree(root + ".previous", "older");
             string incoming = MakeTree(Path.Combine(_temp, "mp.incoming"), "new");
 
-            var result = PluginUpdateService.Swap(root, incoming, new FaultyFs());
+            var result = Swap(root, incoming, new FaultyFs());
 
             Assert.True(result.Success, result.Message);
             Assert.Equal("new", Marker(root));
@@ -349,7 +394,7 @@ namespace MultiTerminal.Tests
             string root = MakeTree(Path.Combine(_temp, "mp"), "old");
             string incoming = MakeTree(Path.Combine(_temp, "mp.incoming"), "new");
 
-            var result = PluginUpdateService.Swap(root, incoming, new FaultyFs(2));
+            var result = Swap(root, incoming, new FaultyFs(2));
 
             Assert.False(result.Success);
             // The exact success wording: "could not be put back" also contains "put back".
@@ -364,10 +409,13 @@ namespace MultiTerminal.Tests
             string root = MakeTree(Path.Combine(_temp, "mp"), "old");
             string incoming = MakeTree(Path.Combine(_temp, "mp.incoming"), "new", valid: false);
 
-            var result = PluginUpdateService.Swap(root, incoming, new FaultyFs());
+            var result = Swap(root, incoming, new FaultyFs());
 
             Assert.False(result.Success);
             Assert.Equal("old", Marker(root));
+            // Backed out by a rename, not a delete, so a crash mid-rollback leaves a state the reconcile handles.
+            Assert.Equal("new", Marker(incoming));
+            Assert.False(File.Exists(root + PluginUpdateService.JournalSuffix));
         }
 
         [Fact]
@@ -376,7 +424,7 @@ namespace MultiTerminal.Tests
             string root = MakeTree(Path.Combine(_temp, "mp"), "old");
             string incoming = MakeTree(Path.Combine(_temp, "mp.incoming"), "new");
 
-            var result = PluginUpdateService.Swap(root, incoming, new FaultyFs(1));
+            var result = Swap(root, incoming, new FaultyFs(1));
 
             Assert.False(result.Success);
             Assert.Contains("Nothing was changed", result.Message);
@@ -389,11 +437,181 @@ namespace MultiTerminal.Tests
             string root = MakeTree(Path.Combine(_temp, "mp"), "old");
             string incoming = MakeTree(Path.Combine(_temp, "mp.incoming"), "new");
 
-            var result = PluginUpdateService.Swap(root, incoming, new FaultyFs(2, 3));
+            var result = Swap(root, incoming, new FaultyFs(2, 3));
 
             Assert.False(result.Success);
             Assert.Contains(root + ".previous", result.Message);
             Assert.Equal("old", Marker(root + ".previous"));
+
+            // The next startup finishes the swap from the still-valid .incoming.
+            var decision = PluginUpdateService.ReconcileRoot(root, PluginUpdateService.RealSwapFileSystem.Instance, null);
+            Assert.Equal(PluginFolderRepair.FinishSwap, decision.Action);
+            Assert.Equal("new", Marker(root));
+        }
+
+        [Fact]
+        public void A_swap_of_a_git_root_leaves_an_older_timestamped_previous_alone()
+        {
+            string root = MakeTree(Path.Combine(_temp, "mp"), "old");
+            string kept = MakeTree(root + ".previous-20261029000000", "developer clone");
+            string incoming = MakeTree(Path.Combine(_temp, "mp.incoming"), "new");
+
+            var result = PluginUpdateService.Swap(root, incoming, new FaultyFs(), root + ".previous-20261030000000", deleteExistingPrevious: false);
+
+            Assert.True(result.Success, result.Message);
+            Assert.Equal("developer clone", Marker(kept));
+            Assert.Equal("old", Marker(root + ".previous-20261030000000"));
+        }
+
+        // ------------------------------------------------------------------ reconcile after a crash mid-swap
+
+        private static PluginFolderSnapshot Snap(bool root, bool incoming = false, bool incomingValid = false, bool journal = false,
+            params PluginPreviousFolder[] previous) =>
+            new PluginFolderSnapshot { RootExists = root, IncomingExists = incoming, IncomingValid = incomingValid, JournalExists = journal, Previous = previous };
+
+        [Fact]
+        public void Reconcile_decides_each_folder_state()
+        {
+            var validPrev = new PluginPreviousFolder(@"C:\m.previous", true);
+            var invalidPrev = new PluginPreviousFolder(@"C:\m.previous", false);
+
+            // Root present: nothing, or delete a stale .incoming (valid or not); the journal goes too.
+            Assert.Equal(new PluginFolderDecision(PluginFolderRepair.None, null, false, false), PluginUpdateService.DecideRepair(Snap(true)));
+            Assert.Equal(new PluginFolderDecision(PluginFolderRepair.DeleteStaleIncoming, null, false, true),
+                PluginUpdateService.DecideRepair(Snap(true, incoming: true, incomingValid: true, journal: true, validPrev)));
+
+            // Root missing, valid .incoming: finish, even with a valid previous.
+            Assert.Equal(PluginFolderRepair.FinishSwap,
+                PluginUpdateService.DecideRepair(Snap(false, incoming: true, incomingValid: true, journal: true, validPrev)).Action);
+
+            // Root missing, invalid or no .incoming, valid previous: restore it; an invalid .incoming is deleted after.
+            Assert.Equal(new PluginFolderDecision(PluginFolderRepair.RestorePrevious, @"C:\m.previous", true, true),
+                PluginUpdateService.DecideRepair(Snap(false, incoming: true, incomingValid: false, journal: true, validPrev)));
+            Assert.Equal(new PluginFolderDecision(PluginFolderRepair.RestorePrevious, @"C:\m.previous", false, false),
+                PluginUpdateService.DecideRepair(Snap(false, false, false, false, validPrev)));
+
+            // The first VALID previous wins, in the given order.
+            Assert.Equal(@"C:\m.previous-20261030000000", PluginUpdateService.DecideRepair(Snap(false, false, false, false,
+                invalidPrev, new PluginPreviousFolder(@"C:\m.previous-20261030000000", true))).RestoreFrom);
+
+            // Root missing, nothing valid: delete nothing, and say so only when something is there.
+            Assert.Equal(new PluginFolderDecision(PluginFolderRepair.NothingValid, null, false, false),
+                PluginUpdateService.DecideRepair(Snap(false, incoming: true, incomingValid: false, journal: true, invalidPrev)));
+            Assert.Equal(new PluginFolderDecision(PluginFolderRepair.None, null, false, false), PluginUpdateService.DecideRepair(Snap(false)));
+        }
+
+        [Fact]
+        public void Previous_folders_are_ordered_journal_first_then_plain_then_newest_and_strangers_ignored()
+        {
+            string[] siblings =
+            {
+                @"C:\x\m.previous-20261001000000", @"C:\x\m.previous", @"C:\x\m.previous-20261030000000",
+                @"C:\x\m.previous-junk", @"C:\x\m.previous-2026103000000", // not 14 digits
+            };
+            Assert.Equal(new[] { @"C:\x\m.previous", @"C:\x\m.previous-20261030000000", @"C:\x\m.previous-20261001000000" },
+                PluginUpdateService.OrderPreviousFolders(@"C:\x\m", siblings, null));
+            Assert.Equal(new[] { @"C:\x\m.previous-20261001000000", @"C:\x\m.previous", @"C:\x\m.previous-20261030000000" },
+                PluginUpdateService.OrderPreviousFolders(@"C:\x\m", siblings, "m.previous-20261001000000"));
+            // A journal naming something else (a path, a stranger) changes nothing.
+            Assert.Equal(@"C:\x\m.previous", PluginUpdateService.OrderPreviousFolders(@"C:\x\m", siblings, @"..\evil")[0]);
+        }
+
+        [Fact]
+        public void Terminated_after_rename_1_finishes_the_swap()
+        {
+            // Rename 1 done (root -> .previous-<time>, journal names it), rename 2 not: root missing.
+            string root = Path.Combine(_temp, "mp");
+            MakeTree(root + ".previous", "older");
+            MakeTree(root + ".previous-20261030000000", "old");
+            File.WriteAllText(root + PluginUpdateService.JournalSuffix, "mp.previous-20261030000000");
+            MakeTree(root + ".incoming", "new");
+
+            var decision = PluginUpdateService.ReconcileRoot(root, PluginUpdateService.RealSwapFileSystem.Instance, null);
+
+            Assert.Equal(PluginFolderRepair.FinishSwap, decision.Action);
+            Assert.Equal("new", Marker(root));
+            Assert.False(Directory.Exists(root + ".incoming"));
+            Assert.Equal("old", Marker(root + ".previous-20261030000000"));
+            Assert.Equal("older", Marker(root + ".previous"));
+            Assert.False(File.Exists(root + PluginUpdateService.JournalSuffix));
+        }
+
+        [Fact]
+        public void Terminated_after_rename_2_keeps_the_new_root_and_clears_the_journal()
+        {
+            string root = MakeTree(Path.Combine(_temp, "mp"), "new");
+            MakeTree(root + ".previous", "old");
+            File.WriteAllText(root + PluginUpdateService.JournalSuffix, "mp.previous");
+
+            var decision = PluginUpdateService.ReconcileRoot(root, PluginUpdateService.RealSwapFileSystem.Instance, null);
+
+            Assert.Equal(PluginFolderRepair.None, decision.Action);
+            Assert.Equal("new", Marker(root));
+            Assert.Equal("old", Marker(root + ".previous"));
+            Assert.False(File.Exists(root + PluginUpdateService.JournalSuffix));
+        }
+
+        [Fact]
+        public void Terminated_mid_rollback_restores_the_journal_named_previous_and_drops_the_invalid_incoming()
+        {
+            // The new tree failed validation and was renamed back; the crash came before the old one moved back.
+            string root = Path.Combine(_temp, "mp");
+            MakeTree(root + ".previous", "older");
+            MakeTree(root + ".previous-20261030000000", "old");
+            File.WriteAllText(root + PluginUpdateService.JournalSuffix, "mp.previous-20261030000000");
+            MakeTree(root + ".incoming", "new", valid: false);
+
+            var decision = PluginUpdateService.ReconcileRoot(root, PluginUpdateService.RealSwapFileSystem.Instance, null);
+
+            Assert.Equal(PluginFolderRepair.RestorePrevious, decision.Action);
+            Assert.Equal("old", Marker(root));
+            Assert.False(Directory.Exists(root + ".incoming"));
+            Assert.Equal("older", Marker(root + ".previous"));
+        }
+
+        [Fact]
+        public void A_stale_incoming_beside_a_live_root_is_deleted()
+        {
+            string root = MakeTree(Path.Combine(_temp, "mp"), "live");
+            MakeTree(root + ".incoming", "never went live");
+
+            Assert.Equal(PluginFolderRepair.DeleteStaleIncoming,
+                PluginUpdateService.ReconcileRoot(root, PluginUpdateService.RealSwapFileSystem.Instance, null).Action);
+            Assert.Equal("live", Marker(root));
+            Assert.False(Directory.Exists(root + ".incoming"));
+        }
+
+        [Fact]
+        public void A_missing_root_with_nothing_valid_deletes_nothing_and_says_so()
+        {
+            string root = Path.Combine(_temp, "mp");
+            MakeTree(root + ".incoming", "broken new", valid: false);
+            MakeTree(root + ".previous", "broken old", valid: false);
+            var log = new List<string>();
+
+            var decision = PluginUpdateService.ReconcileRoot(root, PluginUpdateService.RealSwapFileSystem.Instance, log.Add);
+
+            Assert.Equal(PluginFolderRepair.NothingValid, decision.Action);
+            Assert.False(Directory.Exists(root));
+            Assert.Equal("broken new", Marker(root + ".incoming"));
+            Assert.Equal("broken old", Marker(root + ".previous"));
+            Assert.Contains(log, m => m.StartsWith("PROBLEM:", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public async Task A_check_repairs_an_interrupted_update_before_it_reads_the_stamp()
+        {
+            string root = Path.Combine(_temp, "multiterminal-marketplace");
+            MakeTree(root + ".previous", "old");
+            MakeTree(root + ".incoming", "new");
+            File.WriteAllText(Path.Combine(root + ".incoming", PluginUpdateService.StampFileName), PluginUpdateService.BuildStampJson(ShaB, DateTimeOffset.UtcNow, "mt-update"));
+            string pluginDir = Path.Combine(root, "plugins", "multiterminal");
+
+            using var handler = new StubHandler(_ => CommitAnswer(ShaB));
+            using var service = new PluginUpdateService(handler, () => pluginDir, Path.Combine(_temp, "dl"));
+
+            Assert.Equal(PluginCheckOutcome.UpToDate, (await service.CheckAsync()).Outcome);
+            Assert.Equal("new", Marker(root));
         }
 
         // ------------------------------------------------------------------ daily check
