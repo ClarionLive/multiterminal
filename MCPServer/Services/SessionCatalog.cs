@@ -596,7 +596,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             // A repo-root worktree is shared by every project in the repo, so a cwd admitted only through
             // the repo root needs provenance (Codex, 3fd3c9a7): the transcript's first recorded cwd must
-            // be this project's folder or below it, or a sibling project's session would be offered here.
+            // be this project's folder, or a sibling or nested project's session would be offered here.
             if (ValidateResumeCwd(root, cwd) == null && !BeganInProject(root, scan))
             {
                 missReason = "it began in another project's folder of the same repository";
@@ -723,13 +723,14 @@ namespace MultiTerminal.MCPServer.Services
             return null;
         }
 
-        // The transcript's first recorded cwd is the project root or below it (string checks only).
+        // The transcript's first recorded cwd is exactly the project root (string checks only). Exact,
+        // not "at or below": a registered project nested inside this one would otherwise have its
+        // sessions offered here too (Codex round 2). A session started in a subfolder is not offered.
         private static bool BeganInProject(string root, TranscriptScan scan)
         {
             if (scan.HeadCwds.Count == 0 || !TryCanonicalLocalPath(root, out var r) || !TryCanonicalLocalPath(scan.HeadCwds[0], out var first))
                 return false;
-            return string.Equals(first, r, StringComparison.OrdinalIgnoreCase)
-                || first.StartsWith(r.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase);
+            return string.Equals(first, r, StringComparison.OrdinalIgnoreCase);
         }
 
         // dir is at or below <baseDir>\.claude\worktrees\<one non-empty segment>.

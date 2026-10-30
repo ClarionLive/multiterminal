@@ -138,6 +138,35 @@ namespace MultiTerminal.Tests
             Assert.NotNull(Catalog().TryGetEntry(_projectRoot, id, new HashSet<string>(), Now));
         }
 
+        // Codex round 2: a registered project nested in another; the parent must not be offered the
+        // child's session (first cwd below the parent root, not equal to it).
+        [Fact]
+        public void A_parent_project_is_not_offered_a_session_that_began_in_a_nested_project()
+        {
+            // <repo>\Parent is a registered project and <repo>\Parent\Child another; both below the repo root.
+            var nestedRepo = Path.Combine(_base, "Nested");
+            var parentProject = Path.Combine(nestedRepo, "Parent");
+            var childProject = Path.Combine(parentProject, "Child");
+            var worktree = Path.Combine(nestedRepo, ".claude", "worktrees", "abcd1234");
+            Directory.CreateDirectory(Path.Combine(nestedRepo, ".git"));
+            Directory.CreateDirectory(childProject);
+            Directory.CreateDirectory(worktree);
+            var folder = Path.Combine(_projectsRoot, SessionCatalog.EncodeProjectPath(worktree));
+            Directory.CreateDirectory(folder);
+            var childId = Guid.NewGuid().ToString();
+            var path = Path.Combine(folder, childId + ".jsonl");
+            File.WriteAllText(path, string.Join("\n",
+                Line("user", "start", childProject),
+                Line("assistant", "ok", childProject),
+                Line("assistant", "now in the worktree", worktree)) + "\n");
+            File.SetLastWriteTimeUtc(path, Now.AddHours(-1));
+
+            var fresh = Catalog();
+            Assert.Null(fresh.TryGetEntry(parentProject, childId, new HashSet<string>(), Now));
+            Assert.Equal("it began in another project's folder of the same repository", fresh.LastMissReason);
+            Assert.NotNull(Catalog().TryGetEntry(childProject, childId, new HashSet<string>(), Now));
+        }
+
         [Fact]
         public void A_live_session_is_reported_as_already_open()
         {
