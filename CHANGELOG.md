@@ -5,7 +5,7 @@ All notable changes to MultiTerminal are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.0.0] — 2026-10-22
+## [3.0.0] — 2026-10-30
 
 Major release: Claude profiles keep work and personal projects apart, and
 sessions now survive a relaunch: resume a past session at project launch, bring a
@@ -49,6 +49,10 @@ each other without Claude Code's development channel.
 - **Attention pane.** A card for every session: what it is doing, who is waiting
   on you and for how long, its project and context used, with the 5h/7d quota
   left in the header and configurable activity and alarm styles.
+- **Attention: "asks you" or "Your turn".** A question the agent asks in chat
+  shows as asking you; every other turn end shows a softer "Your turn".
+- **A pane's header and tab show when its agent needs you**, and the header shows
+  the project name larger.
 - **Attention pane By team grouping.** Each PM card has its helpers listed under
   it, a team with anyone blocked goes to the top, and a PM card says "<helper>
   needs you". The grouping survives a restart, text meets 4.5:1 contrast in both
@@ -71,6 +75,11 @@ each other without Claude Code's development channel.
 - **GitHub bot identity for agents.** A one-click GitHub App registration lets
   agents' `git push` and `gh` act as the bot instead of as you, with a short-lived
   token per command and each comment signed with the agent's name.
+- **GitHub watch.** A per-project setting (off by default) checks the project's
+  github.com repo: new issues and PRs become To Do tickets, are told to the
+  project's agent at its next pause, and push you a summary. Each terminal header
+  gets a GitHub row with a link to the repo and the open issue and PR counts, and
+  the header grows to fit it.
 - **Header and Home.** Browse All, New Project, Just Claude, Open PowerShell and
   Launch Project are header pills, and the M menu is an HTML popup. Settings >
   General picks list or cards for Home; Browse All remembers a 3-column sort.
@@ -80,6 +89,10 @@ each other without Claude Code's development channel.
   machine (PR #49 by Mark Sarson).
 - **Smaller additions:** a clear (x) button in every search box, and an app icon
   for MT and its installer (GH #36).
+- **The exit confirmation can be turned off**, with "Don't ask again" on the
+  question or Settings > General > "Ask before exiting MultiTerminal" (GH #19).
+- **Crash reports.** An exception that would end MT unexplained is now written to
+  `%APPDATA%\MultiTerminal\logs\crash-<date>.log` (GH #38, PR #60 by Mark Sarson).
 
 ### Changed
 
@@ -106,6 +119,17 @@ each other without Claude Code's development channel.
   left untouched when it works. MT warns at startup when its terminals would start
   without the agent tools.
 - **Source-control tokens are no longer handed out by the local REST API.**
+- **MCP read tools default to your own name.** `get_messages`,
+  `get_my_pickable_tasks`, `get_my_active_task` and `get_active_worktree` use the
+  calling session's name when none is given, instead of failing with a cryptic
+  error; `get_inbox` still requires `userId` (GH #18).
+- **No GitHub App set up is no longer reported as an error.** Agents' `gh` prints
+  one calm line and uses your own login (GH #68).
+- **xterm.js is told it runs on ConPTY**, turning on its Windows-specific handling,
+  notably reflow on resize (GH #51, PR #57 by Mark Sarson).
+- **Panes MT opens for agents no longer steal focus while you are typing**; focus
+  stays where you are working.
+- **Browser-tab tools default to the calling terminal** when no terminal id is given.
 
 ### Fixed
 
@@ -132,6 +156,28 @@ each other without Claude Code's development channel.
 - **Text boxes in Settings and New Project clipped their text.**
 - **`get_task_detail` and `get_my_active_task` now include the task description**
   (GH #13).
+- **Each terminal started ~77 git.exe processes every 10 seconds** to refresh the
+  HUD's changed-files state; the poll now reuses what it already knows.
+- **An empty pane behind the New Project dialog was solid green**; the focus border
+  is now drawn as an outline.
+- **A blank terminal id in a browser-tab tool** now gives a clear "not found" error
+  instead of a server error.
+- **A spawned helper could start in another repository** when an older agent with
+  the same name had an active task there; it now stays in the folder it was spawned into.
+- **Resume missed worktree sessions of a project registered below its git repo
+  root** (for example ClarionAssistant), and a skipped resume now names its real reason.
+- **Past sessions offered at project launch** (and Continue last, helper resume and
+  startup restore) no longer include the background agents MultiTerminal runs to
+  write checklist explanations; new ones leave no transcript at all (GH #67).
+- **MT could crash at startup or shutdown** building UI off the UI thread before the
+  window existed, or from timers still running at close (GH #38, PR #60 by Mark Sarson).
+- **The header's branch pill overlapped the active task title** (GH #70, PR #71 by
+  Mark Sarson).
+- **The Tasks HUD did not follow an agent's activation** and its Active tab had no
+  count (GH #54, PR #58 by Mark Sarson).
+- **Cancelling a header action left an empty Home tab behind** (PR #64 by Mark Sarson).
+- **The installer did not ship the Everything SDK DLLs**, so the everything-search
+  MCP server exited at startup (GH #42).
 
 ### Upgrade notes
 
@@ -154,6 +200,10 @@ each other without Claude Code's development channel.
   seconds** while the code graph reindexes your projects (always after an
   upgrade). The startup restore shows "Restoring <name>…" meanwhile; the freeze
   itself is being fixed.
+- **Bitbucket accounts that use app passwords stop working**, because Atlassian
+  retired app passwords (GH #62).
+- **This release still targets .NET 8**, which ends support on 10 Nov 2026. A .NET 10
+  update follows as 3.0.1 (GH #47).
 
 ## [2.1.0] — 2026-07-18
 
