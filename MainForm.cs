@@ -178,8 +178,68 @@ namespace MultiTerminal
         /// </summary>
         public event EventHandler DashboardContentReady;
 
+        private readonly int _uiThreadId;
+        private readonly System.Threading.SynchronizationContext _uiContext;
+
+        /// <summary>
+        /// Runs <paramref name="action"/> on the UI thread, whichever thread raised the event (GitHub #38).
+        /// Use instead of <c>if (InvokeRequired) BeginInvoke(...); else ...</c>, which runs the work on the
+        /// CALLING thread whenever this form has no handle (before it is shown, while it closes); see
+        /// <see cref="Services.UiThreadDispatch"/>. With <paramref name="wait"/>, a call from another
+        /// thread blocks until the action has run, when the form has a handle to do that through.
+        /// </summary>
+        private void RunOnUiThread(Action action, bool wait = false)
+        {
+            switch (Services.UiThreadDispatch.Decide(
+                Environment.CurrentManagedThreadId == _uiThreadId, IsHandleCreated, IsDisposed || Disposing))
+            {
+                case Services.UiDispatch.RunHere:
+                    action();
+                    break;
+
+                case Services.UiDispatch.InvokeThroughHandle:
+                    try
+                    {
+                        if (wait) Invoke(action);
+                        else BeginInvoke(action);
+                    }
+                    catch (ObjectDisposedException) { /* closed in between */ }
+                    catch (InvalidOperationException) { /* handle destroyed in between */ }
+                    break;
+
+                case Services.UiDispatch.PostToUiContext:
+                    if (_uiContext == null)
+                    {
+                        _debugLogService?.Warning("MainForm", "RunOnUiThread: no UI synchronization context; work dropped.");
+                        break;
+                    }
+
+                    try
+                    {
+                        _uiContext.Post(_ =>
+                        {
+                            if (!IsDisposed && !Disposing) action();
+                        }, null);
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        // The UI thread's marshaling window is gone too (the app is exiting).
+                        _debugLogService?.Warning("MainForm", $"RunOnUiThread: UI thread unavailable ({ex.Message}); work dropped.");
+                    }
+
+                    break;
+
+                case Services.UiDispatch.Drop:
+                    break;
+            }
+        }
+
         public MainForm()
         {
+            // Captured first, on the UI thread, for RunOnUiThread (GitHub #38).
+            _uiThreadId = Environment.CurrentManagedThreadId;
+            _uiContext = System.Threading.SynchronizationContext.Current;
+
             InitializeComponent();
             // Same .ico as the exe's Win32 icon (GH #36); without this the window shows WinForms' default.
             if (AppIcon.Value != null) Icon = AppIcon.Value;
@@ -1954,9 +2014,11 @@ namespace MultiTerminal
 
         private void OnBrowserTabRequested(object sender, BrowserTabEventArgs e)
         {
-            if (InvokeRequired)
+            // Thread id, not InvokeRequired: a request before this form has a handle must not build the
+            // tab's WebView2 on the REST thread (GitHub #38).
+            if (Environment.CurrentManagedThreadId != _uiThreadId)
             {
-                Invoke(() => OnBrowserTabRequested(sender, e));
+                RunOnUiThread(() => OnBrowserTabRequested(sender, e), wait: true);
                 return;
             }
 
@@ -2949,15 +3011,11 @@ namespace MultiTerminal
                     _agentProcessMap[agentTerminalId] = agent;
                 }
 
-                // Create a dedicated panel for this agent on the UI thread
-                if (InvokeRequired)
-                {
-                    Invoke(new Action(() => CreateAgentPanel(agent, agentName, agentTerminalId, spawnerName, taskDescription, subagentType)));
-                }
-                else
-                {
-                    CreateAgentPanel(agent, agentName, agentTerminalId, spawnerName, taskDescription, subagentType);
-                }
+                // Create a dedicated panel for this agent on the UI thread, never on the calling
+                // REST thread (GitHub #38: InvokeRequired is false there when this form has no handle).
+                RunOnUiThread(
+                    () => CreateAgentPanel(agent, agentName, agentTerminalId, spawnerName, taskDescription, subagentType),
+                    wait: true);
 
                 // Clean up on exit
                 agent.ProcessExited += (s, exitCode) =>
@@ -8091,6 +8149,12 @@ namespace MultiTerminal
             // Idempotent, so the session-save pass's re-triggered Close() does nothing twice.
             _paneLaunches?.BeginShutdown();
 
+            // Stop the UI timers whose ticks start async work (GitHub #38). Disposed only in Dispose,
+            // they kept starting awaits while MT closed, and an await that finishes after the message
+            // loop has ended posts to a dead UI context: the BeginInvoke crash, on the way out.
+            try { _messageQueueTimer?.Stop(); _sessionSyncTimer?.Stop(); }
+            catch (Exception) { /* best-effort: shutdown continues */ }
+
             // Stop the worktree janitor before any other shutdown work \u2014 its
             // timer thread should not fire mid-shutdown.
             try { _worktreeJanitorTimer?.Dispose(); _worktreeJanitorTimer = null; }
@@ -9489,33 +9553,21 @@ namespace MultiTerminal
                             CreateAgentPanel(e.Tailer, $"{e.MemberName} ({e.TeamName})", panelKey, resolvedSpawner, e.TaskDescription, e.SubagentType, isTeamAgent: true, preferredTarget: spawnerDoc);
                     }
 
-                    // Use BeginInvoke (async) instead of Invoke (sync) to prevent deadlocks
-                    // when multiple terminals discover team agents concurrently.
-                    if (InvokeRequired)
-                    {
-                        try { BeginInvoke(new Action(DoCreate)); }
-                        catch (ObjectDisposedException) { }
-                    }
-                    else
-                    {
-                        DoCreate();
-                    }
+                    // Asynchronous (not wait) to prevent deadlocks when multiple terminals discover
+                    // team agents concurrently. RunOnUiThread, not InvokeRequired: the watcher reports
+                    // existing teams before this form has a handle, when InvokeRequired is false off-thread
+                    // and the panel would be built on the watcher's thread (GitHub #38).
+                    RunOnUiThread(DoCreate);
                 };
 
                 _teamWatcher.TeamRemoved += (s, e) =>
                 {
                     _debugLogService?.Info("MainForm", $"Native team removed: {e.TeamName} (members: {string.Join(", ", e.MemberNames)})");
 
-                    if (InvokeRequired)
-                    {
-                        try { BeginInvoke(new Action(() => CleanupTeamPanels(e.TeamKey, e.ConfigRoot, e.IsDefaultRoot, e.MemberNames, e.TranscriptPaths))); }
-                        catch (ObjectDisposedException) { }
-                        catch (InvalidOperationException) { } // no window handle yet, or it is gone: there are no panels to close
-                    }
-                    else
-                    {
-                        CleanupTeamPanels(e.TeamKey, e.ConfigRoot, e.IsDefaultRoot, e.MemberNames, e.TranscriptPaths);
-                    }
+                    // Same route as the discovery handlers: before this form has a handle a discovery is
+                    // queued, so the removal must queue behind it rather than run first on the watcher's
+                    // thread and leave the panel it should close to be created afterwards (GitHub #38).
+                    RunOnUiThread(() => CleanupTeamPanels(e.TeamKey, e.ConfigRoot, e.IsDefaultRoot, e.MemberNames, e.TranscriptPaths));
                 };
 
                 _teamWatcher.MemberRemoved += (s, e) =>
@@ -9538,13 +9590,8 @@ namespace MultiTerminal
                         }
                     }
 
-                    if (InvokeRequired)
-                    {
-                        try { BeginInvoke(new Action(CloseAgentPanel)); }
-                        catch (ObjectDisposedException) { }
-                    }
-                    else
-                        CloseAgentPanel();
+                    // Queued behind any pending creation of this panel, as for TeamRemoved above.
+                    RunOnUiThread(CloseAgentPanel);
                 };
 
                 _teamWatcher.SubagentDiscovered += (s, e) =>
@@ -9575,15 +9622,8 @@ namespace MultiTerminal
                             CreateAgentPanel(e.Tailer, e.MemberName, panelKey, resolvedSpawner, e.TaskDescription, e.SubagentType);
                     }
 
-                    if (InvokeRequired)
-                    {
-                        try { BeginInvoke(new Action(DoCreate)); }
-                        catch (ObjectDisposedException) { }
-                    }
-                    else
-                    {
-                        DoCreate();
-                    }
+                    // See TeammateDiscovered above: never build the panel on the watcher's thread (GitHub #38).
+                    RunOnUiThread(DoCreate);
                 };
 
                 // Wire broker event for SubagentStop hook → close agent panel
