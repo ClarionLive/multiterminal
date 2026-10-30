@@ -163,6 +163,18 @@ namespace MultiTerminal.Services
         internal const string JournalSuffix = ".swap-previous";
         private const string PreviousStampFormat = "yyyyMMddHHmmss";
 
+        /// <summary>
+        /// Beside the root: a file one MultiTerminal process holds open exclusively while it reconciles or
+        /// updates that root. <see cref="UpdateGate"/> serializes callers inside one process only, and two MT
+        /// processes (another Windows session; the single-instance guard is <c>Local\</c>) can share one root.
+        /// It is a file, never a directory, so <see cref="Snapshot"/> cannot take it for a <c>.previous*</c> or
+        /// <c>.incoming</c> folder. Always taken AFTER <see cref="UpdateGate"/> and released before it.
+        /// </summary>
+        internal const string LockSuffix = ".update-lock";
+
+        /// <summary>How long startup waits for another process's lock before skipping the reconcile, across all roots.</summary>
+        internal static readonly TimeSpan StartupReconcileLockWait = TimeSpan.FromSeconds(2);
+
         /// <summary>SettingsService key: when the startup check last ran (ISO-8601 UTC).</summary>
         public const string LastCheckSettingKey = "PluginUpdateLastCheckUtc";
 
@@ -209,6 +221,9 @@ namespace MultiTerminal.Services
 
         /// <summary>Where reconcile messages go (the debug log in MT); null drops them.</summary>
         public Action<string> Log { get; set; }
+
+        /// <summary>How long an update waits for another process's <see cref="LockSuffix"/> lock before it gives up.</summary>
+        internal TimeSpan UpdateLockWait { get; set; } = TimeSpan.FromSeconds(5);
 
         /// <param name="handler">Null for the real network; tests pass a stub.</param>
         /// <param name="pluginDir">The plugin folder MT loads; null for <see cref="LaunchCommandBuilder.GetMtPluginPath"/>.
@@ -726,10 +741,11 @@ namespace MultiTerminal.Services
         /// <summary>Asks GitHub for main's newest commit and compares it with the installed stamp. Never throws.</summary>
         public async Task<PluginCheckResult> CheckAsync(CancellationToken cancellationToken = default)
         {
-            // An update in progress owns .incoming; its own reconcile ran when it started.
+            // An update in progress owns .incoming; its own reconcile ran when it started. The same holds for
+            // an update in another process, so a root whose lock is held is skipped, not waited for.
             if (UpdateGate.Wait(0))
             {
-                try { ReconcileRoots(SafeCandidates(), RealSwapFileSystem.Instance, Log); }
+                try { ReconcileRoots(SafeCandidates(), RealSwapFileSystem.Instance, Log, TimeSpan.Zero); }
                 finally { UpdateGate.Release(); }
             }
 
@@ -785,9 +801,19 @@ namespace MultiTerminal.Services
             string zipPath = null;
             string root = null;
             string incoming = null;
+            FileStream rootLock = null;
             try
             {
-                ReconcileRoots(SafeCandidates(), RealSwapFileSystem.Instance, Log);
+                // Held from here to the end of the cleanup: probe, download, extract, both renames, stamp.
+                var (heldLock, outcome, lockError) = await Task.Run(
+                    () => (AcquireRootLock(check.MarketplaceRoot, UpdateLockWait, out var o, out var e), o, e)).ConfigureAwait(false);
+                rootLock = heldLock;
+                if (outcome == RootLockOutcome.HeldElsewhere)
+                    return PluginUpdateResult.Fail("Another MultiTerminal is updating the plugin. Try again when it has finished.");
+                if (outcome != RootLockOutcome.Acquired)
+                    return PluginUpdateResult.Fail("The update failed: could not lock the plugin folder: " + (GitHubIssueFeed.Sanitize(lockError, 300) ?? "disk error"));
+
+                ReconcileRoots(SafeCandidates(), RealSwapFileSystem.Instance, Log, TimeSpan.Zero, heldRoot: check.MarketplaceRoot);
 
                 root = ResolveMarketplaceRoot();
                 if (root == null || !string.Equals(root, check.MarketplaceRoot, StringComparison.OrdinalIgnoreCase))
@@ -831,6 +857,7 @@ namespace MultiTerminal.Services
                 // Never while the root is missing: a failed rollback can leave the only valid tree in .incoming,
                 // and the next reconcile finishes the swap from it.
                 if (root != null && Directory.Exists(root)) TryDeleteDirectory(incoming);
+                rootLock?.Dispose();
                 UpdateGate.Release();
             }
         }
@@ -966,15 +993,103 @@ namespace MultiTerminal.Services
         /// at startup, before any terminal can launch: while the shared root is missing,
         /// <see cref="LaunchCommandBuilder.GetMtPluginPath"/> would silently fall through to the default
         /// location. Never throws; each root's outcome goes to <paramref name="log"/>.
+        /// <para>Each root is reconciled under its <see cref="LockSuffix"/> lock. A root another process holds
+        /// is SKIPPED, not waited for beyond <paramref name="lockWait"/> (one budget for all roots): that process
+        /// is mid-update and finishes or rolls back itself. <paramref name="heldRoot"/> is a root the caller
+        /// already holds the lock for.</para>
         /// </summary>
-        internal static void ReconcileRoots(IEnumerable<string> pluginDirs, IPluginSwapFileSystem fs, Action<string> log)
+        internal static void ReconcileRoots(IEnumerable<string> pluginDirs, IPluginSwapFileSystem fs, Action<string> log,
+            TimeSpan lockWait, string heldRoot = null)
         {
             if (pluginDirs == null) return;
+            var deadline = DateTime.UtcNow + lockWait;
+            string held = heldRoot == null ? null : CanonicalRoot(heldRoot);
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (string pluginDir in pluginDirs)
             {
                 string root = MarketplaceRootFromPluginDir(pluginDir);
-                if (root != null && seen.Add(root)) ReconcileRoot(root, fs, log);
+                if (root == null || !seen.Add(root)) continue;
+                if (string.Equals(root, held, StringComparison.OrdinalIgnoreCase))
+                {
+                    ReconcileRoot(root, fs, log);
+                    continue;
+                }
+
+                var remaining = deadline - DateTime.UtcNow;
+                ReconcileRootUnderLock(root, remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero, fs, log);
+            }
+        }
+
+        private static void ReconcileRootUnderLock(string root, TimeSpan lockWait, IPluginSwapFileSystem fs, Action<string> log)
+        {
+            FileStream rootLock = null;
+            try
+            {
+                rootLock = AcquireRootLock(root, lockWait, out var outcome, out string error);
+                if (outcome == RootLockOutcome.HeldElsewhere)
+                {
+                    log?.Invoke($"Skipped checking {root} for an interrupted update: another MultiTerminal holds {LockPathFor(root)} (it is updating the plugin).");
+                    return;
+                }
+                // Unavailable: no lock can be made beside the root (folder absent or not writable). This process
+                // cannot change anything there either, so the reconcile only reports what it finds.
+                if (outcome == RootLockOutcome.Unavailable && Directory.Exists(Path.GetDirectoryName(root)))
+                    log?.Invoke($"Could not lock {LockPathFor(root)} ({error}); checking {root} without it.");
+                ReconcileRoot(root, fs, log);
+            }
+            finally
+            {
+                rootLock?.Dispose();
+            }
+        }
+
+        internal enum RootLockOutcome { Acquired, HeldElsewhere, Unavailable }
+
+        /// <summary>Pure: the root with its path normalized and no trailing separator; the lock path is built only from this.</summary>
+        internal static string CanonicalRoot(string root) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+
+        /// <summary>Pure: <c>&lt;canonical root&gt;.update-lock</c>.</summary>
+        internal static string LockPathFor(string root) => CanonicalRoot(root) + LockSuffix;
+
+        /// <summary>
+        /// One attempt at the root's lock: the file opened with no sharing. Null unless
+        /// <see cref="RootLockOutcome.Acquired"/>; a sharing violation is <see cref="RootLockOutcome.HeldElsewhere"/>.
+        /// The file is not deleted on close: deleting it would open a window in which the next opener is refused
+        /// with "access denied", indistinguishable from a folder it cannot write.
+        /// </summary>
+        internal static FileStream TryOpenRootLock(string root, out RootLockOutcome outcome, out string error)
+        {
+            try
+            {
+                var stream = new FileStream(LockPathFor(root), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.None);
+                outcome = RootLockOutcome.Acquired;
+                error = null;
+                return stream;
+            }
+            catch (IOException ex) when ((ex.HResult & 0xFFFF) is 32 or 33) // ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION
+            {
+                outcome = RootLockOutcome.HeldElsewhere;
+                error = ex.Message;
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException
+                                       || ex is NotSupportedException || ex is System.Security.SecurityException)
+            {
+                outcome = RootLockOutcome.Unavailable;
+                error = ex.Message;
+            }
+            return null;
+        }
+
+        /// <summary><see cref="TryOpenRootLock"/>, retried while another process holds it, for at most <paramref name="wait"/>.</summary>
+        internal static FileStream AcquireRootLock(string root, TimeSpan wait, out RootLockOutcome outcome, out string error)
+        {
+            var deadline = DateTime.UtcNow + wait;
+            while (true)
+            {
+                var stream = TryOpenRootLock(root, out outcome, out error);
+                var remaining = deadline - DateTime.UtcNow;
+                if (outcome != RootLockOutcome.HeldElsewhere || remaining <= TimeSpan.Zero) return stream;
+                Thread.Sleep(remaining < TimeSpan.FromMilliseconds(100) ? remaining : TimeSpan.FromMilliseconds(100));
             }
         }
 

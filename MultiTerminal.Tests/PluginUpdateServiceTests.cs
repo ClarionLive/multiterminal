@@ -732,5 +732,105 @@ namespace MultiTerminal.Tests
             Assert.Contains("403", check.Reason);
             Assert.False((await service.UpdateAsync(check)).Success);
         }
+        // ------------------------------------------------------------------ cross-process lock
+
+        /// <summary>Opened the way another MultiTerminal process would hold it: no sharing, independent of the service's own open.</summary>
+        private static FileStream HoldLockAsAnotherProcess(string root) =>
+            new FileStream(root + PluginUpdateService.LockSuffix, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+        [Fact]
+        public void A_second_holder_of_a_root_lock_is_refused_until_the_first_lets_go()
+        {
+            string root = MakeTree(Path.Combine(_temp, "mp"), "old");
+
+            using (var first = PluginUpdateService.TryOpenRootLock(root, out var firstOutcome, out _))
+            {
+                Assert.Equal(PluginUpdateService.RootLockOutcome.Acquired, firstOutcome);
+                Assert.NotNull(first);
+
+                // The same root spelled differently is the same lock: the path comes from the canonical root.
+                var second = PluginUpdateService.TryOpenRootLock(root + @"\..\mp\", out var secondOutcome, out _);
+                Assert.Null(second);
+                Assert.Equal(PluginUpdateService.RootLockOutcome.HeldElsewhere, secondOutcome);
+            }
+
+            using var third = PluginUpdateService.TryOpenRootLock(root, out var thirdOutcome, out _);
+            Assert.Equal(PluginUpdateService.RootLockOutcome.Acquired, thirdOutcome);
+        }
+
+        [Fact]
+        public void Reconcile_skips_a_root_another_process_holds_and_repairs_it_once_released()
+        {
+            string root = Path.Combine(_temp, "multiterminal-marketplace");
+            MakeTree(root + ".previous", "old");
+            MakeTree(root + ".incoming", "new");
+            string[] pluginDirs = { Path.Combine(root, "plugins", "multiterminal") };
+            var log = new List<string>();
+
+            using (HoldLockAsAnotherProcess(root))
+            {
+                var started = DateTime.UtcNow;
+                PluginUpdateService.ReconcileRoots(pluginDirs, PluginUpdateService.RealSwapFileSystem.Instance, log.Add, TimeSpan.FromMilliseconds(300));
+
+                Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(3), "the reconcile waited past its budget");
+                Assert.False(Directory.Exists(root)); // the other process's in-progress state is untouched
+                Assert.Equal("new", Marker(root + ".incoming"));
+                Assert.Contains(log, m => m.StartsWith("Skipped", StringComparison.Ordinal));
+            }
+
+            PluginUpdateService.ReconcileRoots(pluginDirs, PluginUpdateService.RealSwapFileSystem.Instance, log.Add, TimeSpan.Zero);
+            Assert.Equal("new", Marker(root));
+        }
+
+        [Fact]
+        public void A_lock_file_beside_a_missing_root_is_not_a_repair_candidate()
+        {
+            string root = Path.Combine(_temp, "mp");
+            Directory.CreateDirectory(_temp);
+            File.WriteAllText(root + PluginUpdateService.LockSuffix, "");
+
+            var decision = PluginUpdateService.ReconcileRoot(root, PluginUpdateService.RealSwapFileSystem.Instance, null);
+
+            Assert.Equal(PluginFolderRepair.None, decision.Action);
+            Assert.True(File.Exists(root + PluginUpdateService.LockSuffix));
+        }
+
+        [Fact]
+        public async Task An_update_holds_the_lock_throughout_and_is_refused_while_another_process_holds_it()
+        {
+            string root = MakeTree(Path.Combine(_temp, "multiterminal-marketplace"), "old");
+            File.WriteAllText(Path.Combine(root, PluginUpdateService.StampFileName), PluginUpdateService.BuildStampJson(ShaA, DateTimeOffset.UtcNow, "installer"));
+            string pluginDir = Path.Combine(root, "plugins", "multiterminal");
+            byte[] zip = Zip(ValidMarketplace());
+            PluginUpdateService.RootLockOutcome? duringDownload = null;
+
+            using var handler = new StubHandler(req =>
+            {
+                if (req.RequestUri.Host == "api.github.com") return CommitAnswer(ShaB);
+                PluginUpdateService.TryOpenRootLock(root, out var outcome, out _)?.Dispose();
+                duringDownload = outcome;
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(zip) };
+            });
+            using var service = new PluginUpdateService(handler, () => pluginDir, Path.Combine(_temp, "dl"))
+            {
+                UpdateLockWait = TimeSpan.FromMilliseconds(300),
+            };
+            var check = await service.CheckAsync();
+
+            using (HoldLockAsAnotherProcess(root))
+            {
+                var refused = await service.UpdateAsync(check);
+                Assert.False(refused.Success);
+                Assert.Contains("Another MultiTerminal is updating", refused.Message);
+                Assert.Equal("old", Marker(root));
+                Assert.Null(duringDownload); // refused before anything was downloaded
+            }
+
+            // The in-process gate was taken first and released with the failed lock, so this one runs.
+            var result = await service.UpdateAsync(check);
+            Assert.True(result.Success, result.Message);
+            Assert.Equal(PluginUpdateService.RootLockOutcome.HeldElsewhere, duringDownload);
+            Assert.Equal(ShaB, PluginUpdateService.ReadStamp(root).Commit);
+        }
     }
 }
