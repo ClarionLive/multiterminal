@@ -150,9 +150,19 @@ namespace MultiTerminal
         private MultiTerminal.MCPServer.Services.ISessionMessageInjector _sessionInjector;
         private const int DeduplicationCacheMinutes = 5; // Keep delivered message IDs for 5 minutes
 
-        // For session restore with XML layout
-        private int _terminalRestoreIndex = 0;
+        // For session restore with XML layout. Each terminal entry of the layout takes its saved
+        // session from the pairing, by pane key where it has one (GH #74).
+        private TerminalRestorePairing _terminalRestorePairing;
         private List<TerminalSessionInfo> _pendingTerminalSessions;
+
+        // The terminal the focus borders and Attention rail were last moved to, by the active-pane
+        // events or a click into a terminal body (GH #74). ActiveContentChanged and
+        // ActiveDocumentChanged both report a docked tab switch, so the second report of the pane
+        // already shown is skipped.
+        private TerminalDocument _activeTerminalShown;
+
+        // Supplies the dock panel's floating windows (GH #74); see InstallFloatWindowFactory.
+        private IndependentFloatWindowFactory _floatWindowFactory;
 
         // Tracks agent names (CustomTitle) already materialized during the current restore so a
         // drifted layout.xml can't spawn a second same-named TerminalDocument — the durable half
@@ -313,7 +323,7 @@ namespace MultiTerminal
                     return;
 
                 var answer = MessageBox.Show(
-                    this,
+                    DialogOwner(),
                     Services.ClaudeIntegrationCheck.BuildMessage(problems, indexJs, pluginDirs),
                     "MultiTerminal: agent tools unavailable",
                     MessageBoxButtons.YesNo,
@@ -827,18 +837,106 @@ namespace MultiTerminal
         }
 
         /// <summary>
-        /// Handle global keyboard shortcuts that must work even when WebView2 has focus.
-        /// Ctrl+Shift+H: stop terminal and return to start screen on the active tab.
+        /// Global keyboard shortcuts pressed in a WinForms control of the main window. A key pressed
+        /// inside a WebView2 never arrives here (the WinForms WebView2 raises its accelerator keys as
+        /// KeyDown on itself and never calls ProcessCmdKey), so Ctrl+Shift+H inside a terminal is
+        /// handled by that terminal (<see cref="WebViewTerminalRenderer.IsReturnToStartScreenKey"/>).
         /// </summary>
         protected override bool ProcessCmdKey(ref System.Windows.Forms.Message msg, Keys keyData)
         {
-            if (keyData == (Keys.Control | Keys.Shift | Keys.H))
+            if (HandleGlobalShortcut(this, Control.FromChildHandle(msg.HWnd), keyData))
+                return true;
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        /// <summary>
+        /// The global shortcuts, for this window and for every floating window (GH #74), for keys
+        /// pressed in WinForms controls only (see <see cref="ProcessCmdKey"/>): such keys reach the
+        /// TOP-LEVEL form's ProcessCmdKey, which for a pane in a floating window is that window, so it
+        /// hands them here with itself and the control the key was addressed to. A shortcut acts only on
+        /// a pane in the window it was pressed in, the pane holding that control when there is one
+        /// (<see cref="GridLayoutManager.ContentForKey{T}"/>): Ctrl+Shift+H stops a terminal, and from a
+        /// floating window whose pane is not a terminal it must not reach for one the Owner cannot see
+        /// (pipeline security finding). True when the key was handled.
+        /// </summary>
+        private bool HandleGlobalShortcut(Form source, Control origin, Keys keyData)
+        {
+            if (WebViewTerminalRenderer.IsReturnToStartScreenKey(keyData))
             {
-                var activeTerminal = _dockPanel.ActiveDocument as TerminalDocument;
-                activeTerminal?.ReturnToStartScreen();
+                var terminal = GridLayoutManager.ContentForKey<TerminalDocument>(_dockPanel, source, origin);
+                if (terminal != null)
+                    terminal.ReturnToStartScreen();
+                else
+                    _debugLogService?.Info("MainForm", $"Ctrl+Shift+H in {(source is FloatWindow ? "a floating window" : "the main window")}: no terminal pane there, nothing stopped");
                 return true;
             }
-            return base.ProcessCmdKey(ref msg, keyData);
+
+            return false;
+        }
+
+        /// <summary>
+        /// The one way to change the dock panel's theme after construction: a new theme carries the
+        /// library's default floating-window factory, so the factory is installed again with it.
+        /// </summary>
+        private void SetDockPanelTheme(ThemeBase theme)
+        {
+            _dockPanel.Theme = theme;
+            InstallFloatWindowFactory();
+        }
+
+        /// <summary>
+        /// Makes every floating window an ordinary application window (GH #74): taskbar button,
+        /// minimise and restore of its own, shortcuts handed to <see cref="HandleGlobalShortcut"/>. The
+        /// factory lives on the dock panel's theme, so this runs after EVERY theme assignment.
+        /// </summary>
+        private void InstallFloatWindowFactory()
+        {
+            _floatWindowFactory ??= new IndependentFloatWindowFactory(HandleGlobalShortcut, CloseFloatingWindow);
+            _floatWindowFactory.InstallOn(_dockPanel);
+        }
+
+        /// <summary>
+        /// A floating window's close button (GH #74, phase 3). Its terminals close as ONE batch
+        /// (<see cref="CloseTerminalBatch"/>): every "also close helpers?" question first, then the
+        /// panes; a Cancel closes nothing in the window, its tool panels included. Then the other panes
+        /// close the way the library would close them (hidden when they hide on close). Returns false
+        /// while MT is shutting down, leaving the close to the library: the shutdown has already saved
+        /// the session and owns every pane.
+        /// </summary>
+        private bool CloseFloatingWindow(FloatWindow window)
+        {
+            if (window == null || _paneLaunches?.IsShuttingDown == true)
+                return false;
+
+            // The library's own rule for what its close button closes: floated contents with a close button.
+            var contents = window.NestedPanes
+                .SelectMany(pane => pane.Contents)
+                .Where(c => c.DockHandler.DockState == DockState.Float && c.DockHandler.CloseButton)
+                .ToList();
+
+            if (!CloseTerminalBatch(contents.OfType<TerminalDocument>().ToList()))
+                return true;
+
+            // MT may have begun exiting while a question was up; its shutdown pass owns the panels now.
+            if (_paneLaunches?.IsShuttingDown == true)
+                return true;
+
+            foreach (var content in contents.Where(c => !(c is TerminalDocument)))
+            {
+                try
+                {
+                    if (content.DockHandler.HideOnClose)
+                        content.DockHandler.Hide();
+                    else
+                        content.DockHandler.Close();
+                }
+                catch (Exception ex)
+                {
+                    _debugLogService?.Error("MainForm", $"Closing a floating window's panel failed: {ex.Message}");
+                }
+            }
+
+            return true;
         }
 
         private void InitializeDockPanel()
@@ -857,8 +955,14 @@ namespace MultiTerminal
             // Configure dock panel
             _dockPanel.DockBackColor = Color.FromArgb(30, 30, 30);
 
+            // Floating windows are real windows (GH #74). A pane floated without a size of its own
+            // (DockState.Float) opens at this size; the library's default is 300x300.
+            _dockPanel.DefaultFloatWindowSize = new Size(900, 600);
+            InstallFloatWindowFactory();
+
             // Handle active document changes
             _dockPanel.ActiveDocumentChanged += OnActiveDocumentChanged;
+            _dockPanel.ActiveContentChanged += OnActiveContentChanged;
 
             // Robustly tear a terminal down when its tab is closed. ContentRemoved is
             // DockPanelSuite's authoritative "this content left the panel" signal — unlike
@@ -2048,8 +2152,7 @@ namespace MultiTerminal
             // Fallback: search by DocId or name
             if (targetDoc == null)
             {
-                targetDoc = _dockPanel.Documents
-                    .OfType<TerminalDocument>()
+                targetDoc = _gridManager.GetAllTerminalDocuments()
                     .FirstOrDefault(t =>
                         t.DocId == terminal.DocId ||
                         (t.CustomTitle?.Equals(terminal.Name, StringComparison.OrdinalIgnoreCase) ?? false));
@@ -2283,7 +2386,7 @@ namespace MultiTerminal
             // synchronous hand-off (the broker raises it outside _registrationLock).
             TerminalRegistrationRouter.Route(
                 RunOnUiThreadSync,
-                () => _dockPanel.Documents.OfType<TerminalDocument>().ToList(),
+                () => _gridManager.GetAllTerminalDocuments(),
                 d => new PaneIdentity(d.DocId, d.OriginalAgentName, d.CustomTitle, d.LaunchNonce),
                 e.Name, e.DocId, e.LaunchNonce,
                 (binding, targetDoc) => CommitRegistrationBinding(e, binding, targetDoc));
@@ -3662,20 +3765,20 @@ namespace MultiTerminal
         private TerminalDocument GetOrCreateHomeTab(out bool created)
         {
             created = false;
-            if (_dockPanel.ActiveDocument is TerminalDocument active && active.IsStartScreenVisible)
+            if (ActiveTerminalPane() is TerminalDocument active && active.IsStartScreenVisible)
                 return active;
 
-            var home = _dockPanel.Documents.OfType<TerminalDocument>()
+            var home = _gridManager.GetAllTerminalDocuments()
                 .FirstOrDefault(d => d.IsStartScreenVisible && !d.IsHidden);
             if (home != null)
             {
-                home.Activate();
+                GridLayoutManager.Surface(home);
                 return home;
             }
 
             var (_, docId) = AddNewTerminal();
             created = true;
-            return _dockPanel.Documents.OfType<TerminalDocument>().FirstOrDefault(d => d.DocId == docId);
+            return _gridManager.GetAllTerminalDocuments().FirstOrDefault(d => d.DocId == docId);
         }
 
         /// <summary>
@@ -3697,7 +3800,9 @@ namespace MultiTerminal
                     isDisposed: doc.IsDisposed,
                     startScreenVisible: doc.IsStartScreenVisible,
                     terminalStarted: doc.IsTerminalStarted,
-                    terminalPaneCount: _dockPanel.Documents.OfType<TerminalDocument>().Count()))
+                    // Docked panes only (GH #74): the tab is closed only if the MAIN window keeps a
+                    // terminal; terminals in floating windows do not stop it emptying.
+                    terminalPaneCount: _gridManager.GetDockedTerminalDocuments().Count))
             {
                 doc.Close();
             }
@@ -4000,7 +4105,7 @@ namespace MultiTerminal
         private void ShowOwnerProfileDialog()
         {
             var dialog = new Dialogs.OwnerProfileDialog();
-            new WindowInteropHelper(dialog) { Owner = this.Handle };
+            new WindowInteropHelper(dialog) { Owner = DialogOwner().Handle };
 
             // Pre-populate if profile exists (editing)
             var existing = _ownerProfileService.GetProfile();
@@ -4023,7 +4128,7 @@ namespace MultiTerminal
         {
             string homeViewBefore = _settings.GetStartScreenHomeView();
             var dialog = new SettingsWpfDialog(_settings, _currentTheme.IsDark, _ownerProfileService, _sourceControlAccountService);
-            new WindowInteropHelper(dialog) { Owner = this.Handle };
+            new WindowInteropHelper(dialog) { Owner = DialogOwner().Handle };
             if (dialog.ShowDialog() == true)
             {
                 ApplySettingsFromDialog(dialog);
@@ -4036,7 +4141,7 @@ namespace MultiTerminal
         {
             using (var dialog = new Dialogs.AboutDialog(_currentTheme))
             {
-                dialog.ShowDialog(this);
+                dialog.ShowDialog(DialogOwner());
             }
         }
 
@@ -4044,7 +4149,7 @@ namespace MultiTerminal
         {
             using (var dialog = new Dialogs.ChatHistoryDialog(_chatTaskDatabase, _currentTheme))
             {
-                dialog.ShowDialog(this);
+                dialog.ShowDialog(DialogOwner());
             }
         }
 
@@ -4065,7 +4170,7 @@ namespace MultiTerminal
             else
             {
                 MessageBox.Show(
-                    this,
+                    DialogOwner(),
                     "Documentation was not found at:\n" + docsPath,
                     "Help & Documentation",
                     MessageBoxButtons.OK,
@@ -4080,7 +4185,7 @@ namespace MultiTerminal
                 _toolStrip.Font = new Font(_toolStrip.Font.FontFamily, dialog.ToolbarFontSize);
 
             // Apply terminal font to all open terminals (including Oracle)
-            foreach (var doc in _gridManager.GetTerminalDocuments())
+            foreach (var doc in _gridManager.GetAllTerminalDocuments())
             {
                 doc.SetFontSize(dialog.TerminalFontSize);
             }
@@ -4100,7 +4205,7 @@ namespace MultiTerminal
         // switch now. Only on a real change, so an unrelated Settings OK never moves anyone off their view.
         private void ApplyStartScreenHomeViewChange()
         {
-            foreach (var doc in _gridManager.GetTerminalDocuments())
+            foreach (var doc in _gridManager.GetAllTerminalDocuments())
             {
                 if (!doc.IsStartScreenVisible) continue;
                 doc.RefreshStartScreenProjects();
@@ -4202,7 +4307,7 @@ namespace MultiTerminal
                 // Only set DockPanel theme on initial load (before any documents are open)
                 if (isInitialLoad)
                 {
-                    _dockPanel.Theme = new WeifenLuo.WinFormsUI.Docking.VS2015DarkTheme();
+                    SetDockPanelTheme(new WeifenLuo.WinFormsUI.Docking.VS2015DarkTheme());
                 }
             }
             else
@@ -4212,7 +4317,7 @@ namespace MultiTerminal
                 // Only set DockPanel theme on initial load (before any documents are open)
                 if (isInitialLoad)
                 {
-                    _dockPanel.Theme = new WeifenLuo.WinFormsUI.Docking.VS2015LightTheme();
+                    SetDockPanelTheme(new WeifenLuo.WinFormsUI.Docking.VS2015LightTheme());
                 }
             }
 
@@ -4230,7 +4335,7 @@ namespace MultiTerminal
             }
 
             // Update all terminal themes
-            foreach (var doc in _gridManager.GetTerminalDocuments())
+            foreach (var doc in _gridManager.GetAllTerminalDocuments())
             {
                 doc.SetTheme(_currentTheme);
             }
@@ -4431,6 +4536,8 @@ namespace MultiTerminal
 
             // Terminal placement by MaxGridPanes; never floats (task 7f91349f, see TerminalPlacement).
             int maxGrids = _settings?.GetMaxGridPanes() ?? 4;
+            // The split source is the DOCKED active document: placement is about the docked area and
+            // never puts a terminal into a floating window (GH #74 keeps it so).
             var activeDoc = _dockPanel.ActiveDocument as TerminalDocument;
 
             _debugLogService?.Trace("AddNewTerminal", $"Showing terminal in DockPanel (maxGrids: {maxGrids}, forceTab: {forceTabMode})...");
@@ -4441,7 +4548,7 @@ namespace MultiTerminal
             else
             {
                 // Distinct panes holding a terminal, each with its visible-terminal count
-                var panes = _dockPanel.Documents.OfType<TerminalDocument>()
+                var panes = _gridManager.GetDockedTerminalDocuments()
                     .Select(d => d.Pane)
                     .Where(p => p != null)
                     .Distinct()
@@ -4694,7 +4801,7 @@ namespace MultiTerminal
             if (!result.Success)
             {
                 MessageBox.Show(
-                    owner ?? this,
+                    owner ?? DialogOwner(),
                     result.Error ?? "Failed to delete project.",
                     "Delete Project",
                     MessageBoxButtons.OK,
@@ -4708,7 +4815,7 @@ namespace MultiTerminal
                 _currentProject = null;
                 RefreshDashboardProjectInfo();
             }
-            foreach (var doc in _dockPanel.Documents.OfType<TerminalDocument>().ToList())
+            foreach (var doc in _gridManager.GetAllTerminalDocuments())
                 doc.RefreshStartScreenProjects();
             return true;
         }
@@ -4775,7 +4882,7 @@ namespace MultiTerminal
                 _currentProject = _sharedProjectDatabase?.GetRichProject(projectId) ?? _currentProject;
                 RefreshDashboardProjectInfo();
             }
-            foreach (var doc in _dockPanel.Documents.OfType<TerminalDocument>().ToList())
+            foreach (var doc in _gridManager.GetAllTerminalDocuments())
             {
                 doc.RefreshStartScreenProjects();
                 doc.UpdateStatusBar();
@@ -4977,7 +5084,7 @@ namespace MultiTerminal
                         {
                             var identities = GetAvailableIdentities(launchDir);
                             using var picker = new Dialogs.IdentityPickerDialog(terminalName, identities, _currentTheme);
-                            if (picker.ShowDialog(this) == DialogResult.OK)
+                            if (picker.ShowDialog(DialogOwner()) == DialogResult.OK)
                             {
                                 terminalName = picker.SelectedIdentity;
                                 isTeamLead = false; // Alternative identity, not the designated team lead
@@ -5067,7 +5174,7 @@ namespace MultiTerminal
                     resumeSessionId: resumeSession?.Entry.SessionId, launchKind: Services.PaneLaunchKind.From(kind));
                 _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] After StartTerminal: doc.CustomTitle='{doc.CustomTitle}' doc.TabText='{doc.TabText}' doc.Text='{doc.Text}'");
 
-                doc.Activate();
+                GridLayoutManager.Surface(doc);
                 doc.FocusTerminal();
                 _lastActiveTerminal = doc;
 
@@ -5127,7 +5234,7 @@ namespace MultiTerminal
             {
                 // Not the same as "nothing to resume" (pipeline Run 1): say so, and let the user choose
                 // between a new session and launching nothing, in Ask and Continue mode alike.
-                var answer = MessageBox.Show(this,
+                var answer = MessageBox.Show(DialogOwner(),
                     $"Could not read this project's session history:\n{decision.Model.LoadError}\n\nOK starts a new session. Cancel launches nothing.",
                     "Launch project", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
                 _debugLogService?.Info("LaunchSession", $"Project '{project.Name}': history unreadable; user chose {(answer == DialogResult.OK ? "new session" : "cancel")}");
@@ -5146,7 +5253,7 @@ namespace MultiTerminal
             }
 
             using var dialog = new Dialogs.LaunchSessionDialog(project.Name, decision.Model, newSessionName, _currentTheme, DateTime.UtcNow, decision.DefaultChoice);
-            if (dialog.ShowDialog(this) != DialogResult.OK)
+            if (dialog.ShowDialog(DialogOwner()) != DialogResult.OK)
             {
                 _debugLogService?.Info("LaunchSession", $"Project '{project.Name}': launch prompt cancelled; nothing launched");
                 return false;
@@ -5208,7 +5315,7 @@ namespace MultiTerminal
                     _debugLogService?.Info("LaunchSession", $"Helper resume for '{pmName}': {report.Resumed.Count} resumed, {report.Skipped.Count} skipped, {report.Renamed.Count} renamed.");
                     string summary = report.BuildSummary(pmName);
                     if (summary != null)
-                        MessageBox.Show(this, summary, "Resume helpers", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        MessageBox.Show(DialogOwner(), summary, "Resume helpers", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
                 catch (Exception ex)
                 {
@@ -5500,7 +5607,7 @@ namespace MultiTerminal
                 using (var dialog = new Dialogs.StartupRestoreDialog(model, _currentTheme))
                 {
                     // Anything but Resume unticks every row (the dialog's contract), so this is Don't restore.
-                    dialog.ShowDialog(this);
+                    dialog.ShowDialog(DialogOwner());
                 }
 
                 RunStartupRestore(model);
@@ -5519,9 +5626,13 @@ namespace MultiTerminal
             }
         }
 
-        /// <summary>The restored panes still on their Home screen, in dock order.</summary>
-        private List<TerminalDocument> GetRestoredHomePanes() => _gridManager.GetTerminalDocuments()
+        /// <summary>
+        /// The restored panes still on their Home screen, in dock order, docked ones first: the collapse
+        /// keeps the first, and it must not keep a floating window while it closes every docked pane (GH #74).
+        /// </summary>
+        private List<TerminalDocument> GetRestoredHomePanes() => _gridManager.GetAllTerminalDocuments()
             .Where(d => !d.IsDisposed && !d.IsTerminalStarted && d.IsStartScreenVisible)
+            .OrderBy(d => d.DockState == DockState.Document ? 0 : 1)
             .ToList();
 
         /// <summary>Nothing came back: every restored Home pane but the first closes.</summary>
@@ -5578,7 +5689,7 @@ namespace MultiTerminal
 
             if (skipped.Count > 0)
             {
-                MessageBox.Show(this,
+                MessageBox.Show(DialogOwner(),
                     "These terminals were not resumed:\n\n" + string.Join("\n", skipped.Select(s => "• " + s)),
                     "Restore terminals", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -5765,7 +5876,7 @@ namespace MultiTerminal
                 {
                     if (doc == null || doc.IsDisposed || doc.IsTerminalStarted || !doc.IsStartScreenVisible)
                         continue;
-                    if (_gridManager.GetTerminalDocuments().Count(d => !d.IsDisposed) <= 1)
+                    if (_gridManager.GetAllTerminalDocuments().Count(d => !d.IsDisposed) <= 1)
                         return;
                     doc.Close();
                     if (!doc.IsDisposed && doc.DockPanel == null)
@@ -5912,7 +6023,7 @@ namespace MultiTerminal
 
                 doc.StartTerminal(dir, terminalName, claudeProfile: claudeProfile, launchKind: Services.PaneLaunchKind.PowerShell);
 
-                doc.Activate();
+                GridLayoutManager.Surface(doc);
                 doc.FocusTerminal();
                 _lastActiveTerminal = doc;
             }
@@ -5954,7 +6065,7 @@ namespace MultiTerminal
                     describeProfileChoice: DescribeClaudeProfileChoice,
                     profileHint: DescribeClaudeProfileHint);
 
-                if (picker.ShowDialog(this) != DialogResult.OK)
+                if (picker.ShowDialog(DialogOwner()) != DialogResult.OK)
                     return; // User cancelled
 
                 // "Unassigned" (the picker's default since ae3d0193) launches under its OWN unique, non-team
@@ -6021,7 +6132,7 @@ namespace MultiTerminal
                 doc.StartTerminal(workingDir, terminalName, launch.AutoRunCommand, isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath, claudeProfile: claudeProfile,
                     launchKind: Services.PaneLaunchKind.Claude, launchQuietStart: true);
 
-                doc.Activate();
+                GridLayoutManager.Surface(doc);
                 doc.FocusTerminal();
                 _lastActiveTerminal = doc;
             }
@@ -6050,7 +6161,9 @@ namespace MultiTerminal
                 findExistingProject: folder => _mcpServer?.Broker?.FindExistingProjectAtPath(folder)
                                                ?? Services.ExistingProjectMatch.None);
             var helper = new System.Windows.Interop.WindowInteropHelper(wpfDialog);
-            helper.Owner = this.Handle;
+            // Owned by the window holding the start screen it was opened from (GH #74: that may be a
+            // floating window while the main window is minimised).
+            helper.Owner = DialogOwner(sourceDoc).Handle;
             if (wpfDialog.ShowDialog() != true) return;
 
             // The folder already had a project and the user chose Open or Rename (task 9f95ab0c).
@@ -6230,12 +6343,12 @@ namespace MultiTerminal
                     projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile2, taskWorktreePath: taskWorktreePath2,
                     claudeProfile: claudeProfile2, launchKind: Services.PaneLaunchKind.From(terminalKind));
 
-                sourceDoc.Activate();
+                GridLayoutManager.Surface(sourceDoc);
                 sourceDoc.FocusTerminal();
                 _lastActiveTerminal = sourceDoc;
 
                 // Refresh other start screens so the new project card appears
-                foreach (var termDoc in _dockPanel.Documents.OfType<TerminalDocument>())
+                foreach (var termDoc in _gridManager.GetAllTerminalDocuments())
                 {
                     if (termDoc != sourceDoc && termDoc.IsStartScreenVisible)
                         termDoc.ShowStartScreen();
@@ -6681,7 +6794,7 @@ namespace MultiTerminal
                 return;
             }
 
-            MessageBox.Show(this, refusal, "Claude Profile", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(DialogOwner(), refusal, "Claude Profile", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
         /// <summary>
@@ -7008,7 +7121,7 @@ namespace MultiTerminal
             _settings?.SetAgentPanelSplitRatio(ratio);
             // Apply to all other terminals
             var source = sender as TerminalDocument;
-            foreach (var doc in _gridManager.GetTerminalDocuments())
+            foreach (var doc in _gridManager.GetAllTerminalDocuments())
             {
                 if (doc != source) doc.ApplyAgentSplitRatio(ratio);
             }
@@ -7019,7 +7132,7 @@ namespace MultiTerminal
             _settings?.SetHudSplitRatio(ratio);
             // Apply to all other terminals
             var source = sender as TerminalDocument;
-            foreach (var doc in _gridManager.GetTerminalDocuments())
+            foreach (var doc in _gridManager.GetAllTerminalDocuments())
             {
                 if (doc != source) doc.ApplyHudSplitRatio(ratio);
             }
@@ -7030,7 +7143,7 @@ namespace MultiTerminal
             _settings?.SetStatusBarHeight(height);
             // Apply to all other terminals
             var source = sender as TerminalDocument;
-            foreach (var doc in _gridManager.GetTerminalDocuments())
+            foreach (var doc in _gridManager.GetAllTerminalDocuments())
             {
                 if (doc != source) doc.ApplyStatusBarHeight(height);
             }
@@ -7092,7 +7205,7 @@ namespace MultiTerminal
 
                 // Apply to the same tab in all other terminals
                 var source = sender as TerminalDocument;
-                foreach (var doc in _gridManager.GetTerminalDocuments())
+                foreach (var doc in _gridManager.GetAllTerminalDocuments())
                 {
                     if (doc != source) doc.ApplyHudTabZoom(e.ZoomKey, e.Zoom);
                 }
@@ -7127,16 +7240,20 @@ namespace MultiTerminal
             // (DockPanelSuite's ActiveDocument is unreliable with WebView2)
             if (sender is TerminalControl terminal)
             {
-                foreach (var doc in _gridManager.GetTerminalDocuments())
+                foreach (var doc in _gridManager.GetAllTerminalDocuments())
                 {
                     if (doc.Terminal == terminal)
                     {
                         _lastActiveTerminal = doc;
 
+                        // The borders move below, so the active-pane events must not later treat
+                        // this pane as already shown when it is not (GH #74).
+                        _activeTerminalShown = doc;
+
                         // Update focus borders — ActiveDocumentChanged doesn't fire reliably
                         // with WebView2, so we must update borders directly on click
                         SuspendLayout();
-                        foreach (var termDoc in _gridManager.GetTerminalDocuments())
+                        foreach (var termDoc in _gridManager.GetAllTerminalDocuments())
                         {
                             termDoc.SetFocusBorder(termDoc == doc);
                         }
@@ -7418,7 +7535,7 @@ namespace MultiTerminal
             {
                 // Use _lastActiveTerminal instead of _dockPanel.ActiveDocument
                 // because DockPanelSuite's ActiveDocument is unreliable with WebView2
-                var doc = _lastActiveTerminal ?? _dockPanel.ActiveDocument as TerminalDocument;
+                var doc = _lastActiveTerminal ?? ActiveTerminalPane();
                 if (doc != null)
                 {
                     // Send cd command with Enter key (\r)
@@ -7431,7 +7548,7 @@ namespace MultiTerminal
 
         private void CloseCurrentTerminal()
         {
-            if (_dockPanel.ActiveDocument is TerminalDocument doc)
+            if (ActiveTerminalPane() is TerminalDocument doc)
             {
                 doc.Close();
             }
@@ -7439,7 +7556,7 @@ namespace MultiTerminal
 
         private void ApplyGridLayout(GridLayoutManager.GridPreset preset)
         {
-            int existingCount = _gridManager.GetTerminalDocuments().Count;
+            int existingCount = _gridManager.GetDockedTerminalDocuments().Count;
             int neededCount = GetTerminalCountForPreset(preset);
 
             // Top up with Home tabs (task a7d3e675). Each added pane goes through AddNewTerminal, the
@@ -7500,7 +7617,7 @@ namespace MultiTerminal
         /// </summary>
         private TerminalDocument OwnerTypingPane(string newPaneId)
         {
-            if (!(_dockPanel.ActiveDocument is TerminalDocument active) || active.IsDisposed) return null;
+            if (!(ActiveTerminalPane() is TerminalDocument active) || active.IsDisposed) return null;
             return IsOwnerTypingIn(active, newPaneId) ? active : null;
         }
 
@@ -7523,7 +7640,7 @@ namespace MultiTerminal
         private void KeepFocusAfterWebLoad(string what, bool webViewHasFocus)
         {
             if (!webViewHasFocus) return;
-            var active = _dockPanel.ActiveDocument as TerminalDocument;
+            var active = ActiveTerminalPane();
             var typedAt = active?.Terminal?.LastUserInputUtc;
             // The Owner's last input of any kind must be that keystroke: a click into the page since then
             // (or a mouse move, which cannot be told apart) means focus stays where it is.
@@ -7565,11 +7682,43 @@ namespace MultiTerminal
                 $"'{activeDoc.TabText}' became active while you were typing in '{previous.TabText}'. Called from: {string.Join(" < ", callers)}");
         }
 
-        private void OnActiveDocumentChanged(object sender, EventArgs e)
+        /// <summary>
+        /// The terminal the Owner is in, docked or floated (GH #74); see
+        /// <see cref="GridLayoutManager.ActiveTerminalOrDocument"/>.
+        /// </summary>
+        private TerminalDocument ActiveTerminalPane()
+            => GridLayoutManager.ActiveTerminalOrDocument(_dockPanel) as TerminalDocument;
+
+        /// <summary>
+        /// A floated terminal becoming active (GH #74). It never becomes the active DOCUMENT, so
+        /// <see cref="OnActiveDocumentChanged"/> does not fire for it, nor for the move back to a
+        /// docked pane that was the active document all along. A tool panel becoming active changes
+        /// nothing, as before.
+        /// </summary>
+        private void OnActiveContentChanged(object sender, EventArgs e)
         {
+            if (_dockPanel.ActiveContent is TerminalDocument doc)
+                OnActiveTerminalChanged(doc);
+        }
+
+        /// <summary>
+        /// The docked active document changed. That can happen alone while a FLOATED terminal is the
+        /// active content (a tab dragged out to float; an agent closing the docked active pane), so the
+        /// active pane is asked for rather than the document: a floated terminal the Owner is working
+        /// in keeps its focus and borders (GH #74, pipeline debugger).
+        /// </summary>
+        private void OnActiveDocumentChanged(object sender, EventArgs e)
+            => OnActiveTerminalChanged(ActiveTerminalPane());
+
+        private void OnActiveTerminalChanged(TerminalDocument activeDoc)
+        {
+            // Both events report a docked tab switch (ActiveContentChanged first); act once.
+            if (activeDoc != null && ReferenceEquals(activeDoc, _activeTerminalShown))
+                return;
+            _activeTerminalShown = activeDoc;
+
             try
             {
-                var activeDoc = _dockPanel.ActiveDocument as TerminalDocument;
                 LogSwitchAfterTyping(activeDoc);
 
                 // The Attention Rail's highlight has to follow focus changed by clicking a TAB,
@@ -7578,7 +7727,7 @@ namespace MultiTerminal
 
                 // Update focus borders on all terminals
                 SuspendLayout();
-                foreach (var termDoc in _gridManager.GetTerminalDocuments())
+                foreach (var termDoc in _gridManager.GetAllTerminalDocuments())
                 {
                     termDoc.SetFocusBorder(termDoc == activeDoc);
                 }
@@ -7599,7 +7748,7 @@ namespace MultiTerminal
 
                 // Force all panes to refresh their tab strips to show correct active state
                 var refreshedPanes = new HashSet<object>();
-                foreach (var termDoc in _gridManager.GetTerminalDocuments())
+                foreach (var termDoc in _gridManager.GetAllTerminalDocuments())
                 {
                     if (termDoc.Pane?.TabStripControl != null && refreshedPanes.Add(termDoc.Pane))
                     {
@@ -7609,7 +7758,7 @@ namespace MultiTerminal
             }
             catch (Exception ex)
             {
-                _debugLogService?.Error("MainForm", $"OnActiveDocumentChanged error: {ex.Message}");
+                _debugLogService?.Error("MainForm", $"OnActiveTerminalChanged error: {ex.Message}");
             }
         }
 
@@ -7658,6 +7807,15 @@ namespace MultiTerminal
         // PM's answer handled (Yes: closed with it; No: keep running). Null outside a batch.
         private Dictionary<string, IReadOnlyList<string>> _batchHelpersHandled;
 
+        // GH #74: true while a batch close is asking its questions (before anything closes), so a second
+        // batch started from inside a question is ignored.
+        private bool _batchQuestionsOpen;
+
+        // GH #74: while a batch close is CLOSING, each PM's recorded answer and the helpers its question
+        // named. OnPaneFormClosing uses it and asks nothing: a PM with no recorded answer keeps its
+        // helpers. Null outside the closing phase of a batch.
+        private Dictionary<string, PaneBatchCloseQuestions.Recorded> _batchAnswers;
+
         /// <summary>
         /// The tab menu's Close All Tabs / Close all but this (task 7d20e94c item 8 review fix). Closing a
         /// fixed list one by one used to close a helper whose tab comes before its PM as a plain
@@ -7668,32 +7826,85 @@ namespace MultiTerminal
         /// </summary>
         private void OnPaneBatchCloseRequested(object sender, PaneBatchCloseRequestedEventArgs e)
         {
-            if (e == null || e.Panes.Count == 0)
-                return;
-            if (_batchHelpersHandled != null)
+            if (e != null)
+                CloseTerminalBatch(e.Panes);
+        }
+
+        /// <summary>
+        /// Closes several panes as one batch: the tab menu's Close All Tabs and Close all but this, and
+        /// a floating window's close button (GH #74). Every "also close its helpers?" question is asked
+        /// FIRST (<see cref="PaneBatchCloseQuestions"/>), so a Cancel closes nothing at all; then the panes
+        /// close in <see cref="PaneBatchClose"/> order with those answers. True when every pane was
+        /// handled; false when the batch was cancelled or stopped.
+        /// </summary>
+        private bool CloseTerminalBatch(IReadOnlyList<TerminalDocument> panes)
+        {
+            if (panes == null || panes.Count == 0)
+                return true;
+            if (_batchHelpersHandled != null || _batchQuestionsOpen)
             {
                 // A batch inside a batch (a menu click while a question is up): ignore it.
-                return;
+                return false;
             }
 
             var byId = new Dictionary<string, TerminalDocument>(StringComparer.Ordinal);
-            foreach (var pane in e.Panes)
+            foreach (var pane in panes)
             {
                 if (pane != null && !string.IsNullOrEmpty(pane.DocId))
                     byId.TryAdd(pane.DocId, pane);
             }
 
             var plan = new PaneBatchClose(
-                e.Panes.Where(p => p != null).Select(p => p.DocId),
+                panes.Where(p => p != null).Select(p => p.DocId),
                 id => _paneLaunches?.GetOpenHelperDocIds(id));
 
+            // Every question before any close, repeated until a pass asks nobody new (a question pumps
+            // messages, so a helper can be spawned while it is up). While one is showing, a second batch
+            // is ignored above.
+            Dictionary<string, PaneBatchCloseQuestions.Recorded> answers;
+            _batchQuestionsOpen = true;
+            try
+            {
+                answers = PaneBatchCloseQuestions.AskAll(
+                    plan.Order,
+                    id => byId.TryGetValue(id, out var pm) && !pm.IsDisposed
+                        ? OpenHelperPanesOf(pm).Select(h => h.DocId).ToList()
+                        : null,
+                    (id, helperIds) => AskCloseHelpers(
+                        byId[id],
+                        OpenHelperPanesOf(byId[id]).Where(h => helperIds.Contains(h.DocId, StringComparer.Ordinal)).ToList()));
+            }
+            finally
+            {
+                _batchQuestionsOpen = false;
+            }
+
+            if (answers == null)
+            {
+                _debugLogService?.Info("MainForm", "Batch close cancelled before anything closed (GH #74).");
+                return false;
+            }
+
+            // MT may have begun exiting while a question was up; its shutdown pass owns every pane now.
+            if (_paneLaunches?.IsShuttingDown == true)
+                return false;
+
+            _batchAnswers = answers;
             _batchHelpersHandled = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
             try
             {
                 for (var id = plan.Next(); id != null; id = plan.Next())
                 {
                     if (!byId.TryGetValue(id, out var doc) || doc.IsDisposed || doc.DockPanel == null)
+                    {
+                        // Already gone: the Owner closed it by hand in another window while a question
+                        // was up (floating windows are not disabled by it). The helpers its recorded
+                        // answer covered leave the batch, as they would have had the batch closed it:
+                        // that close asked its own question, and its answer stands (pipeline debugger).
+                        if (_batchAnswers.TryGetValue(id, out var recordedForGone))
+                            plan.ReportHelpersHandled(recordedForGone.Helpers);
                         continue;
+                    }
 
                     _batchHelpersHandled.Clear();
                     doc.Close();
@@ -7711,7 +7922,73 @@ namespace MultiTerminal
             finally
             {
                 _batchHelpersHandled = null;
+                _batchAnswers = null;
             }
+
+            return !plan.Stopped;
+        }
+
+        /// <summary>The helper panes of <paramref name="pm"/>'s current launch that are still open.</summary>
+        private List<TerminalDocument> OpenHelperPanesOf(TerminalDocument pm)
+        {
+            var helperDocIds = _paneLaunches?.GetOpenHelperDocIds(pm.DocId);
+            if (helperDocIds == null || helperDocIds.Count == 0)
+                return new List<TerminalDocument>();
+
+            return _dockPanel.Contents.OfType<TerminalDocument>()
+                .Where(d => d != pm && !d.IsDisposed && helperDocIds.Contains(d.DocId, StringComparer.Ordinal))
+                .ToList();
+        }
+
+        /// <summary>
+        /// Shows "also close <paramref name="pm"/>'s helpers?", owned by the window that holds the PM
+        /// (GH #74: a floating window, or the main one), and returns the answer.
+        /// </summary>
+        private PaneBatchCloseQuestions.Answer AskCloseHelpers(TerminalDocument pm, List<TerminalDocument> helpers)
+        {
+            DialogResult answer;
+            _helperClosePromptOpen.Add(pm.DocId);
+            try
+            {
+                answer = MessageBox.Show(
+                    DialogOwner(pm),
+                    HelperCloseWithPm.Question(pm.CustomTitle, helpers.Select(h => h.CustomTitle).ToList()),
+                    "Close helpers too?",
+                    MessageBoxButtons.YesNoCancel,
+                    MessageBoxIcon.Question,
+                    MessageBoxDefaultButton.Button1);
+            }
+            finally
+            {
+                _helperClosePromptOpen.Remove(pm.DocId);
+            }
+
+            return answer == DialogResult.Yes ? PaneBatchCloseQuestions.Answer.CloseHelpersToo
+                : answer == DialogResult.No ? PaneBatchCloseQuestions.Answer.KeepHelpers
+                : PaneBatchCloseQuestions.Answer.Cancel;
+        }
+
+        /// <summary>
+        /// The window a dialog should belong to (GH #74): the one holding <paramref name="context"/> when
+        /// given, else the active form, else the main window, else any floating window, skipping any that
+        /// is hidden or minimised. A dialog owned by a minimised window is hidden with it, and with
+        /// floating windows the main window is often minimised while the Owner works elsewhere.
+        /// </summary>
+        private System.Windows.Forms.IWin32Window DialogOwner(Control context = null)
+        {
+            var candidates = new List<Form>
+            {
+                context?.TopLevelControl as Form,
+                Form.ActiveForm,
+                this,
+            };
+            if (_dockPanel != null)
+                candidates.AddRange(_dockPanel.FloatWindows);
+
+            // Never null: this window is always a candidate, so it is the fallback when none is usable.
+            return DialogOwnerChoice.Pick(
+                candidates,
+                f => !f.IsDisposed && f.Visible && f.WindowState != FormWindowState.Minimized) ?? this;
         }
 
         /// <summary>
@@ -7739,34 +8016,33 @@ namespace MultiTerminal
                 return;
             }
 
-            var helperDocIds = _paneLaunches.GetOpenHelperDocIds(pm.DocId);
-            if (helperDocIds.Count == 0)
-                return;
-
-            var helpers = _dockPanel.Contents.OfType<TerminalDocument>()
-                .Where(d => d != pm && !d.IsDisposed && helperDocIds.Contains(d.DocId, StringComparer.Ordinal))
-                .ToList();
+            var helpers = OpenHelperPanesOf(pm);
             if (helpers.Count == 0)
                 return;
 
-            DialogResult answer;
-            _helperClosePromptOpen.Add(pm.DocId);
-            try
+            PaneBatchCloseQuestions.Answer answer;
+            if (_batchAnswers == null)
             {
-                answer = MessageBox.Show(
-                    this,
-                    HelperCloseWithPm.Question(pm.CustomTitle, helpers.Select(h => h.CustomTitle).ToList()),
-                    "Close helpers too?",
-                    MessageBoxButtons.YesNoCancel,
-                    MessageBoxIcon.Question,
-                    MessageBoxDefaultButton.Button1);
+                answer = AskCloseHelpers(pm, helpers);
             }
-            finally
+            else if (_batchAnswers.TryGetValue(pm.DocId, out var recorded))
             {
-                _helperClosePromptOpen.Remove(pm.DocId);
+                // A batch closing: the question was asked before anything closed (GH #74), and the answer
+                // covers only the helpers it named, not one spawned since.
+                answer = recorded.Answer;
+                helpers = helpers.Where(h => recorded.Helpers.Contains(h.DocId, StringComparer.Ordinal)).ToList();
+            }
+            else
+            {
+                // A batch closing, and this PM gained helpers after its questions were asked. Nothing is
+                // asked once closing has started, because a Cancel now would leave the batch half closed:
+                // the PM closes and these helpers keep running (or close later as part of the batch, if
+                // it named them).
+                _debugLogService?.Info("MainForm", $"'{pm.CustomTitle}' gained helpers after the batch's questions; closing it without asking, its helpers keep running (GH #74).");
+                return;
             }
 
-            if (answer == DialogResult.Cancel)
+            if (answer == PaneBatchCloseQuestions.Answer.Cancel)
             {
                 e.Cancel = true;
                 return;
@@ -7777,7 +8053,7 @@ namespace MultiTerminal
             _batchHelpersHandled?.TryAdd(pm.DocId, helpers.Select(h => h.DocId).ToList());
 
             // MT may have begun exiting while the question was up; its shutdown pass owns every pane now.
-            if (answer != DialogResult.Yes || _paneLaunches.IsShuttingDown)
+            if (answer != PaneBatchCloseQuestions.Answer.CloseHelpersToo || _paneLaunches.IsShuttingDown)
                 return;
 
             foreach (var helper in helpers)
@@ -7926,6 +8202,9 @@ namespace MultiTerminal
             if (!(e.Content is TerminalDocument doc))
                 return;
 
+            if (ReferenceEquals(_activeTerminalShown, doc))
+                _activeTerminalShown = null;
+
             _debugLogService?.Info("MainForm",
                 $"Terminal tab removed from dock: docId={doc.DocId} name='{doc.CustomTitle}' alreadyDisposed={doc.IsDisposed} — forcing teardown (task a9435da9)");
 
@@ -8012,7 +8291,7 @@ namespace MultiTerminal
                 using var profilePicker = new Dialogs.IdentityPickerProfileDialog(
                     identityName, predictedFolder, pickerProfiles,
                     paneProfileName, _currentTheme, DescribeClaudeProfileHint);
-                if (profilePicker.ShowDialog(this) != DialogResult.OK)
+                if (profilePicker.ShowDialog(DialogOwner()) != DialogResult.OK)
                     return;
 
                 pickedProfileName = profilePicker.SelectedClaudeProfileName;
@@ -8155,7 +8434,7 @@ namespace MultiTerminal
                     _exitConfirmDialogOpen = true;
                     try
                     {
-                        confirm = TaskDialog.ShowDialog(this, page);
+                        confirm = TaskDialog.ShowDialog(DialogOwner(), page);
                     }
                     finally
                     {
@@ -8210,7 +8489,7 @@ namespace MultiTerminal
                 try
                 {
                     // Mechanical save — fast, guaranteed (<1 sec per terminal)
-                    var terminals = _dockPanel.Documents.OfType<TerminalDocument>()
+                    var terminals = _gridManager.GetAllTerminalDocuments()
                         .Where(d => d.Terminal?.ConPty != null && d.Terminal.IsRunning)
                         .ToList();
 
@@ -8289,7 +8568,7 @@ namespace MultiTerminal
 
             // Freeze all terminal splitter layouts FIRST to prevent bogus ratio saves
             // during the shutdown resize/layout cascade
-            foreach (var doc in _dockPanel.Documents.OfType<TerminalDocument>())
+            foreach (var doc in _gridManager.GetAllTerminalDocuments())
                 doc.FreezeLayout();
 
             // Batch all settings changes to avoid multiple disk writes
@@ -8411,7 +8690,7 @@ namespace MultiTerminal
             }
 
             // Close all terminals (sends kill signal, doesn't wait for process exit)
-            foreach (var doc in _gridManager.GetTerminalDocuments())
+            foreach (var doc in _gridManager.GetAllTerminalDocuments())
             {
                 try { doc.Terminal?.Stop(); } catch { }
             }
@@ -8439,9 +8718,20 @@ namespace MultiTerminal
             }
 
             // Dispose all terminal documents (each has a WebView2 renderer)
-            foreach (var doc in _gridManager.GetTerminalDocuments())
+            foreach (var doc in _gridManager.GetAllTerminalDocuments())
             {
                 try { doc.Dispose(); } catch { }
+            }
+
+            // GH #74: floating windows have no owner, so they no longer close with this window. Every
+            // terminal, floated ones included, was stopped and disposed just above (a window left with
+            // no panes disposes itself); what can remain is a floating window of panels (Oracle, Tasks).
+            // Close those now rather than leave them on screen. CloseFloatingWindow declines while
+            // shutting down, so the library closes or hides their panes; the layout was saved earlier.
+            foreach (var floatWindow in _dockPanel.FloatWindows.ToList())
+            {
+                try { floatWindow.Close(); }
+                catch (Exception ex) { _debugLogService?.Error("MainForm", $"Closing a floating window at exit: {ex.Message}"); }
             }
         }
 
@@ -8457,7 +8747,7 @@ namespace MultiTerminal
 
         private void SaveSession()
         {
-            var terminals = _gridManager.GetTerminalDocuments();
+            var terminals = _gridManager.GetAllTerminalDocuments();
             if (terminals.Count == 0)
                 return;
 
@@ -8742,10 +9032,12 @@ namespace MultiTerminal
             {
                 try
                 {
-                    _terminalRestoreIndex = 0;
+                    _terminalRestorePairing = new TerminalRestorePairing(_pendingTerminalSessions, ReadLayoutTerminalPaneKeys(layoutPath));
                     _dockPanel.LoadFromXml(layoutPath, GetContentFromPersistString);
                     restoredFromXml = true;
                     _debugLogService?.Trace("RestoreSession", "Restored layout from XML");
+
+                    RestoreSessionsMissingFromLayout();
 
                     // Apply themes to restored panels (LoadFromXml restores positions but not runtime state)
                     ApplyThemesToPanels();
@@ -8789,7 +9081,7 @@ namespace MultiTerminal
                     }
 
                     // Apply grid layout to arrange terminals evenly
-                    var terminals = _gridManager.GetTerminalDocuments();
+                    var terminals = _gridManager.GetDockedTerminalDocuments();
                     if (terminals.Count > 1)
                     {
                         var preset = GridLayoutManager.GetRecommendedPreset(terminals.Count);
@@ -8974,29 +9266,29 @@ namespace MultiTerminal
                 return _oracleService?.DockContent;
             }
 
-            if (persistString == typeof(TerminalDocument).FullName)
+            if (TerminalPersistString.TryParse(persistString, out string layoutPaneKey))
             {
-                // Pair each restored TerminalDocument pane with its saved session by index.
+                // Pair each restored TerminalDocument pane with its saved session: by the pane key
+                // the entry carries, or in order for a layout saved before GH #74 (TerminalRestorePairing).
                 // Reconciliation (task d14048ef): returning null skips the saved entry —
                 // DockPanelSuite's documented contract, the same one the Oracle re-bind above
                 // relies on — so a drifted layout.xml can't spawn an extra TerminalDocument.
                 //
-                // (1) Index past the (deduped) session list ⇒ a phantom blank pane. The pre-fix
+                // (1) No session left for this entry ⇒ a phantom blank pane. The pre-fix
                 //     code created CreateTerminalForRestore(null) here, which is exactly the
                 //     orphan/blank renderer that defeated the statusline. Skip it.
-                if (_pendingTerminalSessions == null || _terminalRestoreIndex >= _pendingTerminalSessions.Count)
+                TerminalSessionInfo sessionInfo = _terminalRestorePairing?.Take(layoutPaneKey);
+                if (sessionInfo == null)
                 {
                     // Record the drop in the in-app debug log so a skipped pane can be traced if
                     // reconciliation ever drops one the user expected (adversary finding, task
                     // d14048ef). The log exists by now (created in InitializeDockPanel on the
                     // constructor path; this factory runs from RestoreSession on Shown). Trace level
                     // records in Debug builds only: Release's Info floor drops it (follow-up 5512c1df).
-                    string skipMsg = $"[RestoreSession] Skipping extra TerminalDocument pane (index {_terminalRestoreIndex} >= session count {_pendingTerminalSessions?.Count ?? 0}) — drifted layout would spawn a phantom blank terminal";
+                    string skipMsg = $"[RestoreSession] Skipping extra TerminalDocument pane (key {layoutPaneKey ?? "none"}, no saved session left of {_pendingTerminalSessions?.Count ?? 0}) — drifted layout would spawn a phantom blank terminal";
                     _debugLogService?.Trace("RestoreSession", skipMsg);
                     return null;
                 }
-
-                TerminalSessionInfo sessionInfo = _pendingTerminalSessions[_terminalRestoreIndex++];
 
                 // (2) Agent name already materialized this restore ⇒ duplicate identity. Belt to
                 //     the SettingsService read-dedup suspenders: if a dup somehow survived into the
@@ -9131,6 +9423,60 @@ namespace MultiTerminal
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// Brings back, docked, every saved session the layout had no entry for
+        /// (<see cref="TerminalRestorePairing.TakeRemaining"/>), under the same one-name-one-terminal
+        /// rule as the layout's own entries. Each pane is caught on its own, so one failure cannot
+        /// turn a successful layout restore into the manual one, which would restore every session
+        /// a second time.
+        /// </summary>
+        private void RestoreSessionsMissingFromLayout()
+        {
+            var remaining = _terminalRestorePairing?.TakeRemaining();
+            if (remaining == null) return;
+
+            foreach (var session in remaining)
+            {
+                try
+                {
+                    string title = session.CustomTitle;
+                    if (!string.IsNullOrEmpty(title) && !_restoredTerminalTitles.Add(title))
+                    {
+                        _debugLogService?.Trace("RestoreSession", $"[RestoreSession] Not restoring session '{title}' missing from the layout: the name is already restored");
+                        continue;
+                    }
+
+                    var doc = CreateTerminalForRestore(session);
+                    doc.Show(_dockPanel, DockState.Document);
+                    _debugLogService?.Info("RestoreSession", $"[RestoreSession] Restored session '{title}' that the saved layout had no pane for (GH #74)");
+                }
+                catch (Exception ex)
+                {
+                    _debugLogService?.Error("RestoreSession", $"Could not restore a session missing from the layout: {ex.Message}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// The pane keys of the terminal entries in a saved layout (GH #74), read before
+        /// <c>LoadFromXml</c> so <see cref="TerminalRestorePairing"/> knows which sessions a later
+        /// entry is keyed to. Empty for a layout from before #74, or one that cannot be read (the load
+        /// that follows then fails or pairs in order, as before).
+        /// </summary>
+        private List<string> ReadLayoutTerminalPaneKeys(string layoutPath)
+        {
+            try
+            {
+                using var stream = System.IO.File.OpenRead(layoutPath);
+                return TerminalPersistString.ReadLayoutPaneKeys(stream);
+            }
+            catch (Exception ex) when (ex is System.Xml.XmlException || ex is System.IO.IOException || ex is UnauthorizedAccessException)
+            {
+                _debugLogService?.Warning("RestoreSession", $"Could not read pane keys from the layout, pairing in order: {ex.Message}");
+                return new List<string>();
+            }
         }
 
         private TerminalDocument CreateTerminalForRestore(TerminalSessionInfo sessionInfo)
@@ -9465,7 +9811,7 @@ namespace MultiTerminal
                     if (control.HasActiveAgent)
                     {
                         var result = MessageBox.Show(
-                            this,
+                            DialogOwner(),
                             "An agent is still running in this panel.\n\nTerminate the agent process?",
                             "Close Agent Panel",
                             MessageBoxButtons.YesNoCancel,
@@ -10352,7 +10698,7 @@ namespace MultiTerminal
                 // card ahead of the pane the agent is actually running in (pipeline Run 1, debugger).
                 // Running first, then panes with a launched identity: an exited pane keeps its
                 // OriginalAgentName, so "has a name" alone is not "is running" (Run 2, debugger LOW).
-                var panesLaunchedFirst = _dockPanel.Documents.OfType<TerminalDocument>()
+                var panesLaunchedFirst = _gridManager.GetAllTerminalDocuments()
                     .OrderBy(d => d.IsTerminalStarted ? 0 : 1)
                     .ThenBy(d => string.IsNullOrEmpty(d.OriginalAgentName) ? 1 : 0);
                 foreach (var doc in panesLaunchedFirst)
@@ -10431,7 +10777,7 @@ namespace MultiTerminal
         {
             try
             {
-                var panes = _dockPanel?.Documents.OfType<TerminalDocument>().ToList();
+                var panes = _gridManager?.GetAllTerminalDocuments();
                 if (panes == null || panes.Count == 0) return;
                 var registry = _mcpServer?.SpawnService?.Panes;
 
@@ -10594,7 +10940,7 @@ namespace MultiTerminal
             string agentName = _mcpServer?.Broker?.AgentAttention?.Get(sessionKey)?.AgentName;
             if (string.IsNullOrWhiteSpace(agentName)) agentName = sessionKey;
 
-            var candidates = _dockPanel.Documents.OfType<TerminalDocument>()
+            var candidates = _gridManager.GetAllTerminalDocuments()
                 .Where(d => string.Equals(d.CustomTitle, agentName, StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
@@ -10625,7 +10971,8 @@ namespace MultiTerminal
                 return false;
             }
 
-            doc.Activate();
+            // Surface, not Activate: the pane may be in a minimised floating window (GH #74).
+            GridLayoutManager.Surface(doc);
             doc.FocusTerminal();
             _lastActiveTerminal = doc;
             return true;
@@ -10776,7 +11123,7 @@ namespace MultiTerminal
 
         private void ToggleHud()
         {
-            var doc = _lastActiveTerminal ?? _dockPanel.ActiveDocument as TerminalDocument;
+            var doc = _lastActiveTerminal ?? ActiveTerminalPane();
             doc?.ToggleHud();
         }
 
@@ -10912,7 +11259,7 @@ namespace MultiTerminal
                     }
                 }
 
-                if (dialog.ShowDialog(this) == DialogResult.OK)
+                if (dialog.ShowDialog(DialogOwner()) == DialogResult.OK)
                 {
                     var prompt = existingPrompt ?? new Prompt();
                     prompt.Category = dialog.Category;

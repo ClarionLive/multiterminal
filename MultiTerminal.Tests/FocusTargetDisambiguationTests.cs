@@ -28,7 +28,7 @@ namespace MultiTerminal.Tests
     /// </para>
     /// <para>
     /// WHY THIS IS A SOURCE-LEVEL TEST: <c>FocusTerminalForSession</c> reaches into
-    /// <c>_dockPanel.Documents</c> and calls <c>Activate()</c> on a WinForms <c>DockContent</c>.
+    /// the dock panel's terminal list and brings a WinForms <c>DockContent</c> forward.
     /// Constructing that is not a unit test. What CAN be pinned is that the disambiguation exists
     /// and has the right polarity — a live terminal preferred over a start screen, not the reverse.
     /// Assertions run over comment-stripped source, following <see cref="BoardHudDoorwayTests"/>:

@@ -93,6 +93,12 @@ namespace MultiTerminal.Controls
         public event EventHandler ContextMenuDismissRequested;
 
         /// <summary>
+        /// Event fired when Ctrl+Shift+H is pressed in the terminal; an owner that returns the pane to
+        /// its start screen sets Handled.
+        /// </summary>
+        public event EventHandler<System.ComponentModel.HandledEventArgs> ReturnToStartScreenRequested;
+
+        /// <summary>
         /// Event fired when the terminal is clicked.
         /// </summary>
         public event EventHandler TerminalClicked;
@@ -165,6 +171,7 @@ namespace MultiTerminal.Controls
             _renderer.AltVKeyPressed += OnRendererAltVKeyPressed;
             _renderer.ContextMenuRequested += OnRendererContextMenuRequested;
             _renderer.ContextMenuDismissRequested += OnRendererContextMenuDismissRequested;
+            _renderer.ReturnToStartScreenRequested += OnRendererReturnToStartScreenRequested;
             _renderer.TerminalClicked += OnRendererTerminalClicked;
 
             Controls.Add(_renderer);
@@ -289,22 +296,25 @@ namespace MultiTerminal.Controls
                 }
             }
 
-            if (IsInActiveDocument())
+            if (IsInActivePane())
                 _renderer.Focus();
             Ready?.Invoke(this, EventArgs.Empty);
         }
 
         /// <summary>
-        /// Whether this terminal's pane is the dock panel's active document, decided when the start runs
+        /// Whether this terminal's pane is the dock panel's active pane, decided when the start runs
         /// (task 2be35d18). A new pane's start is deferred until its WebView2 is ready, about a second
         /// later; focusing it unconditionally then moved the cursor out of whatever pane the Owner was
         /// typing in by that time. A terminal outside a dock panel (the Oracle window) always focuses.
+        /// A pane in a floating window counts when it is the active content: a floated pane is never
+        /// the active document (GH #74).
         /// </summary>
-        private bool IsInActiveDocument()
+        private bool IsInActivePane()
         {
             var content = FindForm() as WeifenLuo.WinFormsUI.Docking.DockContent;
             var dockPanel = content?.DockPanel;
-            return dockPanel == null || dockPanel.ActiveDocument == content;
+            return dockPanel == null
+                || ReferenceEquals(MultiTerminal.Docking.GridLayoutManager.ActiveTerminalOrDocument(dockPanel), content);
         }
 
         /// <summary>
@@ -1089,6 +1099,11 @@ namespace MultiTerminal.Controls
             ContextMenuDismissRequested?.Invoke(this, e);
         }
 
+        private void OnRendererReturnToStartScreenRequested(object sender, System.ComponentModel.HandledEventArgs e)
+        {
+            ReturnToStartScreenRequested?.Invoke(this, e);
+        }
+
         /// <summary>
         /// Handles terminal click from the renderer.
         /// </summary>
@@ -1117,6 +1132,7 @@ namespace MultiTerminal.Controls
                     _renderer.AltVKeyPressed -= OnRendererAltVKeyPressed;
                     _renderer.ContextMenuRequested -= OnRendererContextMenuRequested;
                     _renderer.ContextMenuDismissRequested -= OnRendererContextMenuDismissRequested;
+                    _renderer.ReturnToStartScreenRequested -= OnRendererReturnToStartScreenRequested;
                     _renderer.TerminalClicked -= OnRendererTerminalClicked;
                 }
 

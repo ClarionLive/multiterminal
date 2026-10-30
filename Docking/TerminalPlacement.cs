@@ -39,7 +39,8 @@ namespace MultiTerminal.Docking
         /// <param name="Pane">The pane itself; compared by reference.</param>
         /// <param name="IsDocked">True for a pane in the main document area; false otherwise. Only
         /// docked panes are grid slots, split sources or tab targets. <b>Defensive, not a fix:</b>
-        /// MainForm builds its list from <c>DockPanel.Documents</c>, which yields only Document-state
+        /// MainForm builds its list from <c>GridLayoutManager.GetDockedTerminalDocuments</c>
+        /// (<c>DockPanel.Documents</c>), which yields only Document-state
         /// contents, so a floated terminal never reaches it and this is true for every pane in
         /// production today (debugger gate, task 7f91349f, verified against the decompiled library).
         /// The old code never counted a float either. The flag keeps "never place into a float" a

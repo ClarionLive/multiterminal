@@ -927,6 +927,7 @@ namespace MultiTerminal.Docking
             _terminal.ProcessExited += OnTerminalProcessExited;
             _terminal.ContextMenuRequested += OnTerminalContextMenuRequested;
             _terminal.ContextMenuDismissRequested += OnTerminalContextMenuDismissRequested;
+            _terminal.ReturnToStartScreenRequested += OnTerminalReturnToStartScreenRequested;
             _terminal.Ready += (s, e) => TerminalReady?.Invoke(this, EventArgs.Empty);
             _terminal.StartFailed += OnTerminalStartFailed;
             _terminal.RendererReady += (s, e) => RendererReady?.Invoke(this, EventArgs.Empty);
@@ -1505,19 +1506,34 @@ namespace MultiTerminal.Docking
         {
             if (DockPanel == null) return;
 
-            CloseBatch(DockPanel.Documents
-                .OfType<TerminalDocument>()
-                .ToList());
+            CloseBatch(TerminalsInMyWindow());
         }
 
         private void CloseAllButThis()
         {
             if (DockPanel == null) return;
 
-            CloseBatch(DockPanel.Documents
-                .OfType<TerminalDocument>()
+            CloseBatch(TerminalsInMyWindow()
                 .Where(doc => doc != this)
                 .ToList());
+        }
+
+        /// <summary>
+        /// The terminals in the window this tab is in, which is what Close All Tabs and Close all but
+        /// this mean (GH #74): the docked ones for a tab in the main window, as before, and that floating
+        /// window's own for a tab in a floating window, the way a browser's tab menu works.
+        /// </summary>
+        private List<TerminalDocument> TerminalsInMyWindow()
+        {
+            var floatWindow = DockState == DockState.Float ? Pane?.FloatWindow : null;
+            if (floatWindow == null)
+                return DockPanel.Documents.OfType<TerminalDocument>().ToList();
+
+            return floatWindow.NestedPanes
+                .SelectMany(pane => pane.Contents)
+                .OfType<TerminalDocument>()
+                .Where(doc => doc.DockState == DockState.Float)
+                .ToList();
         }
 
         private void CloseBatch(List<TerminalDocument> docsToClose)
@@ -2212,8 +2228,9 @@ namespace MultiTerminal.Docking
                 StartPosition = _diffPopupBounds.HasValue
                     ? FormStartPosition.Manual
                     : FormStartPosition.CenterParent,
-                // The main window's icon: this pane's own Icon is its tab's attention dot (51a8a17b).
-                Icon = (TopLevelControl as Form)?.Icon
+                // The main window's icon: this pane's own Icon is its tab's attention dot (51a8a17b),
+                // and so is a floating window's Icon property (GH #74: it only swaps what Windows shows).
+                Icon = DockPanel?.FindForm()?.Icon ?? (TopLevelControl as Form)?.Icon
             };
 #pragma warning restore CA2000
 
@@ -2860,6 +2877,13 @@ namespace MultiTerminal.Docking
         {
             _debugLogService?.Trace("TerminalDocument", "Terminal menu dismiss requested (Esc), menu open: " + (_currentContextMenu != null));
             _currentContextMenu?.Close();
+        }
+
+        // Ctrl+Shift+H pressed inside this pane's terminal (GH #74 live check 3).
+        private void OnTerminalReturnToStartScreenRequested(object sender, System.ComponentModel.HandledEventArgs e)
+        {
+            e.Handled = true;
+            ReturnToStartScreen();
         }
 
         /// <summary>
@@ -4579,6 +4603,7 @@ namespace MultiTerminal.Docking
                     _terminal.ProcessExited -= OnTerminalProcessExited;
                     _terminal.ContextMenuRequested -= OnTerminalContextMenuRequested;
                     _terminal.ContextMenuDismissRequested -= OnTerminalContextMenuDismissRequested;
+                    _terminal.ReturnToStartScreenRequested -= OnTerminalReturnToStartScreenRequested;
                     _terminal.Stop();
                     _terminal.Dispose();
                     _terminal = null;
@@ -4590,11 +4615,12 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
-        /// Gets the persist string for layout serialization.
+        /// Gets the persist string for layout serialization: the type name and this pane's
+        /// <see cref="PaneKey"/>, so the restore pairs the entry with its saved session by key (GH #74).
         /// </summary>
         protected override string GetPersistString()
         {
-            return typeof(TerminalDocument).FullName;
+            return TerminalPersistString.For(PaneKey);
         }
     }
 

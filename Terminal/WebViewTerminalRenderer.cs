@@ -156,6 +156,13 @@ namespace MultiTerminal.Terminal
         public event EventHandler ContextMenuDismissRequested;
 
         /// <summary>
+        /// Event fired when Ctrl+Shift+H is pressed in this terminal; a host that returns this pane to
+        /// its start screen sets Handled, and only then is the key kept from the page. See
+        /// <see cref="IsReturnToStartScreenKey"/>.
+        /// </summary>
+        public event EventHandler<System.ComponentModel.HandledEventArgs> ReturnToStartScreenRequested;
+
+        /// <summary>
         /// Event fired when WebView2 initialization completes.
         /// </summary>
         public event EventHandler Initialized;
@@ -212,7 +219,8 @@ namespace MultiTerminal.Terminal
 
             // Raised by the WinForms WebView2 from CoreWebView2Controller.AcceleratorKeyPressed,
             // with e.Handled passed back (checked in Microsoft.Web.WebView2.WinForms
-            // 1.0.3800.47). Escape is always an accelerator, so this sees Esc before the page.
+            // 1.0.3800.47). Escape is always an accelerator, so this sees Esc before the page;
+            // so is any key held with Ctrl, which is how Ctrl+Shift+H is caught.
             _webView.KeyDown += OnWebViewKeyDown;
             _webView.KeyUp += OnWebViewKeyUp;
             _webView.LostFocus += OnWebViewLostFocus;
@@ -626,6 +634,8 @@ namespace MultiTerminal.Terminal
         /// browser-process window, outside the WinForms message loop its menu filter watches, so
         /// the dropdown never receives the key. Handling it here does not depend on the page
         /// knowing the menu is open, which the page-side swallow in terminal.html does.
+        /// Ctrl+Shift+H is handed to the host (<see cref="ReturnToStartScreenRequested"/>) and kept
+        /// from the page only when a host handled it.
         /// </summary>
         private void OnWebViewKeyDown(object sender, KeyEventArgs e)
         {
@@ -639,7 +649,32 @@ namespace MultiTerminal.Terminal
                 DebugLogService?.Trace("WebViewTerminalRenderer", "Esc with the terminal menu open: handled host-side, dismissing");
                 ContextMenuDismissRequested?.Invoke(this, EventArgs.Empty);
             }
+
+            // Only a host that resets the pane marks the key handled. The Oracle terminal has no
+            // start screen and does not subscribe, so there the key still reaches the page, as it
+            // did in every terminal before. Not covered by a test.
+            if (IsReturnToStartScreenKey(e.KeyData))
+            {
+                var request = new System.ComponentModel.HandledEventArgs();
+                ReturnToStartScreenRequested?.Invoke(this, request);
+                if (request.Handled)
+                {
+                    e.Handled = true;
+                    DebugLogService?.Info("WebViewTerminalRenderer", "Ctrl+Shift+H in a terminal: handled by its pane (return to start screen)");
+                }
+            }
         }
+
+        /// <summary>
+        /// Pure. Ctrl+Shift+H (GH #74 live check 3). It has to be caught HERE, from the WebView2's
+        /// accelerator KeyDown: the WinForms WebView2 (1.0.3800.47, decompiled) turns
+        /// <c>AcceleratorKeyPressed</c> into <c>OnKeyDown</c> only and never calls <c>ProcessCmdKey</c>,
+        /// so a key pressed inside a terminal never reached MainForm's or a floating window's
+        /// shortcut handler, docked or floating. Caught here, it can only ever reset the pane it was
+        /// pressed in.
+        /// </summary>
+        public static bool IsReturnToStartScreenKey(Keys keyData)
+            => keyData == (Keys.Control | Keys.Shift | Keys.H);
 
         private void OnWebViewKeyUp(object sender, KeyEventArgs e)
         {
