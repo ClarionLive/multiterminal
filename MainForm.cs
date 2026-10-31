@@ -9496,12 +9496,17 @@ namespace MultiTerminal
                 catch (ObjectDisposedException) { }
             };
 
-            // Auto-remove slot when agent completes.
-            // Panel is removed for all agents (team and non-team) once the process exits.
+            // Remove the slot when the agent stops, unless it FINISHED (exit 0) and Settings > General >
+            // Agent Panel > On Complete is "Keep open" (GH #89): then the panel stays, showing
+            // "completed", until the Owner closes it with its X. Any other stop (a team reclaiming
+            // the transcript, the watcher shutting down, an error) still removes it.
             source.Stopped += (s, exitCode) =>
             {
                 void HandleEmbeddedStopped()
                 {
+                    if (exitCode == 0 && _settings?.GetAgentPanelCloseMode() == "ManualClose")
+                        return;
+
                     if (_embeddedAgentMap.Remove(panelKey, out var info))
                     {
                         info.Control?.DetachAgent();
@@ -9649,6 +9654,17 @@ namespace MultiTerminal
 
                     void DoCreate()
                     {
+                        // The key is built from the display name, which repeats ("verifier"). A finished
+                        // panel kept open by On Complete = Keep open (GH #89) gives way to the new agent;
+                        // otherwise the new agent would run with no panel at all.
+                        if (_embeddedAgentMap.TryGetValue(panelKey, out var held) && held.Control?.HasActiveAgent != true
+                            && _embeddedAgentMap.Remove(panelKey, out var finished))
+                        {
+                            finished.Control?.DetachAgent();
+                            finished.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(finished.Slot);
+                            finished.Control?.Dispose();
+                        }
+
                         if (!_embeddedAgentMap.ContainsKey(panelKey))
                             CreateAgentPanel(e.Tailer, e.MemberName, panelKey, resolvedSpawner, e.TaskDescription, e.SubagentType);
                     }

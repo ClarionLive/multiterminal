@@ -135,7 +135,7 @@ namespace MultiTerminal.Services
 
         // Project-level subagent watching (non-team agents)
         private readonly HashSet<string> _trackedSubagentFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<string, TranscriptTailer> _orphanTailers = new Dictionary<string, TranscriptTailer>(StringComparer.OrdinalIgnoreCase);
+        private readonly OrphanSubagentRegistry _orphanRegistry = new OrphanSubagentRegistry();
         private readonly HashSet<string> _watchedProjectDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // Track agent names from recently-deleted teams to prevent orphan watcher from
@@ -305,6 +305,60 @@ namespace MultiTerminal.Services
         /// </summary>
         internal static string GetLeadProjectDir(string root, string leadCwd) =>
             Path.Combine(root, "projects", GetClaudeProjectSlug(leadCwd));
+
+        /// <summary>
+        /// The project folder that holds the lead session's transcripts NOW (GH #89). The team config
+        /// records the lead's cwd when the team was created, but Claude Code moves a session's folder
+        /// to the project folder of its current directory, so a lead that has since entered a worktree
+        /// keeps its session (and its teammates' transcripts) under that worktree's folder instead, and
+        /// may leave the old folder behind. Returns the project folder (the starting one included) whose
+        /// copy of the session was written most recently, judged by the session folder and its
+        /// <c>subagents</c> folder (a new teammate's file updates the latter); ties keep
+        /// <paramref name="projectDir"/>, and so does a session found nowhere.
+        /// </summary>
+        internal static string FindLeadSessionProjectDir(string projectDir, string leadSessionId)
+        {
+            if (string.IsNullOrEmpty(projectDir) || string.IsNullOrEmpty(leadSessionId))
+                return projectDir;
+
+            string projectsDir = Path.GetDirectoryName(projectDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (string.IsNullOrEmpty(projectsDir) || !Directory.Exists(projectsDir))
+                return projectDir;
+
+            static DateTime? LastWrite(string folder, string sessionId)
+            {
+                var sessionDir = new DirectoryInfo(Path.Combine(folder, sessionId));
+                if (!sessionDir.Exists) return null;
+                var subagentsDir = new DirectoryInfo(Path.Combine(sessionDir.FullName, "subagents"));
+                return subagentsDir.Exists && subagentsDir.LastWriteTimeUtc > sessionDir.LastWriteTimeUtc
+                    ? subagentsDir.LastWriteTimeUtc
+                    : sessionDir.LastWriteTimeUtc;
+            }
+
+            try
+            {
+                string best = null;
+                DateTime bestWrite = DateTime.MinValue;
+                if (LastWrite(projectDir, leadSessionId) is DateTime startWrite)
+                {
+                    best = projectDir;
+                    bestWrite = startWrite;
+                }
+
+                foreach (var candidate in Directory.EnumerateDirectories(projectsDir))
+                {
+                    if (LastWrite(candidate, leadSessionId) is DateTime write && write > bestWrite)
+                    {
+                        best = candidate;
+                        bestWrite = write;
+                    }
+                }
+
+                return best ?? projectDir;
+            }
+            catch (IOException) { return projectDir; }
+            catch (UnauthorizedAccessException) { return projectDir; }
+        }
 
         /// <summary>
         /// The config root (trailing separator) of the profile a pane was launched under, for comparing
@@ -694,15 +748,9 @@ namespace MultiTerminal.Services
                 }
             }
 
-            var orphans = new List<TranscriptTailer>();
+            var orphans = _orphanRegistry.TakeWhere((path, orphan) => IsUnder(root, path));
             lock (_trackedSubagentFiles)
             {
-                foreach (var key in _orphanTailers.Keys.Where(k => IsUnder(root, k)).ToList())
-                {
-                    orphans.Add(_orphanTailers[key]);
-                    _orphanTailers.Remove(key);
-                }
-
                 // Includes the "<dir>:watching" markers, so a root that comes back is watched afresh.
                 _trackedSubagentFiles.RemoveWhere(p => IsUnder(root, p));
             }
@@ -1041,8 +1089,15 @@ namespace MultiTerminal.Services
                     MemberRemoved?.Invoke(this, (teamName, removed, state.TeamKey));
                 }
 
-                // Build subagents directory path (needed for watching even if no new members)
-                string subagentsDir = Path.Combine(projectDir, leadSessionId, "subagents");
+                // Build subagents directory path (needed for watching even if no new members).
+                // Re-resolved on every config read: the lead may have moved into a worktree since (GH #89).
+                string sessionProjectDir = FindLeadSessionProjectDir(projectDir, leadSessionId);
+                if (!string.Equals(sessionProjectDir, projectDir, StringComparison.OrdinalIgnoreCase))
+                {
+                    LogInfo($"Team '{teamName}': lead session lives under {sessionProjectDir}, not its starting folder {projectDir}");
+                    StartProjectSubagentWatchingForDir(root, sessionProjectDir);
+                }
+                string subagentsDir = Path.Combine(sessionProjectDir, leadSessionId, "subagents");
 
                 if (newMembers.Count > 0)
                 {
@@ -2190,6 +2245,22 @@ namespace MultiTerminal.Services
             {
                 if (Gone(root)) return;
 
+                // GH #89: a subagent keeps writing under a new project folder when its parent session
+                // changes worktree. That file is the same agent, so it joins the agent's panel instead
+                // of opening a second one; a finished agent's file opens nothing. Asked before the
+                // filters below, which would judge a continuation file (it starts mid-conversation)
+                // as if it were a new agent.
+                switch (_orphanRegistry.Classify(transcriptPath, DateTime.UtcNow, out var sameAgent))
+                {
+                    case OrphanSubagentRegistry.ClaimResult.Existing:
+                        LogInfo($"Subagent transcript continues in another folder, following it: {sameAgent.AgentName} ({transcriptPath})");
+                        sameAgent.AddTranscriptFile(transcriptPath);
+                        return;
+                    case OrphanSubagentRegistry.ClaimResult.Finished:
+                        LogInfo($"Ignoring a copy of a finished subagent's transcript: {transcriptPath}");
+                        return;
+                }
+
                 // Filter out Claude Code system agents (compact/summary, etc.)
                 if (LooksLikeSystemAgent(transcriptPath))
                 {
@@ -2236,13 +2307,28 @@ namespace MultiTerminal.Services
                     return;
                 }
 
-                // No inbox path — read-only panel
+                // No inbox path — read-only panel.
+                // CA2000: ownership passes to _orphanRegistry on a New claim and is disposed here otherwise;
+                // the registry's takers (StopRoot, CleanupTeam, ReclaimFromOrphan, StopWatching) dispose it.
+#pragma warning disable CA2000
                 var tailer = new TranscriptTailer(transcriptPath, null, displayName);
+#pragma warning restore CA2000
 
-                lock (_trackedSubagentFiles)
+                // Re-asked here, atomically with the registration, so two watchers reporting the
+                // same agent at once cannot both get past the check at the top.
+                var claim = _orphanRegistry.Claim(transcriptPath, tailer, DateTime.UtcNow, out var claimedBy);
+                if (claim != OrphanSubagentRegistry.ClaimResult.New)
                 {
-                    _orphanTailers[NormalizeTranscriptPath(transcriptPath)] = tailer;
+                    tailer.Dispose();
+                    if (claim == OrphanSubagentRegistry.ClaimResult.Existing)
+                        claimedBy.AddTranscriptFile(transcriptPath);
+                    return;
                 }
+
+                // Every way a tailer ends (its own completion, the SubagentStop hook, a team reclaiming
+                // the file, the root going away) passes through Stopped; a clean finish (exit 0) is
+                // remembered so a later copy of the agent's file opens no new panel.
+                tailer.Stopped += (s, exitCode) => _orphanRegistry.Remove(tailer, finished: exitCode == 0, DateTime.UtcNow);
 
                 tailer.StartAsync();
 
@@ -2454,16 +2540,7 @@ namespace MultiTerminal.Services
         /// </summary>
         private void ReclaimFromOrphan(string transcriptPath)
         {
-            string normalizedPath = NormalizeTranscriptPath(transcriptPath);
-            TranscriptTailer orphanTailer = null;
-
-            lock (_trackedSubagentFiles)
-            {
-                if (_orphanTailers.TryGetValue(normalizedPath, out orphanTailer))
-                {
-                    _orphanTailers.Remove(normalizedPath);
-                }
-            }
+            TranscriptTailer orphanTailer = _orphanRegistry.TakeByPath(transcriptPath);
 
             if (orphanTailer != null)
             {
@@ -2482,21 +2559,15 @@ namespace MultiTerminal.Services
             if (string.IsNullOrEmpty(transcriptPath))
                 return false;
 
-            // Both store and lookup use NormalizeTranscriptPath so keys always match
-            string normalizedPath = NormalizeTranscriptPath(transcriptPath);
-            TranscriptTailer tailer = null;
-            lock (_trackedSubagentFiles)
-            {
-                if (_orphanTailers.TryGetValue(normalizedPath, out tailer))
-                {
-                    _orphanTailers.Remove(normalizedPath);
-                }
-            }
+            // By path, else by agent: the hook may name the other copy of the agent's transcript (GH #89).
+            TranscriptTailer tailer = _orphanRegistry.Find(transcriptPath);
 
             if (tailer != null)
             {
                 LogInfo($"Stopping orphan tailer via hook: {Path.GetFileName(transcriptPath)}");
-                tailer.StopAsync(); // Fires Stopped event → MainForm auto-close
+                // A finish, not a failure: exit 0, so a kept-open panel reads "completed" and the
+                // registry remembers the agent (its Stopped handler removes it).
+                tailer.Complete();
                 return true;
             }
 
@@ -2505,7 +2576,7 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Normalize a transcript path so that keys stored and looked up in _orphanTailers
+        /// Normalize a transcript path so that transcript paths compared here
         /// always use the same canonical form, regardless of separator style or relative vs absolute.
         /// </summary>
         private static string NormalizeTranscriptPath(string path)
@@ -2560,8 +2631,7 @@ namespace MultiTerminal.Services
                 List<TranscriptTailer> leftovers;
                 lock (_trackedSubagentFiles)
                 {
-                    leftovers = _orphanTailers.Values.ToList();
-                    _orphanTailers.Clear();
+                    leftovers = _orphanRegistry.TakeWhere((path, orphan) => true);
                     _trackedSubagentFiles.Clear();
                 }
                 foreach (var tailer in leftovers)
@@ -2599,40 +2669,18 @@ namespace MultiTerminal.Services
             state.MemberTailers.Clear();
 
             // Also stop any orphan tailers that share this team's transcript paths
-            // (catches orphan panels created before the team watcher claimed the file)
-            lock (_trackedSubagentFiles)
+            // (catches orphan panels created before the team watcher claimed the file),
+            // or carry a member's name under this team's own root (name-based duplicates; a same-named
+            // subagent of another profile is not this team's).
+            var matchedPaths = new HashSet<string>(state.MatchedTranscripts.Select(NormalizeTranscriptPath), StringComparer.OrdinalIgnoreCase);
+            var teamOrphans = _orphanRegistry.TakeWhere((path, orphan) =>
+                matchedPaths.Contains(path)
+                || (IsUnder(state.Root, path)
+                    && memberNames.Any(name => string.Equals(orphan.AgentName, name, StringComparison.OrdinalIgnoreCase))));
+            foreach (var orphanTailer in teamOrphans)
             {
-                var orphansToRemove = new List<string>();
-                foreach (var kvp in _orphanTailers)
-                {
-                    if (state.MatchedTranscripts.Any(p =>
-                        string.Equals(NormalizeTranscriptPath(p), kvp.Key, StringComparison.OrdinalIgnoreCase)))
-                    {
-                        orphansToRemove.Add(kvp.Key);
-                    }
-                }
-                // Also match orphans by agent name (catches name-based duplicates). Only orphans under
-                // this team's own root: a same-named subagent of another profile is not this team's.
-                foreach (var kvp in _orphanTailers)
-                {
-                    if (!orphansToRemove.Contains(kvp.Key) &&
-                        IsUnder(state.Root, kvp.Key) &&
-                        memberNames.Any(name => string.Equals(kvp.Value.AgentName, name, StringComparison.OrdinalIgnoreCase)))
-                    {
-                        orphansToRemove.Add(kvp.Key);
-                    }
-                }
-                foreach (var key in orphansToRemove)
-                {
-                    // CA2000: orphanTailer retrieved from dictionary via Remove(out); disposed within this scope.
-#pragma warning disable CA2000
-                    if (_orphanTailers.Remove(key, out var orphanTailer))
-                    {
-                        LogInfo($"Stopping orphan tailer for team agent: {orphanTailer.AgentName}");
-                        try { orphanTailer.Dispose(); } catch { }
-                    }
-#pragma warning restore CA2000
-                }
+                LogInfo($"Stopping orphan tailer for team agent: {orphanTailer.AgentName}");
+                try { orphanTailer.Dispose(); } catch { }
             }
 
             try { state.ConfigWatcher?.Dispose(); } catch { }
