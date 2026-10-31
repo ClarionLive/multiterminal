@@ -1280,8 +1280,9 @@ namespace MultiTerminal.Services
                 return;
             }
 
-            // Don't add duplicate watchers for the same directory
-            if (state.HasSubagentsDirWatcher)
+            // Don't add duplicate watchers for the same directory (a different one, after the lead
+            // moved worktree, gets its own watcher below).
+            if (state.WatchedSubagentDirs.Contains(NormalizeTranscriptPath(subagentsDir)))
             {
                 // Watcher already running, but scan for files that may have been created
                 // before the watcher started (e.g., directory and file created simultaneously).
@@ -1305,7 +1306,7 @@ namespace MultiTerminal.Services
                 EnableRaisingEvents = true
             };
             state.Watchers.Add(watcher);
-            state.HasSubagentsDirWatcher = true;
+            state.WatchedSubagentDirs.Add(NormalizeTranscriptPath(subagentsDir));
 
             watcher.Created += (s, e) =>
             {
@@ -2784,7 +2785,13 @@ namespace MultiTerminal.Services
             public FileSystemWatcher ConfigWatcher;
             public List<FileSystemWatcher> Watchers = new List<FileSystemWatcher>();
             public DateTime LastConfigChange;
-            public bool HasSubagentsDirWatcher;
+            /// <summary>
+            /// The subagents folders a transcript watcher is running on. More than one when the lead
+            /// session moved into another worktree's project folder after the team started (GH #89):
+            /// a single "already watching" flag kept the team on its first folder, so teammates that
+            /// joined after the move never got a panel.
+            /// </summary>
+            public HashSet<string> WatchedSubagentDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         }
 
         /// <summary>Everything the service holds for one Claude config directory.</summary>

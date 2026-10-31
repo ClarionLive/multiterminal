@@ -495,6 +495,57 @@ namespace MultiTerminal.Tests
             Assert.Empty(TeamWatcherService.SelectOrphanSubagentPanels(panels, new[] { "" }, WorkRoot, isDefaultRoot: false));
         }
 
+        // ── GH #89: the lead moved into a worktree after the team started ────
+
+        /// <summary>
+        /// Live-test finding (2026-10-31): a team kept one transcript watcher, on the first subagents folder
+        /// it saw. After the lead entered a worktree, Claude Code wrote the next teammate's transcript under
+        /// the worktree's project folder; MT found that folder but never watched it, so the teammate got no
+        /// panel. The teammate's file is created AFTER the config names it, as it is live, so only a watcher
+        /// on the new folder can find it.
+        /// </summary>
+        [Fact]
+        public async Task A_teammate_that_joins_after_the_lead_moved_worktree_is_discovered_in_the_new_folder()
+        {
+            string root = MakeRoot("Default");
+            using var h = new Harness(new[] { root }, root);
+            h.Service.StartWatching();
+
+            string team = "team-" + _id;
+            string session = Guid.NewGuid().ToString();
+            string leadCwd = @"H:\Repo" + _id;
+            string first = "first-" + _id;
+            string second = "second-" + _id;
+            AddTeam(root, team, first, leadCwd, session);
+            Assert.NotNull(await h.WaitForDiscovery(e => e.MemberName == first));
+
+            // The lead enters a worktree: its session continues under that worktree's project folder,
+            // newer than the folder the team config still names.
+            string startSessionDir = Path.Combine(TeamWatcherService.GetLeadProjectDir(root, leadCwd), session);
+            var past = DateTime.UtcNow.AddHours(-1);
+            Directory.SetLastWriteTimeUtc(Path.Combine(startSessionDir, "subagents"), past);
+            Directory.SetLastWriteTimeUtc(startSessionDir, past);
+            string movedSubagents = Path.Combine(
+                TeamWatcherService.GetLeadProjectDir(root, leadCwd + @"\.claude\worktrees\abc12345"), session, "subagents");
+            Directory.CreateDirectory(movedSubagents);
+
+            // A second teammate joins; its transcript appears only after the config names it.
+            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            File.WriteAllText(Path.Combine(root, "teams", team, "config.json"),
+                "{\"leadSessionId\":\"" + session + "\",\"members\":[" +
+                "{\"name\":\"team-lead\",\"agentType\":\"team-lead\",\"cwd\":\"" + leadCwd.Replace("\\", "\\\\") + "\",\"joinedAt\":" + (now - 60000) + "}," +
+                "{\"name\":\"" + first + "\",\"agentType\":\"general-purpose\",\"joinedAt\":" + (now - 60000) + "}," +
+                "{\"name\":\"" + second + "\",\"agentType\":\"general-purpose\",\"joinedAt\":" + now + "}]}");
+            await Task.Delay(1500);
+            string transcript = Path.Combine(movedSubagents, $"agent-{Guid.NewGuid():N}.jsonl");
+            File.WriteAllText(transcript, "{}\n");
+
+            var found = await h.WaitForDiscovery(e => e.MemberName == second);
+
+            Assert.NotNull(found);
+            Assert.True(((TranscriptTailer)found.Tailer).HasTranscriptFile(transcript));
+        }
+
         // ── Helpers ──────────────────────────────────────────────────────────
 
         /// <summary>A profile folder with empty teams and projects folders. Returned with a trailing separator.</summary>
