@@ -6184,9 +6184,8 @@ namespace MultiTerminal
                     {
                         sourceDoc.ClaudeCodeDetected -= newProjectHandler;
 
-                        // Give Claude Code time to settle: past the "initializing..." kick and the
-                        // session-start turn it starts, or, on a quiet-start project (GitHub #34), where
-                        // nothing is typed, simply until the prompt is ready.
+                        // Give Claude Code time to settle until the prompt is ready. This launch is a quiet
+                        // start (GitHub #91, see StartTerminal below), so nothing else is typed into it.
                         await Task.Delay(3000);
                         _debugLogService?.Trace("MainForm", "New project flow: injecting /new-project");
 
@@ -6226,9 +6225,14 @@ namespace MultiTerminal
 
                 // Start terminal in project folder
                 _debugLogService?.Trace("StartScreen", $"Launching new project '{project.Name}' in {launchDir} (taskWorktreePath='{taskWorktreePath2 ?? "null"}')");
+                // GitHub #91: a Claude pane opened by New Project is a quiet start for this launch, so MT does
+                // not type "initializing..." and the session-start menu never opens. /new-project (above)
+                // is then the only thing typed; before, it queued behind the menu and ran after whatever
+                // the user picked there. The project's own Quiet start setting is untouched.
                 sourceDoc.StartTerminal(launchDir, terminalName, autoRunCommand,
                     projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile2, taskWorktreePath: taskWorktreePath2,
-                    claudeProfile: claudeProfile2, launchKind: Services.PaneLaunchKind.From(terminalKind));
+                    claudeProfile: claudeProfile2, launchKind: Services.PaneLaunchKind.From(terminalKind),
+                    launchQuietStart: NewProjectLaunch.IsQuietStart(terminalKind));
 
                 sourceDoc.Activate();
                 sourceDoc.FocusTerminal();
