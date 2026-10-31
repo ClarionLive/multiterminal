@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
@@ -31,6 +32,24 @@ namespace MultiTerminal.Services
         private FileSystemWatcher _directoryWatcher;
         private bool _disposed;
         private bool _pendingStop;
+
+        // GH #89: which file first delivered each transcript line (by its uuid), so a line repeated
+        // in the agent's continuation file is shown once.
+        private readonly ConcurrentDictionary<string, string> _lineOrigins = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
+
+        // GH #89 fallback completion: the SubagentStop hook is the normal finish signal, but it does
+        // not always arrive. A non-team agent whose last turn ended (end_turn) and whose transcript
+        // has then been quiet for QuietCompletionWindow has finished.
+        private readonly object _completionLock = new object();
+        private Timer _quietTimer;
+        private volatile bool _completed;
+        private volatile bool _turnEnded;
+        private DateTime _lastGrowthUtc = DateTime.UtcNow;
+
+        /// <summary>How long a transcript must be quiet after an ended turn before the agent counts as finished.</summary>
+        internal TimeSpan QuietCompletionWindow { get; set; } = TimeSpan.FromSeconds(60);
+
+        private static readonly TimeSpan QuietCheckInterval = TimeSpan.FromSeconds(15);
 
         // Track the last user message we sent, to deduplicate echo(es) from the transcript.
         // Uses a time window instead of one-shot because the transcript may produce multiple
@@ -94,7 +113,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public Task StartAsync()
         {
-            if (IsActive) return Task.CompletedTask;
+            if (IsActive || _completed) return Task.CompletedTask;
             IsActive = true;
 
             System.Diagnostics.Debug.WriteLine($"[TranscriptTailer:{_agentName}] StartAsync called, file={_initialTranscriptPath}");
@@ -111,7 +130,77 @@ namespace MultiTerminal.Services
                 StartDirectoryWatcher();
             }
 
+            _quietTimer ??= new Timer(_ => CheckQuietCompletion(DateTime.UtcNow), null, QuietCheckInterval, QuietCheckInterval);
+
             return Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// The agent has finished: stop tailing and raise <see cref="Stopped"/> with exit code 0.
+        /// Called for the SubagentStop hook, the hook's line in the transcript, and the quiet fallback.
+        /// Raises at most once; does nothing once the tailer has stopped.
+        /// </summary>
+        public void Complete()
+        {
+            lock (_completionLock)
+            {
+                if (!IsActive || _completed) return;
+                IsActive = false;
+                _completed = true;
+            }
+
+            DisposeWatchers();
+            Stopped?.Invoke(this, 0);
+        }
+
+        /// <summary>
+        /// The quiet fallback (GH #89): a non-team agent whose last turn ended and whose transcript has
+        /// not grown for <see cref="QuietCompletionWindow"/> is complete. Team agents are exempt: they
+        /// idle between turns by design.
+        /// </summary>
+        internal void CheckQuietCompletion(DateTime nowUtc)
+        {
+            if (!IsActive || IsTeamAgent || !_turnEnded) return;
+            if (nowUtc - _lastGrowthUtc < QuietCompletionWindow) return;
+
+            System.Diagnostics.Debug.WriteLine($"[TranscriptTailer:{_agentName}] Turn ended and transcript quiet - agent completed");
+            Complete();
+        }
+
+        /// <summary>
+        /// Tracks whether the agent's last turn has ended: an assistant line that stopped with
+        /// <c>end_turn</c> ends it; any later assistant line that did not, or any user line (a tool
+        /// result, a new prompt), means the agent is working again. Other line types (progress,
+        /// system, hook records) change nothing.
+        /// </summary>
+        private void NoteTurnState(string lineType, string stopReason)
+        {
+            if (lineType == "assistant")
+                _turnEnded = stopReason == "end_turn";
+            else if (lineType == "user")
+                _turnEnded = false;
+        }
+
+        /// <summary>The top-level <c>uuid</c>, <c>type</c> and <c>message.stop_reason</c> of a transcript line; nulls when absent or unparseable.</summary>
+        internal static (string Uuid, string Type, string StopReason) ReadLineMeta(string jsonLine)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(jsonLine);
+                var root = doc.RootElement;
+                if (root.ValueKind != JsonValueKind.Object) return (null, null, null);
+
+                string uuid = root.TryGetProperty("uuid", out var u) && u.ValueKind == JsonValueKind.String ? u.GetString() : null;
+                string type = root.TryGetProperty("type", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() : null;
+                string stop = root.TryGetProperty("message", out var m) && m.ValueKind == JsonValueKind.Object
+                    && m.TryGetProperty("stop_reason", out var s) && s.ValueKind == JsonValueKind.String
+                    ? s.GetString() : null;
+                return (string.IsNullOrEmpty(uuid) ? null : uuid, type, stop);
+            }
+            catch (JsonException)
+            {
+                return (null, null, null);
+            }
         }
 
         /// <summary>
@@ -138,7 +227,9 @@ namespace MultiTerminal.Services
         /// </summary>
         public void AddTranscriptFile(string transcriptPath)
         {
-            if (string.IsNullOrEmpty(transcriptPath)) return;
+            // A completed agent stays completed (GH #89): a continuation file found after the finish
+            // must not restart a tailer that nothing could then stop.
+            if (string.IsNullOrEmpty(transcriptPath) || _completed) return;
 
             lock (_trackedFilesLock)
             {
@@ -161,6 +252,9 @@ namespace MultiTerminal.Services
 
             // Read existing content
             ReadNewLinesFromFile(tracked);
+
+            // The catch-up read itself can reach the finish (the SubagentStop line).
+            if (_completed) return;
 
             // Start watching for appends
             StartFileWatcherForTracked(tracked);
@@ -415,6 +509,16 @@ namespace MultiTerminal.Services
                         {
                             if (string.IsNullOrWhiteSpace(line)) continue;
 
+                            var (uuid, lineType, stopReason) = ReadLineMeta(line);
+
+                            // GH #89: when the parent session changes worktree, the agent goes on in a
+                            // new file that repeats some lines of the old one. A line already shown from
+                            // another file is skipped; repeats inside one file are left alone.
+                            if (uuid != null && !string.Equals(_lineOrigins.GetOrAdd(uuid, tracked.Path), tracked.Path, StringComparison.OrdinalIgnoreCase))
+                                continue;
+
+                            NoteTurnState(lineType, stopReason);
+
                             var parsedMessages = AgentMessage.ParseLine(line);
                             foreach (var msg in parsedMessages)
                             {
@@ -479,6 +583,8 @@ namespace MultiTerminal.Services
                             }
                         }
 
+                        if (stream.Position != tracked.LastPosition)
+                            _lastGrowthUtc = DateTime.UtcNow;
                         tracked.LastPosition = stream.Position;
                     }
                 }
@@ -487,9 +593,7 @@ namespace MultiTerminal.Services
                 if (_pendingStop && IsActive)
                 {
                     _pendingStop = false;
-                    IsActive = false;
-                    DisposeWatchers();
-                    Stopped?.Invoke(this, 0);
+                    Complete();
                 }
             }
             catch (IOException ex)
@@ -541,6 +645,9 @@ namespace MultiTerminal.Services
 
         private void DisposeWatchers()
         {
+            try { _quietTimer?.Dispose(); } catch (ObjectDisposedException) { }
+            _quietTimer = null;
+
             lock (_trackedFilesLock)
             {
                 foreach (var tracked in _trackedFiles)
@@ -574,9 +681,19 @@ namespace MultiTerminal.Services
             if (_disposed) return;
             if (disposing)
             {
-                IsActive = false;
+                bool alreadyFinished;
+                lock (_completionLock)
+                {
+                    IsActive = false;
+                    alreadyFinished = _completed;
+                }
+
                 DisposeWatchers();
-                Stopped?.Invoke(this, -1);
+
+                // After Complete() has announced the finish, a later dispose (a root or team teardown)
+                // must not send a second, failing exit that would close a panel kept open (GH #89).
+                if (!alreadyFinished)
+                    Stopped?.Invoke(this, -1);
             }
             _disposed = true;
         }
