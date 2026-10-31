@@ -365,6 +365,27 @@ async function resolveNotesProject(args) {
   };
 }
 
+// GitHub #92: a task's Pending/Coding/Testing/Done view is built from its checklist, and agents often
+// activate a task, or write its plan as prose, without adding any items, leaving that view empty until
+// the Owner notices. set_task_active, claim_task and update_task_plan append this note when the task
+// has none. Advisory only: it never blocks, and a failed lookup adds nothing.
+const EMPTY_CHECKLIST_NOTE =
+  "📋 This task has no checklist yet, so its Pending/Coding/Testing/Done view is empty. " +
+  "Add the steps with append_checklist_items before you start coding.";
+
+async function emptyChecklistNote(taskId, fetchDetail) {
+  try {
+    const detail = await fetchDetail(taskId);
+    const total = detail?.checklistSummary?.total;
+    return total === 0 ? `\n${EMPTY_CHECKLIST_NOTE}` : "";
+  } catch {
+    return "";
+  }
+}
+
+const fetchTaskDetail = (taskId) => apiCall(`/api/tasks/${seg(taskId)}/detail`);
+// End of the #92 checklist note.
+
 // compact_my_context byte cap (ticket c0ebcfd4). TerminalControl.InjectInputAsync splits any injected
 // text over 500 UTF-8 bytes into chunks prefixed "[1/2] ", "[2/2] " and submits each separately, so a
 // long "/compact <focus>" arrives as a plain message ("[1/2] /compact ...", not a command) and the rest
@@ -3229,11 +3250,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
         await apiCall(`/api/tasks/${seg(args.taskId)}/assign`, "POST", body);
+        const claimNote = await emptyChecklistNote(args.taskId, fetchTaskDetail);
         return {
           content: [
             {
               type: "text",
-              text: `✅ Task ${args.taskId} claimed by ${args.assignee}${args.reassign === true ? " (reassigned)" : ""}`,
+              text: `✅ Task ${args.taskId} claimed by ${args.assignee}${args.reassign === true ? " (reassigned)" : ""}${claimNote}`,
             },
           ],
         };
@@ -3618,8 +3640,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           plan: args.plan,
           updatedBy: args.updatedBy,
         });
+        const planNote = await emptyChecklistNote(args.taskId, fetchTaskDetail);
         return {
-          content: [{ type: "text", text: `✅ Plan updated for task ${args.taskId}` }],
+          content: [{ type: "text", text: `✅ Plan updated for task ${args.taskId}${planNote}` }],
         };
       }
 
@@ -3642,6 +3665,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (result.pausedTaskIds && result.pausedTaskIds.length > 0) {
           text += `\nAuto-paused ${result.pausedTaskIds.length} task(s): ${result.pausedTaskTitles.join(", ")}`;
         }
+        text += await emptyChecklistNote(args.taskId, fetchTaskDetail);
         return {
           content: [{ type: "text", text }],
         };
