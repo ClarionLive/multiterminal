@@ -158,6 +158,12 @@ Source: "{#PublishDir}\DashboardHeader\*"; DestDir: "{app}\DashboardHeader"; Com
 Source: "{#PublishDir}\shared\*"; DestDir: "{app}\shared"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PublishDir}\tools\*"; DestDir: "{app}\tools"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PublishDir}\LocalEmbeddingsModel\*"; DestDir: "{app}\LocalEmbeddingsModel"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+; Every csproj <Content> folder must be listed here: a missing one installs silently and fails at
+; runtime (a blank WebView2 panel, or a script resolved from AppContext.BaseDirectory not found).
+Source: "{#PublishDir}\AttentionPanel\*"; DestDir: "{app}\AttentionPanel"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\Dialogs\*"; DestDir: "{app}\Dialogs"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\scripts\*"; DestDir: "{app}\scripts"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\wwwroot\*"; DestDir: "{app}\wwwroot"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; ============================================================
 ; --- .NET Runtime: Managed DLLs (skip if .NET 8 installed) ---
