@@ -4815,6 +4815,19 @@ namespace MultiTerminal
                     _debugLogService?.Warning("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] *** ID MISMATCH *** requested='{e.ProjectId}' returned='{project.Id}' name='{project.Name}'");
                 }
 
+                // GitHub #95: the project may already be open in another pane. Asked first, before the
+                // profile, the session choice or anything registered, so Switch and Cancel change nothing.
+                // After Switch the launching pane is left as it is (still on its start screen): sending it
+                // Home again would refocus its window over the pane just brought forward.
+                var alreadyOpen = ConfirmLaunchWhenProjectAlreadyOpen(doc, project);
+                if (alreadyOpen == AlreadyOpenAnswer.Cancelled)
+                {
+                    doc.ShowStartScreen();
+                    return;
+                }
+                if (alreadyOpen == AlreadyOpenAnswer.Switched)
+                    return;
+
                 // Claude profile (ticket c8ee0eec): the chosen card's project profile, read from the
                 // database, never one the pane ran under before. Decided before anything is stamped,
                 // built or registered, so a refused launch changes nothing.
@@ -5084,6 +5097,104 @@ namespace MultiTerminal
                 doc.ShowStartScreen(); // Restore start screen so the tab isn't blank
                 MessageBox.Show($"Failed to launch project: {ex.Message}", "Launch Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+        /// <summary>The answer to <see cref="ConfirmLaunchWhenProjectAlreadyOpen"/>.</summary>
+        private enum AlreadyOpenAnswer
+        {
+            /// <summary>Not open elsewhere, or the Owner chose Open another: go on launching.</summary>
+            Launch,
+
+            /// <summary>The existing pane was brought forward. Leave the launching pane exactly as it is:
+            /// sending it back to its start screen would refocus its window over the one just raised.</summary>
+            Switched,
+
+            /// <summary>Cancel: launch nothing.</summary>
+            Cancelled,
+        }
+
+        /// <summary>
+        /// GitHub #95: when <paramref name="project"/> is already open in another of the Owner's PM panes,
+        /// asks whether to switch to it or open another. Not asked with Shift held (Shift means "launch, no
+        /// questions", as for the session choice) or for a pane the startup restore already chose for.
+        /// </summary>
+        private AlreadyOpenAnswer ConfirmLaunchWhenProjectAlreadyOpen(TerminalDocument doc, Models.Project project)
+        {
+            if ((Control.ModifierKeys & Keys.Shift) == Keys.Shift || _presetLaunchChoices.ContainsKey(doc.DocId))
+                return AlreadyOpenAnswer.Launch;
+
+            var open = FindPanesWithProjectOpen(project.Id, doc.DocId, out var panes);
+            if (open.Count == 0)
+                return AlreadyOpenAnswer.Launch;
+
+            var target = panes.First(d => d.DocId == open[0].DocId);
+            bool floating = target.DockState == DockState.Float;
+
+            var switchTo = new TaskDialogCommandLinkButton("Switch to it", $"Bring \"{open[0].Title}\" to the front.");
+            var another = new TaskDialogCommandLinkButton("Open another", "Launch a second pane on this project anyway.");
+            var cancel = TaskDialogButton.Cancel;
+            var page = new TaskDialogPage
+            {
+                Caption = "Project already open",
+                Heading = $"{project.Name} is already open",
+                Text = ProjectAlreadyOpen.Describe(open, floating),
+                Icon = TaskDialogIcon.Information,
+                AllowCancel = true,
+                DefaultButton = switchTo,
+            };
+            page.Buttons.Add(switchTo);
+            page.Buttons.Add(another);
+            page.Buttons.Add(cancel);
+
+            var choice = TaskDialog.ShowDialog(this, page);
+            _debugLogService?.Info("MainForm", $"Project '{project.Name}' already open in '{open[0].Title}' ({open.Count} pane(s)): {(choice == switchTo ? "switch" : choice == another ? "open another" : "cancel")}");
+
+            if (choice == another)
+                return AlreadyOpenAnswer.Launch;
+            if (choice != switchTo)
+                return AlreadyOpenAnswer.Cancelled;
+
+            // The question was modal: the pane may have closed or gone back to Home meanwhile. Switch to
+            // whichever pane still has the project open; if none does, there is nothing to switch to.
+            var stillOpen = FindPanesWithProjectOpen(project.Id, doc.DocId, out var panesNow);
+            if (stillOpen.Count == 0)
+                return AlreadyOpenAnswer.Cancelled;
+            BringPaneToFront(panesNow.First(d => d.DocId == stillOpen[0].DocId));
+            return AlreadyOpenAnswer.Switched;
+        }
+
+        /// <summary>The panes other than <paramref name="launchingDocId"/> that have the project open
+        /// (<see cref="ProjectAlreadyOpen.FindOpenPanes"/>), and every live pane they were picked from.
+        /// <c>DockPanel.Contents</c> includes floating, auto-hidden and hidden panes.</summary>
+        private IReadOnlyList<OpenPaneFacts> FindPanesWithProjectOpen(string projectId, string launchingDocId, out List<TerminalDocument> panes)
+        {
+            panes = _dockPanel.Contents.OfType<TerminalDocument>().Where(d => !d.IsDisposed).ToList();
+            var facts = panes.Select(d => new OpenPaneFacts(
+                d.DocId, d.LaunchProjectId, d.LaunchRole, d.Terminal?.IsRunning == true, d.IsStartScreenVisible, d.TabText));
+            return ProjectAlreadyOpen.FindOpenPanes(projectId, launchingDocId, facts);
+        }
+
+        /// <summary>
+        /// Shows <paramref name="pane"/> and gives it focus. The main window is restored if minimised (a
+        /// floating window is owned by it, so it is hidden while the main window is minimised); a pane in a
+        /// floating window then has that window restored and brought to the front.
+        /// </summary>
+        private void BringPaneToFront(TerminalDocument pane)
+        {
+            if (WindowState == FormWindowState.Minimized)
+                WindowState = FormWindowState.Normal;
+            Activate();
+
+            if (pane.DockState == DockState.Float && pane.Pane?.FloatWindow is Form floatWindow && !floatWindow.IsDisposed)
+            {
+                if (floatWindow.WindowState == FormWindowState.Minimized)
+                    floatWindow.WindowState = FormWindowState.Normal;
+                floatWindow.Activate();
+            }
+
+            pane.Activate();
+            pane.FocusTerminal();
+            _lastActiveTerminal = pane;
         }
 
         /// <summary>
