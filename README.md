@@ -1,6 +1,6 @@
 # MultiTerminal
 
-A Windows desktop app (.NET 8 / WinForms / WebView2) for running and coordinating multiple Claude Code terminal sessions — with a kanban task board, inter-terminal messaging, per-task git isolation, institutional memory, and phone access.
+A Windows desktop app (.NET 10 / WinForms / WebView2) for running and coordinating multiple Claude Code terminal sessions — with a kanban task board, inter-terminal messaging, per-task git isolation, institutional memory, and phone access.
 
 ## Features
 

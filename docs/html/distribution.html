@@ -76,7 +76,7 @@
             <tbody>
               <tr><td><strong>Total Package Size</strong></td><td>~385 MB</td></tr>
               <tr><td><strong>Total File Count</strong></td><td>~1,262 files</td></tr>
-              <tr><td><strong>Runtime</strong></td><td>Self-contained .NET 8 (Windows x64)</td></tr>
+              <tr><td><strong>Runtime</strong></td><td>Self-contained .NET 10 (Windows x64)</td></tr>
               <tr><td><strong>Architecture</strong></td><td>x64 only</td></tr>
               <tr><td><strong>Target OS</strong></td><td>Windows 10/11</td></tr>
             </tbody>
@@ -104,7 +104,7 @@
             <tr><th>File</th><th>Purpose</th><th>Required</th></tr>
           </thead>
           <tbody>
-            <tr><td><code>MultiTerminal.exe</code></td><td>Main executable (self-contained .NET 8 host)</td><td>Yes</td></tr>
+            <tr><td><code>MultiTerminal.exe</code></td><td>Main executable (self-contained .NET 10 host)</td><td>Yes</td></tr>
             <tr><td><code>MultiTerminal.dll</code></td><td>Application assembly (all C# code)</td><td>Yes</td></tr>
             <tr><td><code>MultiTerminal.deps.json</code></td><td>Dependency graph for .NET runtime</td><td>Yes</td></tr>
             <tr><td><code>MultiTerminal.runtimeconfig.json</code></td><td>Runtime configuration (framework version, GC settings)</td><td>Yes</td></tr>
@@ -118,7 +118,7 @@
 
         <!-- Category 2: .NET Runtime -->
         <h2 id="dotnet-runtime">2. .NET Runtime (384 DLLs)</h2>
-        <p>The self-contained deployment includes the entire .NET 8 runtime. This eliminates the need for users to install .NET separately.</p>
+        <p>The self-contained deployment includes the entire .NET 10 runtime. This eliminates the need for users to install .NET separately.</p>
 
         <table>
           <thead>
@@ -290,7 +290,7 @@
           <tbody>
             <tr>
               <td><code>MultiTerminal.runtimeconfig.json</code></td>
-              <td>Specifies .NET 8 framework version and runtime options (GC mode, thread pool)</td>
+              <td>Specifies .NET 10 framework version and runtime options (GC mode, thread pool)</td>
               <td>Advanced only</td>
             </tr>
             <tr>
@@ -338,7 +338,7 @@
             <tr><td>DockPanelSuite 3.1.0</td><td>MIT</td><td>Dockable window framework (VS-style panels)</td></tr>
             <tr><td>Microsoft.Web.WebView2</td><td>BSD-style</td><td>Chromium-based embedded browser control</td></tr>
             <tr><td>System.Data.SQLite</td><td>Public Domain</td><td>SQLite database engine for .NET</td></tr>
-            <tr><td>.NET 8 Runtime</td><td>MIT</td><td>Self-contained runtime</td></tr>
+            <tr><td>.NET 10 Runtime</td><td>MIT</td><td>Self-contained runtime</td></tr>
             <tr><td>ASP.NET Core</td><td>MIT</td><td>Web framework for REST API</td></tr>
           </tbody>
         </table>

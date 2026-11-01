@@ -24,7 +24,7 @@ The installer checks for these and warns if missing:
 | Requirement | Purpose | Download |
 |-------------|---------|----------|
 | **Windows 10/11 (x64)** | Host OS | -- |
-| **.NET 8 Desktop Runtime + ASP.NET Core** | Application runtime. If not detected, installer bundles all runtime DLLs (self-contained mode). | [dotnet.microsoft.com](https://dotnet.microsoft.com/download/dotnet/8.0) |
+| **.NET 10 Desktop Runtime + ASP.NET Core** | Application runtime. If not detected, installer bundles all runtime DLLs (self-contained mode). | [dotnet.microsoft.com](https://dotnet.microsoft.com/download/dotnet/10.0) |
 | **Claude Code CLI** | MCP servers and hooks require `~/.claude.json` to exist. Must be installed and run at least once. | `npm install -g @anthropic-ai/claude-code` |
 | **Node.js 24** | MCP server, hooks, and post-install scripts. The hooks' bundled database binary is built for Node 24; on any other major version the activity feed, Attention clearing and session state stop working. | [nodejs.org](https://nodejs.org/) |
 | **WebView2 Runtime** | UI panels (pre-installed on Windows 11; may need manual install on Windows 10). | [developer.microsoft.com](https://developer.microsoft.com/microsoft-edge/webview2/) |
@@ -54,7 +54,7 @@ Options:
 ### Running the Installer
 
 1. Run `MultiTerminalSetup-1.3.0.exe`
-2. The installer checks prerequisites (.NET 8, Claude Code, Node.js, WebView2) and warns about missing items
+2. The installer checks prerequisites (.NET 10, Claude Code, Node.js, WebView2) and warns about missing items
 3. Choose installation type:
    - **Full** -- app + all Claude Code integration (hooks, skills, agents, MCP servers, docs)
    - **Application only** -- just the app and bundled tools
@@ -83,7 +83,7 @@ Options:
 
 ### Prerequisite Detection
 
-- **.NET 8:** Checks registry for both `Microsoft.WindowsDesktop.App` and `Microsoft.AspNetCore.App` 8.x. If found, skips ~380 runtime DLLs (framework-dependent mode). If not found, includes them (self-contained mode).
+- **.NET 10:** Checks registry for both `Microsoft.WindowsDesktop.App` and `Microsoft.AspNetCore.App` 10.x. If found, skips ~380 runtime DLLs (framework-dependent mode). If not found, includes them (self-contained mode).
 - **Claude Code:** Checks for `~/.claude.json`. Required -- installer aborts if missing.
 - **Node.js:** Checks `node --version`. Warns but allows continuing without it.
 - **WebView2:** Checks registry keys. Warns but allows continuing without it.
@@ -97,7 +97,7 @@ The installer runs `post-install.js` after copying files. It performs 6 steps:
 3. **Register optional MCP servers** -- writes `gateway-defaults.json` for the MCP Gateway to auto-seed on first startup.
 4. **Generate `{app}/.claude/project.json`** -- creates a unique project ID, name, and project-level SessionStart hooks.
 5. **Generate `{app}/.claude/settings.local.json`** -- configures all project-level hooks (task routing, inbox checks, safety, subagent office, session status).
-6. **Patch `runtimeconfig.json`** -- if .NET 8 was detected, converts self-contained config to framework-dependent for smaller install.
+6. **Patch `runtimeconfig.json`** -- if .NET 10 was detected, converts self-contained config to framework-dependent for smaller install.
 
 ### Uninstall Script (`post-uninstall.js`)
 
@@ -138,10 +138,10 @@ For development or custom setups where the installer is not appropriate.
 
 ```powershell
 # From MultiTerminal source directory
-dotnet publish -c Release -r win-x64 --self-contained true -o bin\Release\net8.0-windows\win-x64\publish
+dotnet publish -c Release -r win-x64 --self-contained true -o bin\Release\net10.0-windows\win-x64\publish
 
 # Copy publish output to target
-Copy-Item -Path "bin\Release\net8.0-windows\win-x64\publish\*" `
+Copy-Item -Path "bin\Release\net10.0-windows\win-x64\publish\*" `
           -Destination "C:\Applications\MultiTerminal\" -Recurse -Force
 ```
 
