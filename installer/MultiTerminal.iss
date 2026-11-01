@@ -914,33 +914,61 @@ begin
             and (ResultCode = 0);
 end;
 
-// Major version of the node on PATH ('v24.1.0' -> 24), or 0 when it cannot be read.
-// Exec cannot capture output, so 'node --version' is redirected to a temp file.
-function GetNodeMajorVersion: Integer;
+// Parses one run of decimal digits of Text starting at Idx; advances Idx past them.
+// Returns -1 when there is no digit at Idx.
+function ReadVersionPart(const Text: String; var Idx: Integer): Integer;
 var
-  ResultCode, I: Integer;
-  OutFile: String;
-  Output: AnsiString;
   Digits: String;
 begin
-  Result := 0;
+  Digits := '';
+  while (Idx <= Length(Text)) and (Text[Idx] >= '0') and (Text[Idx] <= '9') do
+  begin
+    Digits := Digits + Text[Idx];
+    Idx := Idx + 1;
+  end;
+  Result := StrToIntDef(Digits, -1);
+end;
+
+// Version of the node on PATH ('v24.1.0' -> 24, 1, 0, 'v24.1.0'). False when it cannot be read
+// (missing, unexpected output, or no minor part); the caller then says nothing.
+// Exec cannot capture output, so 'node --version' is redirected to a temp file.
+function GetNodeVersion(var Major, Minor, Patch: Integer; var Text: String): Boolean;
+var
+  ResultCode, Idx: Integer;
+  OutFile: String;
+  Output: AnsiString;
+begin
+  Result := False;
+  Major := 0;
+  Minor := 0;
+  Patch := 0;
+  Text := '';
   OutFile := ExpandConstant('{tmp}\node-version.txt');
   if not Exec('cmd', '/c node --version > "' + OutFile + '" 2>&1', '', SW_HIDE,
               ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
     Exit;
   if not LoadStringFromFile(OutFile, Output) then
     Exit;
-  Output := Trim(Output);
-  if (Length(Output) < 2) or (Output[1] <> 'v') then
+  Text := Output;
+  Text := Trim(Text);
+  if (Length(Text) < 2) or (Text[1] <> 'v') then
     Exit;
-  Digits := '';
-  for I := 2 to Length(Output) do
+  Idx := 2;
+  Major := ReadVersionPart(Text, Idx);
+  if (Major <= 0) or (Idx > Length(Text)) or (Text[Idx] <> '.') then
+    Exit;
+  Idx := Idx + 1;
+  Minor := ReadVersionPart(Text, Idx);
+  if Minor < 0 then
+    Exit;
+  if (Idx <= Length(Text)) and (Text[Idx] = '.') then
   begin
-    if (Output[I] < '0') or (Output[I] > '9') then
-      Break;
-    Digits := Digits + Output[I];
+    Idx := Idx + 1;
+    Patch := ReadVersionPart(Text, Idx);
+    if Patch < 0 then
+      Patch := 0;
   end;
-  Result := StrToIntDef(Digits, 0);
+  Result := True;
 end;
 
 function IsWebView2Installed: Boolean;
@@ -965,7 +993,8 @@ end;
 function InitializeSetup: Boolean;
 var
   NodeMsg, WV2Msg, DotNetMsg: String;
-  NodeMajor: Integer;
+  NodeMajor, NodeMinor, NodePatch: Integer;
+  NodeVersionText: String;
 begin
   Result := True;
 
@@ -1029,7 +1058,7 @@ begin
   if not IsNodeInstalled then
   begin
     NodeMsg := 'Node.js was not detected on this system.' + #13#10 + #13#10 +
-               'Node.js 24 is required for:' + #13#10 +
+               'Node.js 22.13 or newer (24 LTS recommended) is required for:' + #13#10 +
                '  - MCP Server (agent tool interface)' + #13#10 +
                '  - Claude Code hooks (activity tracking)' + #13#10 + #13#10 +
                'You can install Node.js from https://nodejs.org' + #13#10 + #13#10 +
@@ -1043,20 +1072,21 @@ begin
   end
   else
   begin
-    // GH #50: the plugin's hooks use the bundled better-sqlite3, a native binary built for Node 24,
-    // which loads on no other major version (older OR newer). The MCP server still works, but the
-    // hooks that record activity cannot open the database. 0 means the version could not be read;
+    // GH #50: the plugin's hooks open MultiTerminal's database with the bundled better-sqlite3
+    // (a native binary built for Node 24) and, when that cannot load, fall back to Node's built-in
+    // node:sqlite, which exists from Node 22.13. So any Node from 22.13 up works, newer majors
+    // included; below it the hooks cannot open the database. If the version cannot be read,
     // say nothing rather than guess.
-    NodeMajor := GetNodeMajorVersion;
-    if (NodeMajor > 0) and (NodeMajor <> 24) then
+    if GetNodeVersion(NodeMajor, NodeMinor, NodePatch, NodeVersionText) and
+       ((NodeMajor < 22) or ((NodeMajor = 22) and (NodeMinor < 13))) then
     begin
-      NodeMsg := 'Node.js ' + IntToStr(NodeMajor) + ' was detected. MultiTerminal needs Node.js 24.' + #13#10 + #13#10 +
-                 'With another Node.js version the agent tools still work, but the Claude Code hooks' + #13#10 +
+      NodeMsg := 'Node.js ' + NodeVersionText + ' was detected. MultiTerminal needs Node.js 22.13 or newer (24 LTS recommended).' + #13#10 + #13#10 +
+                 'With this Node.js version the agent tools still work, but the Claude Code hooks' + #13#10 +
                  'cannot open MultiTerminal''s database, so these stop working:' + #13#10 +
                  '  - the Activity feed' + #13#10 +
                  '  - clearing Attention cards when an agent moves on' + #13#10 +
                  '  - session state (what each terminal is doing)' + #13#10 + #13#10 +
-                 'You can install Node.js 24 from https://nodejs.org' + #13#10 + #13#10 +
+                 'You can install Node.js 24 LTS from https://nodejs.org' + #13#10 + #13#10 +
                  'Continue installation anyway?';
       if MsgBox(NodeMsg, mbConfirmation, MB_YESNO) = IDNO then
       begin
