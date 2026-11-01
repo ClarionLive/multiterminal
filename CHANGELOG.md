@@ -15,6 +15,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   out, so on an installed machine the Attention panel was empty and the header's
   Context read "--%". The installer build now fails if the build output contains
   anything the installer does not ship or explicitly exclude.
+- **A resumed PM brings back helpers that were working in a subfolder of a
+  worktree.** Resume read only the end of long transcripts, and when the last
+  folder recorded there was a subfolder of the worktree the helper was skipped.
+  If two worktrees' names map to the same transcript folder, the session is now
+  refused with a clear reason instead of being resumed in the wrong one.
+- **The header's GitHub row shows a failed check** ("the account's token was
+  refused", "no GitHub account linked", ...) with a link to fix it, instead of
+  showing nothing until a check succeeds.
+
+### Added
+
+- **MultiTerminal can update its own plugin.** Settings > General shows which
+  plugin commit MT uses, with Check for update and Update now. MT checks once a
+  day at startup and leaves one Inbox notice when there is a newer plugin; it
+  never installs on its own. A plugin folder that is a git clone with local
+  work is never replaced, and an interrupted update is finished or undone the
+  next time MT starts.
+- **The installer builds the plugin from the marketplace's GitHub main** (or a
+  named ref), stamps its commit, and refuses to run while MultiTerminal is open.
 
 ### Changed
 
