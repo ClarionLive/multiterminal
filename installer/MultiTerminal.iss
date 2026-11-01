@@ -174,6 +174,22 @@ Source: "{#PublishDir}\DashboardHeader\*"; DestDir: "{app}\DashboardHeader"; Com
 Source: "{#PublishDir}\shared\*"; DestDir: "{app}\shared"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PublishDir}\tools\*"; DestDir: "{app}\tools"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PublishDir}\LocalEmbeddingsModel\*"; DestDir: "{app}\LocalEmbeddingsModel"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+; Missing from 3.0.0 (task 9ad3a95c). build-installer.ps1's publish coverage check now fails
+; the build when a publish folder or root file is neither listed here nor excluded with a reason.
+; Attention panel page (AttentionPanelControl loads AttentionPanel\attention-panel.html).
+Source: "{#PublishDir}\AttentionPanel\*"; DestDir: "{app}\AttentionPanel"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+; Code review popup page (CodeReviewPopupForm loads Dialogs\code-review.html).
+Source: "{#PublishDir}\Dialogs\*"; DestDir: "{app}\Dialogs"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+; statusline.js (LaunchCommandBuilder forces it as every pane's statusLine; without it the header
+; context and quota stay "--%") and the agent git/gh identity scripts (AgentGitIdentityWiring).
+Source: "{#PublishDir}\scripts\*"; DestDir: "{app}\scripts"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+; Multi-Connect phone gateway web app (MultiRemoteGatewayHost serves wwwroot; it refuses to start without it).
+Source: "{#PublishDir}\wwwroot\*"; DestDir: "{app}\wwwroot"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+; ASP.NET configuration: AllowedHosts (host filtering) and the MultiRemote defaults. Per-install
+; values belong in settings.txt or appsettings.Local.json, so overwriting this file is safe.
+Source: "{#PublishDir}\appsettings.json"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+; The template the gateway's login error tells the user to copy to appsettings.Local.json.
+Source: "{#PublishDir}\appsettings.Local.json.example"; DestDir: "{app}"; Components: main; Flags: ignoreversion
 
 ; ============================================================
 ; --- .NET Runtime: Managed DLLs (skip if .NET 10 installed) ---
