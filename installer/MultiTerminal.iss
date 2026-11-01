@@ -9,7 +9,7 @@
 #define AppURL "https://github.com/peterparker57"
 
 ; Source directories - adjust these for your build machine
-#define PublishDir "..\bin\Release\net8.0-windows\win-x64\publish"
+#define PublishDir "..\bin\Release\net10.0-windows\win-x64\publish"
 ; MCP server ships from the git-canonical repo copy staged by the build's
 ; StageMcpForInstaller target (mcp-dist = repo mcp/ + freshly `npm install`ed
 ; deps), NOT the build machine's %APPDATA% profile. This removes the silent
@@ -176,7 +176,7 @@ Source: "{#PublishDir}\tools\*"; DestDir: "{app}\tools"; Components: main; Flags
 Source: "{#PublishDir}\LocalEmbeddingsModel\*"; DestDir: "{app}\LocalEmbeddingsModel"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; ============================================================
-; --- .NET Runtime: Managed DLLs (skip if .NET 8 installed) ---
+; --- .NET Runtime: Managed DLLs (skip if .NET 10 installed) ---
 ; ============================================================
 Source: "{#PublishDir}\Microsoft.AspNetCore.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
 Source: "{#PublishDir}\Microsoft.AspNetCore.*.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
@@ -196,7 +196,7 @@ Source: "{#PublishDir}\netstandard.dll"; DestDir: "{app}"; Components: main; Fla
 Source: "{#PublishDir}\WindowsBase.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
 
 ; ============================================================
-; --- .NET Runtime: WPF/WinForms managed DLLs (skip if .NET 8) ---
+; --- .NET Runtime: WPF/WinForms managed DLLs (skip if .NET 10) ---
 ; ============================================================
 Source: "{#PublishDir}\Accessibility.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
 Source: "{#PublishDir}\DirectWriteForwarder.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
@@ -208,11 +208,13 @@ Source: "{#PublishDir}\WindowsFormsIntegration.dll"; DestDir: "{app}"; Component
 Source: "{#PublishDir}\UIAutomation*.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
 
 ; ============================================================
-; --- .NET Runtime: Native binaries (skip if .NET 8) ---
+; --- .NET Runtime: Native binaries (skip if .NET 10) ---
 ; ============================================================
 Source: "{#PublishDir}\coreclr.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
 Source: "{#PublishDir}\clrjit.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
 Source: "{#PublishDir}\clrgc.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+; New in the .NET 10 runtime (task 12866c92); loaded only when DOTNET_GCName selects it.
+Source: "{#PublishDir}\clrgcexp.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
 Source: "{#PublishDir}\clretwrc.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
 Source: "{#PublishDir}\hostfxr.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
 Source: "{#PublishDir}\hostpolicy.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
@@ -230,7 +232,7 @@ Source: "{#PublishDir}\aspnetcorev2_inprocess.dll"; DestDir: "{app}"; Components
 Source: "{#PublishDir}\vcruntime140_cor3.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
 
 ; ============================================================
-; --- .NET Runtime: Locale resource directories (skip if .NET 8) ---
+; --- .NET Runtime: Locale resource directories (skip if .NET 10) ---
 ; ============================================================
 Source: "{#PublishDir}\cs\*"; DestDir: "{app}\cs"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
 Source: "{#PublishDir}\de\*"; DestDir: "{app}\de"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
@@ -247,7 +249,7 @@ Source: "{#PublishDir}\zh-Hans\*"; DestDir: "{app}\zh-Hans"; Components: main; F
 Source: "{#PublishDir}\zh-Hant\*"; DestDir: "{app}\zh-Hant"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
 
 ; ============================================================
-; --- .NET Runtime: Native shims directory (skip if .NET 8) ---
+; --- .NET Runtime: Native shims directory (skip if .NET 10) ---
 ; ============================================================
 Source: "{#PublishDir}\runtimes\*"; DestDir: "{app}\runtimes"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
 
@@ -381,7 +383,7 @@ Type: filesandordirs; Name: "{app}\mcps"
 [Code]
 var
   DeleteUserData: Boolean;
-  DotNet8Detected: Boolean;
+  DotNet10Detected: Boolean;
   McpPage: TInputOptionWizardPage;
   // Plugin location (ticket c8ee0eec, GH#23)
   PluginLocPage: TInputOptionWizardPage;
@@ -417,8 +419,8 @@ type
 function MtCoCreateGuid(var Guid: TMtGuid): Integer;
   external 'CoCreateGuid@ole32.dll stdcall';
 
-// Check if .NET 8 Desktop Runtime is installed (includes WinForms + WPF + NETCore)
-function IsDotNet8DesktopInstalled: Boolean;
+// Check if .NET 10 Desktop Runtime is installed (includes WinForms + WPF + NETCore)
+function IsDotNet10DesktopInstalled: Boolean;
 var
   Names: TArrayOfString;
   I: Integer;
@@ -430,7 +432,7 @@ begin
   begin
     for I := 0 to GetArrayLength(Names) - 1 do
     begin
-      if Pos('8.', Names[I]) = 1 then
+      if Pos('10.', Names[I]) = 1 then
       begin
         Result := True;
         Exit;
@@ -439,8 +441,8 @@ begin
   end;
 end;
 
-// Check if ASP.NET Core 8 Runtime is installed
-function IsDotNet8AspNetInstalled: Boolean;
+// Check if ASP.NET Core 10 Runtime is installed
+function IsDotNet10AspNetInstalled: Boolean;
 var
   Names: TArrayOfString;
   I: Integer;
@@ -452,7 +454,7 @@ begin
   begin
     for I := 0 to GetArrayLength(Names) - 1 do
     begin
-      if Pos('8.', Names[I]) = 1 then
+      if Pos('10.', Names[I]) = 1 then
       begin
         Result := True;
         Exit;
@@ -461,16 +463,16 @@ begin
   end;
 end;
 
-// Returns True when runtime DLLs should be installed (i.e., .NET 8 is NOT fully present)
+// Returns True when runtime DLLs should be installed (i.e., .NET 10 is NOT fully present)
 function ShouldInstallRuntimeFiles: Boolean;
 begin
-  Result := not (IsDotNet8DesktopInstalled and IsDotNet8AspNetInstalled);
+  Result := not (IsDotNet10DesktopInstalled and IsDotNet10AspNetInstalled);
 end;
 
 // Returns flag string for post-install.js to know which mode we're in
 function GetDotNetFlag(Param: String): String;
 begin
-  if IsDotNet8DesktopInstalled and IsDotNet8AspNetInstalled then
+  if IsDotNet10DesktopInstalled and IsDotNet10AspNetInstalled then
     Result := '--framework-dependent'
   else
     Result := '--self-contained';
@@ -969,18 +971,18 @@ var
 begin
   Result := True;
 
-  // Detect .NET 8 and cache the result
-  DotNet8Detected := IsDotNet8DesktopInstalled and IsDotNet8AspNetInstalled;
+  // Detect .NET 10 and cache the result
+  DotNet10Detected := IsDotNet10DesktopInstalled and IsDotNet10AspNetInstalled;
 
   // Show .NET detection status
-  if DotNet8Detected then
-    Log('.NET 8 Desktop + ASP.NET Core Runtime detected. Runtime DLLs will be skipped (~380 files).')
+  if DotNet10Detected then
+    Log('.NET 10 Desktop + ASP.NET Core Runtime detected. Runtime DLLs will be skipped (~380 files).')
   else
   begin
-    DotNetMsg := '.NET 8 Desktop Runtime was not detected on this system.' + #13#10 + #13#10 +
+    DotNetMsg := '.NET 10 Desktop Runtime was not detected on this system.' + #13#10 + #13#10 +
                  'The installer will include the full .NET runtime (~380 additional files).' + #13#10 +
-                 'To reduce install size, install the .NET 8 Desktop Runtime first:' + #13#10 +
-                 '  https://dotnet.microsoft.com/download/dotnet/8.0' + #13#10 + #13#10 +
+                 'To reduce install size, install the .NET 10 Desktop Runtime first:' + #13#10 +
+                 '  https://dotnet.microsoft.com/download/dotnet/10.0' + #13#10 + #13#10 +
                  'Continue with full (self-contained) installation?';
     if MsgBox(DotNetMsg, mbConfirmation, MB_YESNO) = IDNO then
     begin

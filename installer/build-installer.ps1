@@ -33,7 +33,7 @@ $GatewayDir     = if ($env:MCPGATEWAY_DIR) { $env:MCPGATEWAY_DIR } else { Join-P
 $InstallerDir   = Join-Path $MultiTermDir 'installer'
 $IssFile        = Join-Path $InstallerDir 'MultiTerminal.iss'
 
-$MTPublishDir   = Join-Path $MultiTermDir 'bin\Release\net8.0-windows\win-x64\publish'
+$MTPublishDir   = Join-Path $MultiTermDir 'bin\Release\net10.0-windows\win-x64\publish'
 # Publish the Gateway to a dedicated installer-staging dir, NOT bin\publish\win-x64 —
 # live McpGateway.exe processes (one per running MT terminal) are launched from that
 # dir and hold locks on its DLLs, so publishing there fails with MSB3027 whenever MT
