@@ -8,6 +8,8 @@
 #   .\build-installer.ps1 -PluginRef v3.0.1            # Bundle the plugin from a tag/branch/sha (default: main)
 #   .\build-installer.ps1 -PluginSource <local clone>  # Offline: bundle a clean local marketplace clone's HEAD
 #   .\build-installer.ps1 -StageOnly      # Stage, validate and stamp the plugin only, then exit
+#   .\build-installer.ps1 -CheckOnly [-PublishDir <folder>]  # Only check that the .iss ships everything
+#                                         # in a publish folder (default: the normal publish output)
 #
 # The Claude Code plugin marketplace is staged from GitHub (ClarionLive/multiterminal-marketplace),
 # never from this machine's live plugin folder: 3.0.0 shipped a local branch that was 20 commits
@@ -18,7 +20,9 @@ param(
     [switch]$Verbose,
     [string]$PluginRef = 'main',
     [string]$PluginSource,
-    [switch]$StageOnly
+    [switch]$StageOnly,
+    [switch]$CheckOnly,
+    [string]$PublishDir
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,7 +37,7 @@ $GatewayDir     = if ($env:MCPGATEWAY_DIR) { $env:MCPGATEWAY_DIR } else { Join-P
 $InstallerDir   = Join-Path $MultiTermDir 'installer'
 $IssFile        = Join-Path $InstallerDir 'MultiTerminal.iss'
 
-$MTPublishDir   = Join-Path $MultiTermDir 'bin\Release\net10.0-windows\win-x64\publish'
+$MTPublishDir   = if ($PublishDir) { $PublishDir } else { Join-Path $MultiTermDir 'bin\Release\net10.0-windows\win-x64\publish' }
 # Publish the Gateway to a dedicated installer-staging dir, NOT bin\publish\win-x64 —
 # live McpGateway.exe processes (one per running MT terminal) are launched from that
 # dir and hold locks on its DLLs, so publishing there fails with MSB3027 whenever MT
@@ -49,6 +53,70 @@ $InnoCompiler = @(
 function Write-Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)   { Write-Host "    $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "    $msg" -ForegroundColor Yellow }
+
+# --- Publish coverage guard (task 9ad3a95c) ---
+# The .iss lists publish files and folders one by one, so a folder the build adds is silently
+# left out of every install: 3.0.0 shipped without AttentionPanel\ (empty Attention panel) and
+# scripts\ (no statusline.js, so the header context read "--%"). deploy.ps1 copies the whole
+# build, which is why no dev machine ever saw it. This check fails the installer build when a
+# top-level file or folder of the publish output is neither matched by a {#PublishDir} Source
+# line nor listed below with the reason it is left out.
+$PublishExclusions = [ordered]@{
+    'docs'    = 'shipped from the source tree (DocsDir) as the optional "docs" component; same files'
+    '*.pdb'   = 'debug symbols, not needed at run time'
+    '*.lib'   = 'onnxruntime import libraries, used only when linking native code'
+}
+
+# Returns the top-level entries of $Dir that the .iss does not ship and $PublishExclusions does
+# not exclude, as "folder\" or "file" strings. Runtime files count as shipped: their Source
+# lines exist (Check: ShouldInstallRuntimeFiles decides per machine whether they are copied).
+function Get-UnshippedPublishEntries([string]$Dir, [string]$Iss) {
+    $fileRules = @()
+    $dirRules = @{}
+    foreach ($line in Get-Content -LiteralPath $Iss) {
+        if ($line -notmatch '^\s*Source:\s*"\{#PublishDir\}\\([^"]+)"') { continue }
+        $rel = $Matches[1]
+        if ($rel.Contains('\')) {
+            $dirRules[$rel.Split('\')[0].ToLowerInvariant()] = $true
+            continue
+        }
+        $excludes = @()
+        if ($line -match 'Excludes:\s*"([^"]+)"') { $excludes = $Matches[1].Split(',') | ForEach-Object { $_.Trim() } }
+        $fileRules += [pscustomobject]@{ Pattern = $rel; Excludes = $excludes }
+    }
+
+    $unshipped = @()
+    foreach ($entry in Get-ChildItem -LiteralPath $Dir -Force) {
+        $name = $entry.Name
+        if (@($PublishExclusions.Keys | Where-Object { $name -like $_ }).Count -gt 0) { continue }
+        if ($entry.PSIsContainer) {
+            if (-not $dirRules.ContainsKey($name.ToLowerInvariant())) { $unshipped += "$name\" }
+            continue
+        }
+        $shipped = $fileRules | Where-Object {
+            $name -like $_.Pattern -and -not (@($_.Excludes | Where-Object { $name -like $_ }).Count -gt 0)
+        }
+        if (-not $shipped) { $unshipped += $name }
+    }
+    return $unshipped
+}
+
+function Assert-PublishCoverage([string]$Dir, [string]$Iss) {
+    if (-not (Test-Path -LiteralPath $Dir)) { throw "Publish output not found at $Dir" }
+    $missing = @(Get-UnshippedPublishEntries -Dir $Dir -Iss $Iss)
+    if ($missing.Count -gt 0) {
+        throw ("The installer would leave out $($missing.Count) publish entr$(if ($missing.Count -eq 1) { 'y' } else { 'ies' }): " +
+               ($missing -join ', ') + ". Add a {#PublishDir} Source line to MultiTerminal.iss, or add the " +
+               "entry to `$PublishExclusions in build-installer.ps1 with the reason it is not needed.")
+    }
+    Write-Ok "Publish coverage OK: every top-level entry of $Dir is shipped or excluded with a reason"
+}
+
+if ($CheckOnly) {
+    Write-Step "Checking publish coverage (-CheckOnly)..."
+    Assert-PublishCoverage -Dir $MTPublishDir -Iss $IssFile
+    exit 0
+}
 
 # --- Plugin marketplace staging (task 4dc459e4) ---
 $PluginRepo       = 'ClarionLive/multiterminal-marketplace'
@@ -234,6 +302,9 @@ $gwCount = (Get-ChildItem $GWPublishDir -Recurse -File).Count
 
 Write-Ok "MultiTerminal: $mtCount files, exe=$mtSize MB"
 Write-Ok "MCP Gateway:   $gwCount files, exe=$gwSize MB"
+
+Write-Step "Checking publish coverage..."
+Assert-PublishCoverage -Dir $MTPublishDir -Iss $IssFile
 
 # --- Compile installer ---
 Write-Step "Compiling Inno Setup installer..."
