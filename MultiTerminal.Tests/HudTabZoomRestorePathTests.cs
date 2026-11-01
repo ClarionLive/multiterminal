@@ -37,7 +37,7 @@ namespace MultiTerminal.Tests
         }
 
         private static int CountMatches(string haystack, string pattern) =>
-            Regex.Matches(haystack, pattern).Count;
+            Regex.Count(haystack, pattern);
 
         /// <summary>
         /// Every TerminalDocument that gets constructed must have its saved zoom restored, or that

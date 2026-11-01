@@ -208,7 +208,7 @@ namespace MultiTerminal.Tests
                     "outside that guard means a clamped restore at a transient height ends the retry " +
                     "loop, and FixedPanel.Panel2 then holds the HUD at its minimum for the session.");
 
-                int total = Regex.Matches(body, Regex.Escape(required)).Count;
+                int total = Regex.Count(body, Regex.Escape(required));
                 Assert.True(
                     total == 1,
                     $"'{required}' appears {total} times in OnHudSplitterSizeChanged; expected exactly " +

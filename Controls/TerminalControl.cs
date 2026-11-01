@@ -710,6 +710,7 @@ namespace MultiTerminal.Controls
         /// e0fa9d90). Set by TerminalDocument.StartTerminal from <see cref="TerminalRoles.IsQuietStart"/>
         /// before every launch, so a reused pane never keeps a previous project's value.
         /// </summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public bool QuietStart { get; set; }
 
         private readonly CompactContinueGate _compactContinueGate = new CompactContinueGate();

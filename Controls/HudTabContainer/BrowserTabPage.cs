@@ -36,6 +36,7 @@ namespace MultiTerminal.Controls
         /// <summary>
         /// Display title for the tab strip.
         /// </summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public string Title { get; set; }
 
         /// <summary>
@@ -58,6 +59,7 @@ namespace MultiTerminal.Controls
         /// and loads, so MainForm checks where focus went). A property, not an event, so the open and
         /// update paths can set it on every call without stacking handlers.
         /// </summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public Action<BrowserTabPage> AfterPageLoad { get; set; }
 
         /// <summary>Whether keyboard focus is inside this tab's web view.</summary>

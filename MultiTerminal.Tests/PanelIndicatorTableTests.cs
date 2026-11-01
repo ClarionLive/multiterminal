@@ -180,7 +180,7 @@ namespace MultiTerminal.Tests
         {
             string src = MainForm();
 
-            int definitions = Regex.Matches(src, @"private void SyncPanelIndicators\(\)").Count;
+            int definitions = Regex.Count(src, @"private void SyncPanelIndicators\(\)");
             Assert.True(definitions == 1, $"Expected exactly one SyncPanelIndicators definition, found {definitions}.");
 
             // Counting call sites is NOT enough, and this test originally did exactly that and was

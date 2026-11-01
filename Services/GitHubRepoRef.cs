@@ -51,7 +51,7 @@ namespace MultiTerminal.Services
                 if (host != "github.com" && host != "www.github.com") return null;
                 path = uri.AbsolutePath;
             }
-            else if (!s.Contains(":") && !s.StartsWith("/", StringComparison.Ordinal) && !s.Contains("\\"))
+            else if (!s.Contains(":") && !s.StartsWith('/') && !s.Contains("\\"))
             {
                 path = s; // bare owner/name
             }

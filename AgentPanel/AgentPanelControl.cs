@@ -31,6 +31,7 @@ namespace MultiTerminal.AgentPanel
         /// <summary>
         /// Set by MainForm for internal debug panel logging.
         /// </summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public DebugLogService DebugLogService { get; set; }
 
         public IAgentMessageSource AttachedAgent => _attachedAgent;

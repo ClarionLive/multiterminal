@@ -24,6 +24,7 @@ namespace MultiTerminal.Dialogs
         /// <summary>
         /// Gets or sets the description for the prompt.
         /// </summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public string Description
         {
             get => descriptionTextBox.Text?.Trim() ?? string.Empty;
@@ -33,6 +34,7 @@ namespace MultiTerminal.Dialogs
         /// <summary>
         /// Gets or sets the prompt text.
         /// </summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public string PromptText
         {
             get => promptTextBox.Text;
@@ -43,6 +45,7 @@ namespace MultiTerminal.Dialogs
         /// Gets or sets whether the prompt text can be edited.
         /// Set to true for creating new prompts, false for saving selected text.
         /// </summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public bool AllowPromptEdit
         {
             get => !promptTextBox.ReadOnly;
@@ -65,6 +68,7 @@ namespace MultiTerminal.Dialogs
         /// <summary>
         /// Sets the initially selected category in the dropdown.
         /// </summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public string SelectedCategory
         {
             set
@@ -95,6 +99,7 @@ namespace MultiTerminal.Dialogs
         /// Gets or sets whether the dialog is in edit mode.
         /// When true, changes the title to "Edit Prompt" and button text to "Update".
         /// </summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public bool IsEditMode
         {
             get => _isEditMode;

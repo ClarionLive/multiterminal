@@ -64,6 +64,7 @@ namespace MultiTerminal.DashboardHeader
         public event Action DashboardReady;
 
         /// <summary>The projects the Launch Project picker lists, and the current project's id.</summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public Func<(IReadOnlyList<HeaderProjectItem> Projects, string CurrentProjectId)> ProjectListProvider { get; set; }
 
         public DashboardHeaderControl()

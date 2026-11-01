@@ -40,7 +40,7 @@ namespace MultiTerminal.Tests
         }
 
         private static int CountMatches(string haystack, string pattern) =>
-            Regex.Matches(haystack, pattern).Count;
+            Regex.Count(haystack, pattern);
 
         /// <summary>
         /// THE ONE THAT MATTERS. Every TerminalDocument that gets constructed must have zoom wired.

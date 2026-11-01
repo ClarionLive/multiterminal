@@ -444,6 +444,7 @@ namespace MultiTerminal.Docking
         /// Function to retrieve available identity names for the "Launch as..." menu.
         /// Set by MainForm to provide identity list.
         /// </summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public Func<string[]> GetAvailableIdentities { get; set; }
 
         // Split ratios for splitter containers (global, applied from settings)
@@ -559,6 +560,7 @@ namespace MultiTerminal.Docking
         /// Gets or sets the pending working directory for session restore.
         /// Set this before the terminal is started during layout restoration.
         /// </summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public string PendingWorkingDirectory
         {
             get => _pendingWorkingDirectory;
@@ -583,6 +585,7 @@ namespace MultiTerminal.Docking
         /// Gets or sets a custom user-defined title for the tab.
         /// When set, this overrides the automatic title from the working directory.
         /// </summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public string CustomTitle
         {
             get => _customTitle;

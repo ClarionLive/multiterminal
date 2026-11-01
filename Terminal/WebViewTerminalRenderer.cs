@@ -103,6 +103,7 @@ namespace MultiTerminal.Terminal
         /// Debug log sink, wired by the owning TerminalControl. Null until wired, so all
         /// call sites use the null-conditional.
         /// </summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public DebugLogService DebugLogService { get; set; }
 
         /// <summary>
