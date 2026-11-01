@@ -108,7 +108,7 @@ namespace MultiTerminal.Services
             GitHubCheckFailure.TokenRefused => "GitHub check failed: the account's token was refused",
             GitHubCheckFailure.NoAccount => "GitHub check failed: no GitHub account linked",
             GitHubCheckFailure.RepoNotFound => "GitHub check failed: repository not found or no access",
-            GitHubCheckFailure.Other => "GitHub check failed: last check failed",
+            GitHubCheckFailure.Other => "GitHub check failed. See the project's settings for details.",
             _ => null,
         };
 

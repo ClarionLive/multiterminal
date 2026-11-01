@@ -1031,7 +1031,7 @@ namespace MultiTerminal.Tests
         [Theory]
         [InlineData(HttpStatusCode.Unauthorized, GitHubCheckFailure.TokenRefused, "GitHub check failed: the account's token was refused", "accounts")]
         [InlineData(HttpStatusCode.NotFound, GitHubCheckFailure.RepoNotFound, "GitHub check failed: repository not found or no access", "project")]
-        [InlineData(HttpStatusCode.InternalServerError, GitHubCheckFailure.Other, "GitHub check failed: last check failed", "project")]
+        [InlineData(HttpStatusCode.InternalServerError, GitHubCheckFailure.Other, "GitHub check failed. See the project's settings for details.", "project")]
         public async Task A_failed_fetch_shows_MTs_sentence_for_its_class_and_a_fixed_target(
             HttpStatusCode status, GitHubCheckFailure expected, string text, string target)
         {
@@ -1135,7 +1135,7 @@ namespace MultiTerminal.Tests
             _db.RecordGitHubWatchCheck("p", "o/r", null, stored);
             var band = GitHubBandModel.Build("o/r", true, _db.GetGitHubWatchState("p", "o/r"));
             Assert.Equal(GitHubCheckFailure.Other, band.Failure);
-            Assert.Equal("GitHub check failed: last check failed", band.FailureText);
+            Assert.Equal("GitHub check failed. See the project's settings for details.", band.FailureText);
         }
 
         [Fact]
