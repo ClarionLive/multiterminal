@@ -420,7 +420,8 @@ namespace MultiTerminal.Docking
 
         /// <summary>
         /// A link on the header's GitHub band was clicked (task e4924065): which page ("repo", "issues"
-        /// or "pulls") of which project's repo. MainForm builds the URL and opens the browser.
+        /// or "pulls") of which project's repo. MainForm builds the URL and opens the browser. The
+        /// failure link (task 81d0e597) sends "accounts" or "project" instead, and MainForm opens that form.
         /// </summary>
         public event EventHandler<GitHubLinkRequestedEventArgs> GitHubLinkRequested;
 
@@ -430,9 +431,8 @@ namespace MultiTerminal.Docking
         /// </summary>
         public event EventHandler<string> SettingsProjectChanged;
 
-        /// <summary>Shows or hides the header's GitHub band (task e4924065). A null repo hides it.</summary>
-        public void SetGitHubBand(string repoFullName, int? openIssues, int? openPullRequests) =>
-            _statusBar?.SetGitHub(repoFullName, openIssues, openPullRequests);
+        /// <summary>Shows or hides the header's GitHub band (task e4924065). A null band or repo hides it.</summary>
+        public void SetGitHubBand(Services.GitHubBand band) => _statusBar?.SetGitHub(band);
 
         /// <summary>
         /// The project the status bar's gear opens: the registered project containing the pane's folder,
