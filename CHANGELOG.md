@@ -5,6 +5,22 @@ All notable changes to MultiTerminal are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Installed copies now include the Attention panel, the statusline script
+  (context and quota in each terminal's header), the code review page and the
+  Multi-Connect phone gateway's web app.** 3.0.0's installer left these folders
+  out, so on an installed machine the Attention panel was empty and the header's
+  Context read "--%". The installer build now fails if the build output contains
+  anything the installer does not ship or explicitly exclude.
+
+### Changed
+
+- **MultiTerminal runs on .NET 10 (LTS)** instead of .NET 8, which reaches end of
+  support on 10 November 2026. Building needs the .NET 10 SDK.
+
 ## [3.0.0] — 2026-10-30
 
 Major release: Claude profiles keep work and personal projects apart, and
