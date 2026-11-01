@@ -516,6 +516,8 @@ namespace MultiTerminal
 #pragma warning restore CA2000
                 // Task e4924065. The service raises these on a pool thread; panes are UI objects.
                 _gitHubWatch.CountsChanged += projectId => PostGitHubUi(() => RefreshGitHubBands(projectId));
+                // Task 81d0e597: a failed check shows (and the next good one clears) without waiting for a tick.
+                _gitHubWatch.CheckRecorded += projectId => PostGitHubUi(() => RefreshGitHubBands(projectId));
                 _gitHubWatch.NoticesQueued += projectId => PostGitHubUi(() => DeliverGitHubNotices(projectId));
                 // Each tick also refreshes the bands: PATCH /api/projects/{id} and update_project change
                 // the Repository URL without any event MainForm hears (pipeline Run 1), so a REST or MCP
@@ -550,8 +552,10 @@ namespace MultiTerminal
         /// <summary>
         /// Shows each terminal's GitHub band (task e4924065): the repo of the project the pane belongs
         /// to (<see cref="TerminalDocument.SettingsProjectId"/>), with the open issue and PR counts
-        /// while that project is watched. A pane outside any project, or in one with no github.com
-        /// repo, has no band. <paramref name="onlyProjectId"/> limits it to one project's panes.
+        /// while that project is watched, and the last check's failure if it failed (task 81d0e597,
+        /// decided by <see cref="Services.GitHubBandModel.Build"/>). A pane outside any project, or in
+        /// one with no github.com repo, has no band. <paramref name="onlyProjectId"/> limits it to one
+        /// project's panes.
         /// </summary>
         private void RefreshGitHubBands(string onlyProjectId)
         {
@@ -560,7 +564,7 @@ namespace MultiTerminal
                 var db = _sharedProjectDatabase;
                 if (db == null || _dockPanel == null) return;
 
-                var bands = new Dictionary<string, (string Repo, int? Issues, int? Prs)>(StringComparer.Ordinal);
+                var bands = new Dictionary<string, Services.GitHubBand>(StringComparer.Ordinal);
                 foreach (var doc in _dockPanel.Contents.OfType<TerminalDocument>())
                 {
                     if (doc == null || doc.IsDisposed) continue;
@@ -568,7 +572,7 @@ namespace MultiTerminal
                     if (onlyProjectId != null && !string.Equals(projectId, onlyProjectId, StringComparison.Ordinal)) continue;
                     if (string.IsNullOrEmpty(projectId))
                     {
-                        doc.SetGitHubBand(null, null, null);
+                        doc.SetGitHubBand(Services.GitHubBand.Hidden);
                         continue;
                     }
 
@@ -576,18 +580,13 @@ namespace MultiTerminal
                     {
                         var project = db.GetRichProject(projectId);
                         var repo = Services.GitHubRepoRef.TryParse(project?.GitRepoUrl);
-                        if (repo == null)
-                            band = (null, null, null);
-                        else if (project.GitHubWatchMode == GitHubWatchMode.Off)
-                            band = (repo.FullName, null, null);   // the link without counts nobody refreshes
-                        else
-                        {
-                            var state = db.GetGitHubWatchState(projectId, repo.FullName);
-                            band = (repo.FullName, state.OpenIssues, state.OpenPullRequests);
-                        }
+                        // Watching off: the link without counts nobody refreshes, and no failure.
+                        bool watching = repo != null && project.GitHubWatchMode != GitHubWatchMode.Off;
+                        band = Services.GitHubBandModel.Build(repo?.FullName, watching,
+                            watching ? db.GetGitHubWatchState(projectId, repo.FullName) : null);
                         bands[projectId] = band;
                     }
-                    doc.SetGitHubBand(band.Repo, band.Issues, band.Prs);
+                    doc.SetGitHubBand(band);
                 }
             }
             catch (Exception ex)
@@ -598,12 +597,30 @@ namespace MultiTerminal
 
         /// <summary>
         /// Opens the page a GitHub band link names (task e4924065). The URL is built here from the
-        /// project's own repo; the header only says which of the three pages.
+        /// project's own repo; the header only says which of the three pages. The failure link (task
+        /// 81d0e597) names one of two MT forms instead: Source Control Accounts (the dialog Settings'
+        /// own button opens; Settings is one page with no tabs to open it on) or the project settings.
         /// </summary>
         private void OnPaneGitHubLinkRequested(object sender, GitHubLinkRequestedEventArgs e)
         {
             try
             {
+                if (e.Target == Services.GitHubBandModel.AccountsTarget)
+                {
+                    if (_sourceControlAccountService == null) return;
+                    var accounts = new SourceControlAccountsDialog(_sourceControlAccountService);
+                    new WindowInteropHelper(accounts) { Owner = this.Handle };
+                    accounts.ShowDialog();
+                    // A fixed token is used at the next check; show the band's state as it is now.
+                    RefreshGitHubBands(e.ProjectId);
+                    return;
+                }
+                if (e.Target == Services.GitHubBandModel.ProjectTarget)
+                {
+                    OpenProjectSettings(e.ProjectId);
+                    return;
+                }
+
                 var project = _sharedProjectDatabase?.GetRichProject(e.ProjectId);
                 string url = Services.GitHubRepoRef.TryParse(project?.GitRepoUrl)?.WebUrl(e.Target);
                 if (url == null) return;

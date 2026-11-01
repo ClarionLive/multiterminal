@@ -65,6 +65,18 @@ namespace MultiTerminal.Services
         /// </summary>
         public const int MaxPages = 5;
 
+        /// <summary>
+        /// The stored error for a 401. Named so <see cref="GitHubBandModel.Classify"/> reads the same
+        /// text this writes (task 81d0e597).
+        /// </summary>
+        internal const string TokenRefusedError = "GitHub refused the account's token (401). Check the source control account.";
+
+        /// <summary>The start of the stored error for a 404 (the repo name follows).</summary>
+        internal const string RepoNotFoundErrorPrefix = "GitHub has no repository ";
+
+        /// <summary>The stored error when no token was passed in.</summary>
+        internal const string NoTokenError = "No GitHub token.";
+
         /// <summary>A response larger than this is refused, not read.</summary>
         public const int MaxResponseBytes = 4 * 1024 * 1024;
 
@@ -197,7 +209,7 @@ namespace MultiTerminal.Services
         private async Task<GitHubFeedResult> FetchPageAsync(GitHubRepoRef repo, string token, int page, CancellationToken cancellationToken)
         {
             if (repo == null) return GitHubFeedResult.Fail("No GitHub repository.");
-            if (string.IsNullOrWhiteSpace(token)) return GitHubFeedResult.Fail("No GitHub token.");
+            if (string.IsNullOrWhiteSpace(token)) return GitHubFeedResult.Fail(NoTokenError);
 
             // Owner and name are validated by GitHubRepoRef to GitHub's own character sets, so they
             // are safe in the path; escaped anyway.
@@ -211,11 +223,11 @@ namespace MultiTerminal.Services
                 using var request = NewRequest(url, token);
                 using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
                 if (response.StatusCode == HttpStatusCode.Unauthorized)
-                    return GitHubFeedResult.Fail("GitHub refused the account's token (401). Check the source control account.");
+                    return GitHubFeedResult.Fail(TokenRefusedError);
                 if ((int)response.StatusCode >= 300 && (int)response.StatusCode < 400)
                     return GitHubFeedResult.Fail($"GitHub says {repo.FullName} has moved ({(int)response.StatusCode}). Update the Repository URL.");
                 if (response.StatusCode == HttpStatusCode.NotFound)
-                    return GitHubFeedResult.Fail($"GitHub has no repository {repo.FullName} that this account can see (404).");
+                    return GitHubFeedResult.Fail($"{RepoNotFoundErrorPrefix}{repo.FullName} that this account can see (404).");
                 if (response.StatusCode == HttpStatusCode.Forbidden || (int)response.StatusCode == 429)
                     return GitHubFeedResult.Fail($"GitHub refused the request ({(int)response.StatusCode}); rate limited or not allowed.");
                 if (!response.IsSuccessStatusCode)

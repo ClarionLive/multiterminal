@@ -339,8 +339,10 @@ namespace MultiTerminal.Controls
                     {
                         // Only the target's NAME crosses from the page; MainForm builds the URL from the
                         // project's own repo (GitHubRepoRef.WebUrl), so the page cannot open anything else.
+                        // The failure link's two targets (task 81d0e597) open MT's own forms, never a URL.
                         string target = root.TryGetProperty("target", out var tEl) && tEl.ValueKind == JsonValueKind.String ? tEl.GetString() : null;
-                        if (target == "repo" || target == "issues" || target == "pulls")
+                        if (target == "repo" || target == "issues" || target == "pulls"
+                            || target == Services.GitHubBandModel.AccountsTarget || target == Services.GitHubBandModel.ProjectTarget)
                             GitHubOpenRequested?.Invoke(this, target);
                     }
                     else if (type == "neededHeight")
@@ -530,7 +532,10 @@ namespace MultiTerminal.Controls
 
         private string _lastGitHubJson = "null";
 
-        /// <summary>A GitHub band link was clicked: "repo", "issues" or "pulls" (task e4924065).</summary>
+        /// <summary>
+        /// A GitHub band link was clicked: "repo", "issues" or "pulls" (task e4924065), or the failure
+        /// link's "accounts" or "project" (task 81d0e597).
+        /// </summary>
         public event EventHandler<string> GitHubOpenRequested;
 
         /// <summary>
@@ -541,14 +546,23 @@ namespace MultiTerminal.Controls
 
         /// <summary>
         /// Shows the project's GitHub band (task e4924065): the repo as <c>owner/name</c>, with its open
-        /// issue and PR counts when both are known. A null repo hides the band. Remembered and replayed
-        /// on 'ready'.
+        /// issue and PR counts when both are known. A null band or repo hides it. When the last check
+        /// failed (task 81d0e597) it also carries MT's failure sentence and the fixed target its link
+        /// sends, and the counts are marked stale. Remembered and replayed on 'ready'.
         /// </summary>
-        public void SetGitHub(string repoFullName, int? openIssues, int? openPullRequests)
+        public void SetGitHub(Services.GitHubBand band)
         {
-            string json = string.IsNullOrEmpty(repoFullName)
+            string json = string.IsNullOrEmpty(band?.Repo)
                 ? "null"
-                : JsonSerializer.Serialize(new { repo = repoFullName, issues = openIssues, prs = openPullRequests });
+                : JsonSerializer.Serialize(new
+                {
+                    repo = band.Repo,
+                    issues = band.OpenIssues,
+                    prs = band.OpenPullRequests,
+                    failure = band.FailureText,
+                    failureTarget = band.FailureTarget,
+                    stale = band.CountsStale,
+                });
             // MainForm refreshes every band once a minute; only a change is sent to the page.
             if (json == _lastGitHubJson) return;
             _lastGitHubJson = json;

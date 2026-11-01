@@ -80,6 +80,27 @@ namespace MultiTerminal.Services
         /// <summary>A project's open issue/PR counts were stored (project id). Raised on a pool thread.</summary>
         public event Action<string> CountsChanged;
 
+        /// <summary>
+        /// A check stored its outcome, good or failed (project id), so the header can show or clear a
+        /// failure without waiting for the next tick (task 81d0e597). Raised on a pool thread.
+        /// </summary>
+        public event Action<string> CheckRecorded;
+
+        /// <summary>The stored error when the project has no source control account linked (task 81d0e597).</summary>
+        internal const string NoAccountError = "No GitHub source control account is linked to this project.";
+
+        /// <summary>
+        /// The stored error when an account is linked but gives no token: it is missing, not a GitHub
+        /// account, or has no token saved (task 81d0e597).
+        /// </summary>
+        internal const string NoTokenError = "The linked source control account is not a GitHub account with a saved token.";
+
+        /// <summary>
+        /// What builds before task 81d0e597 stored for both of the above. Still read by
+        /// <see cref="GitHubBandModel.Classify"/>, since a stored row keeps it until the next check.
+        /// </summary>
+        internal const string LegacyNoTokenError = "No GitHub source control account with a token is linked to this project.";
+
         /// <summary>New items were queued for a project's agent (project id). Raised on a pool thread.</summary>
         public event Action<string> NoticesQueued;
 
@@ -163,14 +184,14 @@ namespace MultiTerminal.Services
                     return 0;
                 }
 
-                string token = string.IsNullOrWhiteSpace(project.SourceControlAccountId)
-                    ? null : _gitHubTokenForAccount(project.SourceControlAccountId);
+                bool hasAccount = !string.IsNullOrWhiteSpace(project.SourceControlAccountId);
+                string token = hasAccount ? _gitHubTokenForAccount(project.SourceControlAccountId) : null;
                 if (string.IsNullOrWhiteSpace(token))
                 {
                     // Null baseline: a failed check learned nothing and must not invent one.
-                    _db.RecordGitHubWatchCheck(project.Id, repo.FullName, null,
-                        "No GitHub source control account with a token is linked to this project.");
+                    _db.RecordGitHubWatchCheck(project.Id, repo.FullName, null, hasAccount ? NoTokenError : NoAccountError);
                     _log($"{project.Name}: no GitHub account token; not checked.");
+                    Raise(CheckRecorded, project.Id);
                     return 0;
                 }
 
@@ -193,6 +214,7 @@ namespace MultiTerminal.Services
                 {
                     _db.RecordGitHubWatchCheck(project.Id, repo.FullName, null, result.Error);
                     _log($"{project.Name} ({repo.FullName}, {reason}): {result.Error}");
+                    Raise(CheckRecorded, project.Id);
                     return 0;
                 }
 
@@ -245,6 +267,7 @@ namespace MultiTerminal.Services
                 _db.RecordGitHubWatchCheck(project.Id, repo.FullName, newBaseline,
                     firstFailed.HasValue ? $"Could not add the card for #{firstFailed.Value}; it will be tried again." : null,
                     fetched: true);
+                Raise(CheckRecorded, project.Id);
 
                 if (baseline == null)
                     _log($"{project.Name} ({repo.FullName}): first check; baseline #{plan.NewBaseline}, nothing added.");

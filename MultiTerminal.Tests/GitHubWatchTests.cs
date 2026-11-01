@@ -1020,5 +1020,138 @@ namespace MultiTerminal.Tests
             Assert.Equal(2, state.OpenIssues);
             Assert.Equal(1, state.OpenPullRequests);
         }
+
+        // ── Task 81d0e597: the header row shows a failed check ───────────────────
+
+        private GitHubBand BandOf(Project project, bool watching = true) =>
+            GitHubBandModel.Build("o/r", watching, _db.GetGitHubWatchState(project.Id, "o/r"));
+
+        // Each case drives the REAL writer (feed or service), so a reworded stored error that the
+        // classifier no longer recognises turns this red instead of silently reading as Other.
+        [Theory]
+        [InlineData(HttpStatusCode.Unauthorized, GitHubCheckFailure.TokenRefused, "GitHub check failed: the account's token was refused", "accounts")]
+        [InlineData(HttpStatusCode.NotFound, GitHubCheckFailure.RepoNotFound, "GitHub check failed: repository not found or no access", "project")]
+        [InlineData(HttpStatusCode.InternalServerError, GitHubCheckFailure.Other, "GitHub check failed. See the project's settings for details.", "project")]
+        public async Task A_failed_fetch_shows_MTs_sentence_for_its_class_and_a_fixed_target(
+            HttpStatusCode status, GitHubCheckFailure expected, string text, string target)
+        {
+            var (service, github, _, _, project) = Build(GitHubWatchMode.Board);
+            github.Status = status;
+            await service.CheckProjectAsync(project, "check");
+
+            var band = BandOf(project);
+            Assert.Equal(expected, band.Failure);
+            Assert.Equal(text, band.FailureText);
+            Assert.Equal(target, band.FailureTarget);
+        }
+
+        [Fact]
+        public async Task No_linked_account_and_an_account_without_a_token_are_told_apart_and_both_open_accounts()
+        {
+            var (service, _, _, _, project) = Build(GitHubWatchMode.Board, token: null);
+            await service.CheckProjectAsync(project, "linked, no token");
+            Assert.Equal(GitHubCheckFailure.TokenRefused, BandOf(project).Failure);
+
+            project.SourceControlAccountId = null;
+            await service.CheckProjectAsync(project, "nothing linked");
+            var band = BandOf(project);
+            Assert.Equal(GitHubCheckFailure.NoAccount, band.Failure);
+            Assert.Equal("GitHub check failed: no GitHub account linked", band.FailureText);
+            Assert.Equal(GitHubBandModel.AccountsTarget, band.FailureTarget);
+        }
+
+        [Fact]
+        public void A_row_stored_by_an_older_build_still_reads_as_a_token_problem()
+        {
+            Assert.Equal(GitHubCheckFailure.TokenRefused,
+                GitHubBandModel.Classify("No GitHub source control account with a token is linked to this project."));
+        }
+
+        [Fact]
+        public async Task The_last_good_counts_stay_dimmed_after_a_failure_and_the_next_success_clears_it()
+        {
+            var (service, github, _, _, project) = Build(GitHubWatchMode.Board);
+            github.Body = Page(5);
+            github.RepoBody = "{\"open_issues_count\":9}";
+            github.SearchBody = "{\"total_count\":4}";
+            await service.CheckProjectAsync(project, "good");
+            var good = BandOf(project);
+            Assert.Equal(GitHubCheckFailure.None, good.Failure);
+            Assert.False(good.CountsStale);
+
+            github.Status = HttpStatusCode.Unauthorized;
+            await service.CheckProjectAsync(project, "refused");
+            var failed = BandOf(project);
+            Assert.Equal(GitHubCheckFailure.TokenRefused, failed.Failure);
+            Assert.Equal(5, failed.OpenIssues);
+            Assert.Equal(4, failed.OpenPullRequests);
+            Assert.True(failed.CountsStale);
+
+            github.Status = HttpStatusCode.OK;
+            await service.CheckProjectAsync(project, "good again");
+            var cleared = BandOf(project);
+            Assert.Equal(GitHubCheckFailure.None, cleared.Failure);
+            Assert.Null(cleared.FailureText);
+            Assert.Null(cleared.FailureTarget);
+            Assert.False(cleared.CountsStale);
+        }
+
+        [Fact]
+        public async Task A_failed_first_check_shows_the_failure_with_no_counts_to_dim()
+        {
+            var (service, github, _, _, project) = Build(GitHubWatchMode.Board);
+            github.Status = HttpStatusCode.Unauthorized;
+            await service.CheckProjectAsync(project, "refused");
+
+            var band = BandOf(project);
+            Assert.Equal("o/r", band.Repo);
+            Assert.Equal(GitHubCheckFailure.TokenRefused, band.Failure);
+            Assert.Null(band.OpenIssues);
+            Assert.False(band.CountsStale);
+        }
+
+        [Fact]
+        public void With_watching_off_the_row_is_the_repo_link_only_whatever_is_stored()
+        {
+            _db.RecordGitHubWatchCheck("p", "o/r", null, GitHubIssueFeed.TokenRefusedError);
+            var band = GitHubBandModel.Build("o/r", watching: false, _db.GetGitHubWatchState("p", "o/r"));
+            Assert.Equal("o/r", band.Repo);
+            Assert.Equal(GitHubCheckFailure.None, band.Failure);
+            Assert.Null(band.FailureText);
+            Assert.Same(GitHubBand.Hidden, GitHubBandModel.Build(null, watching: true, null));
+        }
+
+        [Fact]
+        public void A_card_that_failed_after_a_good_fetch_is_not_shown_as_a_failed_check()
+        {
+            _db.RecordGitHubWatchCheck("p", "o/r", 5, "Could not add the card for #6; it will be tried again.", fetched: true);
+            Assert.Equal(GitHubCheckFailure.None, GitHubBandModel.Build("o/r", true, _db.GetGitHubWatchState("p", "o/r")).Failure);
+        }
+
+        [Fact]
+        public void The_stored_error_text_never_reaches_the_header()
+        {
+            const string stored = "Network error: <img src=x onerror=alert(1)> 203.0.113.9";
+            _db.RecordGitHubWatchCheck("p", "o/r", null, stored);
+            var band = GitHubBandModel.Build("o/r", true, _db.GetGitHubWatchState("p", "o/r"));
+            Assert.Equal(GitHubCheckFailure.Other, band.Failure);
+            Assert.Equal("GitHub check failed. See the project's settings for details.", band.FailureText);
+        }
+
+        [Fact]
+        public async Task Every_recorded_outcome_is_announced_so_the_header_need_not_wait_for_a_tick()
+        {
+            var (service, github, _, _, project) = Build(GitHubWatchMode.Board);
+            var recorded = new List<string>();
+            service.CheckRecorded += recorded.Add;
+
+            github.Status = HttpStatusCode.Unauthorized;
+            await service.CheckProjectAsync(project, "refused");
+            Assert.Equal(new[] { project.Id }, recorded);
+
+            github.Status = HttpStatusCode.OK;
+            await service.CheckProjectAsync(project, "good");
+            Assert.Equal(new[] { project.Id, project.Id }, recorded);
+        }
     }
 }
