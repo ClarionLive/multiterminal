@@ -253,7 +253,7 @@ namespace MultiTerminal.Tests
             string code = StripComments(html);
 
             // Positive: both optimistic sites decrement the host-supplied value.
-            int decrements = Regex.Matches(code, @"unreadCount\s*=\s*Math\.max\(\s*0\s*,\s*unreadCount\s*-\s*1\s*\)").Count;
+            int decrements = Regex.Count(code, @"unreadCount\s*=\s*Math\.max\(\s*0\s*,\s*unreadCount\s*-\s*1\s*\)");
             Assert.True(
                 decrements >= 2,
                 $"Expected both optimistic paths (markRead and sendReply) to DECREMENT the " +
@@ -332,7 +332,7 @@ namespace MultiTerminal.Tests
                 "the panel would treat a failure as a success and blank the list.");
 
             Assert.True(
-                Regex.Matches(cs, @"unreadOnly\s*=\s*_showUnreadOnly").Count >= 2,
+                Regex.Count(cs, @"unreadOnly\s*=\s*_showUnreadOnly") >= 2,
                 "BOTH the success and failure payloads must echo the host's filter mode — otherwise a " +
                 "failed fetch after a toggle leaves the checkbox describing data that was never loaded.");
 

@@ -94,8 +94,16 @@ namespace MultiTerminal.Services
             if (File.Exists(installed))
                 return installed;
 
-            string devBuild = Path.Combine(GatewayProjectPath, "bin", "Release", "net8.0", "McpGateway.exe");
-            return File.Exists(devBuild) ? devBuild : null;
+            // The gateway is a separate source tree with its own TFM: accept its current net8.0 build
+            // and the net10.0 one it moves to (task 12866c92), newest first.
+            foreach (string tfm in new[] { "net10.0", "net8.0" })
+            {
+                string devBuild = Path.Combine(GatewayProjectPath, "bin", "Release", tfm, "McpGateway.exe");
+                if (File.Exists(devBuild))
+                    return devBuild;
+            }
+
+            return null;
         }
 
         /// <summary>

@@ -167,6 +167,11 @@ dotnet_diagnostic.CA1845.severity = suggestion # Use span-based string.Concat
 dotnet_diagnostic.CA1846.severity = suggestion # Prefer AsSpan over Substring
 dotnet_diagnostic.CA1847.severity = suggestion # Use string.Contains(char) instead of string.Contains(string)
 dotnet_diagnostic.CA1848.severity = silent     # LoggerMessage — very noisy, not worth forcing
+# CA1873 (new in the .NET 10 analyzers, task 12866c92): an argument to a log call (e.g. boxing an
+# int) is evaluated even when the level is off. Same family as CA1848. Cannot hide a defect: the
+# only behaviour it could point at is a side effect inside a log argument, and that side effect
+# runs today on every call regardless; the "fix" (an IsEnabled guard) would be what changes behaviour.
+dotnet_diagnostic.CA1873.severity = silent
 
 # Usage / design — review later
 dotnet_diagnostic.CA1051.severity = suggestion # Do not declare visible instance fields

@@ -68,6 +68,7 @@ namespace MultiTerminal.ActivityPanel
         /// <summary>
         /// Debug log sink, wired from the owning ActivityPanelDocument once its broker is available.
         /// </summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public DebugLogService DebugLogService { get; set; }
 
         public ActivityPanelRenderer()

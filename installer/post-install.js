@@ -11,7 +11,7 @@
  *    GatewayIntegrationService.EnsureGatewayRegistered), and passes it per-launch via --mcp-config
  *    (LaunchCommandBuilder), along with the plugin via --plugin-dir.
  * 3. Writing gateway-defaults.json for optional MCP servers (gateway auto-seeds on startup)
- * 4. Patching runtimeconfig.json for framework-dependent mode (if .NET 8 detected)
+ * 4. Patching runtimeconfig.json for framework-dependent mode (if the .NET 10 Desktop + ASP.NET Core runtimes were detected)
  * 5. Shared plugin location only (ticket c8ee0eec, GH#23): registering the shared marketplace
  *    into each extra Claude Code config dir the user listed, with CLAUDE_CONFIG_DIR set in the
  *    CHILD process env only, and recording the dirs that succeeded in

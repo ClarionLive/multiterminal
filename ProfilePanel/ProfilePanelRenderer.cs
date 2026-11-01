@@ -56,6 +56,7 @@ namespace MultiTerminal.ProfilePanel
         /// </summary>
         public bool IsInitialized => _isInitialized;
 
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public DebugLogService DebugLogService { get; set; }
 
         public ProfilePanelRenderer()

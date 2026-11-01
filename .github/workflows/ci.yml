@@ -2,7 +2,7 @@ name: CI
 
 # Build + test + lint on every push to the trunk/integration branches and on
 # every PR. windows-latest because the app is WinForms/WebView2 targeting
-# net8.0-windows -- it cannot build on a Linux runner. See the "CI" paragraph in
+# net10.0-windows -- it cannot build on a Linux runner. See the "CI" paragraph in
 # .claude/CLAUDE.md (Linting section) for how to reproduce each step locally.
 on:
   push:
@@ -50,10 +50,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Setup .NET 8
+      - name: Setup .NET 10
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '10.0.x'
 
       # Node 22 (LTS): its built-in test runner supports glob patterns in
       # `--test <glob>` (added in Node 21). Node 20 does NOT, so the mcp test
@@ -67,11 +67,11 @@ jobs:
             package-lock.json
             mcp/package-lock.json
 
-      # Observability: the project targets net8.0-windows (framework pinned by
+      # Observability: the project targets net10.0-windows (framework pinned by
       # the TFM) and pins its analyzers via NuGet packages, so it builds cleanly
-      # under any SDK >= 8 (dev machines here run SDK 9; this runner ships 10).
-      # There is deliberately no global.json pin — pinning to 8.0.x would break
-      # local builds that only have a newer SDK installed. Logging the resolved
+      # under any SDK >= 10. There is deliberately no global.json pin — pinning
+      # to one 10.0.x band would break local builds that only have a newer SDK
+      # installed. Logging the resolved
       # SDK keeps that non-determinism visible instead of silent.
       - name: Log toolchain versions
         shell: pwsh

@@ -76,7 +76,7 @@
           <table>
             <thead><tr><th>Software</th><th>Version</th><th>Purpose</th></tr></thead>
             <tbody>
-              <tr><td>.NET 8 SDK</td><td>8.0+</td><td>Build and run the application (self-contained deployment includes runtime)</td></tr>
+              <tr><td>.NET 10 SDK</td><td>10.0+</td><td>Build and run the application (self-contained deployment includes runtime)</td></tr>
               <tr><td>WebView2 Runtime</td><td>Evergreen</td><td>Chromium rendering for all HTML panels (pre-installed on Windows 11)</td></tr>
               <tr><td>Node.js</td><td>22.13 or newer (24 LTS recommended)</td><td>MCP server and plugin hooks (the hooks' bundled database binary is built for Node 24; on other versions they fall back to Node's built-in SQLite, from 22.13) (<code>%APPDATA%\multiterminal\mcp\index.js</code>)</td></tr>
               <tr><td>Claude Code CLI</td><td>Latest</td><td>Terminal agent sessions (installed via <code>npm install -g @anthropic-ai/claude-code</code>)</td></tr>
@@ -98,7 +98,7 @@
         <h2 id="build-process">Build Process</h2>
 
         <h3>Building from Source</h3>
-        <p>MultiTerminal is built using MSBuild (via .NET SDK). The project targets <code>net8.0-windows</code> with self-contained deployment for x64.</p>
+        <p>MultiTerminal is built using MSBuild (via .NET SDK). The project targets <code>net10.0-windows</code> with self-contained deployment for x64.</p>
 
         <pre><code># Build in Release mode (self-contained, single output directory)
 dotnet publish -c Release -r win-x64 --self-contained true
@@ -108,7 +108,7 @@ msbuild MultiTerminal.csproj /p:Configuration=Release /p:RuntimeIdentifier=win-x
 
         <h3>Build Output</h3>
         <p>The build produces output in:</p>
-        <pre><code>bin\Release\net8.0-windows\win-x64\publish\</code></pre>
+        <pre><code>bin\Release\net10.0-windows\win-x64\publish\</code></pre>
         <p>This folder contains the complete self-contained deployment (~385 MB, ~1,262 files). See <a href="distribution.html">Distribution</a> for a complete file audit.</p>
 
         <h3>Build via MCP Tool</h3>
@@ -156,7 +156,7 @@ H:\DevLaptop\ClarionPowerShell\Deploy\MultiTerminal.exe</code></pre>
             <tr>
               <td><code>MultiTerminal.runtimeconfig.json</code></td>
               <td>Deploy folder</td>
-              <td>Specifies .NET 8 runtime version, GC settings, and thread pool configuration. Rarely needs modification.</td>
+              <td>Specifies .NET 10 runtime version, GC settings, and thread pool configuration. Rarely needs modification.</td>
             </tr>
             <tr>
               <td><code>MultiTerminal.deps.json</code></td>

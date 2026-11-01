@@ -43,6 +43,7 @@ namespace MultiTerminal.Controls
         private Action<string> _pageSinkForTests; // stands in for the WebView2 page in tests
 
         /// <summary>Where the rail's width, collapsed state and folded groups are kept (task 9a4a9d5e). Tests swap it.</summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         internal SettingsService Settings { get; set; } = SettingsService.Default;
 
         // The rail state is ONE setting for every pane, so a save in one pane is pushed to all of them
@@ -771,6 +772,7 @@ namespace MultiTerminal.Controls
         /// request, live test of 9a4a9d5e): the inline confirm was cut off at a normal rail width, and the
         /// delete reaches notes in every project. Tests swap it.
         /// </summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         internal Func<string, bool> ConfirmCategoryDelete { get; set; }
 
         private bool AskCategoryDelete(string name)

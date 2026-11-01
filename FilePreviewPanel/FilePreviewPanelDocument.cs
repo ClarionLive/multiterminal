@@ -36,6 +36,7 @@ namespace MultiTerminal.FilePreviewPanel
         /// <summary>
         /// Set the debug log service for logging to the app's debug panel.
         /// </summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public Services.DebugLogService DebugLogService { set => _debugLog = value; }
 
         public FilePreviewPanelDocument()

@@ -56,6 +56,7 @@ namespace MultiTerminal.StartScreen
         private const string ShowHomeMessage = "{\"type\":\"show_home\"}";
 
         /// <summary>Where the Home view and Browse All sort preferences live (ticket e20e2ce0 item 8).</summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         internal SettingsService Settings { get; set; } = SettingsService.Default;
 
         private bool _isInitializing;
@@ -69,6 +70,7 @@ namespace MultiTerminal.StartScreen
         private ProjectService _projectService;
 
         // ── Logging sink ──────────────────────────────────────────────────────
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
         public DebugLogService DebugLogService { get; set; }
 
         // ── Public events ─────────────────────────────────────────────────────

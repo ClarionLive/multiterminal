@@ -297,7 +297,7 @@ namespace MultiTerminal.Services
             try
             {
                 var assemblyDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-                // Walk up from bin/Release/net8.0-windows/win-x64 to project root
+                // Walk up from bin/Release/net10.0-windows/win-x64 to project root
                 var dir = new DirectoryInfo(assemblyDir);
                 for (int i = 0; i < 6 && dir != null; i++)
                 {

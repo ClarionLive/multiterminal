@@ -257,11 +257,21 @@ namespace MultiTerminal.Services
             // verified via SafeDirectory before this method is invoked). outputDir is built from that
             // sanitized root plus constant string segments, so Directory.Exists cannot be redirected
             // outside a real on-disk root by caller input.
-            var outputDir = Path.Combine(projectDir, "bin", "Release", "net8.0-windows", "win-x64");
+            // Any registered project can be indexed, not just MT, so both TFMs are tried (MT moved
+            // to net10.0-windows in task 12866c92; other projects may still build net8.0-windows).
+            string outputDir = null;
 #pragma warning disable CA3003
-            if (!Directory.Exists(outputDir))
-                outputDir = Path.Combine(projectDir, "bin", "Debug", "net8.0-windows", "win-x64");
-            if (Directory.Exists(outputDir))
+            foreach (var config in new[] { "Release", "Debug" })
+            {
+                foreach (var tfm in new[] { "net10.0-windows", "net8.0-windows" })
+                {
+                    var candidate = Path.Combine(projectDir, "bin", config, tfm, "win-x64");
+                    if (outputDir == null && Directory.Exists(candidate))
+                        outputDir = candidate;
+                }
+            }
+
+            if (outputDir != null)
 #pragma warning restore CA3003
             {
                 foreach (var dll in Directory.GetFiles(outputDir, "*.dll"))

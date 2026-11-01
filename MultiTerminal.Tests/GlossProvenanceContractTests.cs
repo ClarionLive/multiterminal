@@ -128,7 +128,7 @@ namespace MultiTerminal.Tests
             string view = GraphView();
 
             // Both consumption points: the hover detail panel and the node meta line.
-            int matches = Regex.Matches(view, @"\.source\s*===\s*'generated'").Count;
+            int matches = Regex.Count(view, @"\.source\s*===\s*'generated'");
 
             Assert.True(
                 matches >= 2,
@@ -287,7 +287,7 @@ namespace MultiTerminal.Tests
                     $"Fresh-write path '{site}' is gone from TaskService.");
             }
 
-            int calls = Regex.Matches(service, @"WithFreshWriteProvenance\(\)").Count;
+            int calls = Regex.Count(service, @"WithFreshWriteProvenance\(\)");
             Assert.True(
                 calls == 3,
                 $"Expected exactly 3 calls to WithFreshWriteProvenance in TaskService — one per " +
