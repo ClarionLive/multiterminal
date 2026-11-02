@@ -1,3 +1,14 @@
+---
+paths:
+  - Services/ChecklistGraphBuilder.cs
+  - MCPServer/Models/Plan.cs
+  - MCPServer/Services/GlossBackfill*.cs
+  - Controls/HudGraphPanel/**
+  - Controls/HudTabContainer/**
+  - Controls/TaskHudPanel/**
+  - TasksPanel/**
+---
+
 # Checklist dependency graph (🔗 Plan tab)
 
 Task **60665c6c**. Renders a ticket's checklist as a dependency graph instead of a flat list,

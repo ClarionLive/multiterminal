@@ -1,3 +1,8 @@
+---
+paths:
+  - MCPServer/Services/MessageBroker.cs
+---
+
 # MessageBroker region-extraction pattern
 
 Proven by ticket **e7e89f4b** (Kanban Tasks → `TaskService`) and **validated on a second region** by

@@ -1,3 +1,8 @@
+---
+paths:
+  - MultiTerminal.Tests/**
+---
+
 # Verification discipline — when a green test is not evidence
 
 Produced by the 2026-09-15 program (`7806024f` → `c28e6177`, `f420feeb`, `837e16a3`), which found

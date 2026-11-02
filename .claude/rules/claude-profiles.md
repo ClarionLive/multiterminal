@@ -1,3 +1,12 @@
+---
+paths:
+  - Services/ClaudeProfile*.cs
+  - Models/ClaudeProfile.cs
+  - Services/TeamWatcherService.cs
+  - Terminal/ConPtyTerminal.cs
+  - Dialogs/IdentityPicker*
+---
+
 # Claude profiles: which CLAUDE_CONFIG_DIR a terminal runs under
 
 Ticket **c8ee0eec** (GitHub #21). Read this before changing a launch path, the launch prologue,
