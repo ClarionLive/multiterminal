@@ -22,9 +22,23 @@ test("list_tasks includeDescriptions restores description previews", () => {
   assert.match(formatTasks(tasks, true), /The full brief should only appear when requested\./);
 });
 
-test("missing Claude usage is labelled unknown rather than zero", () => {
-  assert.equal(formatClaudeUsage({}), "Claude usage — 5h: unknown  7d: unknown");
+test("missing 7-day usage is labelled unknown rather than zero, and missing 5-hour usage is left out", () => {
+  assert.equal(formatClaudeUsage({}), "Claude usage — 7d: unknown");
   assert.doesNotMatch(formatClaudeUsage({}), /0%/);
+});
+
+test("a plan with no 5-hour limit shows only the 7-day window", () => {
+  assert.equal(
+    formatClaudeUsage({ fiveHourPercent: null, sevenDayPercent: 87, sevenDayResetIn: "1d 9h" }),
+    "Claude usage — 7d: 87% (resets in 1d 9h)",
+  );
+});
+
+test("a real 0% 5-hour figure is still shown", () => {
+  assert.equal(
+    formatClaudeUsage({ fiveHourPercent: 0, sevenDayPercent: 87 }),
+    "Claude usage — 5h: 0%  7d: 87%",
+  );
 });
 
 test("Claude usage includes reset times when known", () => {

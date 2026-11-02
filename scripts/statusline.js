@@ -30,45 +30,8 @@ process.stdin.on('end', () => {
 
         // Extract rate limits for quota pacing (Claude Code v2.1.80+)
         const rateLimits = data.rate_limits || null;
-        let quota5h = null, quota7d = null, pace5h = null, pace7d = null;
-        let resetIn5h = null, resetIn7d = null;
-
-        if (rateLimits) {
-            if (rateLimits.five_hour) {
-                quota5h = Math.floor(rateLimits.five_hour.used_percentage ?? 0);
-                const resetsAt = rateLimits.five_hour.resets_at;
-                if (resetsAt) {
-                    const minutesRemaining = Math.max(0, Math.floor((new Date(resetsAt) - Date.now()) / 60000));
-                    const windowMinutes = 300; // 5 hours
-                    if (minutesRemaining <= windowMinutes) {
-                        pace5h = Math.round(((windowMinutes - minutesRemaining) * 100 / windowMinutes) - quota5h);
-                    }
-                    // Reset countdown (e.g. "2h 15m")
-                    if (minutesRemaining > 0) {
-                        const h = Math.floor(minutesRemaining / 60);
-                        const m = minutesRemaining % 60;
-                        resetIn5h = h > 0 ? `${h}h ${m}m` : `${m}m`;
-                    }
-                }
-            }
-            if (rateLimits.seven_day) {
-                quota7d = Math.floor(rateLimits.seven_day.used_percentage ?? 0);
-                const resetsAt = rateLimits.seven_day.resets_at;
-                if (resetsAt) {
-                    const minutesRemaining = Math.max(0, Math.floor((new Date(resetsAt) - Date.now()) / 60000));
-                    const windowMinutes = 10080; // 7 days
-                    if (minutesRemaining <= windowMinutes) {
-                        pace7d = Math.round(((windowMinutes - minutesRemaining) * 100 / windowMinutes) - quota7d);
-                    }
-                    if (minutesRemaining > 0) {
-                        const days = Math.floor(minutesRemaining / 1440);
-                        const hours = Math.floor((minutesRemaining % 1440) / 60);
-                        const minutes = minutesRemaining % 60;
-                        resetIn7d = days > 0 ? `${days}d ${hours}h` : (hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`);
-                    }
-                }
-            }
-        }
+        const { quota: quota5h, pace: pace5h, resetIn: resetIn5h } = readRateWindow(rateLimits?.five_hour, 300);
+        const { quota: quota7d, pace: pace7d, resetIn: resetIn7d } = readRateWindow(rateLimits?.seven_day, 10080);
 
         const output = {
             terminalName,
@@ -136,6 +99,41 @@ process.stdin.on('end', () => {
         // Silently fail — don't break Claude Code
     }
 });
+
+// Claude Code sends resets_at as Unix epoch seconds. An ISO date string is still
+// accepted. Anything else is "not known", never "already reset".
+function parseResetMs(resetsAt) {
+    if (typeof resetsAt === 'number' || (typeof resetsAt === 'string' && /^\d+$/.test(resetsAt))) {
+        const seconds = Number(resetsAt);
+        return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : null;
+    }
+    if (typeof resetsAt !== 'string') return null;
+    const ms = Date.parse(resetsAt);
+    return Number.isNaN(ms) ? null : ms;
+}
+
+function formatResetIn(minutesRemaining) {
+    const days = Math.floor(minutesRemaining / 1440);
+    const hours = Math.floor((minutesRemaining % 1440) / 60);
+    const minutes = minutesRemaining % 60;
+    if (days > 0) return `${days}d ${hours}h`;
+    return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+// One rate-limit window. Any window can be absent (Ultra has no five_hour), and a
+// missing figure stays null so it is never shown as 0%.
+function readRateWindow(rateWindow, windowMinutes) {
+    const used = rateWindow?.used_percentage;
+    const quota = Number.isFinite(used) ? Math.floor(used) : null;
+    const resetMs = parseResetMs(rateWindow?.resets_at);
+    const minutesRemaining = resetMs === null ? 0 : Math.floor((resetMs - Date.now()) / 60000);
+    if (minutesRemaining <= 0) return { quota, pace: null, resetIn: null };
+
+    const pace = quota !== null && minutesRemaining <= windowMinutes
+        ? Math.round(((windowMinutes - minutesRemaining) * 100 / windowMinutes) - quota)
+        : null;
+    return { quota, pace, resetIn: formatResetIn(minutesRemaining) };
+}
 
 // Synchronous sleep without a busy-spin (this is a one-shot CLI process, so
 // blocking the main thread briefly is fine and we have no event loop to yield to).

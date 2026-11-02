@@ -1310,7 +1310,7 @@ get_latest_session(projectPath="H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal"
       </tbody>
     </table>
     <h4>Returns</h4>
-    <p>Context percentage with a recommendation (wrap-up vs headroom, relative to <code>MULTITERMINAL_CONTEXT_THRESHOLD</code>, default 70), plus labelled Claude 5h/7d usage and reset countdowns when known, token total/cost, and staleness. Missing usage is shown as <code>unknown</code>, never zero. Returns "not reporting" if the terminal hasn't written context stats yet.</p>
+    <p>Context percentage with a recommendation (wrap-up vs headroom, relative to <code>MULTITERMINAL_CONTEXT_THRESHOLD</code>, default 70), plus labelled Claude 5h/7d usage and reset countdowns when known, token total/cost, and staleness. A missing 5-hour figure is left out, because some plans have no 5-hour limit; a missing 7-day figure is shown as <code>unknown</code>, never zero. Returns "not reporting" if the terminal hasn't written context stats yet.</p>
     <h4>Example</h4>
     <pre><code>check_my_context(agentName="Alice")</code></pre>
   </div>
