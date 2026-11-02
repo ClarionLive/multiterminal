@@ -31,7 +31,7 @@ process.stdin.on('end', () => {
         // Extract rate limits for quota pacing (Claude Code v2.1.80+)
         const rateLimits = data.rate_limits || null;
         let quota5h = null, quota7d = null, pace5h = null, pace7d = null;
-        let resetIn5h = null;
+        let resetIn5h = null, resetIn7d = null;
 
         if (rateLimits) {
             if (rateLimits.five_hour) {
@@ -60,6 +60,12 @@ process.stdin.on('end', () => {
                     if (minutesRemaining <= windowMinutes) {
                         pace7d = Math.round(((windowMinutes - minutesRemaining) * 100 / windowMinutes) - quota7d);
                     }
+                    if (minutesRemaining > 0) {
+                        const days = Math.floor(minutesRemaining / 1440);
+                        const hours = Math.floor((minutesRemaining % 1440) / 60);
+                        const minutes = minutesRemaining % 60;
+                        resetIn7d = days > 0 ? `${days}d ${hours}h` : (hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`);
+                    }
                 }
             }
         }
@@ -75,6 +81,7 @@ process.stdin.on('end', () => {
             pace5h,
             pace7d,
             resetIn5h,
+            resetIn7d,
             // sessionId + transcriptPath let the MT token meter (task f2702f69) locate
             // this terminal's Claude transcript JSONL to tail for live token totals.
             // Both come straight from Claude Code's statusLine stdin; null outside it.
@@ -97,7 +104,7 @@ process.stdin.on('end', () => {
         if (rateLimits) {
             const sharedPath = path.join(os.tmpdir(), 'mt-statusline-quota.json');
             const sharedData = {
-                quota5h, quota7d, pace5h, pace7d, resetIn5h,
+                quota5h, quota7d, pace5h, pace7d, resetIn5h, resetIn7d,
                 timestamp: Date.now(),
                 updatedBy: terminalName
             };

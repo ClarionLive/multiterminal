@@ -250,6 +250,7 @@ namespace MultiTerminal.Services
             result.FiveHourPace = GetNumberAsInt(src, "pace5h");
             result.SevenDayPace = GetNumberAsInt(src, "pace7d");
             result.FiveHourResetIn = GetString(src, "resetIn5h");
+            result.SevenDayResetIn = GetString(src, "resetIn7d");
             result.IsOffPeak = GetBool(src, "isOffPeak");
         }
 
@@ -422,6 +423,9 @@ namespace MultiTerminal.Services
 
         /// <summary>Human-readable 5h reset countdown (e.g. "2h 15m").</summary>
         public string FiveHourResetIn { get; set; }
+
+        /// <summary>Human-readable 7d reset countdown (e.g. "3d 4h").</summary>
+        public string SevenDayResetIn { get; set; }
 
         public bool? IsOffPeak { get; set; }
 

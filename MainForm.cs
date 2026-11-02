@@ -2971,7 +2971,7 @@ namespace MultiTerminal
                         prompt: prompt,
                         workingDir: AppDomain.CurrentDomain.BaseDirectory,
                         mcpConfigPath: mcpConfigPath,
-                        extraArgs: new[] { "--no-session-persistence" },
+                        extraArgs: new[] { "--model", "haiku", "--no-session-persistence" },
                         claudeProfile: glossProfile.Profile);
 
                     pending = null;   // the exit handler owns it from here

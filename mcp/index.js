@@ -10,6 +10,8 @@ import { readFileSync } from "fs";
 import { execFile } from "child_process";
 import { fileURLToPath } from "url";
 import path from "path";
+import { formatTasks } from "./lib/task-formatters.mjs";
+import { formatClaudeUsage } from "./lib/context-formatters.mjs";
 
 const API_BASE = "http://localhost:5050";
 
@@ -485,33 +487,6 @@ function formatInbox(data) {
   return output.trim();
 }
 
-// Format task list for display
-function formatTasks(tasks) {
-  if (!tasks || tasks.length === 0) {
-    return "No tasks found.";
-  }
-
-  let output = "Tasks:\n";
-  tasks.forEach(t => {
-    const statusIcon = {
-      'todo': '📋',
-      'in_progress': '🔄',
-      'done': '✅',
-      'suggestion': '💡'
-    }[t.status] || '•';
-
-    output += `${statusIcon} [${t.id.substring(0, 8)}] ${t.title} (${t.status})`;
-    if (t.assignee) output += ` [${t.assignee}]`;
-    output += "\n";
-    if (t.description) {
-      const desc = t.description.length > 120 ? t.description.substring(0, 120) + "..." : t.description;
-      output += `   ${desc}\n`;
-    }
-  });
-
-  return output.trim();
-}
-
 const server = new Server(
   {
     name: "multiterminal-mcp",
@@ -598,7 +573,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: "list_tasks",
-        description: "List kanban tasks from the MultiTerminal board. In a project terminal this defaults to the CURRENT PROJECT's tasks (resolved from CLAUDE_PROJECT_DIR); pass projectId:\"all\" for the full cross-project board. Quick-tasks (lightweight attribution anchors for trivial changes) are hidden by default; pass includeQuickTasks=true to include them (e.g., for the Quick-Tasks audit view).",
+        description: "List kanban tasks from the MultiTerminal board as a compact one-line summary per task (id, title, status, priority, and assignee when set). Pass includeDescriptions=true for description previews. In a project terminal this defaults to the CURRENT PROJECT's tasks (resolved from CLAUDE_PROJECT_DIR); pass projectId:\"all\" for the full cross-project board. Quick-tasks (lightweight attribution anchors for trivial changes) are hidden by default; pass includeQuickTasks=true to include them (e.g., for the Quick-Tasks audit view).",
         inputSchema: {
           type: "object",
           properties: {
@@ -610,6 +585,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             includeQuickTasks: {
               type: "boolean",
               description: "If true, include quick-tasks (is_quick_task=1 immutable attribution anchors). Default false keeps the kanban board view clean.",
+              default: false,
+            },
+            includeDescriptions: {
+              type: "boolean",
+              description: "If true, add the previous description-preview line beneath each task. Default false keeps each task to one compact line.",
               default: false,
             },
             projectId: {
@@ -3086,7 +3066,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let url = `/api/tasks?status=${encodeURIComponent(status)}&includeQuickTasks=${encodeURIComponent(includeQuickTasks)}`;
         if (projectId) url += `&projectId=${encodeURIComponent(projectId)}`;
         const tasks = await apiCall(url);
-        let text = formatTasks(tasks);
+        let text = formatTasks(tasks, args.includeDescriptions === true);
         if (projectId) {
           text = `(scoped to project ${projectId} — pass projectId:"all" for every project)\n${text}`;
         }
@@ -3731,7 +3711,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const ctxQs = ctxDocId ? `?docId=${encodeURIComponent(ctxDocId)}` : "";
         const stats = await apiCall(`/api/terminals/${seg(ctxName)}/stats` + ctxQs);
         if (!stats || stats.available === false) {
-          return { content: [{ type: "text", text: `No live context stats for '${ctxName}' yet (terminal not reporting). Try again after a turn or two.` }] };
+          return { content: [{ type: "text", text: `No live context stats for '${ctxName}' yet (terminal not reporting). Try again after a turn or two.\n${formatClaudeUsage(stats)}` }] };
         }
         const threshold = parseInt(process.env.MULTITERMINAL_CONTEXT_THRESHOLD || "70", 10);
         const ctx = stats.contextPercent;
@@ -3743,11 +3723,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ? `⚠️ At/over the ${threshold}% nudge threshold — finish your current step, write continuation notes (update_task_continuation), then call clear_my_context at a clean boundary.\n`
             : `✅ Headroom remaining (nudge threshold ${threshold}%).\n`;
         }
-        if (stats.fiveHourPercent != null || stats.sevenDayPercent != null) {
-          ctxText += `Quota — 5h: ${stats.fiveHourPercent ?? "?"}%  7d: ${stats.sevenDayPercent ?? "?"}%`;
-          if (stats.quotaStale) ctxText += " (stale)";
-          ctxText += "\n";
-        }
+        ctxText += formatClaudeUsage(stats);
+        if (stats.quotaStale) ctxText += " (stale)";
+        ctxText += "\n";
         if (stats.tokensTotal != null) {
           ctxText += `Tokens: ${stats.tokensTotal.toLocaleString()}`;
           if (stats.costUsd != null) ctxText += `  (~$${stats.costUsd}${stats.costIsEstimate ? " est" : ""})`;

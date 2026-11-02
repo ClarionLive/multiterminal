@@ -46,7 +46,7 @@ namespace MultiTerminal.Tests
         {
             WritePerTerminal("Alice", "doc1",
                 $"{{\"model\":\"opus-4-8\",\"contextPct\":43,\"quota5h\":10,\"quota7d\":20,\"timestamp\":{NowMs - 5000}}}");
-            WriteShared("{\"quota5h\":55,\"quota7d\":66,\"pace5h\":3,\"pace7d\":-2,\"resetIn5h\":\"2h 15m\",\"isOffPeak\":true,\"timestamp\":" + (NowMs - 1000) + "}");
+            WriteShared("{\"quota5h\":55,\"quota7d\":66,\"pace5h\":3,\"pace7d\":-2,\"resetIn5h\":\"2h 15m\",\"resetIn7d\":\"3d 4h\",\"isOffPeak\":true,\"timestamp\":" + (NowMs - 1000) + "}");
 
             var s = _reader.ReadFor("Alice", "doc1");
 
@@ -59,6 +59,7 @@ namespace MultiTerminal.Tests
             Assert.Equal(66, s.SevenDayPercent);
             Assert.Equal(3, s.FiveHourPace);
             Assert.Equal("2h 15m", s.FiveHourResetIn);
+            Assert.Equal("3d 4h", s.SevenDayResetIn);
             Assert.True(s.IsOffPeak);
             Assert.Equal(5.0, s.AgeSeconds);
             Assert.False(s.Stale);
