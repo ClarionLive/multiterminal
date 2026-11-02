@@ -17,8 +17,8 @@
 #
 # Design invariants:
 #   * ONE-WAY: repo -> dest. Never reads dest back into the repo.
-#   * SELECTIVE: copies only the git-tracked files (index.js, package.json,
-#     README.md). Deliberately does NOT mirror/delete -- dest\node_modules and
+#   * SELECTIVE: copies only the git-tracked runtime files (lib/, index.js,
+#     package.json, package-lock.json, README.md). Deliberately does NOT mirror/delete -- dest\node_modules and
 #     dest\*.db must survive (node_modules is gitignored; the DBs are live data).
 #   * NEWER-TARGET GUARD: if dest\index.js is newer than source\index.js it may
 #     hold an out-of-band edit; warn loudly before overwriting (repo still wins).
@@ -65,6 +65,24 @@ function Report-SyncFailure($message) {
     # WARNING" is the grep anchor callers/CI can key on.
     Write-Host "MCPSYNC WARNING: $message" -ForegroundColor Red
     $script:hadError = $true
+}
+
+function Get-LibraryFileList($directory, $relativeDirectory = "") {
+    foreach ($entry in Get-ChildItem -LiteralPath $directory) {
+        $relative = if ([string]::IsNullOrEmpty($relativeDirectory)) {
+            $entry.Name
+        } else {
+            Join-Path $relativeDirectory $entry.Name
+        }
+        if ($entry.PSIsContainer) {
+            Get-LibraryFileList $entry.FullName $relative
+        } else {
+            [PSCustomObject]@{
+                SourcePath = $entry.FullName
+                RelativePath = $relative
+            }
+        }
+    }
 }
 
 # --- Resolve source (repo mcp/) --------------------------------------------
@@ -184,8 +202,37 @@ try {
     }
 
     # --- Copy the git-tracked files only (never touch node_modules / *.db) -----
+    # Libraries land BEFORE index.js: a newly spawned server must never observe a
+    # new entry point whose relative imports have not arrived yet. Copy files
+    # selectively rather than mirroring so unrelated destination data survives.
+    $sourceLib = Join-Path $SourceDir "lib"
+    $destLib = Join-Path $DestDir "lib"
+    $libraryFiles = @()
+    if (Test-Path -LiteralPath $sourceLib) {
+        # Build relative paths from directory-entry NAMES, never by subtracting
+        # string lengths. Windows may present the root as an 8.3 short path while
+        # Get-ChildItem returns long FullName values; length arithmetic then adds
+        # a spurious leading "lib" and writes dest/lib/lib/... instead.
+        $libraryFiles = @(Get-LibraryFileList $sourceLib)
+        foreach ($file in $libraryFiles) {
+            $relative = $file.RelativePath
+            $destFile = Join-Path $destLib $relative
+            $destParent = Split-Path -Parent $destFile
+            try {
+                if (-not (Test-Path -LiteralPath $destParent)) {
+                    New-Item -ItemType Directory -Path $destParent -Force -ErrorAction Stop | Out-Null
+                }
+                Copy-Item -LiteralPath $file.SourcePath -Destination $destFile -Force -ErrorAction Stop
+            }
+            catch {
+                Report-SyncFailure "APPDATA/dest copy of lib/$relative failed ($DestDir) -- deployed server is now STALE: $_"
+            }
+        }
+    }
+
     # package-lock.json is included so `npm ci` can run reproducibly at the dest.
-    $trackedFiles = @("index.js", "package.json", "package-lock.json", "README.md")
+    # index.js is deliberately last, after every module it imports.
+    $trackedFiles = @("package.json", "package-lock.json", "README.md", "index.js")
     foreach ($name in $trackedFiles) {
         $src = Join-Path $SourceDir $name
         if (Test-Path -LiteralPath $src) {
@@ -198,7 +245,7 @@ try {
         }
     }
     if (-not $script:hadError) {
-        Write-Host "SyncMcpServer: synced $($trackedFiles -join '/') -> $DestDir"
+        Write-Host "SyncMcpServer: synced lib + $($trackedFiles -join '/') -> $DestDir"
     }
 
     # --- Verify the copy actually landed: dest bytes must match source ----------
@@ -218,6 +265,20 @@ try {
                 if ($sTxt -ne $dTxt) {
                     Report-SyncFailure "post-copy verify: $name at dest does not match source ($DestDir) -- deployed server is STALE."
                 }
+            }
+        }
+    }
+    foreach ($file in $libraryFiles) {
+        $relative = $file.RelativePath
+        $d = Join-Path $destLib $relative
+        if (-not (Test-Path -LiteralPath $d)) {
+            Report-SyncFailure "post-copy verify: lib/$relative missing at dest ($DestDir) -- deployed server is STALE."
+        }
+        else {
+            $sTxt = ([System.IO.File]::ReadAllText($file.SourcePath)).Replace("`r`n", "`n")
+            $dTxt = ([System.IO.File]::ReadAllText($d)).Replace("`r`n", "`n")
+            if ($sTxt -ne $dTxt) {
+                Report-SyncFailure "post-copy verify: lib/$relative at dest does not match source ($DestDir) -- deployed server is STALE."
             }
         }
     }
