@@ -1,3 +1,12 @@
+---
+paths:
+  - mcp/index.js
+  - MCPServer/Services/HostCapabilities*.cs
+  - MCPServer/Services/NamedPipeSessionInjector.cs
+  - API/Controllers/MessagingController.cs
+  - API/Controllers/HealthController.cs
+---
+
 # ClarionAssistant (CA) tabs: how an embedded session joins MT messaging
 
 Ticket **9a731cda** (2026-09-29), follow-up to the channel retirement (0ff1b520). Read this before

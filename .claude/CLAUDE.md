@@ -5,6 +5,15 @@ A multi-agent coordination system for Claude Code. WinForms desktop app (C#/.NET
 > Agent behavioral instructions (kanban workflow, messaging, task terminology, MT events) are the MultiTerminal plugin's `agent-rules.md`, which the plugin's `agent-rules-hook.js` prints into every session (Claude Code does not load a plugin's CLAUDE.md). MT-repo-only working rules (build/deploy, this machine, license) are in `.claude/rules/mt-dev-rules.md`. This file is only the codebase reference for working on MT source code.
 > Detailed reference tables (database schema, folder map, task guides, events) are in `.claude/rules/` and load on demand.
 
+| Before changing | Read |
+|---|---|
+| Session launch/resume/restore, including launch work in `MainForm.cs` | `launch-session-choice.md` |
+| Tests and verification strategy | `verification-discipline.md` |
+| Claude profiles, including profile work in `MainForm.cs` | `claude-profiles.md` |
+| Checklist dependency graphs | `checklist-graph.md` |
+| `MessageBroker` region extraction | `broker-extraction-pattern.md` |
+| ClarionAssistant embedded-session integration | `ca-embedded-sessions.md` |
+
 ## ⛔ YOU ARE RUNNING INSIDE MULTITERMINAL — READ FIRST
 
 **You (this Claude Code terminal) are ALWAYS one of MultiTerminal's hosted terminals. MT is the desktop app you live inside.** This changes how build/run/deploy work here:

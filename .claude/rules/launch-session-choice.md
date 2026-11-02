@@ -1,3 +1,16 @@
+---
+paths:
+  - Services/LaunchCommandBuilder.cs
+  - MCPServer/Services/SessionCatalog.cs
+  - Services/LaunchSessionChoice.cs
+  - Services/PaneLaunch*.cs
+  - Services/HelperResume.cs
+  - Services/StartupRestore.cs
+  - Dialogs/LaunchSession*
+  - Dialogs/StartupRestore*
+  - Docking/TerminalDocument.cs
+---
+
 # Project launch: new session, continue last, or resume a past one
 
 Task **ec2ed636** (2026-10-17). Read this before changing `MainForm.OnStartScreenProjectLaunched`,
