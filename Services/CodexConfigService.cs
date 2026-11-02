@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Text.Json;
@@ -18,6 +19,39 @@ namespace MultiTerminal.Services
     {
         private const string ManagedMarkerBegin = "# >>> MULTITERMINAL MANAGED — do not edit (begin) <<<";
         private const string ManagedMarkerEnd = "# <<< MULTITERMINAL MANAGED — do not edit (end) >>>";
+
+        private static readonly string[] MultiTerminalPreApprovedTools =
+        {
+            "get_my_active_task",
+            "get_active_worktree",
+            "get_task_detail",
+            "get_task_files",
+            "get_task_relationships",
+            "list_tasks",
+            "list_terminals",
+            "get_messages",
+            "get_inbox",
+            "get_my_spawn_job",
+            "get_project",
+            "list_projects",
+            "list_project_notes",
+            "search_code",
+            "search_files",
+            "search_code_graph",
+            "get_file_symbols",
+            "get_symbol_callers",
+            "get_symbol_callees",
+            "get_impact_analysis",
+            "register_terminal",
+            "send_message",
+            "mark_inbox_read",
+            "claim_task",
+            "set_task_active",
+            "update_task_plan",
+            "update_task_continuation",
+            "append_checklist_items",
+            "link_task_file",
+        };
 
         /// <summary>
         /// Returns the path to ~/.codex/config.toml (user-global Codex config).
@@ -131,14 +165,13 @@ namespace MultiTerminal.Services
             if (!HasAnyMcpServer(jsonText))
                 return null;
 
-            string managedBlock = BuildManagedTomlBlock(jsonText);
-
             string configPath = GetCodexConfigPath();
             string configDir = Path.GetDirectoryName(configPath);
             if (!string.IsNullOrEmpty(configDir))
                 Directory.CreateDirectory(configDir);
 
             string existing = File.Exists(configPath) ? File.ReadAllText(configPath) : string.Empty;
+            string managedBlock = BuildManagedTomlBlock(jsonText, existing);
             string updated = ReplaceOrAppendManagedBlock(existing, managedBlock);
 
             if (!string.Equals(existing, updated, StringComparison.Ordinal))
@@ -195,7 +228,7 @@ namespace MultiTerminal.Services
             }
         }
 
-        private static string BuildManagedTomlBlock(string mcpJsonText)
+        internal static string BuildManagedTomlBlock(string mcpJsonText, string existingConfig = "")
         {
             var sb = new StringBuilder();
             sb.AppendLine(ManagedMarkerBegin);
@@ -207,6 +240,13 @@ namespace MultiTerminal.Services
             if (doc.RootElement.TryGetProperty("mcpServers", out var servers)
                 && servers.ValueKind == JsonValueKind.Object)
             {
+                var serverNames = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var server in servers.EnumerateObject())
+                    serverNames.Add(server.Name);
+
+                Dictionary<string, SortedDictionary<string, IReadOnlyList<string>>> preserved =
+                    ReadPreservedApprovals(existingConfig, serverNames, out HashSet<string> approvalsOutsideManagedBlock);
+
                 foreach (var server in servers.EnumerateObject())
                 {
                     sb.AppendLine($"[mcp_servers.{TomlKey(server.Name)}]");
@@ -245,7 +285,35 @@ namespace MultiTerminal.Services
                         }
                     }
 
-                    sb.AppendLine();
+                    if (!preserved.TryGetValue(server.Name, out var approvals))
+                        approvals = new SortedDictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+
+                    if (string.Equals(server.Name, "multiterminal", StringComparison.Ordinal))
+                    {
+                        foreach (string tool in MultiTerminalPreApprovedTools)
+                        {
+                            if (!approvalsOutsideManagedBlock.Contains(ApprovalKey(server.Name, tool)))
+                                approvals.TryAdd(tool, new[] { "approval_mode = \"approve\"" });
+                        }
+                    }
+
+                    bool approvalBodyEndsWithBlankLine = false;
+                    foreach (var approval in approvals)
+                    {
+                        if (approvalsOutsideManagedBlock.Contains(ApprovalKey(server.Name, approval.Key)))
+                            continue;
+
+                        if (!approvalBodyEndsWithBlankLine)
+                            sb.AppendLine();
+                        sb.AppendLine($"[mcp_servers.{TomlKey(server.Name)}.tools.{TomlKey(approval.Key)}]");
+                        foreach (string bodyLine in approval.Value)
+                            sb.AppendLine(bodyLine);
+                        approvalBodyEndsWithBlankLine = approval.Value.Count > 0
+                            && string.IsNullOrWhiteSpace(approval.Value[approval.Value.Count - 1]);
+                    }
+
+                    if (!approvalBodyEndsWithBlankLine)
+                        sb.AppendLine();
                 }
             }
 
@@ -253,7 +321,108 @@ namespace MultiTerminal.Services
             return sb.ToString();
         }
 
-        private static string ReplaceOrAppendManagedBlock(string existing, string managedBlock)
+        private static Dictionary<string, SortedDictionary<string, IReadOnlyList<string>>> ReadPreservedApprovals(
+            string existingConfig,
+            HashSet<string> currentServers,
+            out HashSet<string> approvalsOutsideManagedBlock)
+        {
+            var result = new Dictionary<string, SortedDictionary<string, IReadOnlyList<string>>>(StringComparer.Ordinal);
+            approvalsOutsideManagedBlock = new HashSet<string>(StringComparer.Ordinal);
+            int beginIdx = existingConfig.IndexOf(ManagedMarkerBegin, StringComparison.Ordinal);
+            int endIdx = existingConfig.IndexOf(ManagedMarkerEnd, StringComparison.Ordinal);
+            string[] lines = existingConfig.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+            bool insideManagedBlock = false;
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string header = lines[i].Trim();
+                if (header == ManagedMarkerBegin && beginIdx >= 0 && endIdx > beginIdx)
+                {
+                    insideManagedBlock = true;
+                    continue;
+                }
+
+                if (header == ManagedMarkerEnd && insideManagedBlock)
+                {
+                    insideManagedBlock = false;
+                    continue;
+                }
+
+                foreach (string server in currentServers)
+                {
+                    string prefix = $"[mcp_servers.{TomlKey(server)}.tools.";
+                    if (!header.StartsWith(prefix, StringComparison.Ordinal) || !header.EndsWith(']'))
+                        continue;
+
+                    string toolKey = header.Substring(prefix.Length, header.Length - prefix.Length - 1);
+                    if (!TryReadTomlKey(toolKey, out string tool))
+                        throw new FormatException($"Cannot preserve Codex approval table '{header}'.");
+
+                    var bodyLines = new List<string>();
+                    for (int j = i + 1; j < lines.Length && !lines[j].TrimStart().StartsWith('['); j++)
+                    {
+                        if (lines[j].Trim() == ManagedMarkerEnd)
+                            break;
+                        bodyLines.Add(lines[j]);
+                    }
+
+                    string approvalKey = ApprovalKey(server, tool);
+                    if (!insideManagedBlock)
+                    {
+                        approvalsOutsideManagedBlock.Add(approvalKey);
+                        break;
+                    }
+
+                    if (!result.TryGetValue(server, out var tools))
+                    {
+                        tools = new SortedDictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+                        result.Add(server, tools);
+                    }
+
+                    if (!tools.TryAdd(tool, bodyLines))
+                        throw new FormatException($"Duplicate Codex approval table for '{server}.{tool}'.");
+
+                    break;
+                }
+            }
+
+            return result;
+        }
+
+        private static string ApprovalKey(string server, string tool) => server + "\0" + tool;
+
+        private static bool TryReadTomlKey(string text, out string key)
+        {
+            key = null;
+            if (text.Length == 0)
+                return false;
+
+            if (text[0] != '"')
+            {
+                foreach (char c in text)
+                {
+                    if (!(char.IsLetterOrDigit(c) || c == '_' || c == '-'))
+                        return false;
+                }
+
+                key = text;
+                return true;
+            }
+
+            try
+            {
+                using var doc = JsonDocument.Parse(text);
+                if (doc.RootElement.ValueKind != JsonValueKind.String)
+                    return false;
+                key = doc.RootElement.GetString();
+                return key != null;
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+        }
+
+        internal static string ReplaceOrAppendManagedBlock(string existing, string managedBlock)
         {
             int beginIdx = existing.IndexOf(ManagedMarkerBegin, StringComparison.Ordinal);
             int endIdx = existing.IndexOf(ManagedMarkerEnd, StringComparison.Ordinal);

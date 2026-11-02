@@ -74,7 +74,7 @@ Present-but-unparseable or clamped values are logged (`DebugLogService` "CodeGra
 2. Add persistence to `TaskDatabase.cs` (table + CRUD + migration)
 3. Add routing to `MessageBroker.cs` (methods + events)
 4. Add MCP tool to Node.js server if agents need access
-5. Add REST endpoint to `API/Controllers/` if HTTP needed
+5. Add REST endpoint to `API/Controllers/` if HTTP needed; add every new or changed route to `docs/html/api-reference.html` too, or `ApiReferenceRouteDriftTests` fails
 
 **Adding an MCP Tool:**
 1. Add tool definition in `%APPDATA%/multiterminal/mcp/index.js`

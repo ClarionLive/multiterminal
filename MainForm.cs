@@ -268,6 +268,16 @@ namespace MultiTerminal
             _companionManager = _mcpServer.CompanionProcessManager;
             _ = System.Threading.Tasks.Task.Run(() => _companionManager.StartAll());
 
+            // Run once at startup, off the UI thread, and never touch the real app-data folder in tests.
+            if (!ProductionDataGuard.IsUnderTestHost())
+            {
+                _ = System.Threading.Tasks.Task.Run(() =>
+                    LaunchCommandBuilder.SweepStaleForcedStatuslineTempFiles(
+                        LaunchCommandBuilder.GetForcedStatuslineDirectory(),
+                        TimeSpan.FromHours(1),
+                        DateTime.UtcNow));
+            }
+
             // Defer RestoreSession to after the form is shown to avoid blocking the constructor
             // This prevents WebView2 initialization from blocking the UI thread during startup
             _debugLogService?.Trace("MainForm", "Deferring RestoreSession until form is shown...");

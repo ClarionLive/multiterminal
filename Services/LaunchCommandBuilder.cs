@@ -576,9 +576,7 @@ namespace MultiTerminal.Services
                 string json = merged.ToJsonString();
 
                 // Per-user-private dir, not the shared temp root.
-                string dir = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "MultiTerminal");
+                string dir = GetForcedStatuslineDirectory();
                 Directory.CreateDirectory(dir);
                 // The merged content is now PER-PROJECT (it carries that project's local settings),
                 // so key the file by a stable hash of the working dir to avoid cross-project
@@ -615,6 +613,55 @@ namespace MultiTerminal.Services
                     $"[LaunchCommandBuilder] Forced statusLine skipped (settings write failed): {ex.Message}. " +
                     "Context may stay '--%' for project terminals that override statusLine.");
                 return (string.Empty, false);
+            }
+        }
+
+        /// <summary>Returns the per-user directory that holds forced-statusline settings files.</summary>
+        internal static string GetForcedStatuslineDirectory() =>
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "MultiTerminal");
+
+        /// <summary>
+        /// Best-effort removal of atomic-write temporary files left behind by an interrupted launch.
+        /// </summary>
+        internal static int SweepStaleForcedStatuslineTempFiles(
+            string directory,
+            TimeSpan maxAge,
+            DateTime currentUtc)
+        {
+            try
+            {
+                if (!Directory.Exists(directory))
+                    return 0;
+
+                string[] candidates = Directory.GetFiles(
+                    directory,
+                    "forced-statusline-*.settings.json.*.tmp",
+                    SearchOption.TopDirectoryOnly);
+                int deleted = 0;
+                foreach (string candidate in candidates)
+                {
+                    try
+                    {
+                        if (currentUtc - File.GetLastWriteTimeUtc(candidate) <= maxAge)
+                            continue;
+
+                        File.Delete(candidate);
+                        deleted++;
+                    }
+                    catch
+                    {
+                        // A locked or inaccessible orphan must not stop the remaining sweep.
+                    }
+                }
+
+                return deleted;
+            }
+            catch
+            {
+                // Missing/inaccessible directories and enumeration failures are best-effort no-ops.
+                return 0;
             }
         }
 

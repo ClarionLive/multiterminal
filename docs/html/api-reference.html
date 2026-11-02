@@ -958,7 +958,7 @@
   -d '{"title":"Use parameterized queries","content":"Never interpolate...","category":"pattern","confidence":"confirmed"}'</code></pre>
 
   <div class="endpoint-block">
-    <span class="method put">PUT</span> <code>/api/knowledge/{id}</code>
+    <span class="method put">PUT</span> <code>/api/knowledge/{id:int}</code>
   </div>
   <p>Update an existing knowledge entry. Accepts a dictionary of field names to values.</p>
   <h4>Request Body</h4>
@@ -1601,26 +1601,6 @@ curl "http://localhost:5050/api/session-lineage/latest?projectPath=H%3A%5CDevLap
   -H "Content-Type: application/json" \
   -d '{"filePath":"H:\\\\path\\\\to\\\\file.cs"}'</code></pre>
 
-  <div class="endpoint-block">
-    <span class="method get">GET</span> <code>/api/tasks/{taskId}/code-review</code>
-  </div>
-  <p>Get code review diff data for all linked files in a task. Returns file list with git diff output for each.</p>
-  <h4>Response</h4>
-  <pre><code>{
-  "taskId": "c0ce8037",
-  "fileCount": 2,
-  "files": [
-    {
-      "filePath": "H:\\DevLaptop\\...\\TaskDatabase.cs",
-      "description": "Core persistence layer",
-      "hasDiff": true,
-      "diff": "--- a/Services/TaskDatabase.cs\n+++ b/Services/TaskDatabase.cs\n..."
-    }
-  ]
-}</code></pre>
-  <h4>curl</h4>
-  <pre><code>curl http://localhost:5050/api/tasks/c0ce8037/code-review</code></pre>
-
   <!-- ================================================================== -->
   <h2 id="task-reports">Task Reports</h2>
   <!-- ================================================================== -->
@@ -1953,7 +1933,7 @@ curl "http://localhost:5050/api/session-lineage/latest?projectPath=H%3A%5CDevLap
   <pre><code>curl "http://localhost:5050/api/gateway/tools?server=sqlite"</code></pre>
 
   <div class="endpoint-block">
-    <span class="method get">GET</span> <code>/api/gateway/tools/{server__toolname}</code>
+    <span class="method get">GET</span> <code>/api/gateway/tools/{namespacedName}</code>
   </div>
   <p>Get a specific tool's full schema by namespaced name (format: <code>server__toolname</code>).</p>
   <h4>Response</h4>
@@ -2345,6 +2325,395 @@ ws.onmessage = (e) => { /* handle terminal output */ };</code></pre>
 }</code></pre>
   <h4>curl</h4>
   <pre><code>curl http://localhost:5050/api/branch-metadata/proj-123/outcomes</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="route-inventory">Additional Route Inventory</h2>
+  <!-- ================================================================== -->
+  <p>
+    Controller routes without expanded request/response examples are listed here so the reference
+    remains a complete method-and-path contract. The route drift test keeps this inventory and the
+    compiled controller attributes synchronized.
+  </p>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/ask-owner</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/code-graph/dead-code</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/code-graph/file-symbols</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/code-graph/index</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/code-graph/stats</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/debug/cache-coherency</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/debug/files</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/debug/files/{fileName}</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/digest/dates</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/digest/latest</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/digest/regenerate</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/digest/{date}</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/elicitations</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/elicitations/{id}/respond</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/elicitations/{id}/response</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/github/app/callback</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/github/app/installation</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/github/app/installations</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/github/app/register</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/github/app/setup</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/github/app/status</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/github/token</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/health</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/knowledge/bump</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/knowledge/inject</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/knowledge/research-cache</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/knowledge/research-cache</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/messaging/channel-identity</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/messaging/credentials</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/messaging/images</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/messaging/images/{batchId}</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/multi-connect/config</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/multi-connect/config</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/multi-connect/tailscale-status</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/notifications/read-all</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/project-notes</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/project-notes</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/project-notes/tab</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/projects</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/projects</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method delete">DELETE</span> <code>/api/projects/{projectId}</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/projects/{projectId}</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method patch">PATCH</span> <code>/api/projects/{projectId}</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/projects/{projectId}/agents</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method delete">DELETE</span> <code>/api/projects/{projectId}/agents/{agentName}</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/projects/{projectId}/mcp-servers</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method delete">DELETE</span> <code>/api/projects/{projectId}/mcp-servers/{serverName}</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/projects/{projectId}/paths</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method delete">DELETE</span> <code>/api/projects/{projectId}/paths/{pathId:int}</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/projects/{projectId}/prompts</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method delete">DELETE</span> <code>/api/projects/{projectId}/prompts/{promptId:int}</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/projects/{projectId}/skills</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method delete">DELETE</span> <code>/api/projects/{projectId}/skills/{skillName}</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/projects/{projectId}/source-account</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/projects/{projectId}/specialists</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method delete">DELETE</span> <code>/api/projects/{projectId}/specialists/{agentType}</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/remote-mode</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/remote-mode</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/session-lineage/backfill-summaries</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/session-lineage/register</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/session-lineage/sync-project</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/session-lineage/unsummarized</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/session-lineage/{sessionId}/ensure-ready</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/session-memory/index</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/session-memory/index-project</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/session-memory/search</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/session-memory/stats</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/session-memory/unindexed</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/settings/pipeline-topology</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/source-accounts</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/spawn/job/{docId}</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/spawn/job/{docId}/collect</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/spawn/terminal</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/spawn/terminal/close</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/tasks/active/{agentName}</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/tasks/pickable/{agentName}</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/tasks/quick</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method put">PUT</span> <code>/api/tasks/{taskId}/checklist/{itemIndex}/gloss</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/tasks/{taskId}/graph</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method patch">PATCH</span> <code>/api/tasks/{taskId}/order</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method patch">PATCH</span> <code>/api/tasks/{taskId}/title</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/team/profiles</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/terminals/compact-finished</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/terminals/compact-starting</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/terminals/inject</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/terminals/streams</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/terminals/{id}/stream</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/terminals/{name}/stats</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/terminals/{name}/submit</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/wiki/articles</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/wiki/articles/{id}</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/wiki/generate</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/worktrees/active/{agentName}</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/worktrees/pending-merges</code>
+  </div>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/worktrees/stranded</code>
+  </div>
 
 </div>
 </main>
