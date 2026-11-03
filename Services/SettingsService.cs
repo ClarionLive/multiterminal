@@ -162,8 +162,12 @@ namespace MultiTerminal.Services
         private const string DefaultAgentPanelLayout = "SplitRight";
 
         // Agent panel close mode settings
-        private const string AgentPanelCloseModeKey = "AgentPanelCloseMode";
-        private const string DefaultAgentPanelCloseMode = "ManualClose";
+        // GH #89: the setting was saved but never read, and the dialog wrote its old default
+        // (ManualClose) on every OK, so a stored "AgentPanelCloseMode" says nothing about what anyone
+        // chose. Honouring it now would switch those installs to Keep open unasked; a new key starts
+        // everyone on AutoClose, which is what MT has always done.
+        private const string AgentPanelCloseModeKey = "AgentPanelOnComplete";
+        private const string DefaultAgentPanelCloseMode = "AutoClose";
 
         // Status bar height setting
         private const string StatusBarHeightKey = "StatusBarHeight";
@@ -873,8 +877,8 @@ namespace MultiTerminal.Services
         public string GetAgentPanelCloseMode()
         {
             string value = Get(AgentPanelCloseModeKey);
-            if (value == "AutoClose")
-                return "AutoClose";
+            if (value == "AutoClose" || value == "ManualClose")
+                return value;
             return DefaultAgentPanelCloseMode;
         }
 
