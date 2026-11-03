@@ -183,14 +183,27 @@ namespace MultiTerminal.Services
             return ToRoot(resolution.Profile, ctx);
         }
 
-        internal static ClaudeDataRoot ForProject(string projectId, string folder, ClaudeProfileLookup lookup, ClaudeProfileContext ctx)
+        internal static ClaudeDataRoot ForProject(string projectId, string folder, ClaudeProfileLookup lookup, ClaudeProfileContext ctx) =>
+            ForProject(projectId, folder, lookup, ctx, out _);
+
+        /// <summary>
+        /// Ticket c4bf09ca (GitHub #97): as the overload above, and when the answer is null,
+        /// <paramref name="reason"/> says why in a sentence a person can read (null on success). The
+        /// resume paths show it where they would otherwise say only "could not be read".
+        /// </summary>
+        internal static ClaudeDataRoot ForProject(string projectId, string folder, ClaudeProfileLookup lookup, ClaudeProfileContext ctx, out string reason)
         {
+            reason = null;
             if (string.IsNullOrWhiteSpace(folder) && string.IsNullOrWhiteSpace(projectId))
+            {
+                reason = "there is no project or folder to take a Claude profile from.";
                 return null;
+            }
 
             if (lookup == null)
             {
-                WarnOnce("Session data skipped: the project registry is not available yet, so the Claude profile of a folder cannot be decided.");
+                reason = "the project registry is not available yet, so the Claude profile of the project cannot be decided.";
+                WarnOnce("Session data skipped: " + reason);
                 return null;
             }
 
@@ -200,11 +213,15 @@ namespace MultiTerminal.Services
 
             if (!decision.CanLaunch)
             {
+                reason = decision.Refusal;
                 WarnOnce($"Session data skipped. {decision.Refusal}");
                 return null;
             }
 
-            return ToRoot(decision.Profile, ctx);
+            var root = ToRoot(decision.Profile, ctx);
+            if (root == null)
+                reason = $"the folder of the Claude profile '{decision.Profile.Name}' does not exist on this machine.";
+            return root;
         }
 
         internal static ClaudeDataRoot ForPaneOrFolder(ClaudePaneProfile pane, string folder, ClaudeProfileLookup lookup, ClaudeProfileContext ctx)

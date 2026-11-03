@@ -316,5 +316,83 @@ namespace MultiTerminal.Tests
             var inherited = _ctx with { InheritedConfigDir = _workDir };
             Assert.Equal(Path.Combine(_workDir, ".claude.json"), ClaudeProfileDataRoots.DefaultClaudeJsonPath(inherited));
         }
+
+        // ── GitHub #97 (ticket c4bf09ca): the resume catalog's root is the project's profile ──
+
+        private static string WriteSessionWithCwd(string claudeProjectFolder, string cwd)
+        {
+            string id = Guid.NewGuid().ToString();
+            string path = Path.Combine(claudeProjectFolder, id + ".jsonl");
+            string user = JsonSerializer.Serialize(new
+            {
+                type = "user", uuid = Guid.NewGuid().ToString(), timestamp = "2026-10-10T10:00:00Z", cwd,
+                message = new { role = "user", content = "hello" }
+            });
+            string asst = JsonSerializer.Serialize(new
+            {
+                type = "assistant", uuid = Guid.NewGuid().ToString(), timestamp = "2026-10-10T10:00:05Z", cwd,
+                message = new { role = "assistant", content = new[] { new { type = "text", text = "hi" } } }
+            });
+            File.WriteAllText(path, user + Environment.NewLine + asst + Environment.NewLine);
+            File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddHours(-3));
+            return id;
+        }
+
+        private SessionCatalog CatalogFor(string projectId, out string reason)
+        {
+            var root = ClaudeProfileDataRoots.ForProject(projectId, null, _lookup, _ctx, out reason);
+            return root == null ? null : new SessionCatalog(root.ProjectsDir, null, null);
+        }
+
+        [Fact]
+        public void A_project_on_a_second_profile_lists_only_that_profiles_sessions()
+        {
+            string inWork = WriteSessionWithCwd(MakeClaudeProjectFolder(_workDir, _workProject), _workProject);
+            string onlyDefault = WriteSessionWithCwd(MakeClaudeProjectFolder(_defaultDir, _workProject), _workProject);
+
+            var catalog = CatalogFor("p-work", out string reason);
+
+            Assert.Null(reason);
+            Assert.NotNull(catalog);
+            var ids = catalog.List(_workProject, new System.Collections.Generic.HashSet<string>(), DateTime.UtcNow).Select(e => e.SessionId).ToList();
+            Assert.Equal(new[] { inWork }, ids);
+            Assert.DoesNotContain(onlyDefault, ids);
+            Assert.Null(catalog.TryGetEntry(_workProject, onlyDefault, new System.Collections.Generic.HashSet<string>(), DateTime.UtcNow));
+        }
+
+        [Fact]
+        public void A_project_whose_profile_cannot_be_used_gets_no_catalog_and_a_reason_never_Default()
+        {
+            // Default has a session for this very folder; the answer must still be "no catalog".
+            WriteSessionWithCwd(MakeClaudeProjectFolder(_defaultDir, _nopeProject), _nopeProject);
+            WriteSessionWithCwd(MakeClaudeProjectFolder(_defaultDir, _goneProject), _goneProject);
+
+            Assert.Null(CatalogFor("p-nope", out string nopeReason));
+            Assert.False(string.IsNullOrWhiteSpace(nopeReason));
+            Assert.Null(CatalogFor("p-gone", out string goneReason));
+            Assert.False(string.IsNullOrWhiteSpace(goneReason));
+            Assert.Null(ClaudeProfileDataRoots.ForProject("p-work", null, null, _ctx, out string noRegistry));
+            Assert.False(string.IsNullOrWhiteSpace(noRegistry));
+        }
+
+        [Fact]
+        public void A_Default_project_reads_Default_including_an_inherited_config_dir()
+        {
+            string inheritedDir = Path.Combine(_base, "inherited-cfg");
+            Directory.CreateDirectory(Path.Combine(inheritedDir, "projects"));
+            var rows = new[] { new ClaudeProfileProjectRow("p-def", "DefProj", _unownedProject, null, null) };
+            var lookup = new ClaudeProfileLookup(
+                RowById: id => rows.FirstOrDefault(r => r.Id == id),
+                AllRows: () => rows,
+                LoadProjectFile: _ => null,
+                CandidateFolders: ClaudeProfileLaunchPolicy.CandidateFolders);
+
+            var plain = ClaudeProfileDataRoots.ForProject("p-def", null, lookup, _ctx, out _);
+            Assert.Equal(_defaultDir, plain?.ConfigDir);
+
+            var inherited = ClaudeProfileDataRoots.ForProject("p-def", null, lookup, _ctx with { InheritedConfigDir = inheritedDir }, out _);
+            Assert.Equal(ClaudeProfileResolver.Canonicalize(inheritedDir), inherited?.ConfigDir);
+            Assert.Equal(Path.Combine(inherited.ConfigDir, "projects"), inherited.ProjectsDir);
+        }
     }
 }
