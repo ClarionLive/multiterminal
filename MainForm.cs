@@ -2958,8 +2958,36 @@ namespace MultiTerminal
                     var agent = new AgentProcess();
                     pending = agent;
 
+                    // Ticket f4992532: the writer runs with --input-format stream-json, so after its
+                    // turn it waits on stdin forever. Stop it when the turn ends (the stream's
+                    // `result` message), or at the time limit if it hangs. The gate makes the stop
+                    // happen once, whichever fires first.
+                    var stopGate = new GlossWriterStopGate();
+
+                    void StopWriter(string reason)
+                    {
+                        if (!stopGate.TryClaimStop()) return;
+                        _debugLogService?.Info("GlossBackfill", $"Stopping gloss writer for {taskId}: {reason}.");
+                        // Task.Run: the turn-end message arrives on the stdout reader thread, and
+                        // StopAsync awaits that same reader task, so it must not run inline there.
+                        _ = Task.Run(async () =>
+                        {
+                            try { await agent.StopAsync(); }
+                            catch (Exception ex)
+                            {
+                                _debugLogService?.Warning("GlossBackfill", $"Stopping gloss writer for {taskId} failed: {ex.Message}");
+                            }
+                        });
+                    }
+
+                    agent.MessageReceived += (_, msg) =>
+                    {
+                        if (GlossWriterStopGate.IsTurnEnd(msg)) StopWriter("turn ended");
+                    };
+
                     agent.ProcessExited += (_, exitCode) =>
                     {
+                        stopGate.TryClaimStop();   // exited on its own or by a stop: the backstop must not touch a disposed agent
                         _debugLogService?.Info("GlossBackfill", $"Gloss writer for {taskId} exited ({exitCode}).");
                         try { agent.Dispose(); } catch { /* teardown is best-effort */ }
                     };
@@ -2975,6 +3003,17 @@ namespace MultiTerminal
                         claudeProfile: glossProfile.Profile);
 
                     pending = null;   // the exit handler owns it from here
+
+                    // Backstop. No CancellationTokenSource (see CLAUDE.md): after a normal exit the
+                    // delay just runs out and finds the gate already claimed.
+                    _ = Task.Delay(GlossWriterStopGate.BackstopMs).ContinueWith(
+                        _ =>
+                        {
+                            if (!stopGate.StopClaimed)
+                                _debugLogService?.Warning("GlossBackfill", $"Gloss writer for {taskId} still running after {GlossWriterStopGate.BackstopMs / 60000} minutes; treating it as hung.");
+                            StopWriter("time limit reached");
+                        },
+                        TaskScheduler.Default);
                 }
                 finally
                 {
