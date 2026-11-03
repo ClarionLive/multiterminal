@@ -2554,11 +2554,20 @@ namespace MultiTerminal
             string workingDir,
             string initialPrompt,
             string spawnerName,
-            string spawnerDocId)
+            string spawnerDocId,
+            string requestedModel)
         {
             try
             {
                 _debugLogService?.Info("MainForm", $"Spawn requested: {agentName} ({agentType}) in {workingDir}");
+
+                // A model name from the spawner goes onto a command line (ticket b0d2f090): refuse an invalid one
+                // before anything is created, whatever route the request came by.
+                {
+                    string askedModel = ClaudeModelLaunchPolicy.Normalize(requestedModel);
+                    if (askedModel != null && !ClaudeModelLaunchPolicy.IsDefaultToken(askedModel) && !ClaudeModelLaunchPolicy.IsValidModelName(askedModel))
+                        return (false, null, "model is not a valid model name (letters, digits, dots and hyphens, with an optional [1m] suffix). No pane was created.", null);
+                }
 
                 // Oracle is always-on — reject spawn requests, it's managed by OracleService
                 if (agentName.Equals(OracleService.OracleName, StringComparison.OrdinalIgnoreCase))
@@ -2646,7 +2655,7 @@ namespace MultiTerminal
                         // would run under --dangerously-skip-permissions with that project's local
                         // hooks/deny silently stripped (the fail-closed case BuildForcedStatuslineFlag
                         // documents).
-                        var spawnModel = DecideLaunchClaudeModel(ClaudeModelRole.Helper, project?.Id, workingDir, null, $"helper '{agentName}'");
+                        var spawnModel = DecideLaunchClaudeModel(ClaudeModelRole.Helper, project?.Id, workingDir, requestedModel, $"helper '{agentName}'");
                         var launchCmd = Services.LaunchCommandBuilder.BuildCommand(kind, project, workingDirectory: workingDir, model: spawnModel.Model);
                         if (!string.IsNullOrEmpty(launchCmd.BootstrapError))
                         {

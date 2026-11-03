@@ -171,3 +171,11 @@ test("spawn_helper states prompt delivery, and that a long silence is a failure"
   // for no expectation at all.
   assert.ok(/120s/.test(defBlock()), "description must still document the 120s give-up bound");
 });
+
+test("spawn_helper offers an optional model, forwards it, and the schema does not require it (ticket b0d2f090)", () => {
+  const d = defBlock();
+  assert.ok(/\bmodel:\s*\{\s*type:\s*"string"/.test(d), "tool def must declare a string 'model' property");
+  assert.ok(!/required:\s*\[[^\]]*"model"/.test(d), "model must stay optional");
+  const h = handlerBlock();
+  assert.ok(/\bmodel:\s*args\.model/.test(h), "handler must forward 'model' to the spawn endpoint");
+});

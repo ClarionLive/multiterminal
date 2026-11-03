@@ -1135,6 +1135,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "Registered project id; the helper starts in that project's source path. Optional.",
             },
+            model: {
+              type: "string",
+              description: "The model the helper starts on: an alias (\"opus\", \"sonnet\", \"haiku\", \"fable\"), a full model name, or \"default\" for Claude Code's own default. Optional. Omitted, the helper uses the project's helper model, else the Helper model in MultiTerminal's Settings (Sonnet unless changed). Letters, digits, dots and hyphens only, with an optional [1m] suffix; anything else is refused and no pane is created.",
+            },
             initialPrompt: {
               type: "string",
               description: "The helper's job. Handed over as ONE prompt that the helper collects itself (get_my_spawn_job) within seconds of booting; the 120s elsewhere is the give-up bound, not the expected wait. Line breaks are kept. Optional — without it the helper boots and waits, idle, for someone to tell it what to do.",
@@ -3989,6 +3993,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           projectId: args.projectId || null,
           initialPrompt: args.initialPrompt || null,
           spawnerName: String(args.spawnerName).trim(),
+          model: args.model ? String(args.model).trim() : null,
         }, API_TIMEOUT_MS, spawnerNonce ? { "X-MultiTerminal-Launch-Nonce": spawnerNonce } : null);
 
         // What the API's success means: the PANE exists and its identity is registered. The helper

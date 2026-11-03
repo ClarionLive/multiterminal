@@ -125,7 +125,7 @@ namespace MultiTerminal.Tests
             var captured = new Captured();
             var service = new SpawnService
             {
-                OnSpawnRequested = (agentName, agentType, workingDir, initialPrompt, spawnerName, spawnerDocId) =>
+                OnSpawnRequested = (agentName, agentType, workingDir, initialPrompt, spawnerName, spawnerDocId, requestedModel) =>
                 {
                     captured.Reached = true;
                     return Task.FromResult((true, "doc-9", (string)null, agentName + "-2"));
@@ -144,6 +144,46 @@ namespace MultiTerminal.Tests
             Assert.Contains("channel port", (string)ReadProp(body, "readiness"), System.StringComparison.Ordinal);
         }
 
+        [Fact]
+        public async Task A_requested_model_is_trimmed_and_reaches_the_spawn()
+        {
+            var (controller, captured) = Harness();
+
+            var result = await controller.SpawnTerminal(new SpawnTerminalRequest { AgentName = "Helper", Model = " opus " });
+
+            Assert.IsType<OkObjectResult>(result);
+            Assert.Equal("opus", captured.RequestedModel);
+        }
+
+        [Fact]
+        public async Task No_model_reaches_the_spawn_as_null()
+        {
+            var (controller, captured) = Harness();
+
+            await controller.SpawnTerminal(new SpawnTerminalRequest { AgentName = "Helper", Model = "  " });
+
+            Assert.True(captured.Reached);
+            Assert.Null(captured.RequestedModel);
+        }
+
+        [Theory]
+        [InlineData("opus; calc")]
+        [InlineData("a b")]
+        [InlineData("x'y")]
+        [InlineData("$(calc)")]
+        [InlineData("\"opus\"")]
+        [InlineData("opus&calc")]
+        public async Task An_invalid_model_is_a_400_and_creates_no_pane(string model)
+        {
+            var (controller, captured) = Harness();
+
+            var result = await controller.SpawnTerminal(new SpawnTerminalRequest { AgentName = "Helper", Model = model });
+
+            var problem = Assert.IsType<ObjectResult>(result);
+            Assert.Equal(400, problem.StatusCode);
+            Assert.False(captured.Reached);
+        }
+
         private static object ReadProp(object anonymous, string name)
             => anonymous.GetType().GetProperty(name)?.GetValue(anonymous);
 
@@ -154,6 +194,8 @@ namespace MultiTerminal.Tests
             public string InitialPrompt { get; set; }
 
             public bool Reached { get; set; }
+
+            public string RequestedModel { get; set; }
         }
 
         private static (SpawnController Controller, Captured Captured) Harness()
@@ -161,10 +203,11 @@ namespace MultiTerminal.Tests
             var captured = new Captured();
             var service = new SpawnService
             {
-                OnSpawnRequested = (agentName, agentType, workingDir, initialPrompt, spawnerName, spawnerDocId) =>
+                OnSpawnRequested = (agentName, agentType, workingDir, initialPrompt, spawnerName, spawnerDocId, requestedModel) =>
                 {
                     captured.SpawnerName = spawnerName;
                     captured.InitialPrompt = initialPrompt;
+                    captured.RequestedModel = requestedModel;
                     captured.Reached = true;
                     return Task.FromResult((true, "doc-1", (string)null, agentName));
                 },

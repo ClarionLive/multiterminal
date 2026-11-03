@@ -344,7 +344,7 @@ namespace MultiTerminal.Tests
                 Broker.RegisterTerminal("Carol", docId: OtherDocId, nonce: OtherNonce);
                 Service = new SpawnService
                 {
-                    OnSpawnRequested = (agentName, agentType, workingDir, initialPrompt, spawnerName, spawnerDocId)
+                    OnSpawnRequested = (agentName, agentType, workingDir, initialPrompt, spawnerName, spawnerDocId, requestedModel)
                         => Task.FromResult((true, HelperDocId, (string)null!, agentName)),
                     OnCloseRequested = docId =>
                     {
