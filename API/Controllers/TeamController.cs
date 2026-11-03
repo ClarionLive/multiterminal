@@ -41,7 +41,6 @@ namespace MultiTerminal.API.Controllers
                 {
                     name = s.DisplayName ?? s.Id,
                     role = s.Role ?? "",
-                    preferredModel = s.PreferredModel ?? "sonnet",
                     isOnline = onlineNames.Contains(s.DisplayName ?? s.Id),
                     isTeamLead = isLead
                 };
@@ -52,7 +51,9 @@ namespace MultiTerminal.API.Controllers
 
         /// <summary>
         /// Get the team roster for a project, merged with profile data.
-        /// Returns each agent's name, preferred_model, agent_instructions, role, and skills.
+        /// Returns each agent's name, agent_instructions, role, and skills. No model: launches take their
+        /// model from the project and global settings (ticket b0d2f090), not from a profile, so a
+        /// preferred model here would only suggest a setting that does nothing.
         /// </summary>
         [HttpGet("roster")]
         public IActionResult GetTeamRoster([FromQuery] string projectPath)
@@ -82,7 +83,6 @@ namespace MultiTerminal.API.Controllers
                     {
                         name = agentName,
                         hasProfile = true,
-                        preferredModel = profile.PreferredModel ?? "sonnet",
                         agentInstructions = profile.AgentInstructions,
                         role = profile.Role,
                         skills = profile.GetSkills(),
@@ -96,7 +96,6 @@ namespace MultiTerminal.API.Controllers
                     {
                         name = agentName,
                         hasProfile = false,
-                        preferredModel = "sonnet",
                         agentInstructions = (string)null,
                         role = (string)null,
                         skills = new List<string>(),

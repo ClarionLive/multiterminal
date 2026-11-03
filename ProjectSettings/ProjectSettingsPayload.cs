@@ -80,6 +80,7 @@ namespace MultiTerminal.ProjectSettings
                     sourceAccounts = options.SourceAccounts.Select(a => new { value = a.Id, label = a.DisplayName }),
                     projectTypes = ProjectTypes.Select(t => new { value = t, label = t.Length == 0 ? "(none)" : t }),
                     statuses = Project.StatusValues.Select(s => new { value = s.ToLowerInvariant(), label = s }),
+                    claudeModels = ClaudeModelChoices.ProjectFormOptions().Select(m => new { value = m.Value, label = m.Label }),
                     launchModes = new[]
                     {
                         new { value = Project.LaunchModeToStorage(ProjectLaunchMode.Ask), label = "Ask each time" },
@@ -105,7 +106,7 @@ namespace MultiTerminal.ProjectSettings
                         new { value = TerminalKindHelper.ClaudeCodeValue, label = "Claude Code" },
                         new { value = TerminalKindHelper.CodexValue, label = "Codex" },
                     },
-                    availableAgents = options.AvailableAgents.Select(a => new { name = a.Name, role = a.Role ?? "", preferredModel = a.PreferredModel ?? "" }),
+                    availableAgents = options.AvailableAgents.Select(a => new { name = a.Name, role = a.Role ?? "" }),
                     availableMcpServers = options.AvailableMcpServers.Select(m => new { name = m.Name, description = m.Description ?? "" }),
                     availableSkills = options.AvailableSkills,
                     availableSpecialists = options.AvailableSpecialists.Select(s => new { type = s.Type, description = s.Description ?? "" }),

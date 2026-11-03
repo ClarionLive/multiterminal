@@ -1444,7 +1444,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       // Team Assembly Tools
       {
         name: "get_team_roster",
-        description: "Get the team roster for a project with merged profile data (preferred_model, agent_instructions, role, skills). Use this to discover which agents to spawn for a team assembly workflow.",
+        description: "Get the team roster for a project with merged profile data (agent_instructions, role, skills). Use this to discover which agents to spawn for a team assembly workflow.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1594,7 +1594,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             preferredModel: {
               type: "string",
-              description: "Preferred Claude model: opus, sonnet, haiku",
+              description: "Stored on the agent row only. No launch reads it: models come from the project's Model and Helper model settings and MultiTerminal's Settings (ticket b0d2f090).",
             },
           },
           required: ["projectId", "agentName"],
@@ -3004,7 +3004,6 @@ function formatProject(ctx) {
     ctx.agents.forEach(a => {
       text += `  • ${a.agentName}`;
       if (a.role) text += ` (${a.role})`;
-      if (a.preferredModel) text += ` [${a.preferredModel}]`;
       text += "\n";
     });
   }
@@ -4447,14 +4446,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         } else {
           result.agents.forEach(a => {
             const profileIcon = a.hasProfile ? "✅" : "⚠️";
-            const modelIcon = { opus: "🟣", sonnet: "🔵", haiku: "🟢" }[a.preferredModel] || "⚪";
             text += `${profileIcon} ${a.name}`;
             if (a.isTeamLead) text += ` | Team Lead`;
             text += "\n";
-            text += `   Model: ${modelIcon} ${a.preferredModel}`;
-            if (a.role) text += ` | Role: ${a.role}`;
-            if (a.isOnline) text += ` | 🟢 Online`;
-            text += "\n";
+            const detail = [];
+            if (a.role) detail.push(`Role: ${a.role}`);
+            if (a.isOnline) detail.push("🟢 Online");
+            if (detail.length > 0) text += `   ${detail.join(" | ")}\n`;
             if (a.skills && a.skills.length > 0) text += `   Skills: ${a.skills.join(", ")}\n`;
             if (a.agentInstructions) text += `   Instructions: ${a.agentInstructions.substring(0, 100)}${a.agentInstructions.length > 100 ? "..." : ""}\n`;
             if (!a.hasProfile) text += `   ⚠️ No profile found - will spawn with defaults\n`;
