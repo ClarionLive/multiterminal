@@ -242,10 +242,18 @@ namespace MultiTerminal.ProfilePanel
             }
         }
 
-        private TeamMemberProfile ParseProfile(JsonElement element)
+        /// <summary>
+        /// Parses the editor's profile payload. The editor no longer sends <c>preferredModel</c> (ticket
+        /// b0d2f090: no launch reads it), so a payload without it must leave the stored value ALONE: the
+        /// parsed profile carries null, which <c>ProfileService.UpdateProfile</c> treats as "unchanged" and
+        /// <c>CreateProfile</c> turns into its own default. Without the explicit null, the
+        /// <see cref="TeamMemberProfile"/> default of "sonnet" would overwrite the stored value on every save.
+        /// </summary>
+        internal static TeamMemberProfile ParseProfile(JsonElement element)
         {
             var profile = new TeamMemberProfile
             {
+                PreferredModel = null,
                 Id = element.TryGetProperty("id", out var id) ? id.GetString() : null,
                 DisplayName = element.TryGetProperty("displayName", out var displayName) ? displayName.GetString() : null,
                 Role = element.TryGetProperty("role", out var role) ? role.GetString() : null,
