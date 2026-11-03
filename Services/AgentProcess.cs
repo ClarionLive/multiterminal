@@ -248,9 +248,14 @@ namespace MultiTerminal.Services
             }
 
             // The model subagents use when they name none (ticket b0d2f090). Applied last, like the profile,
-            // so a caller's variables cannot move it; a name the allow-pattern rejects sets nothing.
+            // so a caller's variables cannot move it. No decided model (null, or a name the allow-pattern
+            // rejects) REMOVES the variable: the child inherits MT's own environment, so one the Owner set
+            // at User scope would otherwise leak into a launch that decided on none. The gloss writer passes
+            // none and spawns no subagents, so clearing it there changes nothing it does.
             if (ClaudeModelLaunchPolicy.IsValidModelName(subagentModel))
                 environment[SubagentModelVariable] = subagentModel;
+            else
+                environment.Remove(SubagentModelVariable);
         }
 
         /// <summary>The environment variable Claude Code reads for the model of subagents that name none.</summary>

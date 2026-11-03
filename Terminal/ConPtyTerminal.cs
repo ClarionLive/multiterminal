@@ -323,20 +323,22 @@ namespace MultiTerminal.Terminal
         /// <summary>
         /// The model for subagents that name none (ticket b0d2f090), set by the owner BEFORE
         /// <see cref="Start"/> from <see cref="Services.ClaudeModelLaunchPolicy"/>'s decision. Emitted as
-        /// <c>CLAUDE_CODE_SUBAGENT_MODEL</c> beside the Claude profile prologue. Null emits nothing.
+        /// <c>CLAUDE_CODE_SUBAGENT_MODEL</c> beside the Claude profile prologue. Null clears the variable.
         /// </summary>
         public string SubagentModel { get; set; }
 
         /// <summary>
-        /// The <c>CLAUDE_CODE_SUBAGENT_MODEL</c> assignment, or an empty string for null or a name the
-        /// allow-pattern rejects (the value is spliced into a PowerShell line, so nothing else may reach it).
+        /// The <c>CLAUDE_CODE_SUBAGENT_MODEL</c> assignment. For null or a name the allow-pattern rejects (the
+        /// value is spliced into a PowerShell line, so nothing else may reach it) it is the <c>$null</c> clear
+        /// form, like <see cref="BuildQuietStartEnvAssignment"/>: MT's own environment is inherited, so a value
+        /// the Owner set at User scope would otherwise leak into a launch that decided on none.
         /// Separate from <see cref="BuildClaudeEnvSetup"/> on purpose: that helper is not given the launch
         /// command (invariant 6 in claude-profiles.md), and this one is not given it either.
         /// </summary>
         internal static string BuildSubagentModelAssignment(string model) =>
             Services.ClaudeModelLaunchPolicy.IsValidModelName(model)
                 ? $"$env:CLAUDE_CODE_SUBAGENT_MODEL = '{model}'; "
-                : "";
+                : "$env:CLAUDE_CODE_SUBAGENT_MODEL = $null; ";
 
         /// <summary>
         /// The <c>MULTITERMINAL_QUIET_START</c> assignment: <c>'true'</c> for a quiet start, otherwise the

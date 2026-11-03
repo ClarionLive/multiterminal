@@ -168,7 +168,8 @@ Sonnet for helpers, Sonnet for subagents; they are settings, because Anthropic's
   launched by CA, not MT, so none of this reaches them (they need their own CA ticket; `ANTHROPIC_MODEL`
   stays as the stopgap there).
 - **Subagents.** `CLAUDE_CODE_SUBAGENT_MODEL` is set beside the profile prologue (panes) and in
-  `AgentProcess.ApplyEnvironment` (headless). Per the Claude Code docs it does not change the built-in
+  `AgentProcess.ApplyEnvironment` (headless); when no subagent model is decided (the `default` setting or an
+  invalid stored name) it is CLEARED (`$null` / removed), because MT's own environment is inherited. Per the Claude Code docs it does not change the built-in
   Explore and Plan agents, and an agent's frontmatter or the Agent tool's model parameter outrank it.
 - **Header.** The pane header's model badge (`statusbar.html .sl-model`) turns amber for Fable.
 - **Preferred Model.** `team_member_profiles.preferred_model` and `project_agents.preferred_model` still

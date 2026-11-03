@@ -121,9 +121,10 @@ namespace MultiTerminal.Tests
         public void The_subagent_assignment_is_quoted_and_only_for_a_valid_name()
         {
             Assert.Equal("$env:CLAUDE_CODE_SUBAGENT_MODEL = 'sonnet'; ", ConPtyTerminal.BuildSubagentModelAssignment("sonnet"));
-            Assert.Equal("", ConPtyTerminal.BuildSubagentModelAssignment(null));
-            Assert.Equal("", ConPtyTerminal.BuildSubagentModelAssignment("x'; calc; '"));
-            Assert.Equal("", ConPtyTerminal.BuildSubagentModelAssignment("$(calc)"));
+            const string clear = "$env:CLAUDE_CODE_SUBAGENT_MODEL = $null; ";
+            Assert.Equal(clear, ConPtyTerminal.BuildSubagentModelAssignment(null));
+            Assert.Equal(clear, ConPtyTerminal.BuildSubagentModelAssignment("x'; calc; '"));
+            Assert.Equal(clear, ConPtyTerminal.BuildSubagentModelAssignment("$(calc)"));
         }
 
         [Fact]
@@ -137,6 +138,19 @@ namespace MultiTerminal.Tests
             AgentProcess.ApplyEnvironment(none, null, null, null);
             AgentProcess.ApplyEnvironment(none, null, null, "a b; c");
             Assert.DoesNotContain(AgentProcess.SubagentModelVariable, none.Keys);
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("a b; c")]
+        public void An_inherited_subagent_model_does_not_leak_into_a_headless_agent_that_decided_on_none(string decided)
+        {
+            // The child starts from MT's own environment, which may carry a value set at User scope.
+            var env = new Dictionary<string, string> { [AgentProcess.SubagentModelVariable] = "fable" };
+
+            AgentProcess.ApplyEnvironment(env, null, null, decided);
+
+            Assert.DoesNotContain(AgentProcess.SubagentModelVariable, env.Keys);
         }
 
         [Fact]
