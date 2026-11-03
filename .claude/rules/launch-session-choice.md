@@ -84,10 +84,24 @@ with `—` context or its fallback summary. The 256KB head and 64KB tail are alw
 
 `session_lineage` has no rows for spawned helpers and its `session_file_path` goes stale when Claude
 Code moves a transcript into a worktree's folder. `SessionCatalog` therefore reads Claude Code's own
-folders: `~/.claude/projects/<encoded root>` and every `<encoded root>--claude-worktrees-*` (plus `<encoded repo root>--claude-worktrees-*` for a project below its repo root, ticket 3fd3c9a7). Encoding
+folders: `<profile config dir>\projects\<encoded root>` (GitHub #97: the dir is the PROJECT'S Claude profile, see below) and every `<encoded root>--claude-worktrees-*` (plus `<encoded repo root>--claude-worktrees-*` for a project below its repo root, ticket 3fd3c9a7). Encoding
 is `[^A-Za-z0-9] -> '-'`. It reads only a bounded head and tail of each transcript and caps the number
 of transcripts read. Agent names and summaries come from injected DB lookups, with the transcript as
 fallback.
+
+**The root is the project's Claude profile (GH #97, ticket c4bf09ca).** `MainForm.CreateSessionCatalog(project, out refusal)`
+takes `ClaudeProfileDataRoots.ForProject(project.Id, null, ...)` + `projects`: the same project-row decision the launch
+makes (`TryGetLaunchClaudeProfile(project.Id, null)`, and `DecideLaunchClaudeProfile(project.Id, cwd, ...)` for a resumed
+helper), so a session is offered only if the profile the launch runs under can resume it. Claude finds a session only in
+its own config dir; a Default-folder session offered to a Work project failed with "No conversation found". No site builds
+a `.claude` path. A profile that cannot be honoured (not configured, folder missing, owners disagree, no registry) gives NO
+catalog and a reason, never Default's folder: the launch dialog shows it through the load-failure message, a helper is
+skipped with it, a startup-restore row is skipped with it. The Default profile resolves as before, including an inherited
+`CLAUDE_CONFIG_DIR`. Every transcript path after that (`TryGetTranscriptWriteUtc`, `RecheckResume`, `HelperResume.Check`)
+is the catalog entry's own `TranscriptPath`, so it follows the same root; none builds a path. The launch's profile and the
+catalog's root cannot differ for a project launch because both read the project row; "Launch as" is the identity
+picker's restart and has no session choice, and a helper resumed with its PM names the project, so the row decides.
+Pinned by `ClaudeProfileDataRootsTests` (the `A_project_on_a_second_profile...` group).
 
 **Background gloss writers are never offered (GH #67).** The headless gloss writer
 (`MainForm.SpawnGlossWriterAsync`, see checklist-graph.md) starts in the app directory, which lies inside
