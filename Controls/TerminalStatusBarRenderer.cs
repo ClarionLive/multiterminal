@@ -293,6 +293,7 @@ namespace MultiTerminal.Controls
                             SendMessage($"remoteMode:{(_lastRemoteMode.Value ? "true" : "false")}");
                         SendMessage($"projectSettings:{(_lastProjectSettingsAvailable ? "true" : "false")}");
                         SendMessage($"attention:{_lastAttention}");
+                        SendMessage($"claudeProfile:{_lastClaudeProfile}");
                         SendMessage($"github:{_lastGitHubJson}");
 
                         Ready?.Invoke(this, EventArgs.Empty);
@@ -568,6 +569,22 @@ namespace MultiTerminal.Controls
             _lastGitHubJson = json;
             if (_isInitialized)
                 SendMessage($"github:{_lastGitHubJson}");
+        }
+
+        // Ticket 37edc158: the pane's Claude profile name ("" = show nothing). Last-known and replayed
+        // on 'ready', like the values around it, so a value set before the page loads is not lost.
+        private string _lastClaudeProfile = "";
+
+        /// <summary>
+        /// Shows the pane's Claude profile beside the model; null or blank clears it. The caller decides
+        /// what is worth showing (<see cref="Services.PaneProfileBadge"/>). The name is free text, so it is
+        /// sent as the raw remainder of the message and the page sets it with textContent.
+        /// </summary>
+        public void SetClaudeProfile(string name)
+        {
+            _lastClaudeProfile = name ?? "";
+            if (_isInitialized)
+                SendMessage($"claudeProfile:{_lastClaudeProfile}");
         }
 
         private string _lastAttention = "none";

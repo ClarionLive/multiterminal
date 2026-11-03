@@ -428,6 +428,21 @@
             letter-spacing: 0.04em;
         }
 
+        /* The pane's Claude profile (ticket 37edc158), shown only when it is not Default. A long name
+           is cut with an ellipsis and carries the whole name as its tooltip. */
+        .sl-profile {
+            background: var(--model-bg);
+            color: var(--text-secondary);
+            font-weight: 600;
+            flex: 0 1 auto;
+            min-width: 0;
+            max-width: 220px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .sl-profile.hidden { display: none; }
+
         .context-label {
             color: var(--text-muted);
             font-size: var(--font-size-xs);
@@ -673,6 +688,7 @@
         <!-- Row 3: Status Line (model / context / quota) -->
         <div class="row-statusline hidden" id="row-statusline">
             <span class="sl-segment sl-model" id="sl-model">claude</span>
+            <span class="sl-segment sl-profile hidden" id="sl-profile"></span>
             <span class="sl-context" id="sl-context">
                 <span class="context-label">Context:</span>
                 <span class="context-bar" id="context-bar"></span>
@@ -731,6 +747,15 @@
 
         function onProjectSettingsClick() {
             postMessage('projectSettings', {});
+        }
+
+        // Ticket 37edc158: the pane's Claude profile. The name is free text: textContent only, never HTML.
+        function setClaudeProfile(name) {
+            var el = document.getElementById('sl-profile');
+            var shown = !!name;
+            el.textContent = shown ? name : '';
+            el.title = shown ? 'Claude profile: ' + name : '';
+            el.classList.toggle('hidden', !shown);
         }
 
         function setProjectSettingsAvailable(available) {
@@ -1141,6 +1166,8 @@
                         setProjectSettingsAvailable(data.split(':')[1] === 'true');
                     } else if (data.startsWith('attention:')) {
                         document.body.setAttribute('data-attention', data.substring(10));
+                    } else if (data.startsWith('claudeProfile:')) {
+                        setClaudeProfile(data.substring(14));
                     } else if (data.startsWith('github:')) {
                         setGitHub(JSON.parse(data.substring(7)));
                     }

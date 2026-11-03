@@ -439,6 +439,14 @@ namespace MultiTerminal.Docking
         public void SetGitHubBand(Services.GitHubBand band) => _statusBar?.SetGitHub(band);
 
         /// <summary>
+        /// Ticket 37edc158: pushes the pane's launch profile to the header, which shows it only when it is
+        /// not Default. The renderer remembers the value and replays it when its page loads, so a launch
+        /// that begins before the header page is ready is not lost.
+        /// </summary>
+        private void ShowClaudeProfileInHeader() =>
+            _statusBar?.SetClaudeProfile(Services.PaneProfileBadge.TextFor(_launchClaudeProfile?.ProfileName));
+
+        /// <summary>
         /// The project the status bar's gear opens: the registered project containing the pane's folder,
         /// else the project it was launched for. Null when neither exists, and the gear is then disabled.
         /// </summary>
@@ -1581,6 +1589,7 @@ namespace MultiTerminal.Docking
             // Per launch, like the role below: a reused pane must not keep the last launch's profile.
             _launchClaudeProfile = new MultiTerminal.Services.ClaudePaneProfile(
                 claudeProfile == null || claudeProfile.IsDefault ? null : claudeProfile.Name);
+            ShowClaudeProfileInHeader();
             _debugLogService?.Info("TerminalDocument.StartTerminal", $"===== START =====");
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"workingDirectory: '{workingDirectory ?? "null"}'");
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"terminalName: '{terminalName ?? "null"}'");
@@ -2927,6 +2936,8 @@ namespace MultiTerminal.Docking
             _terminalAgentSplitter.Visible = false;
             if (_statusBarSplitter != null) _statusBarSplitter.Visible = false;
             _statusBar.Visible = false;
+            // Back on the start screen no launch is running, so the header shows no profile (ticket 37edc158).
+            _statusBar.SetClaudeProfile(null);
 
             // Show start screen over the entire content area
             _startScreen.BringToFront();
