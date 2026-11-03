@@ -321,6 +321,24 @@ namespace MultiTerminal.Terminal
         public bool QuietStart { get; set; }
 
         /// <summary>
+        /// The model for subagents that name none (ticket b0d2f090), set by the owner BEFORE
+        /// <see cref="Start"/> from <see cref="Services.ClaudeModelLaunchPolicy"/>'s decision. Emitted as
+        /// <c>CLAUDE_CODE_SUBAGENT_MODEL</c> beside the Claude profile prologue. Null emits nothing.
+        /// </summary>
+        public string SubagentModel { get; set; }
+
+        /// <summary>
+        /// The <c>CLAUDE_CODE_SUBAGENT_MODEL</c> assignment, or an empty string for null or a name the
+        /// allow-pattern rejects (the value is spliced into a PowerShell line, so nothing else may reach it).
+        /// Separate from <see cref="BuildClaudeEnvSetup"/> on purpose: that helper is not given the launch
+        /// command (invariant 6 in claude-profiles.md), and this one is not given it either.
+        /// </summary>
+        internal static string BuildSubagentModelAssignment(string model) =>
+            Services.ClaudeModelLaunchPolicy.IsValidModelName(model)
+                ? $"$env:CLAUDE_CODE_SUBAGENT_MODEL = '{model}'; "
+                : "";
+
+        /// <summary>
         /// The <c>MULTITERMINAL_QUIET_START</c> assignment: <c>'true'</c> for a quiet start, otherwise the
         /// <c>$null</c> clear form, so a shell started inside a quiet terminal (or an MT launched from
         /// one) can never pass the flag on to a terminal that is not quiet.
@@ -653,6 +671,11 @@ namespace MultiTerminal.Terminal
                     $"Claude profile '{claudeProfile?.Name}' cannot be applied, so nothing was started. Fix its folder in Settings > Claude Profiles. ({ex.Message})",
                     ex);
             }
+
+            // The model subagents use when they name none (ticket b0d2f090), beside the profile prologue. Per the
+            // docs it does not reach the built-in Explore and Plan agents, and an agent's own frontmatter or the
+            // Agent tool's model parameter outrank it.
+            envSetup += BuildSubagentModelAssignment(SubagentModel);
 
             string promptFunc = "function prompt { $Host.UI.RawUI.WindowTitle = $PWD.Path; return \\\"PS $($PWD.Path)> \\\" }";
 

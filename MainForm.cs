@@ -2646,7 +2646,8 @@ namespace MultiTerminal
                         // would run under --dangerously-skip-permissions with that project's local
                         // hooks/deny silently stripped (the fail-closed case BuildForcedStatuslineFlag
                         // documents).
-                        var launchCmd = Services.LaunchCommandBuilder.BuildCommand(kind, project, workingDirectory: workingDir);
+                        var spawnModel = DecideLaunchClaudeModel(ClaudeModelRole.Helper, project?.Id, workingDir, null, $"helper '{agentName}'");
+                        var launchCmd = Services.LaunchCommandBuilder.BuildCommand(kind, project, workingDirectory: workingDir, model: spawnModel.Model);
                         if (!string.IsNullOrEmpty(launchCmd.BootstrapError))
                         {
                             // Not HandleBootstrapErrorIfAny: that shows a modal MessageBox, which
@@ -2714,7 +2715,8 @@ namespace MultiTerminal
                             inheritedClaudeProfileName: spawnerProfileName,
                             onClaudeProfileRefused: refusal => profileRefusal = refusal,
                             launchKind: Services.PaneLaunchKind.From(kind),
-                            yieldFocusToTyping: true);
+                            yieldFocusToTyping: true,
+                            subagentModel: kind == Models.TerminalKind.ClaudeCode ? spawnModel.SubagentModel : null);
 
                         // Task 7d20e94c: the helper's launch row points at the launch its PROVEN spawner
                         // pane is running (spawnerDocId comes from the caller's launch nonce, never from
@@ -3094,13 +3096,16 @@ namespace MultiTerminal
                 if (!agentProfile.CanLaunch)
                     return (false, null, agentProfile.Refusal);
 
+                var agentModel = DecideLaunchClaudeModel(ClaudeModelRole.Helper, null, workingDir, null, $"headless agent '{agentName}'");
                 var agent = new AgentProcess();
                 await agent.SpawnAsync(
                     prompt: initialPrompt,
                     workingDir: workingDir,
                     mcpConfigPath: mcpConfigPath,
                     environmentVars: spawnEnv,
-                    claudeProfile: agentProfile.Profile);
+                    claudeProfile: agentProfile.Profile,
+                    model: agentModel.Model,
+                    subagentModel: agentModel.SubagentModel);
 
                 // Register with MessageBroker so other terminals can message this agent.
                 //
@@ -4465,7 +4470,7 @@ namespace MultiTerminal
         /// behalf (spawn_helper, helpers resumed with their PM). Focus then stays in the pane the Owner is
         /// typing in (<see cref="Services.PaneFocusGuard.ShouldKeepFocus"/>).</para>
         /// </summary>
-        public (string Name, string DocId) AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, bool atomicIdentityUniqueness = false, bool failClosedIdentity = false, Models.ClaudeProfile decidedClaudeProfile = null, string inheritedClaudeProfileName = null, Action<string> onClaudeProfileRefused = null, string resumeSessionId = null, bool pinWorkingDirectory = false, string launchKind = null, bool yieldFocusToTyping = false)
+        public (string Name, string DocId) AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, bool atomicIdentityUniqueness = false, bool failClosedIdentity = false, Models.ClaudeProfile decidedClaudeProfile = null, string inheritedClaudeProfileName = null, Action<string> onClaudeProfileRefused = null, string resumeSessionId = null, bool pinWorkingDirectory = false, string launchKind = null, bool yieldFocusToTyping = false, string subagentModel = null)
         {
             _debugLogService?.Trace("AddNewTerminal", "===== START =====");
 
@@ -4690,7 +4695,7 @@ namespace MultiTerminal
 
                 if (claudeProfileRefusal == null)
                 {
-                    doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, claudeProfile: claudeProfile, resumeSessionId: resumeSessionId, launchKind: launchKind);
+                    doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, claudeProfile: claudeProfile, resumeSessionId: resumeSessionId, launchKind: launchKind, subagentModel: subagentModel);
                     _debugLogService?.Trace("AddNewTerminal", "doc.StartTerminal returned");
                 }
                 else
@@ -5018,9 +5023,12 @@ namespace MultiTerminal
                 // ~/.codex/config.toml + writes the launcher scaffolding as a side-effect.
                 // A resume starts in the session's own last cwd (the flags depend on it) with
                 // --resume <id>; the command builder validates the id as a GUID.
+                // The model is the configured one for a resume too (Owner decision 2026-11-03): a resumed session
+                // would otherwise keep the model stored in its transcript.
+                var projectModel = DecideLaunchClaudeModel(ClaudeModelRole.ProjectPane, project.Id, null, null, $"project '{project.Name}'");
                 var launchCmd = resumeSession == null
-                    ? Services.LaunchCommandBuilder.BuildCommand(kind, project)
-                    : Services.LaunchCommandBuilder.BuildCommand(kind, project, resumeCwd, resumeSession.Entry.SessionId);
+                    ? Services.LaunchCommandBuilder.BuildCommand(kind, project, model: projectModel.Model)
+                    : Services.LaunchCommandBuilder.BuildCommand(kind, project, resumeCwd, resumeSession.Entry.SessionId, projectModel.Model);
 
                 // Bootstrap gate — see HandleBootstrapErrorIfAny for rationale.
                 if (HandleBootstrapErrorIfAny(launchCmd, onBeforeDialog: () => doc.ShowStartScreen()))
@@ -5190,7 +5198,8 @@ namespace MultiTerminal
                 _debugLogService?.Trace("StartScreen", $"Launching project '{project.Name}' in {launchDir}{(resumeSession == null ? string.Empty : $" resuming session {resumeSession.Entry.SessionId}")}");
                 _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] Calling doc.StartTerminal: doc.DocId='{doc.DocId}' launchDir='{launchDir}' terminalName='{terminalName}' projectId='{project.Id}' projectName='{project.Name}' isTeamLead={isTeamLead} taskWorktreePath='{taskWorktreePath ?? "null"}'");
                 doc.StartTerminal(launchDir, terminalName, autoRunCommand, projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile, taskWorktreePath: taskWorktreePath, claudeProfile: claudeProfile,
-                    resumeSessionId: resumeSession?.Entry.SessionId, launchKind: Services.PaneLaunchKind.From(kind));
+                    resumeSessionId: resumeSession?.Entry.SessionId, launchKind: Services.PaneLaunchKind.From(kind),
+                    subagentModel: kind == TerminalKind.ClaudeCode ? projectModel.SubagentModel : null);
                 _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] After StartTerminal: doc.CustomTitle='{doc.CustomTitle}' doc.TabText='{doc.TabText}' doc.Text='{doc.Text}'");
 
                 doc.Activate();
@@ -5583,7 +5592,9 @@ namespace MultiTerminal
                         continue;
                     }
 
-                    var launchCmd = Services.LaunchCommandBuilder.BuildCommand(TerminalKind.ClaudeCode, project, check.Cwd, entry.SessionId);
+                    // A helper resumed with its PM is a helper: the helper branch of the decision, not the PM's.
+                    var resumeModel = DecideLaunchClaudeModel(ClaudeModelRole.Helper, project.Id, null, null, $"resumed helper '{helperName}'");
+                    var launchCmd = Services.LaunchCommandBuilder.BuildCommand(TerminalKind.ClaudeCode, project, check.Cwd, entry.SessionId, resumeModel.Model);
                     if (!string.IsNullOrEmpty(launchCmd.BootstrapError))
                     {
                         report.AddSkipped(helperName, $"its launch command could not be built ({launchCmd.BootstrapError.TrimEnd('.')})");
@@ -5611,7 +5622,8 @@ namespace MultiTerminal
                         resumeSessionId: entry.SessionId,
                         pinWorkingDirectory: true,
                         launchKind: Services.PaneLaunchKind.Claude,
-                        yieldFocusToTyping: true);
+                        yieldFocusToTyping: true,
+                        subagentModel: resumeModel.SubagentModel);
 
                     if (profileRefusal != null)
                     {
@@ -6242,8 +6254,11 @@ namespace MultiTerminal
 
                 // Always a quiet start (Owner request 2026-10-04): a plain Claude session opens at an idle
                 // prompt, with no session-start menu, for the default and for a named agent alike.
-                doc.StartTerminal(workingDir, terminalName, launch.AutoRunCommand, isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath, claudeProfile: claudeProfile,
-                    launchKind: Services.PaneLaunchKind.Claude, launchQuietStart: true);
+                // The command was built before the folder was known, so the model (a project's own, when the folder
+                // belongs to one) is added now, in the place the builder would have put it.
+                var justClaudeModel = DecideLaunchClaudeModel(ClaudeModelRole.ProjectPane, null, workingDir, null, $"Claude in '{workingDir}'");
+                doc.StartTerminal(workingDir, terminalName, Services.LaunchCommandBuilder.WithModel(launch.AutoRunCommand, justClaudeModel.Model), isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath, claudeProfile: claudeProfile,
+                    launchKind: Services.PaneLaunchKind.Claude, launchQuietStart: true, subagentModel: justClaudeModel.SubagentModel);
 
                 doc.Activate();
                 doc.FocusTerminal();
@@ -6340,7 +6355,8 @@ namespace MultiTerminal
 
                 // Build launch command for the project's default terminal (Claude Code or Codex)
                 var terminalKind = Models.TerminalKindHelper.ParseOrDefault(project.DefaultTerminal);
-                var launchCmd = Services.LaunchCommandBuilder.BuildCommand(terminalKind, project);
+                var newProjectModel = DecideLaunchClaudeModel(ClaudeModelRole.ProjectPane, project.Id, null, null, $"new project '{project.Name}'");
+                var launchCmd = Services.LaunchCommandBuilder.BuildCommand(terminalKind, project, model: newProjectModel.Model);
 
                 // Bootstrap gate — tail message tweaked because the project was created
                 // but no terminal started, so the user can retry from the project card.
@@ -6456,7 +6472,8 @@ namespace MultiTerminal
                 sourceDoc.StartTerminal(launchDir, terminalName, autoRunCommand,
                     projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile2, taskWorktreePath: taskWorktreePath2,
                     claudeProfile: claudeProfile2, launchKind: Services.PaneLaunchKind.From(terminalKind),
-                    launchQuietStart: NewProjectLaunch.IsQuietStart(terminalKind));
+                    launchQuietStart: NewProjectLaunch.IsQuietStart(terminalKind),
+                    subagentModel: terminalKind == TerminalKind.ClaudeCode ? newProjectModel.SubagentModel : null);
 
                 sourceDoc.Activate();
                 sourceDoc.FocusTerminal();
@@ -6849,6 +6866,40 @@ namespace MultiTerminal
             else
                 _debugLogService?.Warning("ClaudeProfile", $"LAUNCH REFUSED. {decision.Refusal}");
 
+            return decision;
+        }
+
+        /// <summary>
+        /// THE decision of which model a Claude launch uses (ticket b0d2f090). Every launch site asks here and
+        /// none reads the settings itself; the rules are <see cref="ClaudeModelLaunchPolicy"/>'s. The project
+        /// row is read fresh from the database, so a change in the project settings form applies at the next
+        /// launch. A project is looked up by <paramref name="projectId"/>, else discovered from
+        /// <paramref name="folder"/>; no project means the global settings alone. Never throws: a lookup that
+        /// fails is logged and decided without a project.
+        /// </summary>
+        /// <param name="role">Project pane or helper. A helper resumed with its PM is a helper.</param>
+        /// <param name="requestedModel">spawn_helper's model, or null.</param>
+        private ClaudeModelDecision DecideLaunchClaudeModel(ClaudeModelRole role, string projectId, string folder, string requestedModel, string launchLabel)
+        {
+            string projectModel = null, projectHelperModel = null;
+            try
+            {
+                if (string.IsNullOrWhiteSpace(projectId) && !string.IsNullOrWhiteSpace(folder))
+                    projectId = _projectService?.DiscoverProject(folder)?.Id;
+
+                var row = string.IsNullOrWhiteSpace(projectId) ? null : _sharedProjectDatabase?.GetRichProject(projectId);
+                projectModel = row?.ClaudeModel;
+                projectHelperModel = row?.ClaudeHelperModel;
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Warning("ClaudeModel", $"{launchLabel}: project model lookup failed, using the global settings: {ex.Message}");
+            }
+
+            var decision = ClaudeModelLaunchPolicy.Decide(role, requestedModel, projectModel, projectHelperModel, _settings?.GetClaudeModelSettings());
+            if (decision.Problem != null)
+                _debugLogService?.Warning("ClaudeModel", $"{launchLabel}: {decision.Problem}");
+            _debugLogService?.Info("ClaudeModel", $"{launchLabel}: {role} model '{decision.Model ?? "(Claude Code default)"}' (from {decision.Source}), subagent model '{decision.SubagentModel ?? "(none)"}'.");
             return decision;
         }
 
@@ -8307,7 +8358,9 @@ namespace MultiTerminal
             // No --resume: this starts a fresh session under the new name. Resuming a past session is the
             // project launch prompt's job (task ec2ed636, TryChooseLaunchSession), which knows the session's
             // own cwd; this path keeps the pane's cwd and could not find a session recorded elsewhere.
-            string autoRunCommand = LaunchCommandBuilder.BuildClaudeCommand(null, workingDirectory).AutoRunCommand;
+            // A project pane when the folder belongs to a project, else the global project model.
+            var launchAsModel = DecideLaunchClaudeModel(ClaudeModelRole.ProjectPane, null, workingDirectory, null, launchAsLabel);
+            string autoRunCommand = LaunchCommandBuilder.BuildClaudeCommand(null, workingDirectory, model: launchAsModel.Model).AutoRunCommand;
 
             // Quiet start (GitHub #34, pipeline run 1): "Launch as..." is not a project launch, so it passes
             // no projectId (that would also set MULTITERMINAL_PROJECT_PM and the "(PM)" badge, which this
@@ -8319,7 +8372,8 @@ namespace MultiTerminal
             doc.Terminal.Stop();
             doc.CustomTitle = terminalName;
             doc.StartTerminal(workingDirectory, terminalName, autoRunCommand, taskWorktreePath: taskWorktreePath,
-                quietStartProjectId: quietStartProjectId, claudeProfile: claudeProfile, launchKind: Services.PaneLaunchKind.Claude);
+                quietStartProjectId: quietStartProjectId, claudeProfile: claudeProfile, launchKind: Services.PaneLaunchKind.Claude,
+                subagentModel: launchAsModel.SubagentModel);
 
             // Auto-initialization is handled by OnClaudeCodeDetected when Claude Code's output is detected.
             // This ensures injection happens AFTER Claude Code is ready, not just after WebView2 loads.

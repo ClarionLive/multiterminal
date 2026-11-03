@@ -105,6 +105,8 @@ namespace MultiTerminal.Services
         /// <param name="extraArgs">Optional additional CLI arguments (e.g. --bare, --disallowedTools).</param>
         /// <param name="environmentVars">Optional environment variables to set on the spawned process.</param>
         /// <param name="claudeProfile">The Claude Code config profile to run under (ticket c8ee0eec), already resolved with <see cref="ClaudeProfileResolver"/>. Null means Default.</param>
+        /// <param name="model">The model for <c>--model</c> (ticket b0d2f090), decided by <see cref="ClaudeModelLaunchPolicy"/>; null adds no flag. A name the allow-pattern rejects throws before any process exists, because the argument line goes through cmd.exe.</param>
+        /// <param name="subagentModel">The value for CLAUDE_CODE_SUBAGENT_MODEL (ticket b0d2f090); null sets none. The gloss writer passes neither, so it stays on its own <c>--model haiku</c>.</param>
         public async Task SpawnAsync(
             string prompt = null,
             string workingDir = null,
@@ -113,10 +115,15 @@ namespace MultiTerminal.Services
             string permissionMode = "bypassPermissions",
             string[] extraArgs = null,
             Dictionary<string, string> environmentVars = null,
-            ClaudeProfile claudeProfile = null)
+            ClaudeProfile claudeProfile = null,
+            string model = null,
+            string subagentModel = null)
         {
             if (_process != null)
                 throw new InvalidOperationException("AgentProcess is already running. Call StopAsync() first.");
+
+            if (model != null && !ClaudeModelLaunchPolicy.IsValidModelName(model))
+                throw new ArgumentException($"Model name is not valid for a command line: '{model}'.", nameof(model));
 
             _cts = new CancellationTokenSource();
 
@@ -144,6 +151,12 @@ namespace MultiTerminal.Services
                 // Count the resumed session as held from spawn, not from the first stream
                 // message, so the launch prompt never offers it in between (task ec2ed636).
                 SessionId ??= sessionId;
+            }
+
+            if (model != null)
+            {
+                args.Add("--model");
+                args.Add(model);
             }
 
             if (!string.IsNullOrEmpty(permissionMode))
@@ -184,7 +197,7 @@ namespace MultiTerminal.Services
 
             // Custom variables (e.g. MULTITERMINAL_NAME for channel identity), then the Claude profile.
             // Throws for a profile with no absolute folder, before any process exists.
-            ApplyEnvironment(psi.Environment, environmentVars, ClaudeProfileResolver.GetEnvironment(claudeProfile));
+            ApplyEnvironment(psi.Environment, environmentVars, ClaudeProfileResolver.GetEnvironment(claudeProfile), subagentModel);
 
             _process = new Process { StartInfo = psi, EnableRaisingEvents = true };
             _process.Exited += OnProcessExited;
@@ -214,7 +227,8 @@ namespace MultiTerminal.Services
         internal static void ApplyEnvironment(
             IDictionary<string, string> environment,
             IEnumerable<KeyValuePair<string, string>> environmentVars,
-            IEnumerable<KeyValuePair<string, string>> profileEnvironment)
+            IEnumerable<KeyValuePair<string, string>> profileEnvironment,
+            string subagentModel = null)
         {
             if (environmentVars != null)
             {
@@ -232,7 +246,15 @@ namespace MultiTerminal.Services
                         environment[kvp.Key] = kvp.Value;
                 }
             }
+
+            // The model subagents use when they name none (ticket b0d2f090). Applied last, like the profile,
+            // so a caller's variables cannot move it; a name the allow-pattern rejects sets nothing.
+            if (ClaudeModelLaunchPolicy.IsValidModelName(subagentModel))
+                environment[SubagentModelVariable] = subagentModel;
         }
+
+        /// <summary>The environment variable Claude Code reads for the model of subagents that name none.</summary>
+        internal const string SubagentModelVariable = "CLAUDE_CODE_SUBAGENT_MODEL";
 
         /// <summary>
         /// Send a user message to the Claude process via stdin.
