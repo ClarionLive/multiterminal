@@ -82,7 +82,8 @@ namespace MultiTerminal.Terminal
         ///
         /// <para><paramref name="launchQuietStart"/> is a launch that is quiet whatever its project says:
         /// "Just Claude", which has no project to carry the setting (Owner request 2026-10-04, ticket
-        /// ae3d0193). The helper rule still wins.</para>
+        /// ae3d0193), and the Claude pane New Project opens, which MT types /new-project into
+        /// (GitHub #91, <c>Services.NewProjectLaunch</c>). The helper rule still wins.</para>
         /// </summary>
         internal static bool IsQuietStart(bool projectQuietStart, string spawnerName, bool launchQuietStart = false) =>
             (projectQuietStart || launchQuietStart) && Resolve(null, spawnerName) != TerminalRole.Helper;
