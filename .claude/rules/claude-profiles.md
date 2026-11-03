@@ -133,6 +133,8 @@ of the machine (`SettingsService`, key `ClaudeProfiles`); a project stores a pro
    and the FOLDER's profile is used, but only if that pane runs under the same profile
    (`SessionContextWriter.SameContextRoot`); otherwise nothing is written.
 
+   The resume session catalog (launch dialog, Continue last, helper resume, startup restore) is the project-row case (GitHub #97): `MainForm.CreateSessionCatalog(project, out refusal)` asks `ForProject(project.Id, null, ..., out reason)`, the launch's own decision, and a null root is no catalog plus the reason, never Default. See launch-session-choice.md.
+
    Still path-only, because no pane exists to ask: the startup session sync and crash-recovery
    indexing and the periodic sync (MainForm, over registered projects); `SessionSyncService` and `SessionDiscovery` (a project path, or every root);
    `SessionLineageService.GetUnsummarizedSessions`; `SessionMemoryDatabase.FindUnindexedSessions`;

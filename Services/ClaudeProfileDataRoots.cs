@@ -15,6 +15,12 @@ namespace MultiTerminal.Services
     }
 
     /// <summary>
+    /// The outcome of <see cref="ClaudeProfileDataRoots.SessionRootForProject"/>. Exactly one of
+    /// <c>Refusal</c> (a clause saying why the profile cannot be used) and <c>Root</c> is set.
+    /// </summary>
+    internal sealed record ClaudeProjectSessionRoot(ClaudeDataRoot Root, bool FolderExists, string Refusal);
+
+    /// <summary>
     /// The Claude profile of a PANE, as a session-data reader or writer is told it. A null reference
     /// means "there is no pane" (the caller then decides by folder); an instance means there IS one,
     /// and its profile is the only one that pane's data may be read from or written to.
@@ -183,28 +189,71 @@ namespace MultiTerminal.Services
             return ToRoot(resolution.Profile, ctx);
         }
 
-        internal static ClaudeDataRoot ForProject(string projectId, string folder, ClaudeProfileLookup lookup, ClaudeProfileContext ctx)
+        internal static ClaudeDataRoot ForProject(string projectId, string folder, ClaudeProfileLookup lookup, ClaudeProfileContext ctx) =>
+            ForProject(projectId, folder, lookup, ctx, out _);
+
+        /// <summary>
+        /// As the overload above, and when the answer is null, <paramref name="reason"/> says why (null on
+        /// success). Both a refusal and a decided profile whose folder is absent give null here; a caller
+        /// that must tell them apart (the resume catalog) uses <see cref="SessionRootForProject"/>.
+        /// </summary>
+        internal static ClaudeDataRoot ForProject(string projectId, string folder, ClaudeProfileLookup lookup, ClaudeProfileContext ctx, out string reason)
         {
-            if (string.IsNullOrWhiteSpace(folder) && string.IsNullOrWhiteSpace(projectId))
+            var result = SessionRootForProject(projectId, folder, lookup, ctx);
+            reason = result.Refusal;
+            if (result.Refusal != null)
                 return null;
 
-            if (lookup == null)
+            if (!result.FolderExists)
             {
-                WarnOnce("Session data skipped: the project registry is not available yet, so the Claude profile of a folder cannot be decided.");
+                reason = $"the folder of the Claude profile '{result.Root.ProfileName}' does not exist on this machine";
+                WarnOnce($"Claude profile '{result.Root.ProfileName}': folder '{result.Root.ConfigDir}' does not exist; its session data is skipped.");
                 return null;
             }
+
+            return result.Root;
+        }
+
+        /// <summary>
+        /// Ticket c4bf09ca (GitHub #97): the profile folder for a PROJECT's sessions, with a refusal told
+        /// apart from "decided, but nothing there yet". The profile is the launch's own decision
+        /// (<see cref="ClaudeProfileLaunchPolicy.Decide"/>). Either
+        /// <list type="bullet">
+        ///   <item>it is refused (no project or folder, no registry, profile not configured, its folder
+        ///   missing where <see cref="ClaudeProfileResolver.Resolve(string, string, ClaudeProfileContext)"/> refuses that, owners disagree):
+        ///   <c>Refusal</c> is the cause as a clause with no trailing full stop, <c>Root</c> is null; or</item>
+        ///   <item>it is decided: <c>Root</c> is its folder and <c>FolderExists</c> says whether the folder
+        ///   is there. Absent is reachable for the Default profile on a machine where Claude Code has never
+        ///   run: that is "no history", not a refusal. Nothing is created.</item>
+        /// </list>
+        /// Never falls back to Default. A refusal is logged once (<see cref="WarnOnce"/>).
+        /// </summary>
+        internal static ClaudeProjectSessionRoot SessionRootForProject(string projectId, string folder, ClaudeProfileLookup lookup, ClaudeProfileContext ctx)
+        {
+            if (string.IsNullOrWhiteSpace(folder) && string.IsNullOrWhiteSpace(projectId))
+                return Refused("there is no project or folder to take a Claude profile from");
+
+            if (lookup == null)
+                return Refused("the project registry is not available yet, so the Claude profile of the project cannot be decided");
 
             var decision = ClaudeProfileLaunchPolicy.Decide(
                 projectId, folder, null, $"session data for '{folder ?? projectId}'", lookup,
                 name => ClaudeProfileResolver.Resolve(name, null, ctx));
 
             if (!decision.CanLaunch)
-            {
-                WarnOnce($"Session data skipped. {decision.Refusal}");
-                return null;
-            }
+                return Refused((decision.Cause ?? decision.Refusal).Trim().TrimEnd('.'));
 
-            return ToRoot(decision.Profile, ctx);
+            string dir = ClaudeProfileResolver.GetConfigDir(decision.Profile, ctx);
+            if (dir == null)
+                return Refused($"the Claude profile '{decision.Profile.Name}' has no usable folder");
+
+            return new ClaudeProjectSessionRoot(new ClaudeDataRoot(decision.Profile.Name, dir), Exists(ctx, dir), null);
+        }
+
+        private static ClaudeProjectSessionRoot Refused(string cause)
+        {
+            WarnOnce("Session data skipped: " + cause + ".");
+            return new ClaudeProjectSessionRoot(null, false, cause);
         }
 
         internal static ClaudeDataRoot ForPaneOrFolder(ClaudePaneProfile pane, string folder, ClaudeProfileLookup lookup, ClaudeProfileContext ctx)

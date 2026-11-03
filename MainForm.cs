@@ -5481,7 +5481,11 @@ namespace MultiTerminal
                 if (projectRoot == null)
                     return new LaunchSessionChoiceModel(null, panes);
 
-                var catalog = CreateSessionCatalog();
+                // GitHub #97: the sessions offered are the ones under the project's own Claude profile. A
+                // profile that cannot be honoured is a load failure the user is told about, never Default's list.
+                var catalog = CreateSessionCatalog(project, out string catalogRefusal);
+                if (catalog == null)
+                    return LaunchSessionChoiceModel.ForLoadFailure(panes, catalogRefusal); // logged once by ClaudeProfileDataRoots
                 var entries = catalog.List(projectRoot, LaunchSessionChoiceModel.LiveSessionIdsOf(panes), DateTime.UtcNow);
 
                 // Task 7d20e94c: which helpers each offered session left open, from the launch record.
@@ -5512,13 +5516,29 @@ namespace MultiTerminal
         /// The session catalog the launch prompt and the helper resume read (task ec2ed636; shared since
         /// 7d20e94c). Agent names come from session_agent_map (one snapshot query), summaries from
         /// session_lineage.
+        ///
+        /// <para>GitHub #97 (ticket c4bf09ca): the transcripts are read from the project's own Claude
+        /// profile, <c>ClaudeProfileDataRoots.ForProject(project.Id, null)</c> + "projects". That is the
+        /// decision the launch makes for the same project (<c>TryGetLaunchClaudeProfile(project.Id, null)</c>
+        /// and, for a resumed helper, <c>DecideLaunchClaudeProfile(project.Id, cwd, ...)</c>: in both the
+        /// project row decides), so the session offered is one that profile can resume. When the profile
+        /// cannot be honoured the result is null with <paramref name="refusal"/> saying why: never the
+        /// Default profile's folder. The profile decision is read here, before any name is registered.</para>
         /// </summary>
-        private SessionCatalog CreateSessionCatalog()
+        private SessionCatalog CreateSessionCatalog(Models.Project project, out string refusal)
         {
+            // A refusal is no catalog. A decided profile whose folder is not there yet (Default on a machine
+            // where Claude Code has never run) is an empty catalog: no history, a silent new session, and
+            // nothing is created. The path is the data-roots code's, not built here.
+            var root = ClaudeProfileDataRoots.SessionRootForProject(project?.Id, null, ClaudeProfileProjectLookup.Current(), ClaudeProfileResolver.CurrentContext());
+            refusal = root.Refusal;
+            if (root.Root == null)
+                return null;
+
             var taskDb = _mcpServer?.Broker?.TaskDb;
             var agentMap = taskDb?.GetAllSessionAgentNames();
             return new SessionCatalog(
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "projects"),
+                root.Root.ProjectsDir,
                 sid => agentMap != null && agentMap.TryGetValue(sid, out var agent) ? agent : null,
                 sid => taskDb?.GetSessionById(sid)?.Summary);
         }
@@ -5566,9 +5586,10 @@ namespace MultiTerminal
             string projectRoot = GetLaunchableProjectRoot(project);
             uint? inputTickAtStart = Services.OwnerInputClock.LastInputTick();
             SessionCatalog catalog = null;
+            string catalogRefusal = null;
             try
             {
-                catalog = projectRoot == null ? null : CreateSessionCatalog();
+                catalog = projectRoot == null ? null : CreateSessionCatalog(project, out catalogRefusal);
             }
             catch (Exception ex)
             {
@@ -5582,7 +5603,9 @@ namespace MultiTerminal
                 {
                     if (catalog == null)
                     {
-                        report.AddSkipped(helperName, "the project's session history could not be read");
+                        report.AddSkipped(helperName, catalogRefusal != null
+                            ? $"the project's session history could not be read ({catalogRefusal})"
+                            : "the project's session history could not be read");
                         continue;
                     }
 
@@ -5899,7 +5922,12 @@ namespace MultiTerminal
                 }
 
                 var live = CollectLiveSessionStates(null);
-                var catalog = CreateSessionCatalog();
+                var catalog = CreateSessionCatalog(project, out string catalogRefusal);
+                if (catalog == null)
+                {
+                    skipped.Add($"{display}: its project's session history could not be read ({catalogRefusal})"); // logged once by ClaudeProfileDataRoots
+                    return false;
+                }
                 var entry = catalog.TryGetEntry(projectRoot, pm.Pane.SessionId, LaunchSessionChoiceModel.LiveSessionIdsOf(live), DateTime.UtcNow);
                 var check = HelperResume.Check(
                     ToOpenHelper(pm.Pane), entry, live, projectRoot,

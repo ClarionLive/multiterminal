@@ -316,5 +316,139 @@ namespace MultiTerminal.Tests
             var inherited = _ctx with { InheritedConfigDir = _workDir };
             Assert.Equal(Path.Combine(_workDir, ".claude.json"), ClaudeProfileDataRoots.DefaultClaudeJsonPath(inherited));
         }
+
+        // ── GitHub #97 (ticket c4bf09ca): the resume catalog's root is the project's profile ──
+
+        private static string WriteSessionWithCwd(string claudeProjectFolder, string cwd)
+        {
+            string id = Guid.NewGuid().ToString();
+            string path = Path.Combine(claudeProjectFolder, id + ".jsonl");
+            string user = JsonSerializer.Serialize(new
+            {
+                type = "user", uuid = Guid.NewGuid().ToString(), timestamp = "2026-10-10T10:00:00Z", cwd,
+                message = new { role = "user", content = "hello" }
+            });
+            string asst = JsonSerializer.Serialize(new
+            {
+                type = "assistant", uuid = Guid.NewGuid().ToString(), timestamp = "2026-10-10T10:00:05Z", cwd,
+                message = new { role = "assistant", content = new[] { new { type = "text", text = "hi" } } }
+            });
+            File.WriteAllText(path, user + Environment.NewLine + asst + Environment.NewLine);
+            File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddHours(-3));
+            return id;
+        }
+
+        private SessionCatalog CatalogFor(string projectId, out string reason)
+        {
+            var root = ClaudeProfileDataRoots.ForProject(projectId, null, _lookup, _ctx, out reason);
+            return root == null ? null : new SessionCatalog(root.ProjectsDir, null, null);
+        }
+
+        [Fact]
+        public void A_project_on_a_second_profile_lists_only_that_profiles_sessions()
+        {
+            string inWork = WriteSessionWithCwd(MakeClaudeProjectFolder(_workDir, _workProject), _workProject);
+            string onlyDefault = WriteSessionWithCwd(MakeClaudeProjectFolder(_defaultDir, _workProject), _workProject);
+
+            var catalog = CatalogFor("p-work", out string reason);
+
+            Assert.Null(reason);
+            Assert.NotNull(catalog);
+            var ids = catalog.List(_workProject, new System.Collections.Generic.HashSet<string>(), DateTime.UtcNow).Select(e => e.SessionId).ToList();
+            Assert.Equal(new[] { inWork }, ids);
+            Assert.DoesNotContain(onlyDefault, ids);
+            Assert.Null(catalog.TryGetEntry(_workProject, onlyDefault, new System.Collections.Generic.HashSet<string>(), DateTime.UtcNow));
+        }
+
+        [Fact]
+        public void A_project_whose_profile_cannot_be_used_gets_no_catalog_and_a_reason_never_Default()
+        {
+            // Default has a session for this very folder; the answer must still be "no catalog".
+            WriteSessionWithCwd(MakeClaudeProjectFolder(_defaultDir, _nopeProject), _nopeProject);
+            WriteSessionWithCwd(MakeClaudeProjectFolder(_defaultDir, _goneProject), _goneProject);
+
+            Assert.Null(CatalogFor("p-nope", out string nopeReason));
+            Assert.False(string.IsNullOrWhiteSpace(nopeReason));
+            Assert.Null(CatalogFor("p-gone", out string goneReason));
+            Assert.False(string.IsNullOrWhiteSpace(goneReason));
+            Assert.Null(ClaudeProfileDataRoots.ForProject("p-work", null, null, _ctx, out string noRegistry));
+            Assert.False(string.IsNullOrWhiteSpace(noRegistry));
+        }
+
+        [Fact]
+        public void A_Default_project_reads_Default_including_an_inherited_config_dir()
+        {
+            string inheritedDir = Path.Combine(_base, "inherited-cfg");
+            Directory.CreateDirectory(Path.Combine(inheritedDir, "projects"));
+            var rows = new[] { new ClaudeProfileProjectRow("p-def", "DefProj", _unownedProject, null, null) };
+            var lookup = new ClaudeProfileLookup(
+                RowById: id => rows.FirstOrDefault(r => r.Id == id),
+                AllRows: () => rows,
+                LoadProjectFile: _ => null,
+                CandidateFolders: ClaudeProfileLaunchPolicy.CandidateFolders);
+
+            var plain = ClaudeProfileDataRoots.ForProject("p-def", null, lookup, _ctx, out _);
+            Assert.Equal(_defaultDir, plain?.ConfigDir);
+
+            var inherited = ClaudeProfileDataRoots.ForProject("p-def", null, lookup, _ctx with { InheritedConfigDir = inheritedDir }, out _);
+            Assert.Equal(ClaudeProfileResolver.Canonicalize(inheritedDir), inherited?.ConfigDir);
+            Assert.Equal(Path.Combine(inherited.ConfigDir, "projects"), inherited.ProjectsDir);
+        }
+
+        // ── Item 3/4 of c4bf09ca: absent folder is "no history", a refusal is a refusal ──
+
+        [Fact]
+        public void A_Default_project_whose_folder_does_not_exist_yet_lists_nothing_without_a_refusal_and_creates_nothing()
+        {
+            string home = Path.Combine(_base, "fresh-home");
+            Directory.CreateDirectory(home);
+            string missing = Path.Combine(home, ".claude");
+            var ctx = new ClaudeProfileContext(Array.Empty<ClaudeProfile>(), null, home, Directory.Exists);
+            var rows = new[] { new ClaudeProfileProjectRow("p-fresh", "Fresh", _unownedProject, null, null) };
+            var lookup = new ClaudeProfileLookup(
+                RowById: id => rows.FirstOrDefault(r => r.Id == id),
+                AllRows: () => rows,
+                LoadProjectFile: _ => null,
+                CandidateFolders: ClaudeProfileLaunchPolicy.CandidateFolders);
+
+            var result = ClaudeProfileDataRoots.SessionRootForProject("p-fresh", null, lookup, ctx);
+
+            Assert.Null(result.Refusal);
+            Assert.False(result.FolderExists);
+            Assert.Equal(missing, result.Root.ConfigDir);
+            var catalog = new SessionCatalog(result.Root.ProjectsDir, null, null);
+            Assert.Empty(catalog.List(_unownedProject, new System.Collections.Generic.HashSet<string>(), DateTime.UtcNow));
+            Assert.Null(catalog.TryGetEntry(_unownedProject, Guid.NewGuid().ToString(), new System.Collections.Generic.HashSet<string>(), DateTime.UtcNow));
+            Assert.False(Directory.Exists(missing));
+        }
+
+        [Fact]
+        public void A_refusal_has_a_cause_clause_without_the_launch_label_and_no_root()
+        {
+            // Named profile not configured, and one whose folder is missing: both are refusals (Resolve
+            // refuses a named profile's missing folder, so that case never reaches the absent-folder path).
+            foreach (string id in new[] { "p-nope", "p-gone" })
+            {
+                var r = ClaudeProfileDataRoots.SessionRootForProject(id, null, _lookup, _ctx);
+                Assert.Null(r.Root);
+                Assert.False(string.IsNullOrWhiteSpace(r.Refusal));
+                Assert.DoesNotContain("Not started", r.Refusal);
+                Assert.DoesNotContain("session data for", r.Refusal);
+                Assert.False(r.Refusal.EndsWith('.'));
+            }
+
+            var noRegistry = ClaudeProfileDataRoots.SessionRootForProject("p-work", null, null, _ctx);
+            Assert.Null(noRegistry.Root);
+            Assert.False(string.IsNullOrWhiteSpace(noRegistry.Refusal));
+        }
+
+        [Fact]
+        public void The_launch_refusal_text_is_unchanged_and_its_cause_is_the_same_decision()
+        {
+            var d = ClaudeProfileLaunchPolicy.Decide("p-nope", null, null, "project 'NopeProj'", _lookup, n => ClaudeProfileResolver.Resolve(n, null, _ctx));
+            Assert.False(d.CanLaunch);
+            Assert.StartsWith("Not started: project 'NopeProj'.", d.Refusal);
+            Assert.Contains(d.Cause, d.Refusal);
+        }
     }
 }
