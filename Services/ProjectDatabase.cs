@@ -210,7 +210,11 @@ namespace MultiTerminal.Services
                 // project starts calling GitHub. SQLite-only, like launch_mode.
                 ("github_watch_mode",     "TEXT"),
                 ("github_check_on_start", "INTEGER"),
-                ("github_check_interval", "TEXT")
+                ("github_check_interval", "TEXT"),
+                // Per-project Claude model (ticket b0d2f090). No DEFAULT: NULL = use the global setting
+                // (Settings > General), so every existing project keeps the machine-wide choice.
+                ("claude_model",          "TEXT"),
+                ("claude_helper_model",   "TEXT")
             };
 
             foreach (var (colName, colDef) in newColumns)
@@ -508,7 +512,8 @@ namespace MultiTerminal.Services
             "change_log", "icon", "icon_color", "git_repo_url", "git_default_branch", "git_auto_commit",
             "is_pinned", "status", "created_by", "last_opened_at", "team_lead", "default_terminal",
             "source_control_account_id", "quiet_start", "claude_profile",
-            "github_watch_mode", "github_check_on_start", "github_check_interval"
+            "github_watch_mode", "github_check_on_start", "github_check_interval",
+            "claude_model", "claude_helper_model"
         };
 
         // Map camelCase JS field names to snake_case SQLite column names.
@@ -531,6 +536,8 @@ namespace MultiTerminal.Services
             ["gitHubWatchMode"] = "github_watch_mode",
             ["gitHubCheckOnStart"] = "github_check_on_start",
             ["gitHubCheckInterval"] = "github_check_interval",
+            ["claudeModel"] = "claude_model",
+            ["claudeHelperModel"] = "claude_helper_model",
         };
 
         // Fields that map to INTEGER 0/1 booleans in the database.
@@ -802,7 +809,8 @@ namespace MultiTerminal.Services
                            icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
                            team_lead, default_terminal, source_control_account_id, status, quiet_start,
                            claude_profile, launch_mode,
-                           github_watch_mode, github_check_on_start, github_check_interval
+                           github_watch_mode, github_check_on_start, github_check_interval,
+                           claude_model, claude_helper_model
                     FROM projects
                     WHERE id = @id
                 ";
@@ -836,7 +844,8 @@ namespace MultiTerminal.Services
                            icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
                            team_lead, default_terminal, source_control_account_id, status, quiet_start,
                            claude_profile, launch_mode,
-                           github_watch_mode, github_check_on_start, github_check_interval
+                           github_watch_mode, github_check_on_start, github_check_interval,
+                           claude_model, claude_helper_model
                     FROM projects
                     ORDER BY is_pinned DESC, created_at DESC
                 ";
@@ -1478,7 +1487,9 @@ namespace MultiTerminal.Services
                     reader.IsDBNull(30) ? null : reader.GetString(30)),
                 GitHubCheckOnStart = !reader.IsDBNull(31) && reader.GetInt32(31) == 1,
                 GitHubCheckInterval = MultiTerminal.Models.GitHubWatchSettings.ParseInterval(
-                    reader.IsDBNull(32) ? null : reader.GetString(32))
+                    reader.IsDBNull(32) ? null : reader.GetString(32)),
+                ClaudeModel = reader.IsDBNull(33) ? null : reader.GetString(33),
+                ClaudeHelperModel = reader.IsDBNull(34) ? null : reader.GetString(34)
             };
         }
 
