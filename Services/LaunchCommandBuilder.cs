@@ -33,11 +33,19 @@ namespace MultiTerminal.Services
         /// Claude Code session id to resume (<c>--resume &lt;id&gt;</c>), or null/whitespace for a fresh
         /// session. Must be a GUID; anything else throws <see cref="ArgumentException"/> (task ec2ed636).
         /// </param>
+        /// <param name="model">
+        /// The model for <c>--model</c> (ticket b0d2f090), already decided by <see cref="ClaudeModelLaunchPolicy"/>,
+        /// or null for no flag, which gives exactly the command this method built before the parameter existed.
+        /// The name goes onto a PowerShell command line, so a name the policy's allow-pattern rejects throws
+        /// <see cref="ArgumentException"/> rather than being quoted: the decision never hands one over, so reaching
+        /// the throw is a caller bug. A resume with a model overrides the model stored in the session's transcript.
+        /// </param>
         /// <returns>LaunchCommand with WorkingDirectory and AutoRunCommand ready for ConPtyTerminal.Start().</returns>
-        public static LaunchCommand BuildClaudeCommand(Models.Project project, string workingDirectory = null, string resumeSessionId = null)
+        public static LaunchCommand BuildClaudeCommand(Models.Project project, string workingDirectory = null, string resumeSessionId = null, string model = null)
         {
             // Validate first: a bad id must fail before BuildFlags writes the settings file.
             string resumeId = NormalizeResumeSessionId(resumeSessionId);
+            string modelFlag = FormatModelFlag(model);
 
             string workingDir = workingDirectory ?? ResolveWorkingDirectory(project);
 
@@ -48,7 +56,7 @@ namespace MultiTerminal.Services
             // which ConPtyTerminal.ApplySessionName needs to splice `-n '<name>'` in after.
             string resumeFlag = resumeId == null ? string.Empty : $" --resume {resumeId}";
 
-            string autoRunCommand = $"claude{flags}{resumeFlag} --dangerously-skip-permissions; exit";
+            string autoRunCommand = $"claude{flags}{modelFlag}{resumeFlag} --dangerously-skip-permissions; exit";
 
             return new LaunchCommand
             {
@@ -56,6 +64,40 @@ namespace MultiTerminal.Services
                 AutoRunCommand = autoRunCommand,
                 ProjectId = project?.Id
             };
+        }
+
+        /// <summary>
+        /// ` --model &lt;name&gt;` (leading space) for a validated model name, or an empty string for null.
+        /// Throws <see cref="ArgumentException"/> for a name <see cref="ClaudeModelLaunchPolicy.IsValidModelName"/>
+        /// rejects, so nothing outside the allow-pattern ever reaches the command line.
+        /// </summary>
+        internal static string FormatModelFlag(string model)
+        {
+            if (string.IsNullOrWhiteSpace(model))
+                return string.Empty;
+            if (!ClaudeModelLaunchPolicy.IsValidModelName(model))
+                throw new ArgumentException($"Model name is not valid for a command line: '{model}'.", nameof(model));
+            return $" --model {model}";
+        }
+
+        /// <summary>
+        /// Adds ` --model &lt;name&gt;` to a command <see cref="BuildClaudeCommand"/> already built, for
+        /// <c>MainForm.OnStartScreenJustClaude</c>, which builds the command before the folder (and so the model)
+        /// is known. The flag lands where <see cref="BuildClaudeCommand"/> puts it: after the flags, before
+        /// <c>--resume</c> and <c>--dangerously-skip-permissions</c>. Null returns the command unchanged.
+        /// </summary>
+        internal static string WithModel(string autoRunCommand, string model)
+        {
+            string modelFlag = FormatModelFlag(model);
+            if (modelFlag.Length == 0 || string.IsNullOrEmpty(autoRunCommand))
+                return autoRunCommand;
+
+            int at = autoRunCommand.IndexOf(" --resume ", StringComparison.Ordinal);
+            if (at < 0)
+                at = autoRunCommand.LastIndexOf(" --dangerously-skip-permissions", StringComparison.Ordinal);
+            if (at < 0)
+                throw new ArgumentException("The command is not a Claude launch built by LaunchCommandBuilder.", nameof(autoRunCommand));
+            return autoRunCommand.Insert(at, modelFlag);
         }
 
         /// <summary>
@@ -278,7 +320,8 @@ namespace MultiTerminal.Services
         /// card split button) should use this instead of calling the per-kind
         /// builder directly.
         /// </summary>
-        public static LaunchCommand BuildCommand(Models.TerminalKind kind, Models.Project project, string workingDirectory = null, string resumeSessionId = null)
+        /// <param name="model">For a Claude launch, the decided model (see <see cref="BuildClaudeCommand"/>); Codex gets no model flag and ignores it.</param>
+        public static LaunchCommand BuildCommand(Models.TerminalKind kind, Models.Project project, string workingDirectory = null, string resumeSessionId = null, string model = null)
         {
             // workingDirectory: explicit cwd for callers that know it (API-driven spawn); null
             // resolves from the project. See BuildClaudeCommand for why this is load-bearing.
@@ -293,7 +336,7 @@ namespace MultiTerminal.Services
                     return BuildCodexCommand(project, workingDirectory);
                 case Models.TerminalKind.ClaudeCode:
                 default:
-                    return BuildClaudeCommand(project, workingDirectory, resumeSessionId);
+                    return BuildClaudeCommand(project, workingDirectory, resumeSessionId, model);
             }
         }
 

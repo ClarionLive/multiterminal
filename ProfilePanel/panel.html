@@ -588,16 +588,6 @@
                     </div>
 
                     <div class="form-group">
-                        <label class="form-label" for="preferredModel">Preferred Model</label>
-                        <select class="form-input" id="preferredModel" name="preferredModel">
-                            <option value="sonnet">Sonnet (default)</option>
-                            <option value="opus">Opus</option>
-                            <option value="haiku">Haiku</option>
-                        </select>
-                        <div class="form-help">Claude model used when spawning this agent</div>
-                    </div>
-
-                    <div class="form-group">
                         <label class="form-label" for="isTeamLead">
                             <input type="checkbox" id="isTeamLead" name="isTeamLead" style="margin-right: 6px;">
                             Team Lead
@@ -824,7 +814,6 @@
             document.getElementById('bio').value = profile.bio || '';
             document.getElementById('skills').value = (profile.skills || []).join(', ');
             document.getElementById('interests').value = (profile.interests || []).join(', ');
-            document.getElementById('preferredModel').value = profile.preferredModel || 'sonnet';
             document.getElementById('isTeamLead').checked = profile.isTeamLead || false;
             document.getElementById('agentInstructions').value = profile.agentInstructions || '';
 
@@ -874,7 +863,6 @@
 
             const skills = skillsText ? skillsText.split(',').map(s => s.trim()).filter(s => s) : [];
             const interests = interestsText ? interestsText.split(',').map(s => s.trim()).filter(s => s) : [];
-            const preferredModel = document.getElementById('preferredModel').value;
             const agentInstructions = document.getElementById('agentInstructions').value.trim();
             const isTeamLead = document.getElementById('isTeamLead').checked;
 
@@ -886,7 +874,6 @@
                 bio: bio || null,
                 skills: skills,
                 interests: interests,
-                preferredModel: preferredModel || 'sonnet',
                 agentInstructions: agentInstructions || null,
                 isTeamLead: isTeamLead
             };

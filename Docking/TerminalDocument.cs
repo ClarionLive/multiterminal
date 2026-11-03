@@ -1575,7 +1575,8 @@ namespace MultiTerminal.Docking
         /// <param name="resumeSessionId">The Claude session this launch resumes (task ec2ed636), reserved for the pane from the first instant; null for a new session.</param>
         /// <param name="launchKind">The <see cref="PaneLaunchKind"/> of this launch, for the launch record, when the caller knows it (pipeline Run 1, task 7d20e94c). Null derives it from <paramref name="autoRunCommand"/>.</param>
         /// <param name="launchQuietStart">Quiet start whatever the project says ("Just Claude", ticket ae3d0193). A helper is still never quiet.</param>
-        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string quietStartProjectId = null, MultiTerminal.Models.ClaudeProfile claudeProfile = null, string resumeSessionId = null, string launchKind = null, bool launchQuietStart = false)
+        /// <param name="subagentModel">The model for CLAUDE_CODE_SUBAGENT_MODEL (ticket b0d2f090), from <see cref="MultiTerminal.Services.ClaudeModelLaunchPolicy"/>; null sets none. Reset on every launch.</param>
+        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string quietStartProjectId = null, MultiTerminal.Models.ClaudeProfile claudeProfile = null, string resumeSessionId = null, string launchKind = null, bool launchQuietStart = false, string subagentModel = null)
         {
             // Per launch, like the role below: a reused pane must not keep the last launch's profile.
             _launchClaudeProfile = new MultiTerminal.Services.ClaudePaneProfile(
@@ -1673,6 +1674,7 @@ namespace MultiTerminal.Docking
                     _debugLogService?.Error("TerminalDocument", $"Quiet start lookup threw for project '{quietProjectId}': {quietEx.Message}");
                 }
             }
+            _terminal.SubagentModel = subagentModel;
             _terminal.QuietStart = MultiTerminal.Terminal.TerminalRoles.IsQuietStart(projectQuietStart, spawnerName, launchQuietStart);
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"quietStart: '{_terminal.QuietStart}' (project setting '{projectQuietStart}', launch '{launchQuietStart}')");
 

@@ -1296,7 +1296,7 @@ curl "http://localhost:5050/api/session-lineage/latest?projectPath=H%3A%5CDevLap
   <div class="endpoint-block">
     <span class="method get">GET</span> <code>/api/team/roster</code>
   </div>
-  <p>Get the team roster for a project, merged with profile data. Returns each agent's name, preferred model, instructions, role, and skills.</p>
+  <p>Get the team roster for a project, merged with profile data. Returns each agent's name, instructions, role, and skills. It carries no model: launches take their model from the project's and MultiTerminal's settings.</p>
   <h4>Query Parameters</h4>
   <table>
     <thead><tr><th>Param</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
@@ -1312,7 +1312,6 @@ curl "http://localhost:5050/api/session-lineage/latest?projectPath=H%3A%5CDevLap
     {
       "name": "Alice",
       "hasProfile": true,
-      "preferredModel": "sonnet",
       "agentInstructions": "Backend systems architect specializing in C# and SQLite",
       "role": "backend",
       "skills": ["database", "api-design", "c-sharp"],

@@ -518,6 +518,54 @@ namespace MultiTerminal.Tests
             Assert.Null(_db.GetGitHubWatchState(p.Id, "o/r").Baseline);        // repo changed: fresh
         }
 
+        /// <summary>Ticket b0d2f090: the two model fields save through UpdateProjectField, blank clears to NULL, and apply at the next launch.</summary>
+        [Fact]
+        public void Model_fields_save_clear_and_apply_at_next_launch()
+        {
+            var p = Seed();
+            Assert.Null(_db.GetRichProject(p.Id).ClaudeModel);
+
+            var set = _service.Save(UpdateFor(p, ("claudeModel", " fable "), ("claudeHelperModel", "default")));
+            Assert.True(set.Success, set.Error);
+            Assert.True(set.AppliesAtNextLaunch);
+            var row = _db.GetRichProject(p.Id);
+            Assert.Equal("fable", row.ClaudeModel);
+            Assert.Equal("default", row.ClaudeHelperModel);
+
+            var cleared = _service.Save(UpdateFor(p, ("claudeModel", ""), ("claudeHelperModel", "  ")));
+            Assert.True(cleared.Success, cleared.Error);
+            row = _db.GetRichProject(p.Id);
+            Assert.Null(row.ClaudeModel);
+            Assert.Null(row.ClaudeHelperModel);
+        }
+
+        [Theory]
+        [InlineData("opus; calc")]
+        [InlineData("a b")]
+        [InlineData("$(calc)")]
+        [InlineData("x'y")]
+        public void A_hostile_model_name_saves_nothing(string name)
+        {
+            var p = Seed();
+            var result = _service.Save(UpdateFor(p, ("buildCommand", "dotnet build"), ("claudeModel", name)));
+
+            Assert.False(result.Success);
+            Assert.Null(_db.GetRichProject(p.Id).ClaudeModel);
+            Assert.NotEqual("dotnet build", _db.GetRichProject(p.Id).BuildCommand);
+        }
+
+        [Fact]
+        public void An_unchanged_stored_invalid_name_does_not_block_an_unrelated_save()
+        {
+            var p = Seed();
+            Assert.True(_db.UpdateProjectField(p.Id, "claudeModel", "bad name"));
+
+            var result = _service.Save(UpdateFor(p, ("claudeModel", "bad name"), ("buildCommand", "dotnet build")));
+
+            Assert.True(result.Success, result.Error);
+            Assert.Equal("dotnet build", _db.GetRichProject(p.Id).BuildCommand);
+        }
+
         // The raw stored launch_mode, so a test can tell the explicit 'ask' SetLaunchMode writes from NULL.
         private string RawLaunchMode(string projectId)
         {

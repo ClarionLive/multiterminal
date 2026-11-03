@@ -58,6 +58,45 @@ namespace MultiTerminal.Tests
             Assert.Equal("dark", doc.RootElement.GetProperty("theme").GetString());
         }
 
+        /// <summary>
+        /// Ticket b0d2f090. The two model dropdowns are fed by the <c>claudeModels</c> option and bound by
+        /// <c>claudeModel</c> / <c>claudeHelperModel</c>; the page, the payload and the service must agree on
+        /// those strings, which no compiler checks. The agents list still CARRIES each agent's stored
+        /// preferredModel (so saving the form does not wipe it) although the page no longer shows it, and the
+        /// agent suggestions no longer offer it.
+        /// </summary>
+        [Fact]
+        public void Model_dropdowns_are_fed_and_the_unused_preferred_model_is_not_shown()
+        {
+            var project = SampleProject();
+            project.ClaudeModel = "claude-opus-4-8";
+            project.ClaudeHelperModel = null;
+            var lists = new ProjectContext();
+            lists.Agents.Add(new ProjectAgent { AgentName = "Bob", Role = "dev", PreferredModel = "haiku" });
+            var options = new ProjectSettingsOptions
+            {
+                AvailableAgents = new[] { ("Bob", "dev", "haiku") },
+            };
+
+            using var doc = JsonDocument.Parse(ProjectSettingsPayload.BuildLoad(project, lists, options, isDark: false));
+            var root = doc.RootElement;
+
+            Assert.Equal("claude-opus-4-8", root.GetProperty("fields").GetProperty("claudeModel").GetString());
+            Assert.Equal("", root.GetProperty("fields").GetProperty("claudeHelperModel").GetString());
+            var values = root.GetProperty("options").GetProperty("claudeModels").EnumerateArray()
+                .Select(o => o.GetProperty("value").GetString()).ToList();
+            Assert.Contains("opus", values);
+            Assert.Contains("default", values);
+
+            Assert.Equal("haiku", root.GetProperty("lists").GetProperty("agents")[0].GetProperty("preferredModel").GetString());
+            Assert.False(root.GetProperty("options").GetProperty("availableAgents")[0].TryGetProperty("preferredModel", out _));
+
+            string page = Page();
+            Assert.Matches(@"data-field=""claudeModel""[^>]*data-options=""claudeModels""", page);
+            Assert.Matches(@"data-field=""claudeHelperModel""[^>]*data-options=""claudeModels""", page);
+            Assert.DoesNotContain("label: 'Model'", page);
+        }
+
         [Fact]
         public void Save_parses_booleans_lists_and_absent_lists()
         {

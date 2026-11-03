@@ -130,6 +130,17 @@ namespace MultiTerminal.API.Controllers
                     statusCode: 400);
             }
 
+            // The model the spawner asked for (ticket b0d2f090). It becomes a command-line argument, so a name
+            // the allow-pattern rejects is refused here, before anything is created. MainForm checks again.
+            string requestedModel = ClaudeModelLaunchPolicy.Normalize(request.Model);
+            if (requestedModel != null && !ClaudeModelLaunchPolicy.IsDefaultToken(requestedModel)
+                && !ClaudeModelLaunchPolicy.IsValidModelName(requestedModel))
+            {
+                return Problem(
+                    detail: "model is not a valid model name (letters, digits, dots and hyphens, with an optional [1m] suffix, e.g. \"opus\" or \"sonnet\"). No pane was created.",
+                    statusCode: 400);
+            }
+
             // The pane that is asking, from its launch nonce (never from spawnerName, which is whatever the
             // caller typed). Resolved before the spawn because the helper may inherit that pane's Claude
             // profile (ticket c8ee0eec), and used again below for close_helper.
@@ -141,7 +152,8 @@ namespace MultiTerminal.API.Controllers
                 workingDir,
                 initialPrompt: initialPrompt,
                 spawnerName: spawnerName,
-                spawnerDocId: provenSpawner?.DocId);
+                spawnerDocId: provenSpawner?.DocId,
+                requestedModel: requestedModel);
 
             if (!success)
                 return Problem(detail: error, statusCode: 400);
@@ -356,6 +368,14 @@ namespace MultiTerminal.API.Controllers
         /// within 120s is reported to the spawner as <c>spawn_failed</c>.
         /// </summary>
         public string InitialPrompt { get; set; }
+
+        /// <summary>
+        /// The model the helper starts on (ticket b0d2f090): an alias such as "opus", "sonnet", "haiku" or
+        /// "fable", or a full model name, or "default" for Claude Code's own default. Optional; omitted means
+        /// the project's helper model, else the global Helper model in Settings. An invalid name is a 400
+        /// and creates no pane.
+        /// </summary>
+        public string Model { get; set; }
     }
 
     public class CloseSpawnedTerminalRequest

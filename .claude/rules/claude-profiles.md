@@ -160,6 +160,12 @@ of the machine (`SettingsService`, key `ClaudeProfiles`); a project stores a pro
     ordinal-ignore-case (blank and `Default` are the same). Folders:
     `ClaudeProfileResolver.Canonicalize`, then ordinal-ignore-case. Use those two, not a local trim.
 
+**Related but separate: the launch's model (ticket b0d2f090).** `CLAUDE_CODE_SUBAGENT_MODEL` is appended in
+`ConPtyTerminal.StartProcess` right after the `BuildClaudeEnvSetup` call, from a separate helper
+(`BuildSubagentModelAssignment`) and the pane's `SubagentModel` property. It is NOT folded into
+`BuildClaudeEnvSetup`, which still takes no command and still has the one parameter, so invariant 6 is
+unchanged. The model decision itself is `ClaudeModelLaunchPolicy`; see `launch-session-choice.md`.
+
 ## Owner decisions
 
 **2026-10-09**
@@ -196,7 +202,8 @@ of the machine (`SettingsService`, key `ClaudeProfiles`); a project stores a pro
 - **Session-memory search spans profiles.** `SessionMemoryDatabase` is one index with no profile
   column.
 - **Oracle always runs under Default.** `OracleTerminalForm.StartTerminal` passes no profile, and
-  it is not checked by the never-used guard.
+  it is not checked by the never-used guard. It also passes no `--model` (its command is hand-built in
+  `OracleService.BuildAutoRunCommand`), so it runs on Claude Code's own default.
 - **Sessions MT did not launch** (ClarionAssistant tabs, see `ca-embedded-sessions.md`) carry no
   profile.
 - **The MT plugin path is the Default profile's.** `LaunchCommandBuilder.MtPluginPathCandidates`

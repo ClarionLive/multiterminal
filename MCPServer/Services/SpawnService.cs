@@ -13,7 +13,9 @@ namespace MultiTerminal.MCPServer.Services
     {
         /// <summary>
         /// Callback to spawn a new ConPTY terminal.
-        /// Parameters: (agentName, agentType, workingDir, initialPrompt, spawnerName, spawnerDocId).
+        /// Parameters: (agentName, agentType, workingDir, initialPrompt, spawnerName, spawnerDocId, requestedModel).
+        /// requestedModel is spawn_helper's optional model (ticket b0d2f090); null means the project's or
+        /// the global helper model. A name the model allow-pattern rejects is refused with an error and no pane.
         /// spawnerDocId is the pane the caller's launch nonce PROVED, or null (ticket c8ee0eec: a helper
         /// in a folder no project owns inherits that pane's Claude profile); spawnerName is only what
         /// the caller said its name was.
@@ -22,7 +24,7 @@ namespace MultiTerminal.MCPServer.Services
         /// back suffixed ("Name-2"), so callers must report and address the returned name, not the
         /// one they asked for.
         /// </summary>
-        public Func<string, string, string, string, string, string, Task<(bool success, string docId, string error, string terminalName)>> OnSpawnRequested { get; set; }
+        public Func<string, string, string, string, string, string, string, Task<(bool success, string docId, string error, string terminalName)>> OnSpawnRequested { get; set; }
 
         /// <summary>
         /// Callback to spawn a headless AgentProcess.
@@ -84,7 +86,8 @@ namespace MultiTerminal.MCPServer.Services
             string workingDir,
             string initialPrompt,
             string spawnerName,
-            string spawnerDocId = null)
+            string spawnerDocId = null,
+            string requestedModel = null)
         {
             if (OnSpawnRequested == null)
             {
@@ -114,7 +117,7 @@ namespace MultiTerminal.MCPServer.Services
 
             try
             {
-                var result = await OnSpawnRequested(agentName, agentType, workingDir, initialPrompt, spawnerName, spawnerDocId);
+                var result = await OnSpawnRequested(agentName, agentType, workingDir, initialPrompt, spawnerName, spawnerDocId, requestedModel);
                 return result;
             }
             catch (Exception ex)

@@ -200,11 +200,15 @@
         <section id="launch">
             <h2>Launch</h2>
             <p class="lead">How new terminals for this project start.</p>
-            <div class="note">Claude profile, launch mode, default terminal, quiet start and launch command apply the next time a terminal for this project starts. Terminals already running keep what they started with.</div>
+            <div class="note">Claude profile, model, helper model, launch mode, default terminal, quiet start and launch command apply the next time a terminal for this project starts. Terminals already running keep what they started with.</div>
             <div class="field"><label for="f-claudeProfile">Claude profile</label><select id="f-claudeProfile" data-field="claudeProfile" data-options="claudeProfiles"></select>
                 <div class="hint" id="profile-hint">Which Claude configuration folder (account, settings, sessions) the project's terminals use.</div></div>
             <div class="field"><label for="f-launchMode">Launch mode</label><select id="f-launchMode" data-field="launchMode" data-options="launchModes"></select>
                 <div class="hint">What launching the project does when it has past sessions: ask each time, always start a new session, or always continue the newest one. Applies at the next launch.</div></div>
+            <div class="field"><label for="f-claudeModel">Model</label><select id="f-claudeModel" data-field="claudeModel" data-options="claudeModels" data-none="Use global"></select>
+                <div class="hint">The Claude model this project's own terminals start on, resumed sessions included. Blank uses the global Project model in Settings.</div></div>
+            <div class="field"><label for="f-claudeHelperModel">Helper model</label><select id="f-claudeHelperModel" data-field="claudeHelperModel" data-options="claudeModels" data-none="Use global"></select>
+                <div class="hint">The Claude model this project's helpers start on. Blank uses the global Helper model in Settings.</div></div>
             <div class="field"><label for="f-defaultTerminal">Default terminal</label><select id="f-defaultTerminal" data-field="defaultTerminal" data-options="terminals"></select></div>
             <div class="field"><label>Quiet start</label><label class="check"><input type="checkbox" data-field="quietStart"> Open straight to an idle prompt, no recap or menu</label>
                 <div class="hint">Claude Code terminals only; Codex terminals still get their startup prompt. Helpers never start quietly.</div></div>
@@ -320,8 +324,7 @@
                        { key: 'description', label: 'Description', kind: 'text' } ] },
         agents: { add: 'Add agent', empty: 'No agents assigned.', blank: { agentName: '', role: '', preferredModel: '' },
             columns: [ { key: 'agentName', label: 'Name', kind: 'text', suggest: 'availableAgents' },
-                       { key: 'role', label: 'Role', kind: 'text' },
-                       { key: 'preferredModel', label: 'Model', kind: 'text' } ] },
+                       { key: 'role', label: 'Role', kind: 'text' } ] },
         specialistAgents: { add: 'Add specialist', empty: 'No specialist agents.', blank: { agentType: '', isEnabled: true, customPrompt: '' },
             columns: [ { key: 'agentType', label: 'Agent', kind: 'text', suggest: 'availableSpecialists' },
                        { key: 'isEnabled', label: 'On', kind: 'check' },

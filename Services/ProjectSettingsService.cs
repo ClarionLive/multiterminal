@@ -97,6 +97,7 @@ namespace MultiTerminal.Services
         public static readonly IReadOnlyCollection<string> LaunchTimeFields = new HashSet<string>(StringComparer.Ordinal)
         {
             "claudeProfile", "launchMode", "defaultTerminal", "quietStart", "launchCommand",
+            "claudeModel", "claudeHelperModel",
         };
 
         /// <summary>True when this save changed something running terminals will not pick up until they restart.</summary>
@@ -142,6 +143,7 @@ namespace MultiTerminal.Services
             "launchCommand", "sourcePath", "deployPath", "buildOutputPath", "buildCommand", "deployCommand",
             "gitRepoUrl", "gitDefaultBranch", "gitAutoCommit", "sourceControlAccountId", "changeLog",
             "gitHubWatchMode", "gitHubCheckOnStart", "gitHubCheckInterval",
+            "claudeModel", "claudeHelperModel",
         };
 
         private static readonly HashSet<string> BooleanFields = new HashSet<string>(StringComparer.Ordinal)
@@ -183,6 +185,17 @@ namespace MultiTerminal.Services
 
             if (normalized.TryGetValue("name", out var newName) && string.IsNullOrWhiteSpace(newName))
                 return ProjectSettingsSaveResult.Fail("The project name cannot be blank.");
+
+            foreach (var modelField in new[] { "claudeModel", "claudeHelperModel" })
+            {
+                // Only a name the user changed is checked: a stored name this build rejects must not stop an
+                // unrelated save (the launch policy launches such a project with no flag and logs it).
+                if (normalized.TryGetValue(modelField, out var modelName) && modelName != null
+                    && !SameValue(modelField, ReadField(current, modelField), modelName)
+                    && !ClaudeModelLaunchPolicy.IsDefaultToken(modelName) && !ClaudeModelLaunchPolicy.IsValidModelName(modelName))
+                    return ProjectSettingsSaveResult.Fail(
+                        $"'{modelName}' is not a valid model name (letters, digits, dots and hyphens, with an optional [1m] suffix). Nothing was saved.");
+            }
 
             string listError = ValidateLists(update);
             if (listError != null)
@@ -371,6 +384,10 @@ namespace MultiTerminal.Services
                     return TerminalKindHelper.Normalize(value);
                 case "claudeProfile":
                     return ClaudeProfile.NormalizeName(value);
+                case "claudeModel":
+                case "claudeHelperModel":
+                    // Blank means "use the global setting" and is stored as NULL (ticket b0d2f090).
+                    return ClaudeModelLaunchPolicy.Normalize(value);
                 case "launchMode":
                     // Unknown or blank reads as ask, the same rule as the stored value (task ec2ed636).
                     return Project.LaunchModeToStorage(Project.ParseLaunchMode(value));
@@ -413,6 +430,8 @@ namespace MultiTerminal.Services
                 case "createdBy": return p.CreatedBy;
                 case "claudeProfile": return ClaudeProfile.NormalizeName(p.ClaudeProfile);
                 case "launchMode": return Project.LaunchModeToStorage(p.LaunchMode);
+                case "claudeModel": return ClaudeModelLaunchPolicy.Normalize(p.ClaudeModel);
+                case "claudeHelperModel": return ClaudeModelLaunchPolicy.Normalize(p.ClaudeHelperModel);
                 case "defaultTerminal": return TerminalKindHelper.Normalize(p.DefaultTerminal);
                 case "quietStart": return p.IsQuietStart ? "true" : "false";
                 case "teamLead": return p.TeamLead;

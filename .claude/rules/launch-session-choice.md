@@ -137,6 +137,51 @@ so the prompt text is the only evidence on disk. The same prompt typed in an int
 - **`--resume`, never `--continue`.** `--continue` picks the newest session in the cwd, which may be
   live, and cannot reach worktree sessions.
 
+## Which model a launch uses (ticket b0d2f090)
+
+Owner report 2026-11-03: resuming a session ran on Fable, because Claude Code keeps the model stored in a
+session's transcript on `--resume` unless `--model` or `ANTHROPIC_MODEL` overrides it. Owner decisions: a
+resume uses the CONFIGURED model, overriding the transcript's; the defaults are Opus for project panes,
+Sonnet for helpers, Sonnet for subagents; they are settings, because Anthropic's models change.
+
+- **One decision.** `ClaudeModelLaunchPolicy.Decide` (pure, `Services/`), reached from every launch site
+  through `MainForm.DecideLaunchClaudeModel`, which only reads the project row and the settings and passes
+  them in. No site reads a setting itself. Order, first match wins: spawn_helper's model (helpers only);
+  a helper: the project's `claude_helper_model`, then Settings > General "Helper model"; a project pane:
+  the project's `claude_model`, then "Project model"; then the built-in default (`opus` / `sonnet`).
+  `default` at any level means no `--model` flag. Subagent model: Settings only (`sonnet` unless set).
+- **Roles.** Launch Project (new or resume), Just Claude, Launch as and New Project are project panes.
+  spawn_helper, a headless agent and a helper resumed with its PM (`ResumeHelpersInto`) are helpers: a
+  helper resumed with its PM must keep using the helper branch, or it would silently run on the PM's model.
+- **The flag.** `LaunchCommandBuilder.BuildClaudeCommand(..., model)` writes ` --model <name>` after the
+  flags and before `--resume`, so the command still starts with the bare `claude` token that
+  `ConPtyTerminal.ApplySessionName` splices `-n` after. No model gives exactly the command built before.
+  Just Claude builds its command before the folder is known and adds the flag with `WithModel`.
+- **Names are untrusted.** A name comes from settings, a project row or an agent's spawn_helper call and
+  lands on a PowerShell command line. The only gate is `ClaudeModelLaunchPolicy.IsValidModelName` (letters,
+  digits, dots, hyphens, optional `[1m]`, anchored with `\z`). The builder throws on anything else. An
+  invalid REQUESTED name makes spawn_helper fail with a 400 and creates no pane; an invalid STORED name
+  is skipped with a warning in the "ClaudeModel" debug log (naming the value and where it was stored)
+  and the next level decides: project row, then Settings, then the built-in model. It is never "no
+  flag", which on a resume would bring back the transcript's model. Only the explicit `default`
+  setting means no flag. The launch is not refused (the model is not an isolation boundary like a
+  Claude profile). An invalid subagent setting uses the built-in subagent model.
+- **Not covered.** The gloss writer stays `--model haiku` and gets no subagent variable. Codex panes get no
+  flag. Oracle hand-builds its command and runs on Claude Code's default. ClarionAssistant IDE tabs are
+  launched by CA, not MT, so none of this reaches them (they need their own CA ticket; `ANTHROPIC_MODEL`
+  stays as the stopgap there).
+- **Subagents.** `CLAUDE_CODE_SUBAGENT_MODEL` is set beside the profile prologue (panes) and in
+  `AgentProcess.ApplyEnvironment` (headless); when no subagent model is decided (the `default` setting or an
+  invalid stored name) it is CLEARED (`$null` / removed), because MT's own environment is inherited. Per the Claude Code docs it does not change the built-in
+  Explore and Plan agents, and an agent's frontmatter or the Agent tool's model parameter outrank it.
+- **Header.** The pane header's model badge (`statusbar.html .sl-model`) turns amber for Fable.
+- **Preferred Model.** `team_member_profiles.preferred_model` and `project_agents.preferred_model` still
+  exist but nothing reads them; the UI, the roster endpoints and the roster MCP text no longer show them.
+- **Not executed live.** The suite covers the decision, the flag, the name gate and the environment
+  assignments. That each MainForm site passes the decision on, and that Claude Code honours `--model` on
+  `--resume`, were not run. Check by resuming a session last run on another model and reading the model
+  of its new turns in the transcript.
+
 ## Helpers resume with their PM (task 7d20e94c)
 
 Resuming a PM session also reopens the helper panes it had open when it last ended. Owner decisions:

@@ -1135,6 +1135,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "Registered project id; the helper starts in that project's source path. Optional.",
             },
+            model: {
+              type: "string",
+              description: "The model the helper starts on: an alias (\"opus\", \"sonnet\", \"haiku\", \"fable\"), a full model name, or \"default\" for Claude Code's own default. Optional. Omitted, the helper uses the project's helper model, else the Helper model in MultiTerminal's Settings (Sonnet unless changed). Letters, digits, dots and hyphens only, with an optional [1m] suffix; anything else is refused and no pane is created.",
+            },
             initialPrompt: {
               type: "string",
               description: "The helper's job. Handed over as ONE prompt that the helper collects itself (get_my_spawn_job) within seconds of booting; the 120s elsewhere is the give-up bound, not the expected wait. Line breaks are kept. Optional — without it the helper boots and waits, idle, for someone to tell it what to do.",
@@ -1440,7 +1444,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       // Team Assembly Tools
       {
         name: "get_team_roster",
-        description: "Get the team roster for a project with merged profile data (preferred_model, agent_instructions, role, skills). Use this to discover which agents to spawn for a team assembly workflow.",
+        description: "Get the team roster for a project with merged profile data (agent_instructions, role, skills). Use this to discover which agents to spawn for a team assembly workflow.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1590,7 +1594,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             preferredModel: {
               type: "string",
-              description: "Preferred Claude model: opus, sonnet, haiku",
+              description: "Stored on the agent row only. No launch reads it: models come from the project's Model and Helper model settings and MultiTerminal's Settings (ticket b0d2f090).",
             },
           },
           required: ["projectId", "agentName"],
@@ -3000,7 +3004,6 @@ function formatProject(ctx) {
     ctx.agents.forEach(a => {
       text += `  • ${a.agentName}`;
       if (a.role) text += ` (${a.role})`;
-      if (a.preferredModel) text += ` [${a.preferredModel}]`;
       text += "\n";
     });
   }
@@ -3989,6 +3992,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           projectId: args.projectId || null,
           initialPrompt: args.initialPrompt || null,
           spawnerName: String(args.spawnerName).trim(),
+          model: args.model ? String(args.model).trim() : null,
         }, API_TIMEOUT_MS, spawnerNonce ? { "X-MultiTerminal-Launch-Nonce": spawnerNonce } : null);
 
         // What the API's success means: the PANE exists and its identity is registered. The helper
@@ -4442,14 +4446,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         } else {
           result.agents.forEach(a => {
             const profileIcon = a.hasProfile ? "✅" : "⚠️";
-            const modelIcon = { opus: "🟣", sonnet: "🔵", haiku: "🟢" }[a.preferredModel] || "⚪";
             text += `${profileIcon} ${a.name}`;
             if (a.isTeamLead) text += ` | Team Lead`;
             text += "\n";
-            text += `   Model: ${modelIcon} ${a.preferredModel}`;
-            if (a.role) text += ` | Role: ${a.role}`;
-            if (a.isOnline) text += ` | 🟢 Online`;
-            text += "\n";
+            const detail = [];
+            if (a.role) detail.push(`Role: ${a.role}`);
+            if (a.isOnline) detail.push("🟢 Online");
+            if (detail.length > 0) text += `   ${detail.join(" | ")}\n`;
             if (a.skills && a.skills.length > 0) text += `   Skills: ${a.skills.join(", ")}\n`;
             if (a.agentInstructions) text += `   Instructions: ${a.agentInstructions.substring(0, 100)}${a.agentInstructions.length > 100 ? "..." : ""}\n`;
             if (!a.hasProfile) text += `   ⚠️ No profile found - will spawn with defaults\n`;

@@ -187,6 +187,17 @@ namespace MultiTerminal.Models
         public GitHubCheckInterval GitHubCheckInterval { get; set; } = GitHubCheckInterval.Off;
 
         /// <summary>
+        /// This project's Claude model for its own panes (ticket b0d2f090), or null to use the global
+        /// Project model. SQLite-only (<c>projects.claude_model</c>), not carried by project.json and not in
+        /// the SaveRichProject UPSERT. Written through UpdateProjectField. Read only by
+        /// <see cref="MultiTerminal.Services.ClaudeModelLaunchPolicy"/>.
+        /// </summary>
+        public string ClaudeModel { get; set; }
+
+        /// <summary>This project's Claude model for helpers, or null to use the global Helper model (<c>projects.claude_helper_model</c>).</summary>
+        public string ClaudeHelperModel { get; set; }
+
+        /// <summary>
         /// Parses a stored <c>launch_mode</c> value, case-insensitively and ignoring surrounding
         /// whitespace. Null, blank and unrecognized values read as <see cref="ProjectLaunchMode.Ask"/>,
         /// so a bad DB value can never make a launch skip the prompt.
