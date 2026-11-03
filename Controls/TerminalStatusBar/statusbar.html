@@ -418,6 +418,16 @@
             font-weight: 600;
         }
 
+        /* A Fable session stands out (ticket b0d2f090): Fable uses the allowance fastest, so a wrong
+           model should be seen before work starts. The script that toggles the class is in the statusline update. */
+        .sl-model.sl-model-fable {
+            background: #b45309;
+            color: #ffffff;
+            box-shadow: 0 0 0 1px #f59e0b;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
         .context-label {
             color: var(--text-muted);
             font-size: var(--font-size-xs);
@@ -920,6 +930,9 @@
             // Model badge
             var modelEl = document.getElementById('sl-model');
             modelEl.textContent = model || 'claude';
+            var isFable = /fable/i.test(model || '');
+            modelEl.classList.toggle('sl-model-fable', isFable);
+            modelEl.title = isFable ? 'Fable uses your usage allowance fastest. Check this is the model you want.' : '';
 
             // Context usage bar
             updateContextBar(contextPct);
