@@ -1054,10 +1054,12 @@ POST /api/spawn/terminal
 {
   "agentName": "Alice",
   "projectId": "optional-project-id",
-  "workingDir": "H:\\Dev\\MyProject"
+  "workingDir": "H:\\Dev\\MyProject",
+  "model": "optional model: opus, sonnet, haiku, fable, a full name, or default"
 }
 ```
 Spawns a new ConPTY terminal with Claude Code. If `projectId` is provided, resolves the project's source path as working directory. Used by ClaudeRemote.
+`model` is optional: omitted, the helper uses the project's helper model, else the Helper model in Settings. A name with anything but letters, digits, dots and hyphens (and an optional `[1m]` suffix) is a 400 and no pane is created.
 
 ---
 
@@ -1075,7 +1077,7 @@ Returns all team member profiles with online status. Used by ClaudeRemote for ag
 ```
 GET /api/team/roster?projectPath=H:\Dev\MyProject
 ```
-Returns the team roster for a project merged with profile data (name, preferred model, agent instructions, role, skills).
+Returns the team roster for a project merged with profile data (name, agent instructions, role, skills; no model, which launches take from settings).
 
 ---
 

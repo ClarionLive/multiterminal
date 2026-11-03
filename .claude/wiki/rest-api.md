@@ -34,7 +34,7 @@
 - `API/Controllers/SpawnController.cs` (119 LOC)
   - REST endpoint for spawning headless AgentProcess with piped stdin/stdout for agent panel conversations.
 - `API/Controllers/TeamController.cs` (116 LOC)
-  - REST endpoint for team roster retrieval with merged profile data: names, preferred models, instructions, roles, skills.
+  - REST endpoint for team roster retrieval with merged profile data: names, instructions, roles, skills.
 - `API/Controllers/GatewayController.cs` (113 LOC)
 - `API/Controllers/TaskReportsController.cs` (93 LOC)
 - `API/Controllers/XamlPreviewController.cs` (91 LOC)
