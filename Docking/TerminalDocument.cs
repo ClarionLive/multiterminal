@@ -233,6 +233,10 @@ namespace MultiTerminal.Docking
         /// Read by "Launch as..." to keep the pane's Quiet start setting (GitHub #34).</summary>
         public string LaunchProjectId => _launchProjectId;
 
+        /// <summary>The role this pane's current launch was given (PM, helper or none). Read by the
+        /// "project already open" question (GitHub #95), which counts only the Owner's own PM panes.</summary>
+        internal MultiTerminal.Terminal.TerminalRole LaunchRole => _terminalRole;
+
         /// <summary>The name of the Claude profile this pane was last launched under (ticket c8ee0eec);
         /// null for Default or a pane that has not launched. Read when a launch lands in a folder no
         /// project owns: by "Launch as..." (the pane keeps its profile) and for a helper this pane spawns
