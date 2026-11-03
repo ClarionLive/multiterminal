@@ -96,7 +96,7 @@ helper), so a session is offered only if the profile the launch runs under can r
 its own config dir; a Default-folder session offered to a Work project failed with "No conversation found". No site builds
 a `.claude` path. A profile that cannot be honoured (not configured, folder missing, owners disagree, no registry) gives NO
 catalog and a reason, never Default's folder: the launch dialog shows it through the load-failure message, a helper is
-skipped with it, a startup-restore row is skipped with it. The Default profile resolves as before, including an inherited
+skipped with it, a startup-restore row is skipped with it. A decided profile whose folder does not exist yet (Default on a machine where Claude Code has never run) is NOT a refusal: `SessionRootForProject` gives its path with `FolderExists` false, the catalog is empty and the launch is a silent new session; nothing is created. A named profile with a missing folder IS a refusal (`Resolve` blocks it). The Default profile resolves as before, including an inherited
 `CLAUDE_CONFIG_DIR`. Every transcript path after that (`TryGetTranscriptWriteUtc`, `RecheckResume`, `HelperResume.Check`)
 is the catalog entry's own `TranscriptPath`, so it follows the same root; none builds a path. The launch's profile and the
 catalog's root cannot differ for a project launch because both read the project row; "Launch as" is the identity

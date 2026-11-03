@@ -394,5 +394,61 @@ namespace MultiTerminal.Tests
             Assert.Equal(ClaudeProfileResolver.Canonicalize(inheritedDir), inherited?.ConfigDir);
             Assert.Equal(Path.Combine(inherited.ConfigDir, "projects"), inherited.ProjectsDir);
         }
+
+        // ── Item 3/4 of c4bf09ca: absent folder is "no history", a refusal is a refusal ──
+
+        [Fact]
+        public void A_Default_project_whose_folder_does_not_exist_yet_lists_nothing_without_a_refusal_and_creates_nothing()
+        {
+            string home = Path.Combine(_base, "fresh-home");
+            Directory.CreateDirectory(home);
+            string missing = Path.Combine(home, ".claude");
+            var ctx = new ClaudeProfileContext(Array.Empty<ClaudeProfile>(), null, home, Directory.Exists);
+            var rows = new[] { new ClaudeProfileProjectRow("p-fresh", "Fresh", _unownedProject, null, null) };
+            var lookup = new ClaudeProfileLookup(
+                RowById: id => rows.FirstOrDefault(r => r.Id == id),
+                AllRows: () => rows,
+                LoadProjectFile: _ => null,
+                CandidateFolders: ClaudeProfileLaunchPolicy.CandidateFolders);
+
+            var result = ClaudeProfileDataRoots.SessionRootForProject("p-fresh", null, lookup, ctx);
+
+            Assert.Null(result.Refusal);
+            Assert.False(result.FolderExists);
+            Assert.Equal(missing, result.Root.ConfigDir);
+            var catalog = new SessionCatalog(result.Root.ProjectsDir, null, null);
+            Assert.Empty(catalog.List(_unownedProject, new System.Collections.Generic.HashSet<string>(), DateTime.UtcNow));
+            Assert.Null(catalog.TryGetEntry(_unownedProject, Guid.NewGuid().ToString(), new System.Collections.Generic.HashSet<string>(), DateTime.UtcNow));
+            Assert.False(Directory.Exists(missing));
+        }
+
+        [Fact]
+        public void A_refusal_has_a_cause_clause_without_the_launch_label_and_no_root()
+        {
+            // Named profile not configured, and one whose folder is missing: both are refusals (Resolve
+            // refuses a named profile's missing folder, so that case never reaches the absent-folder path).
+            foreach (string id in new[] { "p-nope", "p-gone" })
+            {
+                var r = ClaudeProfileDataRoots.SessionRootForProject(id, null, _lookup, _ctx);
+                Assert.Null(r.Root);
+                Assert.False(string.IsNullOrWhiteSpace(r.Refusal));
+                Assert.DoesNotContain("Not started", r.Refusal);
+                Assert.DoesNotContain("session data for", r.Refusal);
+                Assert.False(r.Refusal.EndsWith('.'));
+            }
+
+            var noRegistry = ClaudeProfileDataRoots.SessionRootForProject("p-work", null, null, _ctx);
+            Assert.Null(noRegistry.Root);
+            Assert.False(string.IsNullOrWhiteSpace(noRegistry.Refusal));
+        }
+
+        [Fact]
+        public void The_launch_refusal_text_is_unchanged_and_its_cause_is_the_same_decision()
+        {
+            var d = ClaudeProfileLaunchPolicy.Decide("p-nope", null, null, "project 'NopeProj'", _lookup, n => ClaudeProfileResolver.Resolve(n, null, _ctx));
+            Assert.False(d.CanLaunch);
+            Assert.StartsWith("Not started: project 'NopeProj'.", d.Refusal);
+            Assert.Contains(d.Cause, d.Refusal);
+        }
     }
 }

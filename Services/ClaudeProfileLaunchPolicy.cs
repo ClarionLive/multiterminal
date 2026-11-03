@@ -111,6 +111,13 @@ namespace MultiTerminal.Services
     {
         /// <summary>True when the launch may start, under <see cref="Profile"/>.</summary>
         public bool CanLaunch => Refusal == null;
+
+        /// <summary>
+        /// Ticket c4bf09ca: only WHY it was refused, with no "Not started: ..." label and no advice
+        /// about where to fix it, for a caller that is not a launch (the session-data readers) and so
+        /// words the refusal itself. Null when the launch may proceed. <see cref="Refusal"/> is unchanged.
+        /// </summary>
+        public string Cause { get; init; }
     }
 
     /// <summary>
@@ -358,14 +365,20 @@ namespace MultiTerminal.Services
             {
                 return new ClaudeProfileLaunchDecision(
                     null, null, ClaudeProfileNameSource.None, null,
-                    $"Not started: {launchLabel}. MultiTerminal could not work out which Claude profile it belongs under ({ex.Message}), and will not guess. Try again; if it keeps happening, check the debug log.");
+                    $"Not started: {launchLabel}. MultiTerminal could not work out which Claude profile it belongs under ({ex.Message}), and will not guess. Try again; if it keeps happening, check the debug log.")
+                {
+                    Cause = $"MultiTerminal could not work out which Claude profile it belongs under ({ex.Message})",
+                };
             }
 
             if (name.Conflict != null)
             {
                 return new ClaudeProfileLaunchDecision(
                     null, null, name.Source, null,
-                    $"Not started: {launchLabel}. {name.Conflict}");
+                    $"Not started: {launchLabel}. {name.Conflict}")
+                {
+                    Cause = name.Conflict,
+                };
             }
 
             if (neverUsed != null)
@@ -373,7 +386,10 @@ namespace MultiTerminal.Services
                 return new ClaudeProfileLaunchDecision(
                     null, name.ProfileName, name.Source, name.ProjectName,
                     $"Not started: {launchLabel}. {DescribeOrigin(name)}{neverUsed} Nobody is watching this launch to sign in or answer Claude's first-run prompts, so it would wait on them forever. "
-                    + $"Open a terminal under the Claude profile '{resolution.Profile.Name}' once and sign in, then try again.");
+                    + $"Open a terminal under the Claude profile '{resolution.Profile.Name}' once and sign in, then try again.")
+                {
+                    Cause = DescribeOrigin(name) + neverUsed,
+                };
             }
 
             if (resolution.CanLaunch)
@@ -381,7 +397,10 @@ namespace MultiTerminal.Services
 
             return new ClaudeProfileLaunchDecision(
                 null, name.ProfileName, name.Source, name.ProjectName,
-                DescribeRefusal(launchLabel, name, resolution.BlockedReason));
+                DescribeRefusal(launchLabel, name, resolution.BlockedReason))
+            {
+                Cause = DescribeOrigin(name) + resolution.BlockedReason,
+            };
         }
 
         /// <summary>The refusal text: what was not started, which project and profile, why, and where to fix it.</summary>
