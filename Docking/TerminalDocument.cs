@@ -444,7 +444,7 @@ namespace MultiTerminal.Docking
         /// that begins before the header page is ready is not lost.
         /// </summary>
         private void ShowClaudeProfileInHeader() =>
-            _statusBar?.SetClaudeProfile(Services.PaneProfileBadge.TextFor(_launchClaudeProfile?.ProfileName));
+            _statusBar?.SetClaudeProfile(Services.PaneProfileBadge.For(_launchClaudeProfile?.ProfileName, Services.ClaudeProfileResolver.CurrentContext()));
 
         /// <summary>
         /// The project the status bar's gear opens: the registered project containing the pane's folder,
