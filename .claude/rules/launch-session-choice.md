@@ -161,8 +161,11 @@ Sonnet for helpers, Sonnet for subagents; they are settings, because Anthropic's
   lands on a PowerShell command line. The only gate is `ClaudeModelLaunchPolicy.IsValidModelName` (letters,
   digits, dots, hyphens, optional `[1m]`, anchored with `\z`). The builder throws on anything else. An
   invalid REQUESTED name makes spawn_helper fail with a 400 and creates no pane; an invalid STORED name
-  launches with no flag and a warning in the "ClaudeModel" debug log (the model is not an isolation
-  boundary like a Claude profile, so it does not refuse the launch).
+  is skipped with a warning in the "ClaudeModel" debug log (naming the value and where it was stored)
+  and the next level decides: project row, then Settings, then the built-in model. It is never "no
+  flag", which on a resume would bring back the transcript's model. Only the explicit `default`
+  setting means no flag. The launch is not refused (the model is not an isolation boundary like a
+  Claude profile). An invalid subagent setting uses the built-in subagent model.
 - **Not covered.** The gloss writer stays `--model haiku` and gets no subagent variable. Codex panes get no
   flag. Oracle hand-builds its command and runs on Claude Code's default. ClarionAssistant IDE tabs are
   launched by CA, not MT, so none of this reaches them (they need their own CA ticket; `ANTHROPIC_MODEL`

@@ -103,24 +103,80 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
-        public void An_invalid_stored_name_launches_with_no_flag_and_a_warning()
+        public void An_invalid_project_value_falls_to_the_valid_global_value_with_a_warning_naming_it()
         {
             var d = ClaudeModelLaunchPolicy.Decide(ClaudeModelRole.ProjectPane, null, "x' ; calc", null, Settings(project: "haiku"));
-            Assert.Null(d.Model);
-            Assert.False(d.RequestedNameRejected);
-            Assert.NotNull(d.Problem);
 
-            var g = ClaudeModelLaunchPolicy.Decide(ClaudeModelRole.Helper, null, null, null, Settings(helper: "$(x)"));
-            Assert.Null(g.Model);
-            Assert.NotNull(g.Problem);
+            Assert.Equal("haiku", d.Model);
+            Assert.Equal("global", d.Source);
+            Assert.False(d.RequestedNameRejected);
+            Assert.Contains("x' ; calc", d.Problem);
+            Assert.Contains("project", d.Problem);
         }
 
         [Fact]
-        public void An_invalid_subagent_name_sets_none()
+        public void An_invalid_value_at_every_level_ends_at_the_built_in_model_never_no_flag()
+        {
+            var project = ClaudeModelLaunchPolicy.Decide(ClaudeModelRole.ProjectPane, null, "a b", null, Settings(project: "$(x)"));
+            Assert.Equal("opus", project.Model);
+            Assert.Equal("built-in", project.Source);
+            Assert.Contains("a b", project.Problem);
+            Assert.Contains("$(x)", project.Problem);
+            Assert.Contains("Settings", project.Problem);
+
+            var helper = ClaudeModelLaunchPolicy.Decide(ClaudeModelRole.Helper, null, null, "a b", Settings(helper: "$(x)"));
+            Assert.Equal("sonnet", helper.Model);
+            Assert.Equal("built-in", helper.Source);
+        }
+
+        [Fact]
+        public void An_invalid_global_value_alone_ends_at_the_built_in_model()
+        {
+            var d = ClaudeModelLaunchPolicy.Decide(ClaudeModelRole.Helper, null, null, null, Settings(helper: "$(x)"));
+            Assert.Equal("sonnet", d.Model);
+            Assert.NotNull(d.Problem);
+        }
+
+        [Fact]
+        public void The_default_token_is_still_no_flag_and_is_not_replaced_by_a_later_level()
+        {
+            var d = ClaudeModelLaunchPolicy.Decide(ClaudeModelRole.ProjectPane, null, "default", null, Settings(project: "haiku"));
+            Assert.Null(d.Model);
+            Assert.Null(d.Problem);
+        }
+
+        [Fact]
+        public void An_invalid_subagent_name_uses_the_built_in_subagent_model_with_a_warning()
         {
             var d = ClaudeModelLaunchPolicy.Decide(ClaudeModelRole.ProjectPane, null, null, null, Settings(sub: "a b"));
-            Assert.Null(d.SubagentModel);
-            Assert.NotNull(d.Problem);
+            Assert.Equal("sonnet", d.SubagentModel);
+            Assert.Contains("a b", d.Problem);
+            Assert.Contains("Subagent", d.Problem);
+        }
+
+        [Fact]
+        public void A_resume_with_an_invalid_stored_project_row_or_setting_still_passes_a_model_flag()
+        {
+            string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "mt_resmodel_" + System.Guid.NewGuid().ToString("N"));
+            System.IO.Directory.CreateDirectory(dir);
+            try
+            {
+                const string id = "0f8fad5b-d9cb-469f-a165-70867728950e";
+
+                // A project row holding a bad name, nothing in Settings: the built-in project model.
+                var fromRow = ClaudeModelLaunchPolicy.Decide(ClaudeModelRole.ProjectPane, null, "opus; calc", null, null);
+                string rowCmd = LaunchCommandBuilder.BuildClaudeCommand(null, dir, id, fromRow.Model).AutoRunCommand;
+                Assert.Contains(" --model opus --resume " + id, rowCmd);
+
+                // A bad Settings value, no project row: a helper resumed with its PM gets the built-in helper model.
+                var fromSettings = ClaudeModelLaunchPolicy.Decide(ClaudeModelRole.Helper, null, null, null, Settings(helper: "$(calc)"));
+                string settingsCmd = LaunchCommandBuilder.BuildClaudeCommand(null, dir, id, fromSettings.Model).AutoRunCommand;
+                Assert.Contains(" --model sonnet --resume " + id, settingsCmd);
+            }
+            finally
+            {
+                try { System.IO.Directory.Delete(dir, true); } catch (System.IO.IOException) { }
+            }
         }
     }
 }

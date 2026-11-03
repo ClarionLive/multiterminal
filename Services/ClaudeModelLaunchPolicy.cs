@@ -39,7 +39,7 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Set when a name could not be used. For a REQUESTED name the launch must be refused; for a
-        /// stored name the launch goes ahead with no flag and this is logged.
+        /// stored name the launch goes ahead on the next level's model and this is logged.
         /// </summary>
         public string Problem { get; set; }
 
@@ -59,8 +59,9 @@ namespace MultiTerminal.Services
     /// A helper resumed with its PM is a helper. A helper with no project passes null project values.</para>
     /// <para>A model name is untrusted text bound for a PowerShell command line, so
     /// <see cref="IsValidModelName"/> is the only gate and it runs on every name that can win. A stored
-    /// invalid name launches with no flag (the model is not an isolation boundary like a Claude
-    /// profile); an invalid requested name is rejected.</para>
+    /// invalid name is skipped with a warning naming it and where it was stored, and the next level decides,
+    /// ending at the built-in model: never "no flag", which on a resume would bring back the transcript's
+    /// model. The explicit default token still means no flag. An invalid requested name is rejected.</para>
     /// </summary>
     public static class ClaudeModelLaunchPolicy
     {
@@ -101,11 +102,12 @@ namespace MultiTerminal.Services
             ClaudeModelSettingsValues settings)
         {
             var result = new ClaudeModelDecision();
+            bool helper = role == ClaudeModelRole.Helper;
 
             result.SubagentModel = ResolveSubagent(settings, result);
 
             string requested = Normalize(requestedModel);
-            if (requested != null && role == ClaudeModelRole.Helper)
+            if (requested != null && helper)
             {
                 if (IsDefaultToken(requested))
                 {
@@ -124,23 +126,17 @@ namespace MultiTerminal.Services
                 return result;
             }
 
-            string project = Normalize(role == ClaudeModelRole.Helper ? projectHelperModel : projectModel);
-            if (project != null)
-            {
-                Apply(result, project, "project");
+            // A STORED name that is not valid is skipped with a warning and the next level decides, ending at
+            // the built-in. It is never "no flag": on --resume that would bring back the model stored in the
+            // transcript, which is what this ticket exists to prevent. Only the explicit default token means
+            // no flag, because the Owner chose that.
+            if (TryLevel(result, Normalize(helper ? projectHelperModel : projectModel), "project", helper ? "the project's Helper model" : "the project's Model"))
                 return result;
-            }
 
-            string global = Normalize(role == ClaudeModelRole.Helper
-                ? settings?.GlobalHelperModel
-                : settings?.GlobalProjectModel);
-            if (global != null)
-            {
-                Apply(result, global, "global");
+            if (TryLevel(result, Normalize(helper ? settings?.GlobalHelperModel : settings?.GlobalProjectModel), "global", helper ? "Settings > General Helper model" : "Settings > General Project model"))
                 return result;
-            }
 
-            result.Model = role == ClaudeModelRole.Helper ? BuiltInHelperModel : BuiltInProjectModel;
+            result.Model = helper ? BuiltInHelperModel : BuiltInProjectModel;
             result.Source = "built-in";
             return result;
         }
@@ -151,21 +147,31 @@ namespace MultiTerminal.Services
             if (stored == null) return BuiltInSubagentModel;
             if (IsDefaultToken(stored)) return null;
             if (IsValidModelName(stored)) return stored;
-            result.Problem = $"Subagent model '{stored}' is not a valid model name; none was set.";
-            return null;
+            AddProblem(result, $"Stored model '{stored}' in Settings > General Subagent model is not a valid model name; using the built-in '{BuiltInSubagentModel}'.");
+            return BuiltInSubagentModel;
         }
 
-        private static void Apply(ClaudeModelDecision result, string stored, string source)
+        // True when this level decided (a valid name, or the default token = no flag). False when the level is
+        // unset or holds an invalid name, so the caller carries on down the order.
+        private static bool TryLevel(ClaudeModelDecision result, string stored, string source, string where)
         {
-            result.Source = source;
-            if (IsDefaultToken(stored)) return;
+            if (stored == null) return false;
+            if (IsDefaultToken(stored))
+            {
+                result.Source = source;
+                return true;
+            }
             if (!IsValidModelName(stored))
             {
-                result.Problem = (result.Problem == null ? string.Empty : result.Problem + " ")
-                    + $"Stored model '{stored}' is not a valid model name; launching with no --model.";
-                return;
+                AddProblem(result, $"Stored model '{stored}' in {where} is not a valid model name; skipped.");
+                return false;
             }
             result.Model = stored;
+            result.Source = source;
+            return true;
         }
+
+        private static void AddProblem(ClaudeModelDecision result, string text) =>
+            result.Problem = result.Problem == null ? text : result.Problem + " " + text;
     }
 }
