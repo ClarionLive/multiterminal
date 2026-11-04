@@ -551,10 +551,6 @@ namespace MultiTerminal.Tests
         [InlineData("github_watch_mode", "off", "notify", true)]
         [InlineData("github_watch_mode", "notify", "board", false)]
         [InlineData("github_watch_mode", "board", "off", false)]
-        [InlineData("git_repo_url", "https://github.com/o/r", "git@github.com:o/r.git", false)]
-        [InlineData("git_repo_url", "https://github.com/o/r", "https://github.com/O/R/", false)]
-        [InlineData("git_repo_url", "https://github.com/o/r", "https://github.com/o/other", true)]
-        [InlineData("git_repo_url", null, "https://github.com/o/r", true)]
         public void Only_turning_watching_on_or_naming_another_repository_resets_the_baseline(string column, string oldValue, string newValue, bool reset)
         {
             Assert.Equal(reset, ProjectDatabase.ShouldResetGitHubWatch(column, oldValue, newValue));
@@ -1640,6 +1636,212 @@ namespace MultiTerminal.Tests
             string status = GitHubWatchService.DescribeStatus(p, null, false, null, null);
             Assert.Contains("link a GitHub source control account", status);
             Assert.Contains("Warning: the Also watch line \"nonsense\" is not a github.com repository.", status);
+        }
+
+        // ── Pipeline run 1 on a923589f: one canonical repository key ─────────────
+
+        // CA2100: the SQL in these two helpers is literal test text; nothing reaches it from input.
+#pragma warning disable CA2100
+        private void RawSql(string sql, params (string Name, object Value)[] args)
+        {
+            using var raw = new SQLiteConnection($"Data Source={_dbPath}");
+            raw.Open();
+            using var cmd = new SQLiteCommand(sql, raw);
+            foreach (var (name, value) in args) cmd.Parameters.AddWithValue(name, value ?? DBNull.Value);
+            cmd.ExecuteNonQuery();
+        }
+
+        private long RawCount(string sql)
+        {
+            using var raw = new SQLiteConnection($"Data Source={_dbPath}");
+            raw.Open();
+            using var cmd = new SQLiteCommand(sql, raw);
+            return Convert.ToInt64(cmd.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+        }
+#pragma warning restore CA2100
+
+        [Fact]
+        public async Task A_case_only_edit_of_the_repository_keeps_the_baseline_and_reports_what_arrived_in_between_once()
+        {
+            var (service, github, cards, _, project) = Build(GitHubWatchMode.Board, repoUrl: "https://github.com/Owner/Repo");
+            github.Body = PageOf("Owner/Repo", 30);
+            await service.CheckProjectAsync(project, "baseline");
+            Assert.Equal(30, _db.GetGitHubWatchState(project.Id, "owner/repo").Baseline);   // any case reads the same row
+            Assert.Equal(30, _db.GetGitHubWatchState(project.Id, "OWNER/REPO").Baseline);
+
+            // The Owner retypes the URL in lower case; two items arrive meanwhile.
+            project.GitRepoUrl = "https://github.com/owner/repo";
+            Assert.True(_db.UpdateProjectField(project.Id, "gitRepoUrl", project.GitRepoUrl));
+            Assert.Equal(30, _db.GetGitHubWatchState(project.Id, "owner/repo").Baseline);   // not pruned: the same repository
+
+            github.Body = PageOf("owner/repo", 32, 31, 30);
+            Assert.Equal(2, await service.CheckProjectAsync(project, "after the edit"));
+            Assert.Equal(2, cards.Count);
+            Assert.Equal(0, await service.CheckProjectAsync(project, "again"));   // once
+
+            // And back again: the same row, nothing dumped.
+            project.GitRepoUrl = "https://github.com/Owner/Repo";
+            Assert.True(_db.UpdateProjectField(project.Id, "gitRepoUrl", project.GitRepoUrl));
+            github.Body = PageOf("Owner/Repo", 33, 32, 31, 30);
+            Assert.Equal(1, await service.CheckProjectAsync(project, "edited back"));
+            Assert.Equal(3, cards.Count);
+            Assert.Equal(1, RawCount("SELECT COUNT(*) FROM github_watch_state"));
+        }
+
+        [Fact]
+        public void Every_table_is_keyed_on_the_lowercase_name_whatever_case_the_caller_uses()
+        {
+            _db.RecordGitHubWatchCheck("p", "Owner/Repo", 5, null);
+            _db.RecordGitHubOpenCounts("p", "OWNER/repo", 3, 1);
+            Assert.True(_db.TryClaimGitHubItem("p", "Owner/Repo", 9, false));
+            Assert.False(_db.TryClaimGitHubItem("p", "owner/REPO", 9, false));
+            _db.SetGitHubItemTask("p", "OWNER/REPO", 9, "task-9");
+
+            var state = _db.GetGitHubWatchState("p", "owner/repo");
+            Assert.Equal(5, state.Baseline);
+            Assert.Equal(3, state.OpenIssues);
+            Assert.Equal(1, RawCount("SELECT COUNT(*) FROM github_watch_state WHERE repo = 'owner/repo'"));
+            Assert.Equal(1, RawCount("SELECT COUNT(*) FROM github_watch_seen WHERE repo = 'owner/repo' AND task_id = 'task-9'"));
+        }
+
+        [Fact]
+        public void The_notice_text_keeps_the_case_the_Owner_typed_while_the_key_is_lowercase()
+        {
+            var (_, _, _, _, project) = Build(GitHubWatchMode.Notify, repoUrl: "https://github.com/Owner/Repo");
+            _db.AddGitHubPendingNotices(project.Id, "Owner/Repo", new[] { new ProjectDatabase.GitHubPendingNotice { Number = 4, Url = "https://github.com/Owner/Repo/issues/4" } });
+
+            var notice = Assert.Single(_db.GetGitHubPendingNotices(project.Id));
+            Assert.Equal("Owner/Repo", notice.Repo);
+            Assert.Equal(1, RawCount("SELECT COUNT(*) FROM github_watch_pending WHERE repo = 'owner/repo'"));
+        }
+
+        [Fact]
+        public void The_migration_merges_variants_that_differ_only_in_case_and_can_run_again()
+        {
+            var t0 = DateTime.UtcNow.AddHours(-3);
+            var t1 = DateTime.UtcNow.AddHours(-2);
+            var t2 = DateTime.UtcNow.AddHours(-1);
+            RawSql("INSERT INTO github_watch_state (project_id, repo, baseline_number, last_checked_at, last_success_at, last_error, open_issues, open_prs, counts_at) VALUES ('p','Owner/Repo',10,@t0,@t0,'old error',1,1,@t0)",
+                ("@t0", t0));
+            RawSql("INSERT INTO github_watch_state (project_id, repo, baseline_number, last_checked_at, last_success_at, last_error, open_issues, open_prs, counts_at) VALUES ('p','owner/repo',20,@t2,@t1,NULL,5,6,@t2)",
+                ("@t1", t1), ("@t2", t2));
+            RawSql("INSERT INTO github_watch_state (project_id, repo, baseline_number) VALUES ('p','x/y',7)");
+
+            RawSql("INSERT INTO github_watch_seen (project_id, repo, number, is_pr, task_id, seen_at) VALUES ('p','Owner/Repo',5,0,NULL,@t0)", ("@t0", t0));
+            RawSql("INSERT INTO github_watch_seen (project_id, repo, number, is_pr, task_id, seen_at) VALUES ('p','owner/repo',5,1,'task-5',@t1)", ("@t1", t1));
+            RawSql("INSERT INTO github_watch_seen (project_id, repo, number, is_pr, task_id, seen_at) VALUES ('p','OWNER/REPO',6,0,'task-6',@t1)", ("@t1", t1));
+
+            RawSql("INSERT INTO github_watch_pending (project_id, repo, number, is_pr, task_id, url, created_at) VALUES ('p','Owner/Repo',7,0,NULL,'https://github.com/Owner/Repo/issues/7',@t0)", ("@t0", t0));
+            RawSql("INSERT INTO github_watch_pending (project_id, repo, number, is_pr, task_id, url, created_at) VALUES ('p','owner/repo',7,0,'task-7',NULL,@t1)", ("@t1", t1));
+            RawSql("INSERT INTO github_watch_pending (project_id, repo, number, is_pr, task_id, url, created_at) VALUES ('p','Other/Thing',8,1,NULL,NULL,@t1)", ("@t1", t1));
+
+            _db.MigrateGitHubWatchRepoKeys();
+
+            var merged = _db.GetGitHubWatchState("p", "owner/repo");
+            Assert.Equal(20, merged.Baseline);                       // the highest
+            Assert.Null(merged.LastError);                           // the newest check's
+            Assert.Equal(5, merged.OpenIssues);
+            Assert.Equal(6, merged.OpenPullRequests);
+            Assert.Equal(7, _db.GetGitHubWatchState("p", "x/y").Baseline);   // untouched
+            Assert.Equal(2, RawCount("SELECT COUNT(*) FROM github_watch_state"));
+            Assert.Equal(0, RawCount("SELECT COUNT(*) FROM github_watch_state WHERE repo <> lower(repo)"));
+
+            Assert.Equal(2, RawCount("SELECT COUNT(*) FROM github_watch_seen"));
+            Assert.Equal(1, RawCount("SELECT COUNT(*) FROM github_watch_seen WHERE number = 5 AND task_id = 'task-5' AND is_pr = 1"));   // no task id lost
+            Assert.Equal(1, RawCount("SELECT COUNT(*) FROM github_watch_seen WHERE number = 6 AND task_id = 'task-6' AND repo = 'owner/repo'"));
+            Assert.False(_db.TryClaimGitHubItem("p", "Owner/Repo", 5, false));
+
+            var notices = _db.GetGitHubPendingNotices("p");
+            Assert.Equal(2, notices.Count);
+            var seven = notices.Single(n => n.Number == 7);
+            Assert.Equal("task-7", seven.TaskId);
+            Assert.Equal("https://github.com/Owner/Repo/issues/7", seven.Url);
+            Assert.Equal("Owner/Repo", seven.Repo);
+            Assert.Equal(0, RawCount("SELECT COUNT(*) FROM github_watch_pending WHERE repo <> lower(repo)"));
+
+            // Run again, and reopen the database: nothing more to do, nothing changes.
+            _db.MigrateGitHubWatchRepoKeys();
+            Assert.Equal(20, _db.GetGitHubWatchState("p", "owner/repo").Baseline);
+            Assert.Equal(2, RawCount("SELECT COUNT(*) FROM github_watch_state"));
+            Assert.Equal(2, RawCount("SELECT COUNT(*) FROM github_watch_seen"));
+            Assert.Equal(2, RawCount("SELECT COUNT(*) FROM github_watch_pending"));
+        }
+
+        [Fact]
+        public async Task A_mixed_case_row_from_before_the_upgrade_keeps_its_baseline_so_upgrading_dumps_nothing()
+        {
+            var (service, github, cards, _, project) = Build(GitHubWatchMode.Board, repoUrl: "https://github.com/POSitive-Software/POSitiveAnywhereV2");
+            RawSql("INSERT INTO github_watch_state (project_id, repo, baseline_number, last_checked_at, last_success_at) VALUES (@p,'POSitive-Software/POSitiveAnywhereV2',30,@t,@t)",
+                ("@p", project.Id), ("@t", DateTime.UtcNow.AddHours(-1)));
+
+            _db.MigrateGitHubWatchRepoKeys();   // what opening the upgraded database does
+
+            Assert.Equal(30, _db.GetGitHubWatchState(project.Id, "POSitive-Software/POSitiveAnywhereV2").Baseline);
+            github.Body = PageOf("POSitive-Software/POSitiveAnywhereV2", 30, 29, 28);
+            Assert.Equal(0, await service.CheckProjectAsync(project, "after the upgrade"));
+            Assert.Empty(cards);
+            Assert.Equal(30, _db.GetGitHubWatchState(project.Id, "positive-software/positiveanywherev2").Baseline);
+        }
+
+        [Fact]
+        public void A_repository_taken_off_the_list_also_loses_its_queued_notices_and_keeps_its_claims()
+        {
+            var (_, _, _, _, project) = BuildTwo();
+            _db.AddGitHubPendingNotices(project.Id, "o/second", new[] { new ProjectDatabase.GitHubPendingNotice { Number = 3 } });
+            _db.AddGitHubPendingNotices(project.Id, "o/r", new[] { new ProjectDatabase.GitHubPendingNotice { Number = 4 } });
+            Assert.True(_db.TryClaimGitHubItem(project.Id, "o/second", 3, false));
+
+            Assert.True(_db.UpdateProjectField(project.Id, "gitHubExtraRepos", null));
+
+            var left = Assert.Single(_db.GetGitHubPendingNotices(project.Id));
+            Assert.Equal("o/r", left.Repo);
+            Assert.False(_db.TryClaimGitHubItem(project.Id, "o/second", 3, false));   // the claim stays
+        }
+
+        // ── Pipeline run 1: an unexpected failure is shown, not just logged ──────
+
+        [Fact]
+        public async Task An_unexpected_exception_in_a_check_is_recorded_as_a_failure_and_the_next_repository_is_still_checked()
+        {
+            var (_, github, _, _, project) = BuildTwo();
+            var cards = new List<string>();
+            var recorded = new List<string>();
+            int pushes = 0;
+            // CA2000: the service owns the feed; it is disposed with the test class.
+#pragma warning disable CA2000
+            var service = new GitHubWatchService(_db, () => new[] { project }, _ => "tok", new GitHubIssueFeed(github),
+                (title, description, projectId) => { cards.Add(title); return "task-" + cards.Count; },
+                (_, _) => { pushes++; throw new InvalidOperationException("boom <img src=x onerror=alert(1)> 203.0.113.9"); },
+                _ => { });
+#pragma warning restore CA2000
+            _services.Add(service);
+            service.CheckRecorded += recorded.Add;
+
+            github.BodyByRepo["o/r"] = PageOf("o/r", 30);
+            github.BodyByRepo["o/second"] = PageOf("o/second", 30);
+            await service.CheckProjectAsync(project, "baseline");   // a baseline check pushes nothing
+
+            recorded.Clear();
+            github.BodyByRepo["o/r"] = PageOf("o/r", 31, 30);
+            github.BodyByRepo["o/second"] = PageOf("o/second", 31, 30);
+            await service.CheckProjectAsync(project, "check");   // reporting calls the push, which throws
+
+            Assert.Equal(2, pushes);   // the second repository was still checked after the first threw
+            Assert.Equal(2, cards.Count);
+            foreach (string repo in new[] { "o/r", "o/second" })
+            {
+                var state = _db.GetGitHubWatchState(project.Id, repo);
+                Assert.Equal(GitHubWatchService.UnexpectedError, state.LastError);
+                Assert.DoesNotContain("boom", state.LastError);
+                Assert.DoesNotContain("203.0.113.9", state.LastError);
+                Assert.NotNull(state.LastCheckedUtc);   // the retry delay counts from here
+                Assert.False(GitHubWatchService.IsDue(GitHubCheckInterval.Minutes15, state.LastSuccessUtc, state.LastCheckedUtc, DateTime.UtcNow));
+
+                var band = GitHubBandModel.Build(repo, true, state);
+                Assert.Equal(GitHubCheckFailure.Other, band.Failure);
+                Assert.Equal("GitHub check failed. See the project's settings for details.", band.FailureText);
+            }
+            Assert.Contains(project.Id, recorded);   // the header was told
         }
     }
 }
