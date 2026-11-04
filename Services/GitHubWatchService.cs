@@ -294,12 +294,11 @@ namespace MultiTerminal.Services
                     _log($"{project.Name} ({repo.FullName}): first check; baseline #{plan.NewBaseline}, nothing added.");
                 else if (reported.Count > 0)
                 {
-                    var (title, body) = PushText(project.Name, repo, reported, plan.MayHaveMissed, project.GitHubWatchMode,
-                        showRepo: GitHubWatchList.Of(project).Repos.Count > 1);
-                    _push(title, body);
                     _log($"{project.Name} ({repo.FullName}, {reason}): {reported.Count} new.");
 
-                    // Queued, not sent: the project's agent hears at its next pause (task e4924065).
+                    // Queued FIRST, not sent: the project's agent hears at its next pause (task e4924065). The
+                    // baseline is already past these items and they are claimed, so a later check will not offer
+                    // them again; if the phone push below threw before this, the agent would never hear of them.
                     _db.AddGitHubPendingNotices(project.Id, repo.FullName, reported.Select(i => new ProjectDatabase.GitHubPendingNotice
                     {
                         Number = i.Number,
@@ -308,6 +307,19 @@ namespace MultiTerminal.Services
                         Url = i.Url,
                     }));
                     Raise(NoticesQueued, project.Id);
+
+                    // The push is only a convenience on top: its failure is logged and the check, which worked,
+                    // is not marked as failed.
+                    try
+                    {
+                        var (title, body) = PushText(project.Name, repo, reported, plan.MayHaveMissed, project.GitHubWatchMode,
+                            showRepo: GitHubWatchList.Of(project).Repos.Count > 1);
+                        _push(title, body);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log($"{project.Name} ({repo.FullName}): the push for {reported.Count} new item(s) failed: {ex.Message}");
+                    }
                 }
 
                 // A count that cannot be read leaves the last one in place; it never fails the check.

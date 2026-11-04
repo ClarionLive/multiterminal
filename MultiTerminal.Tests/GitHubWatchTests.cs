@@ -1806,42 +1806,97 @@ namespace MultiTerminal.Tests
             var (_, github, _, _, project) = BuildTwo();
             var cards = new List<string>();
             var recorded = new List<string>();
-            int pushes = 0;
+            bool tokenThrowsOnce = false;
             // CA2000: the service owns the feed; it is disposed with the test class.
 #pragma warning disable CA2000
-            var service = new GitHubWatchService(_db, () => new[] { project }, _ => "tok", new GitHubIssueFeed(github),
+            var service = new GitHubWatchService(_db, () => new[] { project },
+                _ =>
+                {
+                    // The seam: an exception out of a callback, on the first repository's check only.
+                    if (!tokenThrowsOnce) return "tok";
+                    tokenThrowsOnce = false;
+                    throw new InvalidOperationException("boom <img src=x onerror=alert(1)> 203.0.113.9");
+                },
+                new GitHubIssueFeed(github),
                 (title, description, projectId) => { cards.Add(title); return "task-" + cards.Count; },
-                (_, _) => { pushes++; throw new InvalidOperationException("boom <img src=x onerror=alert(1)> 203.0.113.9"); },
-                _ => { });
+                (_, _) => { }, _ => { });
 #pragma warning restore CA2000
             _services.Add(service);
             service.CheckRecorded += recorded.Add;
 
             github.BodyByRepo["o/r"] = PageOf("o/r", 30);
             github.BodyByRepo["o/second"] = PageOf("o/second", 30);
-            await service.CheckProjectAsync(project, "baseline");   // a baseline check pushes nothing
+            await service.CheckProjectAsync(project, "baseline");
 
             recorded.Clear();
             github.BodyByRepo["o/r"] = PageOf("o/r", 31, 30);
             github.BodyByRepo["o/second"] = PageOf("o/second", 31, 30);
-            await service.CheckProjectAsync(project, "check");   // reporting calls the push, which throws
+            tokenThrowsOnce = true;
+            await service.CheckProjectAsync(project, "check");
 
-            Assert.Equal(2, pushes);   // the second repository was still checked after the first threw
-            Assert.Equal(2, cards.Count);
-            foreach (string repo in new[] { "o/r", "o/second" })
-            {
-                var state = _db.GetGitHubWatchState(project.Id, repo);
-                Assert.Equal(GitHubWatchService.UnexpectedError, state.LastError);
-                Assert.DoesNotContain("boom", state.LastError);
-                Assert.DoesNotContain("203.0.113.9", state.LastError);
-                Assert.NotNull(state.LastCheckedUtc);   // the retry delay counts from here
-                Assert.False(GitHubWatchService.IsDue(GitHubCheckInterval.Minutes15, state.LastSuccessUtc, state.LastCheckedUtc, DateTime.UtcNow));
+            var failed = _db.GetGitHubWatchState(project.Id, "o/r");
+            Assert.Equal(GitHubWatchService.UnexpectedError, failed.LastError);
+            Assert.DoesNotContain("boom", failed.LastError);
+            Assert.DoesNotContain("203.0.113.9", failed.LastError);
+            Assert.NotNull(failed.LastCheckedUtc);   // the retry delay counts from here
+            Assert.False(GitHubWatchService.IsDue(GitHubCheckInterval.Minutes15, failed.LastSuccessUtc, failed.LastCheckedUtc, DateTime.UtcNow));
+            Assert.Equal(30, failed.Baseline);       // a failure learns nothing and invents nothing
 
-                var band = GitHubBandModel.Build(repo, true, state);
-                Assert.Equal(GitHubCheckFailure.Other, band.Failure);
-                Assert.Equal("GitHub check failed. See the project's settings for details.", band.FailureText);
-            }
+            var band = GitHubBandModel.Build("o/r", true, failed);
+            Assert.Equal(GitHubCheckFailure.Other, band.Failure);
+            Assert.Equal("GitHub check failed. See the project's settings for details.", band.FailureText);
             Assert.Contains(project.Id, recorded);   // the header was told
+
+            // The next repository was still checked, and shows no failure.
+            Assert.Equal(new[] { "GitHub issue #31 in o/second" }, cards);
+            Assert.Null(_db.GetGitHubWatchState(project.Id, "o/second").LastError);
+            Assert.Equal(31, _db.GetGitHubWatchState(project.Id, "o/second").Baseline);
+        }
+
+        [Fact]
+        public async Task A_push_that_throws_leaves_the_notices_queued_and_does_not_mark_the_repository_failed()
+        {
+            var (_, github, _, _, project) = BuildTwo();
+            var cards = new List<string>();
+            var queuedEvents = new List<string>();
+            var recorded = new List<string>();
+            int pushes = 0;
+            // CA2000: the service owns the feed; it is disposed with the test class.
+#pragma warning disable CA2000
+            var service = new GitHubWatchService(_db, () => new[] { project }, _ => "tok", new GitHubIssueFeed(github),
+                (title, description, projectId) => { cards.Add(title); return "task-" + cards.Count; },
+                (_, _) => { pushes++; throw new InvalidOperationException("push service is down"); },
+                _ => { });
+#pragma warning restore CA2000
+            _services.Add(service);
+            service.NoticesQueued += queuedEvents.Add;
+            service.CheckRecorded += recorded.Add;
+
+            github.BodyByRepo["o/r"] = PageOf("o/r", 30);
+            github.BodyByRepo["o/second"] = PageOf("o/second", 30);
+            await service.CheckProjectAsync(project, "baseline");
+
+            recorded.Clear();
+            github.BodyByRepo["o/r"] = PageOf("o/r", 32, 31, 30);
+            Assert.Equal(2, await service.CheckProjectAsync(project, "check"));
+
+            Assert.Equal(1, pushes);
+            // The agent still hears of both items, with their tickets.
+            var notices = _db.GetGitHubPendingNotices(project.Id);
+            Assert.Equal(new[] { 31, 32 }, notices.Select(n => n.Number));
+            Assert.All(notices, n => Assert.Equal("o/r", n.Repo));
+            Assert.All(notices, n => Assert.False(string.IsNullOrEmpty(n.TaskId)));
+            Assert.Contains(project.Id, queuedEvents);
+
+            // The check worked: no failure is stored or shown, and the baseline moved.
+            var state = _db.GetGitHubWatchState(project.Id, "o/r");
+            Assert.Null(state.LastError);
+            Assert.Equal(32, state.Baseline);
+            Assert.Equal(GitHubCheckFailure.None, GitHubBandModel.Build("o/r", true, state).Failure);
+
+            // And a later check does not offer them again.
+            Assert.Equal(0, await service.CheckProjectAsync(project, "again"));
+            Assert.Equal(2, _db.GetGitHubPendingNotices(project.Id).Count);
         }
     }
 }
