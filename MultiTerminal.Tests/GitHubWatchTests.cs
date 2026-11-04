@@ -1549,5 +1549,97 @@ namespace MultiTerminal.Tests
             p.GitHubExtraRepos = null;
             Assert.Null(GitHubWatchList.ResolveLink(p, "issues", "o/second"));
         }
+
+        // ── Ticket a923589f item 3: say so when the watch is on and something cannot be read ──
+
+        [Fact]
+        public void A_Repository_URL_naming_only_an_account_is_called_out_in_the_header_instead_of_checking_nothing_in_silence()
+        {
+            // The POSitiveAnywhereV2 case: the account, no repository, watch on.
+            var header = HeaderOf(WatchedProject("https://github.com/positivesoftware", null, GitHubWatchMode.Board));
+
+            Assert.False(header.IsHidden);
+            Assert.Empty(header.Entries);
+            Assert.Equal("GitHub watch: the Repository URL \"https://github.com/positivesoftware\" names an account, not a repository", header.Warning);
+            Assert.Equal("project", header.WarningTarget);
+        }
+
+        [Fact]
+        public void The_warning_is_shown_only_while_the_watch_is_on()
+        {
+            Assert.Same(GitHubHeader.Hidden, HeaderOf(WatchedProject("https://github.com/positivesoftware", null, GitHubWatchMode.Off)));
+
+            var off = HeaderOf(WatchedProject("https://github.com/o/r", "garbage", GitHubWatchMode.Off));
+            Assert.Single(off.Entries);   // the readable repo still has its link
+            Assert.Null(off.Warning);
+
+            Assert.NotNull(HeaderOf(WatchedProject("https://github.com/o/r", "garbage", GitHubWatchMode.Notify)).Warning);
+        }
+
+        [Fact]
+        public void An_unreadable_Repository_URL_still_shows_the_readable_Also_watch_repositories_and_the_warning()
+        {
+            var header = HeaderOf(WatchedProject("https://example.com/o/r", "o/second\nsecond-line-nonsense"));
+
+            Assert.Equal(new[] { "o/second" }, header.Entries.Select(e => e.Band.Repo));
+            Assert.Contains("the Repository URL \"https://example.com/o/r\" is not a github.com repository", header.Warning);
+            Assert.Contains("(and 1 more cannot be read)", header.Warning);
+        }
+
+        [Fact]
+        public void An_unreadable_Also_watch_line_is_named_as_such()
+        {
+            var header = HeaderOf(WatchedProject("https://github.com/o/r", "https://github.com/someaccount"));
+            Assert.Equal("GitHub watch: the Also watch line \"https://github.com/someaccount\" names an account, not a repository", header.Warning);
+            Assert.Single(header.Entries);
+        }
+
+        [Fact]
+        public void More_repositories_than_the_limit_is_said_not_silently_dropped()
+        {
+            string extras = string.Join("\n", Enumerable.Range(1, 11).Select(i => "o/extra" + i));
+            var header = HeaderOf(WatchedProject("https://github.com/o/r", extras));
+
+            Assert.Equal(GitHubWatchList.MaxRepos, header.Entries.Count);
+            Assert.Contains("only the first 10 repositories are watched; 2 more were left out", header.Warning);
+        }
+
+        [Fact]
+        public void The_warning_quotes_the_Owners_line_but_strips_control_and_direction_characters_and_cuts_a_long_one()
+        {
+            string hostile = "bad‮line\u0007" + new string('z', 200);
+            var header = HeaderOf(WatchedProject("https://github.com/o/r", hostile));
+
+            Assert.DoesNotContain('‮', header.Warning);
+            Assert.DoesNotContain('\u0007', header.Warning);
+            Assert.True(header.Warning.Length < 200);
+            Assert.Contains("…", header.Warning);
+        }
+
+        [Fact]
+        public void A_stored_check_error_is_never_copied_into_the_warning_or_the_header()
+        {
+            _db.RecordGitHubWatchCheck("hdr", "o/second", null, "Network error: <img src=x onerror=alert(1)> 203.0.113.9");
+            var header = HeaderOf(WatchedProject("https://github.com/o/r", "o/second\nnonsense"));
+
+            Assert.DoesNotContain("203.0.113.9", header.Warning);
+            Assert.DoesNotContain("<img", header.Warning);
+            Assert.Equal("GitHub check failed. See the project's settings for details.", header.Entries[1].Band.FailureText);
+        }
+
+        [Fact]
+        public void A_project_with_a_blank_Repository_URL_and_no_Also_watch_has_nothing_to_warn_about()
+        {
+            Assert.Same(GitHubHeader.Hidden, HeaderOf(WatchedProject("  ", "  \n ", GitHubWatchMode.Board)));
+        }
+
+        [Fact]
+        public void The_form_says_an_unreadable_line_is_there_even_when_the_account_is_not_linked()
+        {
+            var p = WatchedProject("https://github.com/o/r", "nonsense", GitHubWatchMode.Board);
+            string status = GitHubWatchService.DescribeStatus(p, null, false, null, null);
+            Assert.Contains("link a GitHub source control account", status);
+            Assert.Contains("Warning: the Also watch line \"nonsense\" is not a github.com repository.", status);
+        }
     }
 }
