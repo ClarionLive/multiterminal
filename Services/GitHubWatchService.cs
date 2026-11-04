@@ -137,12 +137,13 @@ namespace MultiTerminal.Services
                 foreach (var project in _projects() ?? Array.Empty<Project>())
                 {
                     if (project == null || project.GitHubWatchMode == GitHubWatchMode.Off) continue;
-                    var repo = GitHubRepoRef.TryParse(project.GitRepoUrl);
-                    if (repo == null) continue;
-
-                    var state = _db.GetGitHubWatchState(project.Id, repo.FullName);
-                    if (IsDue(project.GitHubCheckInterval, state.LastSuccessUtc, state.LastCheckedUtc, now))
-                        await CheckProjectAsync(project, "interval").ConfigureAwait(false);
+                    // Each repository on the project's watch list is due on its own state (ticket a923589f).
+                    foreach (var repo in GitHubWatchList.Of(project).Repos)
+                    {
+                        var state = _db.GetGitHubWatchState(project.Id, repo.FullName);
+                        if (IsDue(project.GitHubCheckInterval, state.LastSuccessUtc, state.LastCheckedUtc, now))
+                            await CheckRepoAsync(project, repo, "interval").ConfigureAwait(false);
+                    }
                 }
             }
             catch (Exception ex)
@@ -165,24 +166,44 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// One check of one project. Single flight per project; never throws. Returns how many new
-        /// items were reported (0 for a first, baseline-only check or a failure).
+        /// One check of every repository on a project's watch list (ticket a923589f), one after the other.
+        /// A repository that fails does not stop the others (<see cref="CheckRepoAsync"/> never throws).
+        /// Returns how many new items were reported across them.
         /// </summary>
         internal async Task<int> CheckProjectAsync(Project project, string reason)
         {
-            if (string.IsNullOrEmpty(project?.Id) || Volatile.Read(ref _disposed) != 0 || !_inFlight.TryAdd(project.Id, 0)) return 0;
+            if (string.IsNullOrEmpty(project?.Id) || Volatile.Read(ref _disposed) != 0) return 0;
+
+            var list = GitHubWatchList.Of(project);
+            if (list.HasProblems)
+                _log($"{project.Name}: {list.WarningBody()}.");
+            if (list.Repos.Count == 0)
+            {
+                if (!list.HasProblems) _log($"{project.Name}: Repository URL is not a github.com repository; not watched.");
+                return 0;
+            }
+
+            int reported = 0;
+            foreach (var repo in list.Repos)
+                reported += await CheckRepoAsync(project, repo, reason).ConfigureAwait(false);
+            return reported;
+        }
+
+        /// <summary>
+        /// One check of one repository of a project. Single flight per project AND repository; never throws.
+        /// Returns how many new items were reported (0 for a first, baseline-only check or a failure).
+        /// </summary>
+        internal async Task<int> CheckRepoAsync(Project project, GitHubRepoRef repo, string reason)
+        {
+            if (string.IsNullOrEmpty(project?.Id) || repo == null || Volatile.Read(ref _disposed) != 0) return 0;
+            // Item numbers repeat across repositories, so the repository is part of the key.
+            string flightKey = project.Id + "\n" + repo.FullName.ToLowerInvariant();
+            if (!_inFlight.TryAdd(flightKey, 0)) return 0;
             try
             {
                 CancellationToken stopping;
                 try { stopping = _stopping.Token; }
                 catch (ObjectDisposedException) { return 0; }   // disposed between the check above and here
-
-                var repo = GitHubRepoRef.TryParse(project.GitRepoUrl);
-                if (repo == null)
-                {
-                    _log($"{project.Name}: Repository URL is not a github.com repository; not watched.");
-                    return 0;
-                }
 
                 bool hasAccount = !string.IsNullOrWhiteSpace(project.SourceControlAccountId);
                 string token = hasAccount ? _gitHubTokenForAccount(project.SourceControlAccountId) : null;
@@ -203,7 +224,7 @@ namespace MultiTerminal.Services
                 // back on, pointed it at another repo or account), or its baseline was reset, this
                 // check's answer is stale: drop it and write nothing (pipeline Run 2).
                 var current = FindProject(project.Id);
-                if (IsStale(project, current, baseline, _db.GetGitHubWatchState(project.Id, repo.FullName).Baseline))
+                if (IsStale(project, current, repo.FullName, baseline, _db.GetGitHubWatchState(project.Id, repo.FullName).Baseline))
                 {
                     _log($"{project.Name}: watch settings changed during the check; its result was dropped.");
                     return 0;
@@ -273,7 +294,8 @@ namespace MultiTerminal.Services
                     _log($"{project.Name} ({repo.FullName}): first check; baseline #{plan.NewBaseline}, nothing added.");
                 else if (reported.Count > 0)
                 {
-                    var (title, body) = PushText(project.Name, repo, reported, plan.MayHaveMissed, project.GitHubWatchMode);
+                    var (title, body) = PushText(project.Name, repo, reported, plan.MayHaveMissed, project.GitHubWatchMode,
+                        showRepo: GitHubWatchList.Of(project).Repos.Count > 1);
                     _push(title, body);
                     _log($"{project.Name} ({repo.FullName}, {reason}): {reported.Count} new.");
 
@@ -308,20 +330,22 @@ namespace MultiTerminal.Services
             }
             finally
             {
-                _inFlight.TryRemove(project.Id, out _);
+                _inFlight.TryRemove(flightKey, out _);
             }
         }
 
         /// <summary>
         /// Whether a check's result no longer applies: the project is gone, watching is off, the
-        /// mode, repository or account changed, or the stored baseline is not the one the check started
-        /// from (a reset, or another check got there first). Pure.
+        /// mode or account changed, THIS repository is no longer on the project's watch list, or the
+        /// stored baseline is not the one the check started from (a reset, or another check got there
+        /// first). Only this repository's membership counts, so an edit to the rest of the list does not
+        /// drop a check that is still wanted (ticket a923589f). Pure.
         /// </summary>
-        internal static bool IsStale(Project started, Project now, int? baselineAtStart, int? baselineNow)
+        internal static bool IsStale(Project started, Project now, string repoFullName, int? baselineAtStart, int? baselineNow)
         {
             if (now == null || now.GitHubWatchMode == GitHubWatchMode.Off) return true;
             if (now.GitHubWatchMode != started.GitHubWatchMode) return true;
-            if (!string.Equals(GitHubRepoRef.TryParse(now.GitRepoUrl)?.FullName, GitHubRepoRef.TryParse(started.GitRepoUrl)?.FullName, StringComparison.OrdinalIgnoreCase)) return true;
+            if (!GitHubWatchList.Of(now).Contains(repoFullName)) return true;
             if (!string.Equals(now.SourceControlAccountId, started.SourceControlAccountId, StringComparison.Ordinal)) return true;
             return baselineAtStart != baselineNow;
         }
@@ -384,31 +408,69 @@ namespace MultiTerminal.Services
         /// <summary>
         /// One line for the project form saying whether the project can be watched and how the last
         /// check went, so "not watchable" is visible rather than a silent no-op. Shown whatever the
-        /// mode, so the Owner can see what turning it on would need. Pure.
+        /// mode, so the Owner can see what turning it on would need. Pure. This overload reads the one
+        /// state it is given as the state of every repository; see the Func overload for several.
         /// </summary>
         /// <param name="accountProvider">The linked account's provider ("github", "bitbucket"), or null when none is linked.</param>
         public static string DescribeStatus(Project project, string accountProvider, bool accountHasToken,
-            DateTime? lastCheckedUtc, string lastError)
+            DateTime? lastCheckedUtc, string lastError) =>
+            DescribeStatus(project, accountProvider, accountHasToken, _ => (lastCheckedUtc, lastError));
+
+        /// <summary>
+        /// As above for a project that may list several repositories (ticket a923589f):
+        /// <paramref name="stateOf"/> gives each repository's last check time and error by <c>owner/name</c>.
+        /// With the watch on, anything that cannot be read is named after the status, in MT's words.
+        /// </summary>
+        public static string DescribeStatus(Project project, string accountProvider, bool accountHasToken,
+            Func<string, (DateTime? CheckedUtc, string Error)> stateOf)
         {
             if (project == null) return string.Empty;
-            var repo = GitHubRepoRef.TryParse(project.GitRepoUrl);
-            if (repo == null)
-                return "Not watchable: the Repository URL above is not a github.com repository.";
-            if (accountProvider == null)
-                return $"Not watchable: link a GitHub source control account to check {repo.FullName}.";
-            if (!string.Equals(accountProvider, "github", StringComparison.OrdinalIgnoreCase))
-                return "Not watchable: the linked source control account is not a GitHub account.";
-            if (!accountHasToken)
-                return "Not watchable: the linked GitHub account has no token saved.";
-            if (project.GitHubWatchMode == GitHubWatchMode.Off)
-                return $"Off. {repo.FullName} can be watched once this is turned on.";
-            if (lastCheckedUtc == null)
-                return $"Ready to watch {repo.FullName}. Not checked yet.";
+            var list = GitHubWatchList.Of(project);
+            string warning = project.GitHubWatchMode != GitHubWatchMode.Off && list.HasProblems
+                ? " Warning: " + list.WarningBody() + "."
+                : string.Empty;
 
-            string when = lastCheckedUtc.Value.ToLocalTime().ToString("g", System.Globalization.CultureInfo.CurrentCulture);
-            return string.IsNullOrEmpty(lastError)
-                ? $"Watching {repo.FullName}. Last checked {when}."
-                : $"Watching {repo.FullName}. Last check {when} failed: {lastError}";
+            if (list.Repos.Count == 0)
+            {
+                var first = list.Problems.Count > 0 ? list.Problems[0] : null;
+                if (first == null || first.IsPrimary)
+                    return first != null && first.NamesAccountOnly
+                        ? "Not watchable: the Repository URL above names an account, not a repository."
+                        : "Not watchable: the Repository URL above is not a github.com repository.";
+                return "Not watchable: " + list.WarningBody() + ".";
+            }
+
+            string names = list.Repos.Count == 1 ? list.Repos[0].FullName : string.Join(", ", list.Repos.Select(r => r.FullName));
+            if (accountProvider == null)
+                return $"Not watchable: link a GitHub source control account to check {names}." + warning;
+            if (!string.Equals(accountProvider, "github", StringComparison.OrdinalIgnoreCase))
+                return "Not watchable: the linked source control account is not a GitHub account." + warning;
+            if (!accountHasToken)
+                return "Not watchable: the linked GitHub account has no token saved." + warning;
+            if (project.GitHubWatchMode == GitHubWatchMode.Off)
+                return $"Off. {names} can be watched once this is turned on.";
+
+            string When(DateTime? t) => t.Value.ToLocalTime().ToString("g", System.Globalization.CultureInfo.CurrentCulture);
+
+            if (list.Repos.Count == 1)
+            {
+                var (checkedUtc, error) = stateOf(list.Repos[0].FullName);
+                if (checkedUtc == null)
+                    return $"Ready to watch {names}. Not checked yet." + warning;
+                return (string.IsNullOrEmpty(error)
+                    ? $"Watching {names}. Last checked {When(checkedUtc)}."
+                    : $"Watching {names}. Last check {When(checkedUtc)} failed: {error}") + warning;
+            }
+
+            var sb = new System.Text.StringBuilder($"Watching {names}.");
+            foreach (var repo in list.Repos)
+            {
+                var (checkedUtc, error) = stateOf(repo.FullName);
+                if (checkedUtc == null) sb.Append($" {repo.FullName}: not checked yet.");
+                else if (string.IsNullOrEmpty(error)) sb.Append($" {repo.FullName}: last checked {When(checkedUtc)}.");
+                else sb.Append($" {repo.FullName}: last check {When(checkedUtc)} failed: {error}");
+            }
+            return sb.ToString() + warning;
         }
 
         internal static string Kind(GitHubItem item) => item.IsPullRequest ? "PR" : "Issue";
@@ -457,10 +519,11 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>One push per check: the count, and up to three items by number and title.</summary>
-        internal static (string Title, string Body) PushText(string projectName, GitHubRepoRef repo, IReadOnlyList<GitHubItem> items, bool mayHaveMissed, GitHubWatchMode mode)
+        internal static (string Title, string Body) PushText(string projectName, GitHubRepoRef repo, IReadOnlyList<GitHubItem> items, bool mayHaveMissed, GitHubWatchMode mode, bool showRepo = false)
         {
             int n = items.Count;
-            string title = $"{projectName}: {n}{(mayHaveMissed ? "+" : "")} new on GitHub";
+            // With several repositories the push says which one, so "3 new" is not ambiguous.
+            string title = $"{projectName}{(showRepo ? " (" + repo.FullName + ")" : "")}: {n}{(mayHaveMissed ? "+" : "")} new on GitHub";
             var lines = items.Take(3).Select(i => $"{Kind(i)} #{i.Number}: {i.Title}").ToList();
             if (n > 3) lines.Add($"and {n - 3} more");
             if (mayHaveMissed)
