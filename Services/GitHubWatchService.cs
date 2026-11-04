@@ -325,12 +325,44 @@ namespace MultiTerminal.Services
             }
             catch (Exception ex)
             {
-                _log($"{project?.Name}: check failed: {ex.Message}");
+                _log($"{project?.Name} ({repo.FullName}): check failed: {ex.Message}");
+                RecordUnexpectedFailure(project, repo);
                 return 0;
             }
             finally
             {
                 _inFlight.TryRemove(flightKey, out _);
+            }
+        }
+
+        /// <summary>
+        /// The stored error for a check that failed in a way MT did not expect (a database, parsing or
+        /// callback exception; ticket a923589f, pipeline Run 1). A constant, never the exception's text: the
+        /// header only classifies it (as <see cref="GitHubCheckFailure.Other"/>) and shows MT's own sentence.
+        /// </summary>
+        internal const string UnexpectedError = "The check failed unexpectedly. See MultiTerminal's debug log.";
+
+        /// <summary>
+        /// An exception out of a check must not leave the header looking healthy: record a failure for this
+        /// repository (which also schedules the retry), and tell the header. Not at shutdown, when nothing
+        /// should be written. Never throws: if recording itself fails, that is only logged.
+        /// </summary>
+        private void RecordUnexpectedFailure(Project project, GitHubRepoRef repo)
+        {
+            try
+            {
+                if (Volatile.Read(ref _disposed) != 0) return;
+                bool stopping;
+                try { stopping = _stopping.IsCancellationRequested; }
+                catch (ObjectDisposedException) { return; }
+                if (stopping) return;
+
+                _db.RecordGitHubWatchCheck(project.Id, repo.FullName, null, UnexpectedError);
+                Raise(CheckRecorded, project.Id);
+            }
+            catch (Exception ex)
+            {
+                _log($"{project?.Name} ({repo?.FullName}): could not record the failure: {ex.Message}");
             }
         }
 
