@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Text.Json;
 using System.Windows.Forms;
@@ -342,9 +343,13 @@ namespace MultiTerminal.Controls
                         // project's own repo (GitHubRepoRef.WebUrl), so the page cannot open anything else.
                         // The failure link's two targets (task 81d0e597) open MT's own forms, never a URL.
                         string target = root.TryGetProperty("target", out var tEl) && tEl.ValueKind == JsonValueKind.String ? tEl.GetString() : null;
+                        // The repository the link belongs to (ticket a923589f). Untrusted text: MainForm accepts it
+                        // only if it is on the project's watch list, and builds the URL from its own parsed copy.
+                        string repo = root.TryGetProperty("repo", out var rEl) && rEl.ValueKind == JsonValueKind.String ? rEl.GetString() : null;
+                        if (repo != null && repo.Length > 120) repo = null;
                         if (target == "repo" || target == "issues" || target == "pulls"
                             || target == Services.GitHubBandModel.AccountsTarget || target == Services.GitHubBandModel.ProjectTarget)
-                            GitHubOpenRequested?.Invoke(this, target);
+                            GitHubOpenRequested?.Invoke(this, (target, repo));
                     }
                     else if (type == "neededHeight")
                     {
@@ -537,7 +542,7 @@ namespace MultiTerminal.Controls
         /// A GitHub band link was clicked: "repo", "issues" or "pulls" (task e4924065), or the failure
         /// link's "accounts" or "project" (task 81d0e597).
         /// </summary>
-        public event EventHandler<string> GitHubOpenRequested;
+        public event EventHandler<(string Target, string Repo)> GitHubOpenRequested;
 
         /// <summary>
         /// The page reports the height, in device pixels, its shown rows need, while the GitHub row is
@@ -551,18 +556,26 @@ namespace MultiTerminal.Controls
         /// failed (task 81d0e597) it also carries MT's failure sentence and the fixed target its link
         /// sends, and the counts are marked stale. Remembered and replayed on 'ready'.
         /// </summary>
-        public void SetGitHub(Services.GitHubBand band)
+        public void SetGitHub(Services.GitHubHeader header)
         {
-            string json = string.IsNullOrEmpty(band?.Repo)
+            string json = header == null || header.IsHidden
                 ? "null"
                 : JsonSerializer.Serialize(new
                 {
-                    repo = band.Repo,
-                    issues = band.OpenIssues,
-                    prs = band.OpenPullRequests,
-                    failure = band.FailureText,
-                    failureTarget = band.FailureTarget,
-                    stale = band.CountsStale,
+                    // One entry per watched repository (ticket a923589f): the link's text, the repository it
+                    // opens, its counts, and its own failure sentence (MT's, never GitHub's).
+                    repos = header.Entries.Select(e => new
+                    {
+                        label = e.Label,
+                        repo = e.Band.Repo,
+                        issues = e.Band.OpenIssues,
+                        prs = e.Band.OpenPullRequests,
+                        failure = e.Band.FailureText,
+                        failureTarget = e.Band.FailureTarget,
+                        stale = e.Band.CountsStale,
+                    }).ToList(),
+                    warning = header.Warning,
+                    warningTarget = header.WarningTarget,
                 });
             // MainForm refreshes every band once a minute; only a change is sent to the page.
             if (json == _lastGitHubJson) return;

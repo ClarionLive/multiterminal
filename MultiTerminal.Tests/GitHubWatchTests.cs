@@ -1432,5 +1432,122 @@ namespace MultiTerminal.Tests
             Assert.Equal("Not watchable: the Repository URL above names an account, not a repository.",
                 GitHubWatchService.DescribeStatus(p, "github", true, null, null));
         }
+
+        // ── Ticket a923589f item 2: the header's GitHub row with several repositories ──
+
+        private static Project WatchedProject(string primary, string extras, GitHubWatchMode mode = GitHubWatchMode.Board)
+        {
+            var p = Project.Create("P", Path.GetTempPath());
+            p.GitRepoUrl = primary;
+            p.GitHubExtraRepos = extras;
+            p.GitHubWatchMode = mode;
+            return p;
+        }
+
+        private GitHubHeader HeaderOf(Project p) =>
+            GitHubBandModel.BuildHeader(p, name => _db.GetGitHubWatchState("hdr", name));
+
+        [Fact]
+        public void A_single_repository_looks_as_it_always_did()
+        {
+            _db.RecordGitHubWatchCheck("hdr", "o/r", 5, null);
+            _db.RecordGitHubOpenCounts("hdr", "o/r", 4, 2);
+            var header = HeaderOf(WatchedProject("https://github.com/o/r", null));
+
+            var entry = Assert.Single(header.Entries);
+            Assert.Equal("o/r", entry.Label);   // the full name, as before
+            Assert.Equal("o/r", entry.Band.Repo);
+            Assert.Equal(4, entry.Band.OpenIssues);
+            Assert.Equal(2, entry.Band.OpenPullRequests);
+            Assert.Null(header.Warning);
+        }
+
+        [Fact]
+        public void Three_repositories_get_one_entry_each_with_the_short_name_and_their_own_counts()
+        {
+            _db.RecordGitHubWatchCheck("hdr", "acme/web", 5, null);
+            _db.RecordGitHubOpenCounts("hdr", "acme/web", 4, 2);
+            _db.RecordGitHubWatchCheck("hdr", "acme/api", 9, null);
+            _db.RecordGitHubOpenCounts("hdr", "acme/api", 0, 7);
+            var header = HeaderOf(WatchedProject("https://github.com/acme/web", "acme/api\nacme/docs"));
+
+            Assert.Equal(new[] { "web", "api", "docs" }, header.Entries.Select(e => e.Label));
+            Assert.Equal(new[] { "acme/web", "acme/api", "acme/docs" }, header.Entries.Select(e => e.Band.Repo));
+            Assert.Equal(7, header.Entries[1].Band.OpenPullRequests);
+            Assert.Null(header.Entries[2].Band.OpenIssues);   // never checked yet: no counts
+        }
+
+        [Fact]
+        public void Two_repositories_with_the_same_name_keep_their_owner_in_the_label()
+        {
+            var header = HeaderOf(WatchedProject("https://github.com/a/site", "b/site\nb/other"));
+            Assert.Equal(new[] { "a/site", "b/site", "other" }, header.Entries.Select(e => e.Label));
+        }
+
+        [Fact]
+        public void One_repositorys_failure_shows_against_that_repository_only()
+        {
+            _db.RecordGitHubWatchCheck("hdr", "o/r", 5, null);
+            _db.RecordGitHubWatchCheck("hdr", "o/second", null, GitHubIssueFeed.TokenRefusedError);
+            var header = HeaderOf(WatchedProject("https://github.com/o/r", "o/second"));
+
+            Assert.Equal(GitHubCheckFailure.None, header.Entries[0].Band.Failure);
+            Assert.Equal(GitHubCheckFailure.TokenRefused, header.Entries[1].Band.Failure);
+            Assert.Equal("accounts", header.Entries[1].Band.FailureTarget);
+        }
+
+        [Fact]
+        public void With_the_watch_off_every_repository_is_a_link_without_counts()
+        {
+            _db.RecordGitHubWatchCheck("hdr", "o/second", null, GitHubIssueFeed.TokenRefusedError);
+            var header = HeaderOf(WatchedProject("https://github.com/o/r", "o/second", GitHubWatchMode.Off));
+
+            Assert.Equal(2, header.Entries.Count);
+            Assert.All(header.Entries, e => Assert.Equal(GitHubCheckFailure.None, e.Band.Failure));
+            Assert.All(header.Entries, e => Assert.Null(e.Band.OpenIssues));
+        }
+
+        [Fact]
+        public void A_project_with_nothing_to_watch_has_no_header_row()
+        {
+            Assert.Same(GitHubHeader.Hidden, HeaderOf(WatchedProject(null, null)));
+            Assert.Same(GitHubHeader.Hidden, HeaderOf(WatchedProject("https://bitbucket.org/o/r", null, GitHubWatchMode.Off)));
+            Assert.Same(GitHubHeader.Hidden, GitHubBandModel.BuildHeader(null, _ => null));
+        }
+
+        [Fact]
+        public void A_header_link_opens_a_repository_only_if_it_is_on_this_projects_watch_list()
+        {
+            var p = WatchedProject("https://github.com/o/r", "o/second");
+
+            Assert.Equal("https://github.com/o/second/issues", GitHubWatchList.ResolveLink(p, "issues", "o/second"));
+            Assert.Equal("https://github.com/o/r/pulls", GitHubWatchList.ResolveLink(p, "pulls", "o/r"));
+            // Matched ignoring case, but the URL is built from the project's own parsed name.
+            Assert.Equal("https://github.com/o/second", GitHubWatchList.ResolveLink(p, "repo", "O/SECOND"));
+
+            Assert.Null(GitHubWatchList.ResolveLink(p, "issues", "someone/else"));
+            Assert.Null(GitHubWatchList.ResolveLink(p, "issues", "https://evil.example/o/r"));
+            Assert.Null(GitHubWatchList.ResolveLink(p, "issues", "o/r/../../x"));
+            Assert.Null(GitHubWatchList.ResolveLink(p, "settings", "o/r"));       // not one of the three pages
+            Assert.Null(GitHubWatchList.ResolveLink(p, "issues", null));          // several repos: ambiguous, so nothing
+            Assert.Null(GitHubWatchList.ResolveLink(null, "issues", "o/r"));
+        }
+
+        [Fact]
+        public void An_older_page_that_names_no_repository_still_opens_the_only_one()
+        {
+            var p = WatchedProject("https://github.com/o/r", null);
+            Assert.Equal("https://github.com/o/r/issues", GitHubWatchList.ResolveLink(p, "issues", null));
+            Assert.Null(GitHubWatchList.ResolveLink(p, "issues", "o/other"));
+        }
+
+        [Fact]
+        public void A_repository_removed_from_the_list_can_no_longer_be_opened_from_a_stale_header()
+        {
+            var p = WatchedProject("https://github.com/o/r", "o/second");
+            Assert.NotNull(GitHubWatchList.ResolveLink(p, "issues", "o/second"));
+            p.GitHubExtraRepos = null;
+            Assert.Null(GitHubWatchList.ResolveLink(p, "issues", "o/second"));
+        }
     }
 }

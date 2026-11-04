@@ -574,7 +574,7 @@ namespace MultiTerminal
                 var db = _sharedProjectDatabase;
                 if (db == null || _dockPanel == null) return;
 
-                var bands = new Dictionary<string, Services.GitHubBand>(StringComparer.Ordinal);
+                var bands = new Dictionary<string, Services.GitHubHeader>(StringComparer.Ordinal);
                 foreach (var doc in _dockPanel.Contents.OfType<TerminalDocument>())
                 {
                     if (doc == null || doc.IsDisposed) continue;
@@ -582,18 +582,16 @@ namespace MultiTerminal
                     if (onlyProjectId != null && !string.Equals(projectId, onlyProjectId, StringComparison.Ordinal)) continue;
                     if (string.IsNullOrEmpty(projectId))
                     {
-                        doc.SetGitHubBand(Services.GitHubBand.Hidden);
+                        doc.SetGitHubBand(Services.GitHubHeader.Hidden);
                         continue;
                     }
 
                     if (!bands.TryGetValue(projectId, out var band))
                     {
+                        // One entry per repository on the project's watch list (ticket a923589f). Watching off:
+                        // the links without counts nobody refreshes, and no failure or warning.
                         var project = db.GetRichProject(projectId);
-                        var repo = Services.GitHubRepoRef.TryParse(project?.GitRepoUrl);
-                        // Watching off: the link without counts nobody refreshes, and no failure.
-                        bool watching = repo != null && project.GitHubWatchMode != GitHubWatchMode.Off;
-                        band = Services.GitHubBandModel.Build(repo?.FullName, watching,
-                            watching ? db.GetGitHubWatchState(projectId, repo.FullName) : null);
+                        band = Services.GitHubBandModel.BuildHeader(project, repoName => db.GetGitHubWatchState(projectId, repoName));
                         bands[projectId] = band;
                     }
                     doc.SetGitHubBand(band);
@@ -631,8 +629,10 @@ namespace MultiTerminal
                     return;
                 }
 
+                // The page named a repository; it must be on THIS project's watch list, and the URL is built
+                // here from our own parsed copy of it, never from what the page sent (ticket a923589f).
                 var project = _sharedProjectDatabase?.GetRichProject(e.ProjectId);
-                string url = Services.GitHubRepoRef.TryParse(project?.GitRepoUrl)?.WebUrl(e.Target);
+                string url = Services.GitHubWatchList.ResolveLink(project, e.Target, e.Repo);
                 if (url == null) return;
                 using var browser = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
             }

@@ -436,7 +436,7 @@ namespace MultiTerminal.Docking
         public event EventHandler<string> SettingsProjectChanged;
 
         /// <summary>Shows or hides the header's GitHub band (task e4924065). A null band or repo hides it.</summary>
-        public void SetGitHubBand(Services.GitHubBand band) => _statusBar?.SetGitHub(band);
+        public void SetGitHubBand(Services.GitHubHeader header) => _statusBar?.SetGitHub(header);
 
         /// <summary>
         /// Ticket 37edc158: pushes the pane's launch profile to the header, which shows it only when it is
@@ -919,10 +919,10 @@ namespace MultiTerminal.Docking
                 if (!string.IsNullOrEmpty(SettingsProjectId))
                     ProjectSettingsRequested?.Invoke(this, SettingsProjectId);
             };
-            _statusBar.GitHubOpenRequested += (s, target) =>
+            _statusBar.GitHubOpenRequested += (s, request) =>
             {
                 if (!string.IsNullOrEmpty(SettingsProjectId))
-                    GitHubLinkRequested?.Invoke(this, new GitHubLinkRequestedEventArgs(SettingsProjectId, target));
+                    GitHubLinkRequested?.Invoke(this, new GitHubLinkRequestedEventArgs(SettingsProjectId, request.Target, request.Repo));
             };
             _statusBar.OpenFolderRequested += OnOpenFolderRequested;
             _statusBar.HudToggleRequested += (s, e) =>

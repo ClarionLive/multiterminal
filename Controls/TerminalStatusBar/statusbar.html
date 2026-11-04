@@ -579,8 +579,9 @@
            ============================================ */
         .row-github {
             display: flex;
+            flex-wrap: wrap;           /* several repositories (ticket a923589f) wrap onto more lines */
             align-items: center;
-            gap: 8px;
+            gap: 2px 8px;
             padding: 0 12px;
             min-height: 24px;
             border-top: 1px solid var(--border-color);
@@ -619,6 +620,15 @@
         .github-link.failure { color: var(--ctx-red); flex-shrink: 1; min-width: 0; }
         .github-failure.hidden { display: none; }
         .github-counts.stale { opacity: 0.5; }
+
+        /* Ticket a923589f: one entry per watched repository, side by side and wrapping as a group. With a
+           single repository this looks exactly as the row always did. */
+        .github-entries { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 16px; min-width: 0; max-width: 100%; }
+        .github-entry { display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
+        .github-entry .github-link:first-child { flex-shrink: 1; min-width: 0; }
+        /* The warning about a line that cannot be read: MT's own sentence, a link to the project settings. */
+        .github-link.warning { color: var(--ctx-red); flex-shrink: 1; min-width: 0; max-width: 100%; }
+        .github-link.warning.hidden { display: none; }
 
         /* Hidden state for rows 2-4 before data arrives */
         .row-folder.hidden,
@@ -727,17 +737,8 @@
              clipped, not the model/context/quota row (pipeline Run 2). -->
         <div class="row-github hidden" id="row-github">
             <svg class="github-mark" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-            <button class="github-link" id="github-repo" title="Open the repository on GitHub" onclick="onGitHubClick('repo')"></button>
-            <span class="github-failure hidden" id="github-failure-wrap">
-                <span class="github-sep">·</span>
-                <button class="github-link failure" id="github-failure" onclick="onGitHubFailureClick()"></button>
-            </span>
-            <span class="github-counts hidden" id="github-counts">
-                <span class="github-sep">·</span>
-                <button class="github-link count" id="github-issues" title="Open the issues on GitHub" onclick="onGitHubClick('issues')"></button>
-                <span class="github-sep">·</span>
-                <button class="github-link count" id="github-prs" title="Open the pull requests on GitHub" onclick="onGitHubClick('pulls')"></button>
-            </span>
+            <span class="github-entries" id="github-entries"></span>
+            <button class="github-link warning hidden" id="github-warning" onclick="onGitHubWarningClick()" title="Open the project settings"></button>
         </div>
     </div>
 
@@ -794,35 +795,66 @@
             }
         }
 
-        // GitHub band (task e4924065). Text only, through textContent: the repo name comes from the
-        // project's settings and the counts are numbers.
+        // GitHub band (task e4924065; several repositories, ticket a923589f). Text only, through
+        // textContent: repository names come from the project's settings, and the failure and warning
+        // sentences are MT's own. Nothing from the page is ever put in as markup.
+        function ghButton(cls, text, title, onClick) {
+            var b = document.createElement('button');
+            b.className = 'github-link' + (cls ? ' ' + cls : '');
+            b.textContent = text;
+            if (title) b.title = title;
+            b.addEventListener('click', onClick);
+            return b;
+        }
+        function ghSep() {
+            var sep = document.createElement('span');
+            sep.className = 'github-sep';
+            sep.textContent = '\u00b7';
+            return sep;
+        }
+        function ghEntry(r) {
+            var entry = document.createElement('span');
+            entry.className = 'github-entry';
+            entry.appendChild(ghButton('', r.label + ' \u2197', 'Open ' + r.repo + ' on GitHub', function () { onGitHubClick('repo', r.repo); }));
+            // Task 81d0e597: the failure sentence is MT's (GitHubBandModel); the link sends back only the
+            // fixed target name C# put here.
+            if (typeof r.failure === 'string' && r.failure && (r.failureTarget === 'accounts' || r.failureTarget === 'project')) {
+                var target = r.failureTarget;
+                entry.appendChild(ghSep());
+                entry.appendChild(ghButton('failure', r.failure,
+                    target === 'accounts' ? 'Open Source Control Accounts' : 'Open the project settings',
+                    function () { postMessage('openGitHub', { target: target }); }));
+            }
+            if (typeof r.issues === 'number' && typeof r.prs === 'number') {
+                var counts = document.createElement('span');
+                counts.className = 'github-counts' + (r.stale === true ? ' stale' : '');
+                counts.appendChild(ghSep());
+                counts.appendChild(ghButton('count', r.issues + (r.issues === 1 ? ' issue' : ' issues'), 'Open the issues on GitHub', function () { onGitHubClick('issues', r.repo); }));
+                counts.appendChild(ghSep());
+                counts.appendChild(ghButton('count', r.prs + (r.prs === 1 ? ' PR open' : ' PRs open'), 'Open the pull requests on GitHub', function () { onGitHubClick('pulls', r.repo); }));
+                entry.appendChild(counts);
+            }
+            return entry;
+        }
         function setGitHub(info) {
             var row = document.getElementById('row-github');
-            if (!info || !info.repo) { row.classList.add('hidden'); return; }
-            document.getElementById('github-repo').textContent = info.repo + ' ↗';
-            var counts = document.getElementById('github-counts');
-            if (typeof info.issues === 'number' && typeof info.prs === 'number') {
-                document.getElementById('github-issues').textContent = info.issues + (info.issues === 1 ? ' issue' : ' issues');
-                document.getElementById('github-prs').textContent = info.prs + (info.prs === 1 ? ' PR open' : ' PRs open');
-                counts.classList.remove('hidden');
+            var host = document.getElementById('github-entries');
+            var warn = document.getElementById('github-warning');
+            var repos = info && Array.isArray(info.repos) ? info.repos : [];
+            var warning = info && typeof info.warning === 'string' ? info.warning : '';
+            if (repos.length === 0 && !warning) { row.classList.add('hidden'); return; }
+
+            while (host.firstChild) host.removeChild(host.firstChild);
+            repos.forEach(function (r) {
+                if (r && typeof r.repo === 'string' && r.repo) host.appendChild(ghEntry(r));
+            });
+
+            if (warning && info.warningTarget === 'project') {
+                warn.textContent = warning;
+                warn.classList.remove('hidden');
             } else {
-                counts.classList.add('hidden');
-            }
-            counts.classList.toggle('stale', info.stale === true);
-            // Task 81d0e597: the failure sentence is MT's (GitHubBandModel), never GitHub's text, and
-            // the link sends back only the fixed target name C# put here.
-            var failWrap = document.getElementById('github-failure-wrap');
-            var failBtn = document.getElementById('github-failure');
-            if (typeof info.failure === 'string' && info.failure) {
-                failBtn.textContent = info.failure;
-                gitHubFailureTarget = info.failureTarget || null;
-                failBtn.title = gitHubFailureTarget === 'accounts'
-                    ? 'Open Source Control Accounts'
-                    : 'Open the project settings';
-                failWrap.classList.remove('hidden');
-            } else {
-                gitHubFailureTarget = null;
-                failWrap.classList.add('hidden');
+                warn.textContent = '';
+                warn.classList.add('hidden');
             }
             row.classList.remove('hidden');
             reportNeededHeight();
@@ -846,14 +878,14 @@
         // itself also lands here, but leaves the needed height unchanged, so nothing is re-sent.
         window.addEventListener('resize', reportNeededHeight);
 
-        function onGitHubClick(target) {
-            postMessage('openGitHub', { target: target });
+        // The page names a target and the repository it showed. C# checks the repository against the
+        // project's watch list and builds the URL itself; the page never sends a URL.
+        function onGitHubClick(target, repo) {
+            postMessage('openGitHub', { target: target, repo: repo });
         }
 
-        var gitHubFailureTarget = null;
-        function onGitHubFailureClick() {
-            if (gitHubFailureTarget === 'accounts' || gitHubFailureTarget === 'project')
-                postMessage('openGitHub', { target: gitHubFailureTarget });
+        function onGitHubWarningClick() {
+            postMessage('openGitHub', { target: 'project' });
         }
 
         function onOpenFolderClick() {
