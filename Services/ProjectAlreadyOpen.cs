@@ -12,7 +12,8 @@ namespace MultiTerminal.Services
     /// <param name="IsRunning">Whether the pane's process is running.</param>
     /// <param name="OnStartScreen">Whether the pane is showing its start screen.</param>
     /// <param name="Title">The pane's tab text, for the question.</param>
-    internal sealed record OpenPaneFacts(string DocId, string LaunchProjectId, TerminalRole Role, bool IsRunning, bool OnStartScreen, string Title);
+    /// <param name="Kind">The <see cref="PaneLaunchKind"/> of the pane's current launch; null when not known.</param>
+    internal sealed record OpenPaneFacts(string DocId, string LaunchProjectId, TerminalRole Role, bool IsRunning, bool OnStartScreen, string Title, string Kind = null);
 
     /// <summary>
     /// GitHub #95: launching a project that is already open in another pane used to open a second one
@@ -25,8 +26,11 @@ namespace MultiTerminal.Services
         /// The panes that already have <paramref name="projectId"/> open, in the order given.
         /// A pane counts only when its current launch was the Owner opening that project (its role is
         /// <see cref="TerminalRole.ProjectManager"/>: a helper a PM spawned is the PM's business, not a
-        /// second copy of the project), its process is running, it is not back on its start screen, and
-        /// it is not the pane being launched. Project ids are compared exactly, as the database stores them.
+        /// second copy of the project), it runs an agent rather than a plain shell (a Claude or Codex pane
+        /// can be the project's PM; a PowerShell pane cannot, so it never counts; ClarionLive#96 review),
+        /// its process is running, it is not back on its start screen, and it is not the pane being
+        /// launched. A launch whose kind is unknown still counts: asking is the safe answer. Project ids
+        /// are compared exactly, as the database stores them.
         /// </summary>
         internal static IReadOnlyList<OpenPaneFacts> FindOpenPanes(string projectId, string launchingDocId, IEnumerable<OpenPaneFacts> panes)
         {
@@ -36,6 +40,7 @@ namespace MultiTerminal.Services
             return panes
                 .Where(p => p != null
                     && p.Role == TerminalRole.ProjectManager
+                    && !string.Equals(p.Kind, PaneLaunchKind.PowerShell, StringComparison.Ordinal)
                     && p.IsRunning
                     && !p.OnStartScreen
                     && string.Equals(p.LaunchProjectId, projectId, StringComparison.Ordinal)
