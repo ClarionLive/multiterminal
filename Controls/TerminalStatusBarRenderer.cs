@@ -346,7 +346,8 @@ namespace MultiTerminal.Controls
                         // The repository the link belongs to (ticket a923589f). Untrusted text: MainForm accepts it
                         // only if it is on the project's watch list, and builds the URL from its own parsed copy.
                         string repo = root.TryGetProperty("repo", out var rEl) && rEl.ValueKind == JsonValueKind.String ? rEl.GetString() : null;
-                        if (repo != null && repo.Length > 120) repo = null;
+                        // owner (39) + "/" + name (100) is at most 140 characters; 160 leaves room, anything longer is not a repo.
+                        if (repo != null && repo.Length > 160) repo = null;
                         if (target == "repo" || target == "issues" || target == "pulls"
                             || target == Services.GitHubBandModel.AccountsTarget || target == Services.GitHubBandModel.ProjectTarget)
                             GitHubOpenRequested?.Invoke(this, (target, repo));

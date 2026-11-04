@@ -250,8 +250,9 @@ namespace MultiTerminal.Services
                         }
                     }
 
-                    // Turning GitHub watch back on resets its baselines inside UpdateProjectField (task 92eeeb47), so
-                    // every writer gets it. A repo that left the watch list loses its own baseline here.
+                    // Turning GitHub watch back on resets every baseline inside UpdateProjectField (task 92eeeb47).
+                    // The two list fields were written above without their own prune; here, once, each repository
+                    // that is no longer on the list loses its state and queued notices (ticket a923589f).
                     if (watchListBefore != null)
                         _db.PruneGitHubWatchList(update.ProjectId, watchListBefore);
 
