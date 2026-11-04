@@ -428,6 +428,27 @@
             letter-spacing: 0.04em;
         }
 
+        /* The pane's Claude profile (ticket 37edc158), a pill in the identity row beside Input: that row is
+           visible from the moment the pane launches, unlike the statusline rows (Codex and PowerShell panes
+           never fill those). A long name is cut with an ellipsis and its tooltip carries the whole text. */
+        .profile-pill {
+            flex: 0 1 auto;
+            min-width: 0;
+            max-width: 220px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            padding: 2px 7px;
+            font-size: 11px;
+            font-weight: 600;
+            border-radius: 3px;
+            border: 1px solid var(--ctx-green);
+            background: var(--model-bg);
+            color: var(--ctx-green);
+        }
+
+        .profile-pill.hidden { display: none; }
+
         .context-label {
             color: var(--text-muted);
             font-size: var(--font-size-xs);
@@ -639,6 +660,7 @@
                     <span class="task-label">Ready to work</span>
                 </div>
             </div>
+            <span class="profile-pill hidden" id="sl-profile"></span>
             <div class="input-pill" id="input-pill" title="Input source (Local = desktop, Remote = phone)">
                 <span class="input-label">Input:</span>
                 <span class="input-value" id="input-value">Local</span>
@@ -731,6 +753,16 @@
 
         function onProjectSettingsClick() {
             postMessage('projectSettings', {});
+        }
+
+        // Ticket 37edc158: the pane's Claude profile. The name is free text: textContent only, never HTML.
+        // badge is {text, tooltip} or null. Both are free text (a profile name, a folder path).
+        function setClaudeProfile(badge) {
+            var el = document.getElementById('sl-profile');
+            var shown = !!(badge && badge.text);
+            el.textContent = shown ? badge.text : '';
+            el.title = shown ? (badge.tooltip || '') : '';
+            el.classList.toggle('hidden', !shown);
         }
 
         function setProjectSettingsAvailable(available) {
@@ -1141,6 +1173,8 @@
                         setProjectSettingsAvailable(data.split(':')[1] === 'true');
                     } else if (data.startsWith('attention:')) {
                         document.body.setAttribute('data-attention', data.substring(10));
+                    } else if (data.startsWith('claudeProfile:')) {
+                        setClaudeProfile(JSON.parse(data.substring(14)));
                     } else if (data.startsWith('github:')) {
                         setGitHub(JSON.parse(data.substring(7)));
                     }
