@@ -142,7 +142,7 @@ namespace MultiTerminal.Services
             "isPinned", "createdBy", "claudeProfile", "launchMode", "defaultTerminal", "quietStart", "teamLead",
             "launchCommand", "sourcePath", "deployPath", "buildOutputPath", "buildCommand", "deployCommand",
             "gitRepoUrl", "gitDefaultBranch", "gitAutoCommit", "sourceControlAccountId", "changeLog",
-            "gitHubWatchMode", "gitHubCheckOnStart", "gitHubCheckInterval",
+            "gitHubWatchMode", "gitHubCheckOnStart", "gitHubCheckInterval", "gitHubExtraRepos",
             "claudeModel", "claudeHelperModel",
         };
 
@@ -197,6 +197,10 @@ namespace MultiTerminal.Services
                         $"'{modelName}' is not a valid model name (letters, digits, dots and hyphens, with an optional [1m] suffix). Nothing was saved.");
             }
 
+            string watchListError = ValidateWatchList(current, normalized);
+            if (watchListError != null)
+                return ProjectSettingsSaveResult.Fail(watchListError);
+
             string listError = ValidateLists(update);
             if (listError != null)
                 return ProjectSettingsSaveResult.Fail(listError);
@@ -225,6 +229,11 @@ namespace MultiTerminal.Services
                     changed = normalized.Where(p => !SameValue(p.Key, ReadField(current, p.Key), p.Value))
                                         .ToDictionary(p => p.Key, p => p.Value, StringComparer.Ordinal);
 
+                    // The watch list is judged once, after both of its fields are written: a repo that moves between
+                    // Repository URL and Also watch must not lose its baseline to the half-way state (a923589f).
+                    var watchListBefore = changed.ContainsKey("gitRepoUrl") || changed.ContainsKey("gitHubExtraRepos")
+                        ? GitHubWatchList.Of(current.GitRepoUrl, current.GitHubExtraRepos) : null;
+
                     foreach (var pair in changed)
                     {
                         // launch_mode has one writer, SetLaunchMode (task ec2ed636); UpdateProjectField does not
@@ -232,7 +241,8 @@ namespace MultiTerminal.Services
                         // connection, so it runs inside this transaction like every other write here.
                         bool written = pair.Key == "launchMode"
                             ? _db.SetLaunchMode(update.ProjectId, Project.ParseLaunchMode(pair.Value))
-                            : _db.UpdateProjectField(update.ProjectId, pair.Key, pair.Value);
+                            : _db.UpdateProjectField(update.ProjectId, pair.Key, pair.Value,
+                                pruneWatchList: pair.Key != "gitRepoUrl" && pair.Key != "gitHubExtraRepos");
                         if (!written)
                         {
                             failedField = pair.Key;
@@ -240,8 +250,10 @@ namespace MultiTerminal.Services
                         }
                     }
 
-                    // Turning GitHub watch back on, or pointing it at another repository, resets its
-                    // baseline inside UpdateProjectField (task 92eeeb47), so every writer gets it.
+                    // Turning GitHub watch back on resets its baselines inside UpdateProjectField (task 92eeeb47), so
+                    // every writer gets it. A repo that left the watch list loses its own baseline here.
+                    if (watchListBefore != null)
+                        _db.PruneGitHubWatchList(update.ProjectId, watchListBefore);
 
                     SaveAgents(update.ProjectId, update.Agents);
                     SaveSpecialists(update.ProjectId, update.SpecialistAgents);
@@ -396,12 +408,42 @@ namespace MultiTerminal.Services
                     return GitHubWatchSettings.ModeToStorage(GitHubWatchSettings.ParseMode(value));
                 case "gitHubCheckInterval":
                     return GitHubWatchSettings.IntervalToStorage(GitHubWatchSettings.ParseInterval(value));
+                case "gitHubExtraRepos":
+                    return NormalizeExtraRepos(value);
                 case "currentVersion":
                     return string.IsNullOrWhiteSpace(value) ? "0.1.0" : value;
                 default:
                     // A blank optional field is stored as null, as EditProjectDialog did.
                     return string.IsNullOrWhiteSpace(value) ? null : value;
             }
+        }
+
+        /// <summary>
+        /// The Also watch text as stored: one entry per line, blanks dropped (commas also split), null when
+        /// empty, so the same list typed two ways compares equal.
+        /// </summary>
+        internal static string NormalizeExtraRepos(string value)
+        {
+            var lines = GitHubWatchList.Split(value);
+            return lines.Count == 0 ? null : string.Join("\n", lines);
+        }
+
+        /// <summary>
+        /// Refuses a save that would put more than <see cref="GitHubWatchList.MaxRepos"/> repositories on a
+        /// project's watch list, so a mistake cannot multiply API calls (ticket a923589f). Judged only when the
+        /// save changes the Repository URL or Also watch. A line that cannot be read does not block the save:
+        /// the form and the header say so instead.
+        /// </summary>
+        private static string ValidateWatchList(Project current, Dictionary<string, string> normalized)
+        {
+            bool urlChanged = normalized.TryGetValue("gitRepoUrl", out var url) && !SameValue("gitRepoUrl", current.GitRepoUrl, url);
+            bool extraChanged = normalized.TryGetValue("gitHubExtraRepos", out var extra) && !SameValue("gitHubExtraRepos", ReadField(current, "gitHubExtraRepos"), extra);
+            if (!urlChanged && !extraChanged) return null;
+
+            var list = GitHubWatchList.Of(urlChanged ? url : current.GitRepoUrl, extraChanged ? extra : current.GitHubExtraRepos);
+            if (list.OverLimit == 0) return null;
+            return $"A project can watch at most {GitHubWatchList.MaxRepos} GitHub repositories (the Repository URL and Also watch together); " +
+                   $"{list.OverLimit} too many are listed. Nothing was saved.";
         }
 
         private static bool SameValue(string field, string stored, string incoming)
@@ -449,6 +491,7 @@ namespace MultiTerminal.Services
                 case "gitHubWatchMode": return GitHubWatchSettings.ModeToStorage(p.GitHubWatchMode);
                 case "gitHubCheckOnStart": return p.GitHubCheckOnStart ? "true" : "false";
                 case "gitHubCheckInterval": return GitHubWatchSettings.IntervalToStorage(p.GitHubCheckInterval);
+                case "gitHubExtraRepos": return NormalizeExtraRepos(p.GitHubExtraRepos);
                 default: throw new ArgumentOutOfRangeException(nameof(field), field, "Not an editable project field.");
             }
         }

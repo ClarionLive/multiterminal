@@ -187,6 +187,14 @@ namespace MultiTerminal.Models
         public GitHubCheckInterval GitHubCheckInterval { get; set; } = GitHubCheckInterval.Off;
 
         /// <summary>
+        /// Extra GitHub repositories to watch besides <see cref="GitRepoUrl"/> (ticket a923589f): one per
+        /// line (commas also split), anything <c>GitHubRepoRef.TryParse</c> accepts. SQLite-only
+        /// (<c>projects.github_extra_repos</c>), not carried by project.json and not in the SaveRichProject
+        /// UPSERT. NULL = none. Read through <c>GitHubWatchList.Of</c>, the one rule for a project's list.
+        /// </summary>
+        public string GitHubExtraRepos { get; set; }
+
+        /// <summary>
         /// This project's Claude model for its own panes (ticket b0d2f090), or null to use the global
         /// Project model. SQLite-only (<c>projects.claude_model</c>), not carried by project.json and not in
         /// the SaveRichProject UPSERT. Written through UpdateProjectField. Read only by

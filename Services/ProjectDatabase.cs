@@ -214,7 +214,10 @@ namespace MultiTerminal.Services
                 // Per-project Claude model (ticket b0d2f090). No DEFAULT: NULL = use the global setting
                 // (Settings > General), so every existing project keeps the machine-wide choice.
                 ("claude_model",          "TEXT"),
-                ("claude_helper_model",   "TEXT")
+                ("claude_helper_model",   "TEXT"),
+                // Extra GitHub repositories to watch besides git_repo_url (ticket a923589f): one per line,
+                // free text. NULL = none. SQLite-only, not in project.json or the SaveRichProject UPSERT.
+                ("github_extra_repos",    "TEXT")
             };
 
             foreach (var (colName, colDef) in newColumns)
@@ -513,7 +516,7 @@ namespace MultiTerminal.Services
             "is_pinned", "status", "created_by", "last_opened_at", "team_lead", "default_terminal",
             "source_control_account_id", "quiet_start", "claude_profile",
             "github_watch_mode", "github_check_on_start", "github_check_interval",
-            "claude_model", "claude_helper_model"
+            "claude_model", "claude_helper_model", "github_extra_repos"
         };
 
         // Map camelCase JS field names to snake_case SQLite column names.
@@ -538,6 +541,7 @@ namespace MultiTerminal.Services
             ["gitHubCheckInterval"] = "github_check_interval",
             ["claudeModel"] = "claude_model",
             ["claudeHelperModel"] = "claude_helper_model",
+            ["gitHubExtraRepos"] = "github_extra_repos",
         };
 
         // Fields that map to INTEGER 0/1 booleans in the database.
@@ -553,7 +557,13 @@ namespace MultiTerminal.Services
         /// or "1"/"0" and convert to INTEGER automatically.
         /// </summary>
         /// <returns>True if updated, false if project not found or field not allowed.</returns>
-        public bool UpdateProjectField(string projectId, string fieldName, string value)
+        public bool UpdateProjectField(string projectId, string fieldName, string value) =>
+            UpdateProjectField(projectId, fieldName, value, pruneWatchList: true);
+
+        /// <param name="pruneWatchList">False only for a caller that writes several watch-list fields in one
+        /// save (ProjectSettingsService): it prunes once afterwards with <see cref="PruneGitHubWatchList"/>, so
+        /// a repo that moves between Repository URL and Also watch is not dropped by the half-way state.</param>
+        internal bool UpdateProjectField(string projectId, string fieldName, string value, bool pruneWatchList)
         {
             if (string.IsNullOrWhiteSpace(projectId) || string.IsNullOrWhiteSpace(fieldName))
                 return false;
@@ -604,8 +614,11 @@ namespace MultiTerminal.Services
 
             lock (_dbLock)
             {
-                bool watchField = fieldName == "github_watch_mode" || fieldName == "git_repo_url";
+                bool listField = fieldName == "git_repo_url" || fieldName == "github_extra_repos";
+                bool watchField = fieldName == "github_watch_mode";
                 string oldValue = watchField ? ReadProjectText(projectId, fieldName) : null;
+                // The watch list as it was, for the repos this write takes off it (ticket a923589f).
+                var listBefore = listField && pruneWatchList ? ReadWatchList(projectId) : null;
 
                 // CA2100 / CA3001: fieldName is whitelist-validated against _allowedProjectFields above (rejected if not present);
                 // all user-supplied values (projectId, paramValue) flow through SQLiteParameter.
@@ -623,6 +636,10 @@ namespace MultiTerminal.Services
                 // tool all write through this method (task 92eeeb47, pipeline Run 2).
                 if (updated && watchField && ShouldResetGitHubWatch(fieldName, oldValue, value))
                     ResetGitHubWatchState(projectId);
+                // Only a repo that LEFT the list loses its baseline; the others keep theirs, and an edit that
+                // leaves a repo on the list (the ssh form of the same one, another line) changes nothing.
+                if (updated && listBefore != null)
+                    PruneGitHubWatchList(projectId, listBefore);
                 // Watching turned off: the Owner no longer wants to hear, so drop what was waiting for
                 // the agent (task e4924065, pipeline Run 1).
                 if (updated && fieldName == "github_watch_mode"
@@ -662,6 +679,7 @@ namespace MultiTerminal.Services
             {
                 "github_watch_mode" => "SELECT github_watch_mode FROM projects WHERE id = @id",
                 "git_repo_url" => "SELECT git_repo_url FROM projects WHERE id = @id",
+                "github_extra_repos" => "SELECT github_extra_repos FROM projects WHERE id = @id",
                 _ => throw new ArgumentOutOfRangeException(nameof(column), column, "Not a GitHub watch column."),
             };
             // Re-entrant: both callers already hold _dbLock.
@@ -671,6 +689,38 @@ namespace MultiTerminal.Services
                 command.Parameters.AddWithValue("@id", projectId);
                 var result = command.ExecuteScalar();
                 return result == null || result is DBNull ? null : Convert.ToString(result, System.Globalization.CultureInfo.InvariantCulture);
+            }
+        }
+
+        /// <summary>The project's stored watch list: Repository URL plus Also watch (ticket a923589f).</summary>
+        internal GitHubWatchList ReadWatchList(string projectId)
+        {
+            lock (_dbLock)
+            {
+                return GitHubWatchList.Of(ReadProjectText(projectId, "git_repo_url"), ReadProjectText(projectId, "github_extra_repos"));
+            }
+        }
+
+        /// <summary>
+        /// Drops the watch state of every repository that was on <paramref name="before"/> and is no longer
+        /// on the project's stored list (ticket a923589f), so adding it back later is a baseline-only check
+        /// and a stale row cannot let it dump its backlog. Repositories still on the list keep their
+        /// baselines. Claims (github_watch_seen) are kept, as in <see cref="ResetGitHubWatchState"/>.
+        /// </summary>
+        internal void PruneGitHubWatchList(string projectId, GitHubWatchList before)
+        {
+            if (before == null || string.IsNullOrEmpty(projectId)) return;
+            lock (_dbLock)
+            {
+                var after = ReadWatchList(projectId);
+                foreach (string repo in GitHubWatchList.Removed(before, after))
+                {
+                    using var command = new SQLiteCommand(
+                        "DELETE FROM github_watch_state WHERE project_id = @p AND lower(repo) = lower(@r)", _connection);
+                    command.Parameters.AddWithValue("@p", projectId);
+                    command.Parameters.AddWithValue("@r", repo);
+                    command.ExecuteNonQuery();
+                }
             }
         }
 
@@ -810,7 +860,7 @@ namespace MultiTerminal.Services
                            team_lead, default_terminal, source_control_account_id, status, quiet_start,
                            claude_profile, launch_mode,
                            github_watch_mode, github_check_on_start, github_check_interval,
-                           claude_model, claude_helper_model
+                           claude_model, claude_helper_model, github_extra_repos
                     FROM projects
                     WHERE id = @id
                 ";
@@ -845,7 +895,7 @@ namespace MultiTerminal.Services
                            team_lead, default_terminal, source_control_account_id, status, quiet_start,
                            claude_profile, launch_mode,
                            github_watch_mode, github_check_on_start, github_check_interval,
-                           claude_model, claude_helper_model
+                           claude_model, claude_helper_model, github_extra_repos
                     FROM projects
                     ORDER BY is_pinned DESC, created_at DESC
                 ";
@@ -1020,12 +1070,12 @@ namespace MultiTerminal.Services
 
                 // A null URL keeps the stored one (COALESCE), so only a non-null one can repoint the
                 // watch; the same reset rule as UpdateProjectField (task 92eeeb47, pipeline Run 2).
-                string oldRepoUrl = project.GitRepoUrl != null ? ReadProjectText(project.Id, "git_repo_url") : null;
+                var listBefore = project.GitRepoUrl != null ? ReadWatchList(project.Id) : null;
 
                 command.ExecuteNonQuery();
 
-                if (project.GitRepoUrl != null && ShouldResetGitHubWatch("git_repo_url", oldRepoUrl, project.GitRepoUrl))
-                    ResetGitHubWatchState(project.Id);
+                if (listBefore != null)
+                    PruneGitHubWatchList(project.Id, listBefore);
             }
         }
 
@@ -1489,7 +1539,8 @@ namespace MultiTerminal.Services
                 GitHubCheckInterval = MultiTerminal.Models.GitHubWatchSettings.ParseInterval(
                     reader.IsDBNull(32) ? null : reader.GetString(32)),
                 ClaudeModel = reader.IsDBNull(33) ? null : reader.GetString(33),
-                ClaudeHelperModel = reader.IsDBNull(34) ? null : reader.GetString(34)
+                ClaudeHelperModel = reader.IsDBNull(34) ? null : reader.GetString(34),
+                GitHubExtraRepos = reader.IsDBNull(35) ? null : reader.GetString(35)
             };
         }
 

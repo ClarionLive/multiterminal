@@ -518,6 +518,71 @@ namespace MultiTerminal.Tests
             Assert.Null(_db.GetGitHubWatchState(p.Id, "o/r").Baseline);        // repo changed: fresh
         }
 
+        /// <summary>Ticket a923589f: Also watch saves as one repository per line, an unrelated save leaves it alone, a blank clears it.</summary>
+        [Fact]
+        public void Also_watch_saves_one_repository_per_line_and_an_unrelated_save_keeps_it()
+        {
+            var p = Seed();
+            Assert.Null(_db.GetRichProject(p.Id).GitHubExtraRepos);
+
+            var set = _service.Save(UpdateFor(p, ("gitHubExtraRepos", " o/second, https://github.com/o/third \r\n\r\nnot a repo ")));
+            Assert.True(set.Success, set.Error);
+            Assert.Contains("gitHubExtraRepos", set.ChangedFields);
+            Assert.Equal("o/second\nhttps://github.com/o/third\nnot a repo", _db.GetRichProject(p.Id).GitHubExtraRepos);   // an unreadable line still saves
+
+            var other = _service.Save(UpdateFor(p, ("buildCommand", "dotnet build")));
+            Assert.True(other.Success, other.Error);
+            Assert.DoesNotContain("gitHubExtraRepos", other.ChangedFields);
+            Assert.Equal("o/second\nhttps://github.com/o/third\nnot a repo", _db.GetRichProject(p.Id).GitHubExtraRepos);
+
+            var same = _service.Save(UpdateFor(p, ("gitHubExtraRepos", "o/second\nhttps://github.com/o/third\nnot a repo")));
+            Assert.DoesNotContain("gitHubExtraRepos", same.ChangedFields);   // typed another way, same list
+
+            Assert.True(_service.Save(UpdateFor(p, ("gitHubExtraRepos", "  \n "))).Success);
+            Assert.Null(_db.GetRichProject(p.Id).GitHubExtraRepos);
+        }
+
+        [Fact]
+        public void A_save_that_would_watch_more_than_ten_repositories_is_refused_and_writes_nothing()
+        {
+            var p = Seed();
+            string eleven = string.Join("\n", Enumerable.Range(1, 11).Select(i => "o/r" + i));
+
+            var result = _service.Save(UpdateFor(p, ("buildCommand", "x"), ("gitHubExtraRepos", eleven)));
+
+            Assert.False(result.Success);
+            Assert.Contains("at most 10", result.Error);
+            Assert.Null(_db.GetRichProject(p.Id).GitHubExtraRepos);
+            Assert.Null(_db.GetRichProject(p.Id).BuildCommand);
+
+            Assert.True(_service.Save(UpdateFor(p, ("gitHubExtraRepos", string.Join("\n", Enumerable.Range(1, 9).Select(i => "o/r" + i))))).Success);   // ten with the Repository URL
+            Assert.True(_service.Save(UpdateFor(p, ("gitRepoUrl", "o/primary"))).Success);
+            Assert.False(_service.Save(UpdateFor(p, ("gitHubExtraRepos", eleven))).Success);
+        }
+
+        /// <summary>
+        /// A repository that moves between Repository URL and Also watch in one save keeps its baseline: the
+        /// two writes are judged together, not one after the other (ticket a923589f).
+        /// </summary>
+        [Fact]
+        public void Swapping_a_repository_between_the_Repository_URL_and_Also_watch_keeps_both_baselines()
+        {
+            var p = Seed();
+            Assert.True(_service.Save(UpdateFor(p, ("gitHubWatchMode", "board"), ("gitRepoUrl", "https://github.com/o/a"), ("gitHubExtraRepos", "o/b"))).Success);
+            _db.RecordGitHubWatchCheck(p.Id, "o/a", 40, null);
+            _db.RecordGitHubWatchCheck(p.Id, "o/b", 50, null);
+
+            var swap = _service.Save(UpdateFor(p, ("gitRepoUrl", "https://github.com/o/b"), ("gitHubExtraRepos", "o/a")));
+            Assert.True(swap.Success, swap.Error);
+            Assert.Equal(40, _db.GetGitHubWatchState(p.Id, "o/a").Baseline);
+            Assert.Equal(50, _db.GetGitHubWatchState(p.Id, "o/b").Baseline);
+
+            // Replace one and drop the other: only those two lose theirs, and a new one has none yet.
+            Assert.True(_service.Save(UpdateFor(p, ("gitRepoUrl", "https://github.com/o/c"), ("gitHubExtraRepos", "o/a"))).Success);
+            Assert.Null(_db.GetGitHubWatchState(p.Id, "o/b").Baseline);
+            Assert.Equal(40, _db.GetGitHubWatchState(p.Id, "o/a").Baseline);
+        }
+
         /// <summary>Ticket b0d2f090: the two model fields save through UpdateProjectField, blank clears to NULL, and apply at the next launch.</summary>
         [Fact]
         public void Model_fields_save_clear_and_apply_at_next_launch()
