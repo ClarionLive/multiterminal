@@ -92,6 +92,26 @@ Same license terms as xterm.js above.
 
 ---
 
+## @xterm/addon-unicode11
+
+**Version:** 0.9.0
+**License:** MIT
+**Project:** https://github.com/xtermjs/xterm.js
+
+Same license terms as xterm.js above.
+
+---
+
+## @xterm/addon-webgl
+
+**Version:** 0.19.0
+**License:** MIT
+**Project:** https://github.com/xtermjs/xterm.js
+
+Same license terms as xterm.js above.
+
+---
+
 ## Microsoft.Web.WebView2
 
 **Version:** 1.0.3800.47
