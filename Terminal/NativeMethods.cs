@@ -372,5 +372,56 @@ namespace MultiTerminal.Terminal
         {
             return GetForegroundWindow();
         }
+
+        private const uint MF_STRING = 0x0000;
+        private const uint MF_SEPARATOR = 0x0800;
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetSystemMenu(IntPtr hWnd, [MarshalAs(UnmanagedType.Bool)] bool bRevert);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AppendMenu(IntPtr hMenu, uint uFlags, UIntPtr uIDNewItem, string lpNewItem);
+
+        /// <summary>
+        /// Adds a separator and a command to a window's system menu (GH #74). The command arrives as
+        /// WM_SYSCOMMAND with <paramref name="commandId"/> in wParam; Windows uses wParam's low four bits
+        /// itself, so the id must have them clear and lie below the SC_* range (0xF000).
+        /// </summary>
+        public static bool AppendSystemMenuCommand(IntPtr windowHandle, int commandId, string text)
+        {
+            IntPtr menu = GetSystemMenu(windowHandle, false);
+            if (menu == IntPtr.Zero) return false;
+            return AppendMenu(menu, MF_SEPARATOR, UIntPtr.Zero, null)
+                && AppendMenu(menu, MF_STRING, (UIntPtr)(uint)commandId, text);
+        }
+
+        private const int SW_RESTORE = 9;
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsIconic(IntPtr hWnd);
+
+        /// <summary>
+        /// Restores a minimised window to the state it had before it was minimised (a maximised window
+        /// comes back maximised), for surfacing a pane in a minimised floating window (GH #74). Does
+        /// nothing to a window that is not minimised.
+        ///
+        /// <para>Measured in the test host: the FIRST restore of a minimised window was ignored, for this
+        /// app's floating window and the library's own alike, and a second one worked. That matches
+        /// Windows letting a process's start-up show state override its first ShowWindow call (the test
+        /// host is started hidden). Whether MultiTerminal, started normally, is affected was not
+        /// measured, so the restore is retried once while the window is still minimised.</para>
+        /// </summary>
+        internal static void RestoreIfMinimized(IntPtr windowHandle)
+        {
+            if (windowHandle == IntPtr.Zero) return;
+            for (int attempt = 0; attempt < 2 && IsIconic(windowHandle); attempt++)
+                ShowWindow(windowHandle, SW_RESTORE);
+        }
     }
 }

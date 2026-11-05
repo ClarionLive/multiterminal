@@ -634,11 +634,20 @@ namespace MultiTerminal.Tests
 
             Assert.Contains("private void SyncAttentionPanelFocus(TerminalDocument activeDoc)", src, StringComparison.Ordinal);
 
-            int handler = src.IndexOf("private void OnActiveDocumentChanged", StringComparison.Ordinal);
-            Assert.True(handler >= 0, "OnActiveDocumentChanged not found");
+            // GH #74: the tab-click body moved into OnActiveTerminalChanged, which ActiveDocumentChanged
+            // (docked tab clicks) and ActiveContentChanged (floated panes) both call. Pin the route,
+            // then the body.
+            int tabEvent = src.IndexOf("private void OnActiveDocumentChanged(", StringComparison.Ordinal);
+            Assert.True(tabEvent >= 0, "OnActiveDocumentChanged not found");
+            int tabEventEnd = src.IndexOf("private ", tabEvent + 1, StringComparison.Ordinal);
+            Assert.True(tabEventEnd > tabEvent, "could not bound OnActiveDocumentChanged");
+            Assert.Contains("OnActiveTerminalChanged(", src.Substring(tabEvent, tabEventEnd - tabEvent), StringComparison.Ordinal);
 
-            int end = src.IndexOf("OnActiveDocumentChanged error", handler, StringComparison.Ordinal);
-            Assert.True(end > handler, "could not bound OnActiveDocumentChanged");
+            int handler = src.IndexOf("private void OnActiveTerminalChanged(", StringComparison.Ordinal);
+            Assert.True(handler >= 0, "OnActiveTerminalChanged not found");
+
+            int end = src.IndexOf("OnActiveTerminalChanged error", handler, StringComparison.Ordinal);
+            Assert.True(end > handler, "could not bound OnActiveTerminalChanged");
 
             Assert.Contains(
                 "SyncAttentionPanelFocus(activeDoc);",

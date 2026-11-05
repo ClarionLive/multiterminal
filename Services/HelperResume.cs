@@ -200,8 +200,10 @@ namespace MultiTerminal.Services
     /// "also close helpers?" is asked before the helper is closed as an ordinary <c>pane_closed</c>
     /// (which would make it unresumable). Otherwise tab order is kept; a cycle (not possible with one
     /// level of helpers) falls back to tab order.</item>
-    /// <item>A pane whose close was cancelled (Cancel on the question, or any other veto) STOPS the
-    /// batch: nothing after it is closed, its helpers included.</item>
+    /// <item>The questions are asked before anything closes (<see cref="PaneBatchCloseQuestions"/>,
+    /// GH #74), so a Cancel there closes nothing. A pane whose close is still vetoed once the closing
+    /// has started (anything other than the question) STOPS the batch: nothing after it is closed, its
+    /// helpers included.</item>
     /// <item>Helpers closed with their PM (Yes) are not closed again.</item>
     /// <item>"No" removes that PM's helpers from the batch: the Owner said not to close them, so they
     /// keep running even though "Close All" named them.</item>
@@ -285,5 +287,98 @@ namespace MultiTerminal.Services
                     _done.Add(id);
             }
         }
+    }
+
+    /// <summary>
+    /// Asks every "also close its helpers?" question of a batch close BEFORE anything closes (GH #74,
+    /// phase 3). Closing a floating window, Close All Tabs and Close all but this all close several
+    /// panes; asked one pane at a time, a Cancel on the second PM came after the first was already
+    /// closed, leaving the batch half done. Asked up front, a Cancel closes nothing. Pure: the caller
+    /// shows the questions and closes the panes, reusing these answers.
+    ///
+    /// <para><b>The questions are repeated until nothing new is asked.</b> A question is modal and pumps
+    /// messages, so an agent can spawn a helper for a pane that was already passed over while it is on
+    /// screen (pipeline adversary). Each pass asks only panes not yet answered; the questions end when a
+    /// pass asks nobody. The caller must then ask nothing while closing: a pane with no recorded answer
+    /// keeps its helpers running, which loses nothing.</para>
+    ///
+    /// <para><b>A pane an earlier answer settled is not asked.</b> A helper with helpers of its own is
+    /// closed with its PM (Yes) or left running (No); asking it as well could cancel the batch over a
+    /// pane that answer already decided, or record an answer nothing reads (pipeline debugger).</para>
+    ///
+    /// <para><b>An answer covers the helpers its question named.</b> <see cref="Recorded.Helpers"/>
+    /// keeps them, so a helper spawned after the question is not closed by a Yes it was never part
+    /// of.</para>
+    /// </summary>
+    public static class PaneBatchCloseQuestions
+    {
+        /// <summary>One PM's answer.</summary>
+        public enum Answer
+        {
+            /// <summary>Yes: close its helpers too.</summary>
+            CloseHelpersToo,
+
+            /// <summary>No: close only the PM; its helpers keep running.</summary>
+            KeepHelpers,
+
+            /// <summary>Cancel: close nothing at all.</summary>
+            Cancel,
+        }
+
+        /// <summary>An answer and the helpers the question named.</summary>
+        public sealed record Recorded(Answer Answer, IReadOnlyCollection<string> Helpers);
+
+        /// <summary>
+        /// Asks, in <paramref name="closeOrder"/>, each pane with open helpers that no earlier answer
+        /// settled, pass after pass until a pass asks nobody.
+        /// </summary>
+        /// <param name="closeOrder">The batch's close order (<see cref="PaneBatchClose.Order"/>).</param>
+        /// <param name="openHelpersOf">A pane's open helper panes right now; null or empty means none.</param>
+        /// <param name="ask">Shows the question for a pane, naming these helpers.</param>
+        /// <returns>The answers by pane; null as soon as one is <see cref="Answer.Cancel"/>.</returns>
+        public static Dictionary<string, Recorded> AskAll(
+            IEnumerable<string> closeOrder,
+            Func<string, IReadOnlyCollection<string>> openHelpersOf,
+            Func<string, IReadOnlyCollection<string>, Answer> ask)
+        {
+            if (openHelpersOf == null) throw new ArgumentNullException(nameof(openHelpersOf));
+            if (ask == null) throw new ArgumentNullException(nameof(ask));
+
+            var order = (closeOrder ?? Enumerable.Empty<string>()).Where(id => !string.IsNullOrEmpty(id)).Distinct(StringComparer.Ordinal).ToList();
+            var answers = new Dictionary<string, Recorded>(StringComparer.Ordinal);
+
+            // Each pass that asks anyone records a new pane, so there are at most order.Count passes
+            // that ask, and the one after asks nobody.
+            for (int pass = 0; pass <= order.Count; pass++)
+            {
+                bool askedAnyone = false;
+                foreach (var id in order)
+                {
+                    if (answers.ContainsKey(id) || SettledByAnEarlierAnswer(id, answers))
+                        continue;
+
+                    var helpers = (openHelpersOf(id) ?? Array.Empty<string>())
+                        .Where(h => !string.IsNullOrEmpty(h) && !string.Equals(h, id, StringComparison.Ordinal))
+                        .Distinct(StringComparer.Ordinal)
+                        .ToList();
+                    if (helpers.Count == 0)
+                        continue;
+
+                    var answer = ask(id, helpers);
+                    if (answer == Answer.Cancel)
+                        return null;
+                    answers[id] = new Recorded(answer, helpers);
+                    askedAnyone = true;
+                }
+
+                if (!askedAnyone)
+                    break;
+            }
+
+            return answers;
+        }
+
+        private static bool SettledByAnEarlierAnswer(string id, Dictionary<string, Recorded> answers)
+            => answers.Values.Any(r => r.Helpers.Contains(id, StringComparer.Ordinal));
     }
 }
