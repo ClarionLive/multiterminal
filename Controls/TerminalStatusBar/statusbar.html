@@ -62,9 +62,12 @@
             box-sizing: border-box;
         }
 
+        /* A minimum, not a fixed height: the GitHub row wraps when several repositories don't fit one line
+           (ticket a923589f), and a fixed 140px clipped the page however tall the bar grew. The bar's own
+           height still clips the page when the Owner drags it shorter. */
         html, body {
             width: 100%;
-            height: 140px;
+            min-height: 140px;
             overflow: hidden;
         }
 
@@ -82,7 +85,7 @@
         .status-bar-container {
             display: flex;
             flex-direction: column;
-            height: 140px;
+            min-height: 140px;
             background: var(--bg-card);
             border-bottom: 1px solid var(--border-color);
             transition: background 0.3s ease, box-shadow 0.3s ease;
@@ -578,8 +581,10 @@
            Slim, so the four rows still fit the bar's 140px (the bar does not grow; pipeline Run 1).
            ============================================ */
         .row-github {
-            display: flex;
-            flex-wrap: wrap;           /* several repositories (ticket a923589f) wrap onto more lines */
+            /* The mark keeps its own column, so it can't wrap onto a line of its own when the entries
+               only just fit; the entries wrap inside the second column (ticket a923589f). */
+            display: grid;
+            grid-template-columns: 14px minmax(0, 1fr);
             align-items: center;
             gap: 2px 8px;
             padding: 0 12px;
@@ -623,11 +628,12 @@
 
         /* Ticket a923589f: one entry per watched repository, side by side and wrapping as a group. With a
            single repository this looks exactly as the row always did. */
-        .github-entries { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 16px; min-width: 0; max-width: 100%; }
+        .github-entries { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 16px; min-width: 0; max-width: 100%; grid-column: 2; }
+        .github-entries:empty { display: none; }
         .github-entry { display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
         .github-entry .github-link:first-child { flex-shrink: 1; min-width: 0; }
         /* The warning about a line that cannot be read: MT's own sentence, a link to the project settings. */
-        .github-link.warning { color: var(--ctx-red); flex-shrink: 1; min-width: 0; max-width: 100%; }
+        .github-link.warning { color: var(--ctx-red); flex-shrink: 1; min-width: 0; max-width: 100%; grid-column: 2; justify-self: start; }
         .github-link.warning.hidden { display: none; }
 
         /* Hidden state for rows 2-4 before data arrives */
