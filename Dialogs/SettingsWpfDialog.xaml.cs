@@ -323,6 +323,7 @@ namespace MultiTerminal.Dialogs
             DefaultWorkingDirText.Text = _settings.GetDefaultWorkingDirectory() ?? "";
             HomeViewCombo.SelectedIndex = Math.Max(0, Array.IndexOf(HomeViewChoice, _settings.GetStartScreenHomeView()));
             ConfirmExitCheck.IsChecked = _settings.GetConfirmExit();
+            RemoteControlAllCheck.IsChecked = _settings.GetRemoteControlAllTerminals();
 
             var models = _settings.GetClaudeModelSettings();
             LoadModelPick(ProjectModelCombo, ProjectModelText, models.GlobalProjectModel, ClaudeModelLaunchPolicy.BuiltInProjectModel);
@@ -383,6 +384,7 @@ namespace MultiTerminal.Dialogs
                 _settings.SetDefaultWorkingDirectory(DefaultWorkingDirText.Text?.Trim());
                 _settings.SetStartScreenHomeView(HomeViewChoice[Math.Max(0, HomeViewCombo.SelectedIndex)]);
                 _settings.SetConfirmExit(ConfirmExitCheck.IsChecked == true);
+                _settings.SetRemoteControlAllTerminals(RemoteControlAllCheck.IsChecked == true);
                 _settings.SetClaudeModelSettings(_modelsToSaveProject, _modelsToSaveHelper, _modelsToSaveSubagent);
 
                 _settings.SetWorktreeMode(

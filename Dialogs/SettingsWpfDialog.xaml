@@ -512,6 +512,18 @@
                                   FontSize="13"
                                   Margin="0,12,0,0"
                                   VerticalContentAlignment="Center"/>
+                        <!-- Remote Control for every Claude terminal (ticket d096464f) -->
+                        <CheckBox x:Name="RemoteControlAllCheck"
+                                  Content="Remote Control for every Claude terminal"
+                                  Foreground="#E0E0E0"
+                                  FontFamily="Segoe UI"
+                                  FontSize="13"
+                                  Margin="0,12,0,0"
+                                  VerticalContentAlignment="Center"
+                                  ToolTip="Starts each Claude terminal with --remote-control, so you can reach it by name from claude.ai/code and the Claude app. Needs a claude.ai login (not an API key). Applies to terminals started after you save."/>
+                        <TextBlock Text="Terminals started from now on. The session can run tools, as the terminal can; only your claude.ai account sees it."
+                                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                   TextWrapping="Wrap" Margin="20,2,0,0"/>
                         <!-- MultiTerminal plugin version and updater (task 4dc459e4) -->
                         <TextBlock x:Name="PluginVersionText"
                                    Text="MultiTerminal plugin: …"
