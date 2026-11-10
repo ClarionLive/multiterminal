@@ -399,6 +399,46 @@ namespace MultiTerminal.Terminal
         }
 
         /// <summary>
+        /// Adds a bare <c>--remote-control</c> right after the <c>claude</c> token when <paramref name="enabled"/>
+        /// (ticket d096464f, the "Remote Control for every Claude terminal" setting). Returns the command
+        /// unchanged when disabled, when it is not a Claude launch (Codex, a plain shell), or when it already
+        /// asks for Remote Control.
+        /// <para>BARE, NOT <c>--remote-control '&lt;name&gt;'</c>: the remote session's title comes from
+        /// <c>-n</c>, which <see cref="ApplySessionName"/> adds in front of this flag, so the terminal's name is
+        /// stated once and cannot drift. The flag takes an OPTIONAL name, so whatever follows it must not be a
+        /// bare word it would swallow as one. When the code was written (review of ticket d096464f), every
+        /// builder of a Claude launch (LaunchCommandBuilder, OracleService.BuildAutoRunCommand, the Claude
+        /// Commands setting) followed <c>claude</c> with a <c>-</c> flag; no test feeds their output through
+        /// here, so a new builder must keep that true. A command starting with a bare word gets the flag at
+        /// the end instead. Not handled, as in <see cref="ApplySessionName"/>: a <c>;</c> or <c>--rc</c>
+        /// inside a quoted argument of a hand-written command.</para>
+        /// </summary>
+        internal static string ApplyRemoteControl(string autoRunCommand, bool enabled)
+        {
+            if (!enabled || !IsClaudeLaunch(autoRunCommand))
+                return autoRunCommand;
+
+            if (System.Text.RegularExpressions.Regex.IsMatch(autoRunCommand, @"(^|\s)--(remote-control|rc)(\s|=|;|$)"))
+                return autoRunCommand;
+
+            int claudeTokenEnd = autoRunCommand.IndexOf("claude", StringComparison.Ordinal) + "claude".Length;
+            string rest = autoRunCommand.Substring(claudeTokenEnd);
+            string next = rest.TrimStart();
+
+            // Followed by a bare word (e.g. a hand-written "claude myprompt"): the flag would take it as the
+            // session name. Put the flag at the end of the claude arguments instead, before any "; ...".
+            if (next.Length > 0 && next[0] != '-' && next[0] != ';')
+            {
+                int semicolon = autoRunCommand.IndexOf(';', claudeTokenEnd);
+                return semicolon < 0
+                    ? autoRunCommand.TrimEnd() + " --remote-control"
+                    : autoRunCommand.Insert(semicolon, " --remote-control");
+            }
+
+            return autoRunCommand.Insert(claudeTokenEnd, " --remote-control");
+        }
+
+        /// <summary>
         /// True when the command's FIRST token is exactly <c>claude</c>. Deliberately not a
         /// <c>Contains("claude")</c>: the Codex launch resolves paths that can contain the word, and a
         /// substring match would splice a Claude-only flag into a Codex command line.
@@ -718,6 +758,17 @@ namespace MultiTerminal.Terminal
                 // Name the Claude session after the agent, so the MT name IS the address peers use
                 // (task 0ff1b520). Applied here because this is the only place holding both the
                 // command and the chosen name — see ApplySessionName for why not LaunchCommandBuilder.
+                // Remote Control (ticket d096464f): when the setting is on, every Claude pane is also reachable
+                // from claude.ai/code and the Claude app. Added first so -n lands in front of it; the remote
+                // session takes its title from -n, so it carries the terminal's name.
+                bool remoteControl = Services.SettingsService.Default.GetRemoteControlAllTerminals();
+                string remoteCommand = ApplyRemoteControl(autoRunCommand, remoteControl);
+                if (!string.Equals(remoteCommand, autoRunCommand, StringComparison.Ordinal))
+                {
+                    DebugLogService?.Trace("ConPtyTerminal", "Remote Control on for this Claude session (setting)");
+                }
+
+                autoRunCommand = remoteCommand;
                 string namedCommand = ApplySessionName(autoRunCommand, terminalName);
                 if (!string.Equals(namedCommand, autoRunCommand, StringComparison.Ordinal))
                 {

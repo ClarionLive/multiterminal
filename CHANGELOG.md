@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Remote Control for every Claude terminal.** A new option in Settings >
+  General starts each Claude terminal with Claude Code's Remote Control, so you
+  can follow and drive it from claude.ai/code or the Claude app, where it is
+  listed under the terminal's name. Off by default; it needs a claude.ai login
+  (not an API key) and applies to terminals started after it is turned on.
 - **MultiTerminal can update its own plugin.** Settings > General shows which
   plugin commit MT uses, with Check for update and Update now. MT checks once a
   day at startup and leaves one Inbox notice when there is a newer plugin; it
