@@ -36,7 +36,7 @@ namespace MultiTerminal.Tests
 
         /// <summary>The order StartProcess applies them in: the remote title comes from -n, the terminal's name.</summary>
         [Fact]
-        public void With_the_session_name_the_name_comes_first_and_the_flag_is_followed_by_a_flag()
+        public void With_the_session_name_the_name_comes_first_then_the_flag_then_the_mcp_config_flag()
         {
             string result = ConPtyTerminal.ApplySessionName(ConPtyTerminal.ApplyRemoteControl(ClaudeLaunch, true), "Alice");
 

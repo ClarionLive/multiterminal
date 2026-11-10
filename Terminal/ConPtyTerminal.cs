@@ -406,8 +406,12 @@ namespace MultiTerminal.Terminal
         /// <para>BARE, NOT <c>--remote-control '&lt;name&gt;'</c>: the remote session's title comes from
         /// <c>-n</c>, which <see cref="ApplySessionName"/> adds in front of this flag, so the terminal's name is
         /// stated once and cannot drift. The flag takes an OPTIONAL name, so whatever follows it must not be a
-        /// bare word it would swallow as one: in every launch MT builds, it is followed by another
-        /// <c>--</c> flag, a <c>-</c> flag, <c>;</c> or the end of the command.</para>
+        /// bare word it would swallow as one. When the code was written (review of ticket d096464f), every
+        /// builder of a Claude launch (LaunchCommandBuilder, OracleService.BuildAutoRunCommand, the Claude
+        /// Commands setting) followed <c>claude</c> with a <c>-</c> flag; no test feeds their output through
+        /// here, so a new builder must keep that true. A command starting with a bare word gets the flag at
+        /// the end instead. Not handled, as in <see cref="ApplySessionName"/>: a <c>;</c> or <c>--rc</c>
+        /// inside a quoted argument of a hand-written command.</para>
         /// </summary>
         internal static string ApplyRemoteControl(string autoRunCommand, bool enabled)
         {
