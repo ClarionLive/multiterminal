@@ -307,6 +307,99 @@ namespace MultiTerminal.Tests
             Assert.Empty(exits);
         }
 
+        // ── 268acc24: members of the session's implicit team finish like subagents ─
+
+        private static string SubagentStopLine() =>
+            "{\"type\":\"progress\",\"uuid\":\"stop1\",\"message\":{\"type\":\"progress\",\"hookType\":\"SubagentStop\"}}";
+
+        private static string TeammateMessage(string uuid) =>
+            "{\"type\":\"user\",\"uuid\":\"" + uuid + "\",\"sessionId\":\"" + SessionId + "\",\"message\":{\"role\":\"user\",\"content\":\"<teammate-message teammate_id=\\\"team-lead\\\">send the rest</teammate-message>\"}}";
+
+        [Fact]
+        public void An_implicit_team_member_whose_turn_ended_and_went_quiet_completes()
+        {
+            var main = WriteTranscript(TranscriptIn("F--repo"),
+                Assistant("u1", "working", "tool_use"),
+                ToolResult("u2"),
+                Assistant("u3", "done", "end_turn"));
+
+            using var tailer = new TranscriptTailer(main, "inbox.json", "probe-A") { IsTeamAgent = true, IsImplicitTeamMember = true };
+            var exits = new List<int>();
+            tailer.Stopped += (s, code) => exits.Add(code);
+            tailer.StartAsync();
+
+            tailer.CheckQuietCompletion(DateTime.UtcNow);
+            Assert.Empty(exits);
+
+            tailer.CheckQuietCompletion(DateTime.UtcNow.AddMinutes(2));
+            Assert.Equal(new[] { 0 }, exits);
+            Assert.False(tailer.IsActive);
+        }
+
+        [Fact]
+        public void An_implicit_team_member_completes_on_the_SubagentStop_line()
+        {
+            var main = WriteTranscript(TranscriptIn("F--repo"),
+                Assistant("u1", "working", "tool_use"),
+                SubagentStopLine());
+
+            using var tailer = new TranscriptTailer(main, "inbox.json", "probe-A") { IsTeamAgent = true, IsImplicitTeamMember = true };
+            var exits = new List<int>();
+            tailer.Stopped += (s, code) => exits.Add(code);
+            tailer.StartAsync();
+
+            Assert.Equal(new[] { 0 }, exits);
+        }
+
+        [Fact]
+        public void An_implicit_team_member_woken_by_a_message_after_its_turn_ended_is_not_completed()
+        {
+            // The pipeline lead's "your report was cut off, send the rest", seconds after the member idled.
+            var main = WriteTranscript(TranscriptIn("F--repo"),
+                Assistant("u1", "report part one", "end_turn"),
+                TeammateMessage("u2"));
+
+            using var tailer = new TranscriptTailer(main, "inbox.json", "Security-Auditor") { IsTeamAgent = true, IsImplicitTeamMember = true };
+            var exits = new List<int>();
+            tailer.Stopped += (s, code) => exits.Add(code);
+            tailer.StartAsync();
+
+            tailer.CheckQuietCompletion(DateTime.UtcNow.AddHours(1));
+            Assert.Empty(exits);
+        }
+
+        [Fact]
+        public void A_created_team_member_ignores_the_SubagentStop_line_too()
+        {
+            var main = WriteTranscript(TranscriptIn("F--repo"),
+                Assistant("u1", "idle between turns", "end_turn"),
+                SubagentStopLine());
+
+            using var tailer = new TranscriptTailer(main, "inbox.json", "Verifier") { IsTeamAgent = true };
+            var exits = new List<int>();
+            tailer.Stopped += (s, code) => exits.Add(code);
+            tailer.StartAsync();
+
+            tailer.CheckQuietCompletion(DateTime.UtcNow.AddHours(1));
+            Assert.Empty(exits);
+            Assert.True(tailer.IsActive);
+        }
+
+        [Theory]
+        [InlineData("session-554a88f1", "554a88f1-9a09-467d-8ea1-14d4a93157a5", true)]
+        [InlineData("SESSION-554A88F1", "554a88f1-9a09-467d-8ea1-14d4a93157a5", true)]
+        [InlineData("session-3e0dea71", "554a88f1-9a09-467d-8ea1-14d4a93157a5", false)] // another session's id
+        [InlineData("session-554a88f", "554a88f1-9a09-467d-8ea1-14d4a93157a5", false)]  // prefix too short
+        [InlineData("session-554a88f1-x", "554a88f1-9a09-467d-8ea1-14d4a93157a5", false)]
+        [InlineData("my-review-team", "554a88f1-9a09-467d-8ea1-14d4a93157a5", false)]   // a created team
+        [InlineData("session-554a88f1", null, false)]
+        [InlineData("session-554a88f1", "554a88f", false)]
+        [InlineData(null, "554a88f1-9a09-467d-8ea1-14d4a93157a5", false)]
+        public void The_implicit_session_team_is_named_session_plus_the_lead_session_id_prefix(string teamName, string leadSessionId, bool expected)
+        {
+            Assert.Equal(expected, TeamWatcherService.IsImplicitSessionTeam(teamName, leadSessionId));
+        }
+
         // ── A team whose lead moved into a worktree ────────────────────────
 
         [Fact]

@@ -875,16 +875,22 @@ namespace MultiTerminal.Services
                     };
                     state.ConfigWatcher.Changed += (s, e) =>
                     {
-                        // Debounce
-                        var now = DateTime.Now;
-                        if ((now - state.LastConfigChange).TotalMilliseconds < 500) return;
-                        state.LastConfigChange = now;
+                        // Debounce on the trailing edge: one read per burst, taken at the end of it. This
+                        // used to read 100 ms after the first change and drop every change in the next
+                        // 500 ms, so a lead stopping three agents at once (three writes in ~0.5 s) had only
+                        // the first removal seen, and two cards stayed open for good (268acc24). The flag
+                        // is cleared before the read, so a write landing during it schedules another.
+                        if (Interlocked.Exchange(ref state.ConfigReadPending, 1) != 0) return;
 
                         Task.Run(async () =>
                         {
-                            await Task.Delay(100);
+                            await Task.Delay(ConfigDebounceMs);
+                            Interlocked.Exchange(ref state.ConfigReadPending, 0);
                             if (Gone(root)) return;
-                            ReadAndProcessConfig(root, teamName, configPath);
+                            lock (state.ConfigReadLock)
+                            {
+                                ReadAndProcessConfig(root, teamName, configPath);
+                            }
                         });
                     };
 
@@ -914,6 +920,9 @@ namespace MultiTerminal.Services
         /// callback has got past its check, which no amount of waiting can arrange.
         /// </summary>
         internal Action<string, string> ProcessTeamHook { get; set; }
+
+        /// <summary>How long after the first change of a burst config.json is read; later changes in that time are covered by the same read.</summary>
+        private const int ConfigDebounceMs = 500;
 
         /// <summary>Test seam (InternalsVisibleTo): how many teams the service is holding state for.</summary>
         internal int ActiveTeamCount => _activeTeams.Count;
@@ -1711,6 +1720,25 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// True for the team Claude Code gives every session on its own: named <c>session-</c> plus the
+        /// first 8 characters of its lead session id (<c>session-554a88f1</c> for lead session
+        /// <c>554a88f1-9a09-…</c>). Every named Agent call joins it as an in-process member, and Claude
+        /// Code leaves the member in config.json after it has finished (it is removed only when the lead
+        /// stops it), so its card cannot wait for a removal to close (268acc24).
+        /// <para>The name is the test, not <c>backendType: "in-process"</c>: a team somebody creates
+        /// can run in-process too, and its members are meant to idle until told to stop. A created team
+        /// would have to be named after its own lead's session id to be mistaken for this one.</para>
+        /// </summary>
+        internal static bool IsImplicitSessionTeam(string teamName, string leadSessionId)
+        {
+            const string Prefix = "session-";
+            const int IdLength = 8;
+            if (string.IsNullOrEmpty(teamName) || string.IsNullOrEmpty(leadSessionId) || leadSessionId.Length < IdLength)
+                return false;
+            return string.Equals(teamName, Prefix + leadSessionId.Substring(0, IdLength), StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
         /// Create a TranscriptTailer for a team member and fire the TeammateDiscovered event.
         /// </summary>
         private void CreateTailerForMember(string teamName, string memberName, string transcriptPath, TeamState state)
@@ -1728,6 +1756,8 @@ namespace MultiTerminal.Services
 
                 var tailer = new TranscriptTailer(transcriptPath, inboxPath, memberName);
                 tailer.IsTeamAgent = true; // Don't auto-stop on Result — team agents stay alive between turns
+                // ...unless the team is the one Claude Code made for the session itself (268acc24).
+                tailer.IsImplicitTeamMember = IsImplicitSessionTeam(teamName, state.LeadSessionId);
                 state.TrackedMembers.Add(memberName);
                 state.MemberTailers[memberName] = tailer;
 
@@ -2784,7 +2814,10 @@ namespace MultiTerminal.Services
             public Dictionary<string, TranscriptTailer> MemberTailers = new Dictionary<string, TranscriptTailer>();
             public FileSystemWatcher ConfigWatcher;
             public List<FileSystemWatcher> Watchers = new List<FileSystemWatcher>();
-            public DateTime LastConfigChange;
+            /// <summary>1 while a debounced config.json read is scheduled and not yet started.</summary>
+            public int ConfigReadPending;
+            /// <summary>Keeps two debounced config reads of this team from running at once.</summary>
+            public readonly object ConfigReadLock = new object();
             /// <summary>
             /// The subagents folders a transcript watcher is running on. More than one when the lead
             /// session moved into another worktree's project folder after the team started (GH #89):

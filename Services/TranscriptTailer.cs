@@ -81,6 +81,22 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool IsTeamAgent { get; set; }
 
+        /// <summary>
+        /// A member of the team Claude Code gives every session on its own (<c>session-&lt;id prefix&gt;</c>,
+        /// see <see cref="TeamWatcherService.IsImplicitSessionTeam"/>), not of one somebody created. Every
+        /// named Agent call lands in that team, and nothing removes the member when it is done (268acc24),
+        /// so it finishes the way a subagent does: the SubagentStop line, or an ended turn followed by
+        /// quiet. It stays a team agent otherwise (it has an inbox and can be sent messages).
+        /// <para>A completed member stays completed: if a message wakes it later, its card does not
+        /// come back to life. A message the lead sends within <see cref="QuietCompletionWindow"/> of the
+        /// turn ending (the usual "your report was cut off, send the rest") arrives as a user line,
+        /// which un-ends the turn, so that case never completes early.</para>
+        /// </summary>
+        public bool IsImplicitTeamMember { get; set; }
+
+        /// <summary>Waits for an explicit stop: a member of a team somebody created, which idles between turns by design.</summary>
+        private bool WaitsForExplicitStop => IsTeamAgent && !IsImplicitTeamMember;
+
         public IReadOnlyList<AgentMessage> Messages
         {
             get
@@ -155,12 +171,13 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// The quiet fallback (GH #89): a non-team agent whose last turn ended and whose transcript has
-        /// not grown for <see cref="QuietCompletionWindow"/> is complete. Team agents are exempt: they
-        /// idle between turns by design.
+        /// not grown for <see cref="QuietCompletionWindow"/> is complete. Members of a created team are
+        /// exempt: they idle between turns by design. Members of a session's implicit team are not
+        /// (<see cref="IsImplicitTeamMember"/>).
         /// </summary>
         internal void CheckQuietCompletion(DateTime nowUtc)
         {
-            if (!IsActive || IsTeamAgent || !_turnEnded) return;
+            if (!IsActive || WaitsForExplicitStop || !_turnEnded) return;
             if (nowUtc - _lastGrowthUtc < QuietCompletionWindow) return;
 
             System.Diagnostics.Debug.WriteLine($"[TranscriptTailer:{_agentName}] Turn ended and transcript quiet - agent completed");
@@ -563,8 +580,8 @@ namespace MultiTerminal.Services
                                 }
 
                                 // Detect agent completion: a Result message means the turn is done.
-                                // For team agents, don't auto-stop — they stay alive between turns.
-                                if (msg.Type == AgentMessageType.Result && IsActive && !IsTeamAgent)
+                                // For members of a created team, don't auto-stop — they stay alive between turns.
+                                if (msg.Type == AgentMessageType.Result && IsActive && !WaitsForExplicitStop)
                                 {
                                     System.Diagnostics.Debug.WriteLine($"[TranscriptTailer:{_agentName}] Result message detected - agent completed");
                                     _pendingStop = true;
@@ -576,7 +593,7 @@ namespace MultiTerminal.Services
                             // message object. This is the actual last line written — the type:"result"
                             // check above never fires because transcripts never contain type:"result".
                             // Parse this raw line directly to avoid changing AgentMessage filtering logic.
-                            if (!IsTeamAgent && IsActive && IsSubagentStopLine(line))
+                            if (!WaitsForExplicitStop && IsActive && IsSubagentStopLine(line))
                             {
                                 System.Diagnostics.Debug.WriteLine($"[TranscriptTailer:{_agentName}] SubagentStop progress event detected - agent completed");
                                 _pendingStop = true;
