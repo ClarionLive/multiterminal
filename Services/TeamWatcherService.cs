@@ -949,7 +949,8 @@ namespace MultiTerminal.Services
                 Interlocked.Exchange(ref state.ConfigReaderWaiting, 0);
                 if (Gone(root)) return;
 
-                var result = ReadAndProcessConfig(root, teamName, configPath, wait: false);
+                // Reads only into the state it was started for: a team deleted while it waited stays deleted.
+                var result = ReadAndProcessConfig(root, teamName, configPath, wait: false, expected: state);
                 ConfigReadHook?.Invoke(teamName);
                 if (result == ConfigReadResult.Done) return;
                 if (result == ConfigReadResult.Retry && ++retries > MaxConfigRetries)
@@ -1063,16 +1064,26 @@ namespace MultiTerminal.Services
         /// <see cref="TeamState.ConfigReadLock"/>: two reads of one team never run at once. With
         /// <paramref name="wait"/> false a read already running makes this return
         /// <see cref="ConfigReadResult.Busy"/> instead of blocking.
+        /// <para>With <paramref name="expected"/> (a debounced read) the read is into that state only,
+        /// and only while it is still the team's current one: no <c>GetOrAddTeam</c>, which would bring
+        /// back a team deleted while the read waited. Without it, the team's state is got or made.</para>
         /// </summary>
-        private ConfigReadResult ReadAndProcessConfig(RootState root, string teamName, string configPath, bool wait)
+        private ConfigReadResult ReadAndProcessConfig(RootState root, string teamName, string configPath, bool wait, TeamState expected = null)
         {
-            var state = GetOrAddTeam(root, teamName);
+            var state = expected ?? GetOrAddTeam(root, teamName);
             if (state == null) return ConfigReadResult.Done; // the root stopped being watched meanwhile
 
             if (!Monitor.TryEnter(state.ConfigReadLock, wait ? Timeout.Infinite : 0))
                 return ConfigReadResult.Busy;
             try
             {
+                // Checked under the lock, so a removal that lands first is always seen.
+                if (expected != null && !IsCurrentTeamState(expected))
+                {
+                    Log($" Skipping config read for team '{teamName}': the team was removed while the read waited");
+                    return ConfigReadResult.Done;
+                }
+
                 return ReadAndProcessConfigLocked(root, teamName, configPath, state);
             }
             finally
@@ -1080,6 +1091,10 @@ namespace MultiTerminal.Services
                 Monitor.Exit(state.ConfigReadLock);
             }
         }
+
+        /// <summary>The team <paramref name="state"/> is for is being watched, and this is still its state.</summary>
+        private bool IsCurrentTeamState(TeamState state) =>
+            !state.Root.Stopped && _activeTeams.TryGetValue(state.TeamKey, out var current) && ReferenceEquals(current, state);
 
         private ConfigReadResult ReadAndProcessConfigLocked(RootState root, string teamName, string configPath, TeamState state)
         {
@@ -1244,6 +1259,12 @@ namespace MultiTerminal.Services
                 // This picks up new JSONL files created when agents wake up for subsequent turns,
                 // even after all members have been initially matched.
                 WatchForNewTranscripts(teamName, subagentsDir, newMembers, state);
+                return ConfigReadResult.Done;
+            }
+            catch (Exception ex) when (ex is FileNotFoundException || ex is DirectoryNotFoundException)
+            {
+                // The team was deleted: nothing to read again. Its folder watcher reports the removal.
+                Log($" Config for team '{teamName}' is gone: {ex.Message}");
                 return ConfigReadResult.Done;
             }
             catch (Exception ex) when (ex is JsonException || ex is IOException)
@@ -1854,17 +1875,6 @@ namespace MultiTerminal.Services
                 // Mark as claimed so project-level watcher skips it
                 lock (_trackedSubagentFiles) { _trackedSubagentFiles.Add(transcriptPath); }
 
-                // Start tailing (catches up on existing content)
-                tailer.StartAsync();
-
-                LogInfo($"Created tailer for '{memberName}' in team '{teamName}': {Path.GetFileName(transcriptPath)}");
-
-                // Bridge team agent SendMessage calls to ChatPanel
-                tailer.TeamMessageSent += (s, msg) =>
-                {
-                    TeamMessageSent?.Invoke(this, (teamName, memberName, msg, state.SpawnerName));
-                };
-
                 // Look up spawner and task metadata from the office hook tracking file
                 var tracking = LookupFromTrackingByPath(transcriptPath);
 
@@ -1900,11 +1910,32 @@ namespace MultiTerminal.Services
                 };
 
                 // A completed implicit-team member that gets new work is announced again, so it has a
-                // card while it works (268acc24).
+                // card while it works (268acc24). Subscribed before StartAsync starts the file watchers,
+                // so no wake can come before it. Only while this tailer is still the member's: a wake
+                // racing the member's removal (or a newer tailer for the name) announces nothing.
                 tailer.Reactivated += (s, e) =>
                 {
+                    bool stillMember;
+                    lock (state.ConfigReadLock) // a member's removal (a config read) changes MemberTailers under it
+                    {
+                        stillMember = state.MemberTailers.TryGetValue(memberName, out var current) && ReferenceEquals(current, tailer);
+                    }
+                    if (!stillMember || Gone(state.Root) || tailer.IsShutDown) return;
                     LogInfo($"Completed member '{memberName}' of team '{teamName}' has new work: showing its card again");
                     TeammateDiscovered?.Invoke(this, Args(isWake: true));
+                };
+
+                // Start tailing (catches up on existing content)
+                tailer.StartAsync();
+
+                LogInfo($"Created tailer for '{memberName}' in team '{teamName}': {Path.GetFileName(transcriptPath)}");
+
+                // Bridge team agent SendMessage calls to ChatPanel. Deliberately after the catch-up read:
+                // subscribing first would re-send every SendMessage already in the transcript to the
+                // chat each time MT restarts.
+                tailer.TeamMessageSent += (s, msg) =>
+                {
+                    TeamMessageSent?.Invoke(this, (teamName, memberName, msg, state.SpawnerName));
                 };
 
                 // A member whose work was already finished when it was found (after an MT restart, a

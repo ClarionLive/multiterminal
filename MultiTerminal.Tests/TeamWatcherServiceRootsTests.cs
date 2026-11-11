@@ -705,6 +705,42 @@ namespace MultiTerminal.Tests
             Assert.Contains(member, h.MembersRemoved);
         }
 
+        /// <summary>
+        /// Pipeline run 2, item D: a config read still waiting when the team folder is deleted used to
+        /// bring the team back (GetOrAddTeam) and then retry a missing file. It must read nothing.
+        /// </summary>
+        [Fact]
+        public async Task A_config_read_waiting_when_the_team_is_deleted_does_not_bring_the_team_back()
+        {
+            string root = MakeRoot("Default");
+            using var h = new Harness(new[] { root }, root);
+            h.Service.StartWatching();
+
+            string session = Guid.NewGuid().ToString();
+            string team = ImplicitTeam(session);
+            string member = "probe-" + _id;
+            string leadCwd = @"H:\Repo" + _id;
+            AddTeam(root, team, member, leadCwd, session);
+            Assert.NotNull(await h.WaitForDiscovery(e => e.MemberName == member));
+            await Task.Delay(1000);
+
+            int reads = 0;
+            h.Service.ConfigReadHook = name => { if (name == team) System.Threading.Interlocked.Increment(ref reads); };
+
+            // A change starts a reader waiting 500 ms; the team goes before it reads.
+            string teamDir = Path.Combine(root, "teams", team);
+            File.WriteAllText(Path.Combine(teamDir, "config.json"), ConfigJsonWithMembers(leadCwd, session, new[] { member }));
+            Directory.Delete(teamDir, recursive: true);
+
+            var deadline = DateTime.UtcNow + Wait;
+            while (DateTime.UtcNow < deadline && (h.Removed.IsEmpty || System.Threading.Volatile.Read(ref reads) == 0))
+                await Task.Delay(20);
+            Assert.False(h.Removed.IsEmpty, "the team's removal was never reported");
+            Assert.True(System.Threading.Volatile.Read(ref reads) > 0, "the waiting reader never ran");
+
+            Assert.Equal(0, h.Service.ActiveTeamCount);
+        }
+
         // ── Helpers ──────────────────────────────────────────────────────────
 
         private static string ImplicitTeam(string leadSessionId) => TeamWatcherService.ImplicitSessionTeamPrefix + leadSessionId.Substring(0, 8);

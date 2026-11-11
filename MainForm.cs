@@ -9661,6 +9661,14 @@ namespace MultiTerminal
             if (layout == "DoNotShow")
                 return;
 
+            // A tailer stopped for good (its member was removed, or the team or root went away while
+            // this card waited for the UI thread) has nothing more to show (268acc24).
+            if (source is TranscriptTailer { IsShutDown: true })
+            {
+                _debugLogService?.Info("CreateAgentPanel", $"Skipping '{agentName}': its tailer has already been shut down");
+                return;
+            }
+
             // Always embed in a terminal's EmbeddedAgentPanel.
             // Priority: caller's document → exact name lookup → fuzzy name → identity scan → last active → first available.
             TerminalDocument targetTerminal = null;
@@ -9823,7 +9831,16 @@ namespace MultiTerminal
             {
                 void HandleEmbeddedStopped()
                 {
+                    // Only this card: after a wake (268acc24) the key can belong to a newer card.
+                    if (!_embeddedAgentMap.TryGetValue(panelKey, out var current) || !ReferenceEquals(current.Control, control))
+                        return;
+
                     if (exitCode == 0 && _settings?.GetAgentPanelCloseMode() == "ManualClose")
+                        return;
+
+                    // Complete() raises Stopped outside its lock, so a wake on another thread can get in
+                    // first: a member that is working again keeps its card.
+                    if (exitCode == 0 && source.IsActive)
                         return;
 
                     if (_embeddedAgentMap.Remove(panelKey, out var info))
@@ -9847,12 +9864,42 @@ namespace MultiTerminal
                 catch (ObjectDisposedException) { }
             }
 
-            source.Stopped += (s, exitCode) => OnSourceStopped(exitCode);
+            // Unsubscribed when the card goes, whichever path removes it (they all dispose the control):
+            // a woken member gets a new card, and the old card's handler must not outlive it (268acc24).
+            EventHandler<int> stoppedHandler = (s, exitCode) => OnSourceStopped(exitCode);
+            source.Stopped += stoppedHandler;
+            control.Disposed += (s, e) => source.Stopped -= stoppedHandler;
 
             // The agent may have finished between being announced and this card being built (the
             // announcement is queued to the UI thread): its Stopped(0) went to nobody, so apply it now.
             if (source is TranscriptTailer { IsCompleted: true })
                 OnSourceStopped(0);
+        }
+
+        /// <summary>What to do with a team member's card when the member is announced.</summary>
+        internal enum TeamCardAction
+        {
+            /// <summary>No card for this key yet: build one.</summary>
+            Create,
+            /// <summary>This agent already has its card: leave it.</summary>
+            Keep,
+            /// <summary>This agent's card is still showing after it completed, and it woke: re-attach it.</summary>
+            Reattach,
+            /// <summary>The card is stale (its pane closed) or holds another agent: remove it, build a new one.</summary>
+            Replace
+        }
+
+        /// <summary>
+        /// The card decision for an announced team member (268acc24). <paramref name="sameAgent"/>: the
+        /// existing, live card is attached to the announced tailer. A card left from a closed pane, or
+        /// a card kept open (On Complete = Keep open) for an earlier agent of the same name, gives way
+        /// whatever <paramref name="isWake"/> says; before, it blocked the new member's card for good.
+        /// </summary>
+        internal static TeamCardAction DecideTeamCard(bool hasEntry, bool stale, bool sameAgent, bool isWake)
+        {
+            if (!hasEntry) return TeamCardAction.Create;
+            if (stale || !sameAgent) return TeamCardAction.Replace;
+            return isWake ? TeamCardAction.Reattach : TeamCardAction.Keep;
         }
 
         /// <summary>
@@ -9911,14 +9958,30 @@ namespace MultiTerminal
                     void DoCreate()
                     {
                         string cardName = $"{e.MemberName} ({e.TeamName})";
-                        if (_embeddedAgentMap.TryGetValue(panelKey, out var existing))
-                        {
-                            // A completed member woke (268acc24) and its card is still showing, kept by
-                            // On Complete = Keep open: re-attach so it reads "running" again with the
-                            // new work, rather than open a second card.
-                            if (e.IsWake)
-                                existing.Control?.AttachAgent(e.Tailer, cardName, e.TaskDescription, e.SubagentType, isTeamAgent: true);
+                        bool hasEntry = _embeddedAgentMap.TryGetValue(panelKey, out var existing);
+                        bool stale = hasEntry && (existing.Control == null || existing.Control.IsDisposed
+                            || existing.Terminal == null || existing.Terminal.IsDisposed);
+                        bool sameAgent = hasEntry && !stale && ReferenceEquals(existing.Control.AttachedAgent, e.Tailer);
+
+                        var action = DecideTeamCard(hasEntry, stale, sameAgent, e.IsWake);
+                        if (action == TeamCardAction.Keep)
                             return;
+                        if (action == TeamCardAction.Reattach)
+                        {
+                            existing.Control.AttachAgent(e.Tailer, cardName, e.TaskDescription, e.SubagentType, isTeamAgent: true);
+                            return;
+                        }
+                        if (action == TeamCardAction.Replace)
+                        {
+                            _embeddedAgentMap.Remove(panelKey);
+                            if (!stale)
+                            {
+                                existing.Control.DetachAgent();
+                                existing.Terminal.EmbeddedAgentPanel?.RemoveAgentSlot(existing.Slot);
+                            }
+                            if (existing.Control != null && !existing.Control.IsDisposed)
+                                existing.Control.Dispose();
+                            _debugLogService?.Info("MainForm", $"Replacing the {(stale ? "stale" : "earlier")} card of {e.MemberName} with the new agent's card");
                         }
 
                         CreateAgentPanel(e.Tailer, cardName, panelKey, resolvedSpawner, e.TaskDescription, e.SubagentType, isTeamAgent: true, preferredTarget: spawnerDoc);

@@ -492,6 +492,76 @@ namespace MultiTerminal.Tests
         }
 
         [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void A_finish_line_followed_by_a_new_unfinished_turn_in_one_catch_up_read_leaves_the_agent_working(bool implicitMember)
+        {
+            // Pipeline run 2, item A: the finish was set aside for the end of the read pass, and the
+            // later work in the same pass did not cancel it, so a working agent was marked completed
+            // (and, at start-up, got no card).
+            var main = WriteTranscript(TranscriptIn("F--repo"),
+                Assistant("u1", "first job", "tool_use"),
+                SubagentStopLine(),
+                TeammateMessage("u2"),
+                Assistant("u3", "second job, still working", "tool_use"));
+
+            using var tailer = implicitMember
+                ? new TranscriptTailer(main, "inbox.json", "probe-A") { IsTeamAgent = true, IsImplicitTeamMember = true }
+                : new TranscriptTailer(main, null, "Subagent a507d269");
+            var exits = new List<int>();
+            tailer.Stopped += (s, code) => exits.Add(code);
+            tailer.StartAsync();
+
+            Assert.Empty(exits);
+            Assert.True(tailer.IsActive);
+            Assert.False(tailer.IsCompleted);
+        }
+
+        [Fact]
+        public void A_finish_line_followed_by_a_new_unfinished_turn_in_one_live_append_leaves_the_member_working()
+        {
+            var main = WriteTranscript(TranscriptIn("F--repo"), Assistant("u1", "first job", "tool_use"));
+            using var tailer = new TranscriptTailer(main, "inbox.json", "probe-A") { IsTeamAgent = true, IsImplicitTeamMember = true };
+            tailer.StartAsync();
+
+            // One write, so one read pass sees all three lines.
+            File.AppendAllText(main, SubagentStopLine() + "\n" + TeammateMessage("u2") + "\n" + Assistant("u3", "second job, still working", "tool_use") + "\n");
+
+            Assert.True(Eventually(() => tailer.Messages.Any(m => m.Content == "second job, still working")), "the append was never read");
+            Assert.True(tailer.IsActive);
+            Assert.False(tailer.IsCompleted);
+        }
+
+        [Fact]
+        public void A_tailer_stopped_for_good_is_not_made_active_by_a_new_file()
+        {
+            var main = WriteTranscript(TranscriptIn("F--repo"), Assistant("u1", "working", "tool_use"));
+            using var tailer = new TranscriptTailer(main, "inbox.json", "probe-A") { IsTeamAgent = true, IsImplicitTeamMember = true };
+            tailer.StartAsync();
+            tailer.StopAsync();
+
+            tailer.AddTranscriptFile(WriteTranscript(TranscriptIn("F--repo", agentFile: "agent-a507d26986ef907e4.jsonl"), TeammateMessage("u2")));
+
+            Assert.True(tailer.IsShutDown);
+            Assert.False(tailer.IsActive);
+        }
+
+        // Pipeline run 2, item B: an announced member and the card already under its key.
+        [Theory]
+        [InlineData(false, false, false, false, MainForm.TeamCardAction.Create)]
+        [InlineData(false, false, false, true, MainForm.TeamCardAction.Create)]
+        [InlineData(true, false, true, false, MainForm.TeamCardAction.Keep)]       // a repeat announcement
+        [InlineData(true, false, true, true, MainForm.TeamCardAction.Reattach)]    // woke, card kept open
+        [InlineData(true, false, false, false, MainForm.TeamCardAction.Replace)]   // kept card of an earlier same-named member
+        [InlineData(true, false, false, true, MainForm.TeamCardAction.Replace)]
+        [InlineData(true, true, false, false, MainForm.TeamCardAction.Replace)]    // entry left by a closed pane
+        [InlineData(true, true, false, true, MainForm.TeamCardAction.Replace)]
+        internal void A_team_card_gives_way_unless_it_is_already_this_agents(bool hasEntry, bool stale, bool sameAgent, bool isWake, MainForm.TeamCardAction expected)
+        {
+            Assert.Equal(expected, MainForm.DecideTeamCard(hasEntry, stale, sameAgent, isWake));
+        }
+
+        [Theory]
         [InlineData("session-554a88f1", "554a88f1-9a09-467d-8ea1-14d4a93157a5", true)]
         [InlineData("SESSION-554A88F1", "554a88f1-9a09-467d-8ea1-14d4a93157a5", true)]
         [InlineData("session-3e0dea71", "554a88f1-9a09-467d-8ea1-14d4a93157a5", false)] // another session's id

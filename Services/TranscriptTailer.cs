@@ -105,6 +105,9 @@ namespace MultiTerminal.Services
         /// <summary>Set by <see cref="StopAsync"/> and Dispose: nothing can make the tailer active again.</summary>
         private volatile bool _shutDown;
 
+        /// <summary>Stopped for good (<see cref="StopAsync"/> or Dispose): no card should be built for it.</summary>
+        public bool IsShutDown => _shutDown;
+
         /// <summary>The agent has finished (exit 0 was raised) and has not been woken since.</summary>
         public bool IsCompleted => _completed;
 
@@ -320,6 +323,13 @@ namespace MultiTerminal.Services
 
             // Start watching for appends
             StartFileWatcherForTracked(tracked);
+
+            // Shut down while this file was being added: drop the watcher just started, and stay inactive.
+            if (_shutDown)
+            {
+                DisposeWatchers();
+                return;
+            }
 
             // Re-activate if was marked inactive (a dormant member is reactivated only by new work)
             if (!_completed)
@@ -594,6 +604,12 @@ namespace MultiTerminal.Services
 
                             NoteTurnState(lineType, stopReason);
 
+                            // A finish seen earlier in this pass is overtaken by later work (268acc24): the
+                            // SubagentStop line, then a new prompt and the agent working on it, all in one
+                            // read (a catch-up read at start-up, or a burst of appends) is a working agent.
+                            if (_pendingStop && (lineType == "user" || lineType == "assistant"))
+                                _pendingStop = false;
+
                             var parsedMessages = AgentMessage.ParseLine(line);
                             foreach (var msg in parsedMessages)
                             {
@@ -664,7 +680,8 @@ namespace MultiTerminal.Services
                     }
                 }
 
-                if (woke)
+                // Not for a tailer shut down meanwhile (its member removed): nobody should build a card for it.
+                if (woke && !_shutDown)
                     Reactivated?.Invoke(this, EventArgs.Empty);
 
                 // Fire Stopped after finishing the read pass so all messages are delivered first
