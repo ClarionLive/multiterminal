@@ -9957,6 +9957,12 @@ namespace MultiTerminal
 
                     void DoCreate()
                     {
+                        // A late announcement from a tailer already stopped for good (a member removed and
+                        // replaced while its wake was on the way) must not touch the map: Replace would
+                        // dispose the replacement's card, and CreateAgentPanel would then refuse this one.
+                        if (e.Tailer is TranscriptTailer { IsShutDown: true })
+                            return;
+
                         string cardName = $"{e.MemberName} ({e.TeamName})";
                         bool hasEntry = _embeddedAgentMap.TryGetValue(panelKey, out var existing);
                         bool stale = hasEntry && (existing.Control == null || existing.Control.IsDisposed
