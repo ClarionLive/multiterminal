@@ -51,6 +51,12 @@ namespace MultiTerminal.Services
         /// for a team member.
         /// </summary>
         public string SubagentPanelKey { get; set; }
+        /// <summary>
+        /// True when a member that had completed got new work (268acc24): a message woke it, in the
+        /// same transcript or a new one. Its card may still be on screen (On Complete = Keep open), and
+        /// then it is re-attached rather than duplicated; otherwise a new card is made.
+        /// </summary>
+        public bool IsWake { get; set; }
     }
 
     /// <summary>
@@ -859,7 +865,7 @@ namespace MultiTerminal.Services
                     return;
                 }
 
-                ReadAndProcessConfig(root, teamName, configPath);
+                var firstRead = ReadAndProcessConfig(root, teamName, configPath, wait: true);
 
                 // Watch config.json for changes (new members added)
                 var state = GetOrAddTeam(root, teamName);
@@ -873,20 +879,7 @@ namespace MultiTerminal.Services
                         NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size,
                         EnableRaisingEvents = true
                     };
-                    state.ConfigWatcher.Changed += (s, e) =>
-                    {
-                        // Debounce
-                        var now = DateTime.Now;
-                        if ((now - state.LastConfigChange).TotalMilliseconds < 500) return;
-                        state.LastConfigChange = now;
-
-                        Task.Run(async () =>
-                        {
-                            await Task.Delay(100);
-                            if (Gone(root)) return;
-                            ReadAndProcessConfig(root, teamName, configPath);
-                        });
-                    };
+                    state.ConfigWatcher.Changed += (s, e) => RequestConfigRead(root, teamName, configPath, state);
 
                     // The root may have been stopped, and this state swept, after GetOrAddTeam handed
                     // it over: nothing would dispose a watcher attached to it now.
@@ -896,6 +889,10 @@ namespace MultiTerminal.Services
                         state.ConfigWatcher = null;
                     }
                 }
+
+                // The first read caught config.json mid-write: read it again once it settles.
+                if (firstRead == ConfigReadResult.Retry)
+                    RequestConfigRead(root, teamName, configPath, state);
             }
             catch (Exception ex)
             {
@@ -907,6 +904,76 @@ namespace MultiTerminal.Services
             }
         }
 
+        /// <summary>What one read of a team's config.json came to.</summary>
+        private enum ConfigReadResult
+        {
+            /// <summary>Read and acted on, or nothing to act on that another read would change.</summary>
+            Done,
+            /// <summary>Empty, unparseable or locked: probably caught mid-write, worth reading again.</summary>
+            Retry,
+            /// <summary>Another read of this team was running (only when not waiting for it).</summary>
+            Busy
+        }
+
+        /// <summary>
+        /// config.json changed: read it once it has gone <see cref="ConfigDebounceMs"/> without changing.
+        /// <para>Each change bumps a counter and the one waiting reader starts its wait again, so a
+        /// burst of writes (a lead stopping three agents at once) is read once, after its last write.
+        /// The old handler read 100 ms after the first change and dropped the rest of the burst, and
+        /// only the first of three removals was ever seen (268acc24).</para>
+        /// <para>At most one reader waits per team. It stops waiting just before it reads, so a change
+        /// during the read gets a new reader. A read that finds the file empty or invalid, or another
+        /// read in progress, waits and reads again instead of dropping the change; invalid content is
+        /// retried at most <see cref="MaxConfigRetries"/> times.</para>
+        /// </summary>
+        private void RequestConfigRead(RootState root, string teamName, string configPath, TeamState state)
+        {
+            Interlocked.Increment(ref state.ConfigChangeCount);
+            if (Interlocked.Exchange(ref state.ConfigReaderWaiting, 1) != 0) return;
+            Task.Run(() => RunConfigReaderAsync(root, teamName, configPath, state));
+        }
+
+        private async Task RunConfigReaderAsync(RootState root, string teamName, string configPath, TeamState state)
+        {
+            int retries = 0;
+            while (true)
+            {
+                int seen;
+                do
+                {
+                    seen = Volatile.Read(ref state.ConfigChangeCount);
+                    await Task.Delay(ConfigDebounceMs).ConfigureAwait(false);
+                }
+                while (Volatile.Read(ref state.ConfigChangeCount) != seen && !Gone(root));
+
+                Interlocked.Exchange(ref state.ConfigReaderWaiting, 0);
+                if (Gone(root)) return;
+
+                // Reads only into the state it was started for: a team deleted while it waited stays deleted.
+                var result = ReadAndProcessConfig(root, teamName, configPath, wait: false, expected: state);
+                ConfigReadHook?.Invoke(teamName);
+                if (result == ConfigReadResult.Done) return;
+                if (result == ConfigReadResult.Retry && ++retries > MaxConfigRetries)
+                {
+                    LogError($"Gave up re-reading config for team '{teamName}' after {MaxConfigRetries} retries; the next change will read it again");
+                    return;
+                }
+
+                // Wait and read again, unless a change meanwhile already started a reader that will.
+                if (Interlocked.Exchange(ref state.ConfigReaderWaiting, 1) != 0) return;
+            }
+        }
+
+        /// <summary>
+        /// Test seam (InternalsVisibleTo), null in production: called with the team name after each
+        /// debounced config.json read, whatever it found. Lets a test change the file only once a read
+        /// has really happened, which no fixed delay can promise.
+        /// </summary>
+        internal Action<string> ConfigReadHook { get; set; }
+
+        /// <summary>How many times a debounced read re-reads a config.json it found empty or invalid.</summary>
+        private const int MaxConfigRetries = 3;
+
         /// <summary>
         /// Test seam (InternalsVisibleTo), null in production: called with "start" when a team folder
         /// is about to be processed (after the stopped check) and with "end" when that pass is over,
@@ -914,6 +981,9 @@ namespace MultiTerminal.Services
         /// callback has got past its check, which no amount of waiting can arrange.
         /// </summary>
         internal Action<string, string> ProcessTeamHook { get; set; }
+
+        /// <summary>How long config.json must go without changing before a debounced read of it.</summary>
+        private const int ConfigDebounceMs = 500;
 
         /// <summary>Test seam (InternalsVisibleTo): how many teams the service is holding state for.</summary>
         internal int ActiveTeamCount => _activeTeams.Count;
@@ -990,8 +1060,43 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Read config.json and discover new team members.
         /// For each new member, watch for their transcript JSONL file and create a TranscriptTailer.
+        /// Every caller goes through here, so every read holds the team's
+        /// <see cref="TeamState.ConfigReadLock"/>: two reads of one team never run at once. With
+        /// <paramref name="wait"/> false a read already running makes this return
+        /// <see cref="ConfigReadResult.Busy"/> instead of blocking.
+        /// <para>With <paramref name="expected"/> (a debounced read) the read is into that state only,
+        /// and only while it is still the team's current one: no <c>GetOrAddTeam</c>, which would bring
+        /// back a team deleted while the read waited. Without it, the team's state is got or made.</para>
         /// </summary>
-        private void ReadAndProcessConfig(RootState root, string teamName, string configPath)
+        private ConfigReadResult ReadAndProcessConfig(RootState root, string teamName, string configPath, bool wait, TeamState expected = null)
+        {
+            var state = expected ?? GetOrAddTeam(root, teamName);
+            if (state == null) return ConfigReadResult.Done; // the root stopped being watched meanwhile
+
+            if (!Monitor.TryEnter(state.ConfigReadLock, wait ? Timeout.Infinite : 0))
+                return ConfigReadResult.Busy;
+            try
+            {
+                // Checked under the lock, so a removal that lands first is always seen.
+                if (expected != null && !IsCurrentTeamState(expected))
+                {
+                    Log($" Skipping config read for team '{teamName}': the team was removed while the read waited");
+                    return ConfigReadResult.Done;
+                }
+
+                return ReadAndProcessConfigLocked(root, teamName, configPath, state);
+            }
+            finally
+            {
+                Monitor.Exit(state.ConfigReadLock);
+            }
+        }
+
+        /// <summary>The team <paramref name="state"/> is for is being watched, and this is still its state.</summary>
+        private bool IsCurrentTeamState(TeamState state) =>
+            !state.Root.Stopped && _activeTeams.TryGetValue(state.TeamKey, out var current) && ReferenceEquals(current, state);
+
+        private ConfigReadResult ReadAndProcessConfigLocked(RootState root, string teamName, string configPath, TeamState state)
         {
             try
             {
@@ -1002,7 +1107,7 @@ namespace MultiTerminal.Services
                     json = reader.ReadToEnd();
                 }
 
-                if (string.IsNullOrWhiteSpace(json)) return;
+                if (string.IsNullOrWhiteSpace(json)) return ConfigReadResult.Retry;
 
                 using var doc = JsonDocument.Parse(json);
                 var config = doc.RootElement;
@@ -1011,14 +1116,12 @@ namespace MultiTerminal.Services
                 if (string.IsNullOrEmpty(leadSessionId))
                 {
                     LogError($"No leadSessionId in config for team '{teamName}'");
-                    return;
+                    return ConfigReadResult.Done;
                 }
 
-                var state = GetOrAddTeam(root, teamName);
-                if (state == null) return; // the root stopped being watched meanwhile
                 state.LeadSessionId = leadSessionId;
 
-                if (!config.TryGetProperty("members", out var membersArr)) return;
+                if (!config.TryGetProperty("members", out var membersArr)) return ConfigReadResult.Done;
 
                 // Derive the correct project directory from the lead member's cwd
                 // (MultiTerminal's own CWD may differ from the Claude Code project path)
@@ -1156,10 +1259,24 @@ namespace MultiTerminal.Services
                 // This picks up new JSONL files created when agents wake up for subsequent turns,
                 // even after all members have been initially matched.
                 WatchForNewTranscripts(teamName, subagentsDir, newMembers, state);
+                return ConfigReadResult.Done;
+            }
+            catch (Exception ex) when (ex is FileNotFoundException || ex is DirectoryNotFoundException)
+            {
+                // The team was deleted: nothing to read again. Its folder watcher reports the removal.
+                Log($" Config for team '{teamName}' is gone: {ex.Message}");
+                return ConfigReadResult.Done;
+            }
+            catch (Exception ex) when (ex is JsonException || ex is IOException)
+            {
+                // Half-written (Claude Code rewrites the file in place) or locked: worth another read.
+                LogError($"Config for team '{teamName}' not readable yet: {ex.Message}");
+                return ConfigReadResult.Retry;
             }
             catch (Exception ex)
             {
                 LogError($"Error reading config for team '{teamName}': {ex.Message}");
+                return ConfigReadResult.Done;
             }
         }
 
@@ -1711,6 +1828,27 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// True for the team Claude Code gives every session on its own: named <c>session-</c> plus the
+        /// first 8 characters of its lead session id (<c>session-554a88f1</c> for lead session
+        /// <c>554a88f1-9a09-…</c>). Every named Agent call joins it as an in-process member, and Claude
+        /// Code leaves the member in config.json after it has finished (it is removed only when the lead
+        /// stops it), so its card cannot wait for a removal to close (268acc24).
+        /// <para>The name is the test, not <c>backendType: "in-process"</c>: a team somebody creates
+        /// can run in-process too, and its members are meant to idle until told to stop. A created team
+        /// would have to be named after its own lead's session id to be mistaken for this one.</para>
+        /// </summary>
+        internal static bool IsImplicitSessionTeam(string teamName, string leadSessionId)
+        {
+            const int IdLength = 8;
+            if (string.IsNullOrEmpty(teamName) || string.IsNullOrEmpty(leadSessionId) || leadSessionId.Length < IdLength)
+                return false;
+            return string.Equals(teamName, ImplicitSessionTeamPrefix + leadSessionId.Substring(0, IdLength), StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>The start of the name of the team Claude Code makes for each session (see <see cref="IsImplicitSessionTeam"/>).</summary>
+        internal const string ImplicitSessionTeamPrefix = "session-";
+
+        /// <summary>
         /// Create a TranscriptTailer for a team member and fire the TeammateDiscovered event.
         /// </summary>
         private void CreateTailerForMember(string teamName, string memberName, string transcriptPath, TeamState state)
@@ -1728,22 +1866,14 @@ namespace MultiTerminal.Services
 
                 var tailer = new TranscriptTailer(transcriptPath, inboxPath, memberName);
                 tailer.IsTeamAgent = true; // Don't auto-stop on Result — team agents stay alive between turns
+
+                // A member of the team Claude Code made for the session itself finishes like a subagent (268acc24).
+                tailer.IsImplicitTeamMember = IsImplicitSessionTeam(teamName, state.LeadSessionId);
                 state.TrackedMembers.Add(memberName);
                 state.MemberTailers[memberName] = tailer;
 
                 // Mark as claimed so project-level watcher skips it
                 lock (_trackedSubagentFiles) { _trackedSubagentFiles.Add(transcriptPath); }
-
-                // Start tailing (catches up on existing content)
-                tailer.StartAsync();
-
-                LogInfo($"Created tailer for '{memberName}' in team '{teamName}': {Path.GetFileName(transcriptPath)}");
-
-                // Bridge team agent SendMessage calls to ChatPanel
-                tailer.TeamMessageSent += (s, msg) =>
-                {
-                    TeamMessageSent?.Invoke(this, (teamName, memberName, msg, state.SpawnerName));
-                };
 
                 // Look up spawner and task metadata from the office hook tracking file
                 var tracking = LookupFromTrackingByPath(transcriptPath);
@@ -1765,7 +1895,7 @@ namespace MultiTerminal.Services
                     }
                 }
 
-                TeammateDiscovered?.Invoke(this, new TeammateDiscoveredEventArgs
+                TeammateDiscoveredEventArgs Args(bool isWake) => new TeammateDiscoveredEventArgs
                 {
                     TeamName = teamName,
                     MemberName = memberName,
@@ -1775,8 +1905,49 @@ namespace MultiTerminal.Services
                     SubagentType = tracking.SubagentType,
                     LeadCwd = state.LeadCwd,
                     ConfigRoot = state.Root.Plan.Root,
-                    TeamKey = state.TeamKey
-                });
+                    TeamKey = state.TeamKey,
+                    IsWake = isWake
+                };
+
+                // A completed implicit-team member that gets new work is announced again, so it has a
+                // card while it works (268acc24). Subscribed before StartAsync starts the file watchers,
+                // so no wake can come before it. Only while this tailer is still the member's: a wake
+                // racing the member's removal (or a newer tailer for the name) announces nothing.
+                tailer.Reactivated += (s, e) =>
+                {
+                    bool stillMember;
+                    lock (state.ConfigReadLock) // a member's removal (a config read) changes MemberTailers under it
+                    {
+                        stillMember = state.MemberTailers.TryGetValue(memberName, out var current) && ReferenceEquals(current, tailer);
+                    }
+                    if (!stillMember || Gone(state.Root) || tailer.IsShutDown) return;
+                    LogInfo($"Completed member '{memberName}' of team '{teamName}' has new work: showing its card again");
+                    TeammateDiscovered?.Invoke(this, Args(isWake: true));
+                };
+
+                // Start tailing (catches up on existing content)
+                tailer.StartAsync();
+
+                LogInfo($"Created tailer for '{memberName}' in team '{teamName}': {Path.GetFileName(transcriptPath)}");
+
+                // Bridge team agent SendMessage calls to ChatPanel. Deliberately after the catch-up read:
+                // subscribing first would re-send every SendMessage already in the transcript to the
+                // chat each time MT restarts.
+                tailer.TeamMessageSent += (s, msg) =>
+                {
+                    TeamMessageSent?.Invoke(this, (teamName, memberName, msg, state.SpawnerName));
+                };
+
+                // A member whose work was already finished when it was found (after an MT restart, a
+                // session-* team keeps every member it ever had) gets no card for that old work. It
+                // stays watched, and a wake announces it above.
+                if (tailer.IsCompleted)
+                {
+                    LogInfo($"Member '{memberName}' of team '{teamName}' had already finished: no card unless it gets new work");
+                    return;
+                }
+
+                TeammateDiscovered?.Invoke(this, Args(isWake: false));
             }
             catch (Exception ex)
             {
@@ -2333,6 +2504,14 @@ namespace MultiTerminal.Services
 
                 tailer.StartAsync();
 
+                // Finished before it was found (the catch-up read reached its finish, e.g. after an MT
+                // restart): its Stopped(0) went to no card, so open none (268acc24).
+                if (tailer.IsCompleted)
+                {
+                    LogInfo($"Orphan subagent had already finished, no panel: {displayName} ({Path.GetFileName(transcriptPath)})");
+                    return;
+                }
+
                 LogInfo($"Orphan subagent detected: {displayName} ({Path.GetFileName(transcriptPath)}), spawner: {tracking.SpawnerName ?? "(unknown)"}, desc: \"{tracking.TaskDescription ?? ""}\"");
 
                 // Extract parent session ID from transcript path:
@@ -2784,7 +2963,12 @@ namespace MultiTerminal.Services
             public Dictionary<string, TranscriptTailer> MemberTailers = new Dictionary<string, TranscriptTailer>();
             public FileSystemWatcher ConfigWatcher;
             public List<FileSystemWatcher> Watchers = new List<FileSystemWatcher>();
-            public DateTime LastConfigChange;
+            /// <summary>Bumped on every config.json change; a waiting reader starts its wait again when it moves.</summary>
+            public int ConfigChangeCount;
+            /// <summary>1 while a reader is waiting to read config.json (at most one per team).</summary>
+            public int ConfigReaderWaiting;
+            /// <summary>Held for every read of this team's config.json, whoever starts it.</summary>
+            public readonly object ConfigReadLock = new object();
             /// <summary>
             /// The subagents folders a transcript watcher is running on. More than one when the lead
             /// session moved into another worktree's project folder after the team started (GH #89):
