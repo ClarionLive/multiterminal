@@ -9819,7 +9819,7 @@ namespace MultiTerminal
             // Agent Panel > On Complete is "Keep open" (GH #89): then the panel stays, showing
             // "completed", until the Owner closes it with its X. Any other stop (a team reclaiming
             // the transcript, the watcher shutting down, an error) still removes it.
-            source.Stopped += (s, exitCode) =>
+            void OnSourceStopped(int exitCode)
             {
                 void HandleEmbeddedStopped()
                 {
@@ -9845,8 +9845,14 @@ namespace MultiTerminal
                         HandleEmbeddedStopped();
                 }
                 catch (ObjectDisposedException) { }
-            };
+            }
 
+            source.Stopped += (s, exitCode) => OnSourceStopped(exitCode);
+
+            // The agent may have finished between being announced and this card being built (the
+            // announcement is queued to the UI thread): its Stopped(0) went to nobody, so apply it now.
+            if (source is TranscriptTailer { IsCompleted: true })
+                OnSourceStopped(0);
         }
 
         /// <summary>
@@ -9904,8 +9910,18 @@ namespace MultiTerminal
 
                     void DoCreate()
                     {
-                        if (!_embeddedAgentMap.ContainsKey(panelKey))
-                            CreateAgentPanel(e.Tailer, $"{e.MemberName} ({e.TeamName})", panelKey, resolvedSpawner, e.TaskDescription, e.SubagentType, isTeamAgent: true, preferredTarget: spawnerDoc);
+                        string cardName = $"{e.MemberName} ({e.TeamName})";
+                        if (_embeddedAgentMap.TryGetValue(panelKey, out var existing))
+                        {
+                            // A completed member woke (268acc24) and its card is still showing, kept by
+                            // On Complete = Keep open: re-attach so it reads "running" again with the
+                            // new work, rather than open a second card.
+                            if (e.IsWake)
+                                existing.Control?.AttachAgent(e.Tailer, cardName, e.TaskDescription, e.SubagentType, isTeamAgent: true);
+                            return;
+                        }
+
+                        CreateAgentPanel(e.Tailer, cardName, panelKey, resolvedSpawner, e.TaskDescription, e.SubagentType, isTeamAgent: true, preferredTarget: spawnerDoc);
                     }
 
                     // Asynchronous (not wait) to prevent deadlocks when multiple terminals discover
@@ -9932,6 +9948,16 @@ namespace MultiTerminal
 
                     void CloseAgentPanel()
                     {
+                        // A member that finished cleanly keeps its card under On Complete = Keep open,
+                        // even when the lead then stops it: the removal is not a failure (268acc24).
+                        if (_settings?.GetAgentPanelCloseMode() == "ManualClose"
+                            && _embeddedAgentMap.TryGetValue(panelKey, out var kept)
+                            && kept.Control?.AttachedAgent is TranscriptTailer { IsCompleted: true })
+                        {
+                            _debugLogService?.Info("MainForm", $"Keeping the finished card of {e.MemberName} open (On Complete = Keep open)");
+                            return;
+                        }
+
                         if (_embeddedAgentMap.Remove(panelKey, out var embedded))
                         {
                             embedded.Control?.DetachAgent();

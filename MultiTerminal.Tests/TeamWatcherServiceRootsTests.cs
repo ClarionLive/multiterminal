@@ -622,7 +622,97 @@ namespace MultiTerminal.Tests
             Assert.Equal(names.OrderBy(n => n), h.MembersRemoved.OrderBy(n => n));
         }
 
+        /// <summary>
+        /// After an MT restart a session-* team still lists every member it ever had. One whose work
+        /// had already finished gets no card; when a message wakes it, it is announced as a wake.
+        /// </summary>
+        [Fact]
+        public async Task An_implicit_member_found_already_finished_gets_no_card_until_it_is_woken()
+        {
+            string root = MakeRoot("Default");
+            using var h = new Harness(new[] { root }, root);
+            h.Service.StartWatching();
+
+            string session = Guid.NewGuid().ToString();
+            string leadCwd = @"H:\Repo" + _id;
+            string member = "probe-" + _id;
+            string transcript = WriteTranscript(root, leadCwd, session);
+            File.WriteAllText(transcript, Line("assistant", "u1", "report", "end_turn") + "\n");
+            File.SetLastWriteTimeUtc(transcript, DateTime.UtcNow.AddHours(-1));
+
+            string staging = Path.Combine(_base, "staging", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(staging);
+            File.WriteAllText(Path.Combine(staging, "config.json"), ConfigJsonWithMembers(leadCwd, session, new[] { member }));
+            Directory.Move(staging, Path.Combine(root, "teams", ImplicitTeam(session)));
+
+            // Long enough for the team to be read and the member matched (each step here takes well under a second).
+            await Task.Delay(3000);
+            Assert.DoesNotContain(h.Discovered, e => e.MemberName == member);
+
+            File.AppendAllText(transcript,
+                Line("user", "u2", "<teammate-message teammate_id=\\\"team-lead\\\">more</teammate-message>", null) + "\n" +
+                Line("assistant", "u3", "more work", "tool_use") + "\n");
+
+            var woke = await h.WaitForDiscovery(e => e.MemberName == member);
+            Assert.NotNull(woke);
+            Assert.True(woke.IsWake);
+            Assert.True(((TranscriptTailer)woke.Tailer).IsActive);
+        }
+
+        /// <summary>
+        /// A read that catches config.json half-written must not lose the change. Here the last
+        /// Changed event leaves the file invalid, and the valid content arrives by a rename (no
+        /// Changed event) only after a debounced read has seen the invalid file: only a retry of the
+        /// read can see it. Without the read hook this passed by luck when a second Changed event from
+        /// the write pushed the first read past the rename.
+        /// </summary>
+        [Fact]
+        public async Task A_config_read_that_finds_the_file_half_written_reads_it_again()
+        {
+            string root = MakeRoot("Default");
+            using var h = new Harness(new[] { root }, root);
+            h.Service.StartWatching();
+
+            string session = Guid.NewGuid().ToString();
+            string team = ImplicitTeam(session);
+            string leadCwd = @"H:\Repo" + _id;
+            string member = "triage-" + _id;
+            AddTeam(root, team, member, leadCwd, session);
+            Assert.NotNull(await h.WaitForDiscovery(e => e.MemberName == member));
+            await Task.Delay(1000);
+
+            int reads = 0;
+            h.Service.ConfigReadHook = name => { if (name == team) System.Threading.Interlocked.Increment(ref reads); };
+
+            string configPath = Path.Combine(root, "teams", team, "config.json");
+            File.WriteAllText(configPath, "{\"leadSessionId\":\"" + session + "\",\"memb");
+
+            // Only once a read has found the file invalid does the valid content arrive.
+            var readDeadline = DateTime.UtcNow + Wait;
+            while (DateTime.UtcNow < readDeadline && System.Threading.Volatile.Read(ref reads) == 0)
+                await Task.Delay(20);
+            Assert.True(System.Threading.Volatile.Read(ref reads) > 0, "no debounced read of the invalid config");
+
+            string staged = Path.Combine(_base, "staging", Guid.NewGuid().ToString("N") + ".json");
+            Directory.CreateDirectory(Path.GetDirectoryName(staged));
+            File.WriteAllText(staged, ConfigJsonWithMembers(leadCwd, session, Array.Empty<string>()));
+            File.Move(staged, configPath, overwrite: true);
+
+            var deadline = DateTime.UtcNow + Wait;
+            while (DateTime.UtcNow < deadline && !h.MembersRemoved.Contains(member))
+                await Task.Delay(50);
+
+            Assert.Contains(member, h.MembersRemoved);
+        }
+
         // ── Helpers ──────────────────────────────────────────────────────────
+
+        private static string ImplicitTeam(string leadSessionId) => TeamWatcherService.ImplicitSessionTeamPrefix + leadSessionId.Substring(0, 8);
+
+        private static string Line(string type, string uuid, string text, string stopReason) =>
+            "{\"type\":\"" + type + "\",\"uuid\":\"" + uuid + "\",\"message\":{\"role\":\"" + type + "\",\"content\":"
+            + (type == "user" ? "\"" + text + "\"" : "[{\"type\":\"text\",\"text\":\"" + text + "\"}]")
+            + ",\"stop_reason\":" + (stopReason == null ? "null" : "\"" + stopReason + "\"") + "}}";
 
         private static string ConfigJsonWithMembers(string leadCwd, string leadSessionId, IReadOnlyList<string> memberNames)
         {

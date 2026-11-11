@@ -385,6 +385,112 @@ namespace MultiTerminal.Tests
             Assert.True(tailer.IsActive);
         }
 
+        /// <summary>Polls <paramref name="condition"/> for up to 10 s; returns its final value (never hangs).</summary>
+        private static bool Eventually(Func<bool> condition)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (DateTime.UtcNow < deadline)
+            {
+                if (condition()) return true;
+                System.Threading.Thread.Sleep(50);
+            }
+            return condition();
+        }
+
+        private static TranscriptTailer CompletedImplicitMember(string path, List<int> exits, List<string> wakes)
+        {
+            var tailer = new TranscriptTailer(path, "inbox.json", "probe-A") { IsTeamAgent = true, IsImplicitTeamMember = true };
+            tailer.Stopped += (s, code) => { lock (exits) exits.Add(code); };
+            tailer.Reactivated += (s, e) => { lock (wakes) wakes.Add("woke"); };
+            tailer.StartAsync();
+            tailer.CheckQuietCompletion(DateTime.UtcNow.AddMinutes(2));
+            Assert.Equal(new[] { 0 }, exits);
+            Assert.True(tailer.IsCompleted);
+            return tailer;
+        }
+
+        [Fact]
+        public void A_completed_implicit_member_woken_in_the_same_file_after_the_quiet_window_is_active_again()
+        {
+            var main = WriteTranscript(TranscriptIn("F--repo"), Assistant("u1", "report", "end_turn"));
+            var exits = new List<int>();
+            var wakes = new List<string>();
+            using var tailer = CompletedImplicitMember(main, exits, wakes);
+
+            // Minutes later the lead sends more work: it lands in the same transcript.
+            File.AppendAllLines(main, new[] { TeammateMessage("u2"), Assistant("u3", "more work", "tool_use") });
+
+            Assert.True(Eventually(() => { lock (wakes) return wakes.Count == 1; }), "no Reactivated after the same-file append");
+            Assert.True(tailer.IsActive);
+            Assert.False(tailer.IsCompleted);
+            Assert.Contains(tailer.Messages, m => m.Content == "more work");
+
+            // And it can finish again, raising a second exit 0.
+            File.AppendAllLines(main, new[] { Assistant("u4", "done again", "end_turn") });
+            Assert.True(Eventually(() => tailer.Messages.Any(m => m.Content == "done again")));
+            tailer.CheckQuietCompletion(DateTime.UtcNow.AddMinutes(5));
+            lock (exits) Assert.Equal(new[] { 0, 0 }, exits);
+        }
+
+        [Fact]
+        public void A_completed_implicit_member_woken_in_a_new_file_after_the_quiet_window_is_active_again()
+        {
+            var main = WriteTranscript(TranscriptIn("F--repo"), Assistant("u1", "report", "end_turn"));
+            var exits = new List<int>();
+            var wakes = new List<string>();
+            using var tailer = CompletedImplicitMember(main, exits, wakes);
+
+            // The watcher hands the tailer a new transcript of the same member (TeamWatcherService, wake-up file).
+            var next = WriteTranscript(TranscriptIn("F--repo", agentFile: "agent-a507d26986ef907e4.jsonl"),
+                TeammateMessage("u2"), Assistant("u3", "more work", "tool_use"));
+            tailer.AddTranscriptFile(next);
+
+            lock (wakes) Assert.Single(wakes);
+            Assert.True(tailer.IsActive);
+            Assert.Contains(tailer.Messages, m => m.Content == "more work");
+        }
+
+        [Fact]
+        public void A_completed_implicit_member_is_not_woken_once_disposed()
+        {
+            var main = WriteTranscript(TranscriptIn("F--repo"), Assistant("u1", "report", "end_turn"));
+            var exits = new List<int>();
+            var wakes = new List<string>();
+            var tailer = CompletedImplicitMember(main, exits, wakes);
+            tailer.Dispose();
+
+            var next = WriteTranscript(TranscriptIn("F--repo", agentFile: "agent-a507d26986ef907e4.jsonl"), TeammateMessage("u2"));
+            tailer.AddTranscriptFile(next);
+
+            Assert.Empty(wakes);
+            Assert.False(tailer.IsActive);
+            Assert.Equal(new[] { 0 }, exits); // the dispose of a finished member sends no failing stop
+        }
+
+        [Fact]
+        public void A_transcript_already_finished_when_found_is_completed_by_StartAsync()
+        {
+            // What MT finds after a restart: the finish is already in the file, so the tailer is
+            // completed before any card subscribes to it.
+            var stopped = WriteTranscript(TranscriptIn("F--repo"), Assistant("u1", "done", "tool_use"), SubagentStopLine());
+            using var a = new TranscriptTailer(stopped, "inbox.json", "probe-A") { IsTeamAgent = true, IsImplicitTeamMember = true };
+            a.StartAsync();
+            Assert.True(a.IsCompleted);
+
+            // An ended turn whose file was last written long ago counts the same, for a plain subagent too.
+            var quiet = WriteTranscript(TranscriptIn("F--repo", agentFile: "agent-b000000000000000.jsonl"), Assistant("u1", "done", "end_turn"));
+            File.SetLastWriteTimeUtc(quiet, DateTime.UtcNow.AddHours(-2));
+            using var b = new TranscriptTailer(quiet, null, "Subagent b0000000");
+            b.StartAsync();
+            Assert.True(b.IsCompleted);
+
+            // But a member of a created team never is.
+            using var c = new TranscriptTailer(quiet, "inbox.json", "Verifier") { IsTeamAgent = true };
+            c.StartAsync();
+            Assert.False(c.IsCompleted);
+            Assert.True(c.IsActive);
+        }
+
         [Theory]
         [InlineData("session-554a88f1", "554a88f1-9a09-467d-8ea1-14d4a93157a5", true)]
         [InlineData("SESSION-554A88F1", "554a88f1-9a09-467d-8ea1-14d4a93157a5", true)]
