@@ -39,8 +39,11 @@ namespace MultiTerminal.Services
     /// </summary>
     public sealed class RelocationHost
     {
-        /// <summary>The panes open right now (read on the UI thread before the move starts).</summary>
-        public IReadOnlyList<RelocationPane> Panes { get; init; } = Array.Empty<RelocationPane>();
+        /// <summary>
+        /// Reads the panes open right now. Called by every check, including the one the move itself runs
+        /// after the Owner confirmed, so a terminal opened while the confirmation was up still refuses the move.
+        /// </summary>
+        public Func<IReadOnlyList<RelocationPane>> GetPanes { get; init; } = () => Array.Empty<RelocationPane>();
 
         /// <summary>Every Claude config folder (<c>ClaudeProfileResolver.GetAllRoots</c>).</summary>
         public IReadOnlyList<string> ClaudeConfigRoots { get; init; } = Array.Empty<string>();
@@ -72,14 +75,17 @@ namespace MultiTerminal.Services
             };
             foreach (var a in args) info.ArgumentList.Add(a);
             using var process = Process.Start(info);
-            string output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
+
+            // Both pipes are drained at once, so a chatty stderr cannot block git before the timeout applies.
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            var stderr = process.StandardError.ReadToEndAsync();
             if (!process.WaitForExit(60000))
             {
                 try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
                 return (-1, "git did not finish within 60 seconds");
             }
 
-            return (process.ExitCode, output.Trim());
+            return (process.ExitCode, (stdout.GetAwaiter().GetResult() + stderr.GetAwaiter().GetResult()).Trim());
         }
     }
 
@@ -121,17 +127,27 @@ namespace MultiTerminal.Services
         {
             if (project == null) return new[] { "No project." };
             var problems = ProjectRelocationChecks.Check(
-                project.Id, project.Path, project.SourcePath, newRoot, moveFolder, _host.Panes,
+                project.Id, project.Path, project.SourcePath, newRoot, moveFolder, _host.GetPanes?.Invoke(),
                 Directory.Exists, HasEntries).ToList();
 
+            string from = RelocationPaths.Normalize(project.Path);
+            string to = RelocationPaths.Normalize(newRoot);
             if (!moveFolder && problems.Count == 0)
-                problems.AddRange(CheckSameProject(project, RelocationPaths.Normalize(newRoot)));
+                problems.AddRange(CheckSameProject(project, to));
 
             if (problems.Count == 0)
             {
                 using var connection = _host.OpenDatabase();
-                problems.AddRange(ProjectRelocationStore.FindConflicts(connection, RelocationPaths.Normalize(newRoot)));
+                problems.AddRange(ProjectRelocationStore.FindConflicts(connection, to));
+
+                // Another registered project inside this folder would have its row moved but not its Claude
+                // history, previous folders or cached copy (pipeline Run 1, Debugger).
+                foreach (var name in ProjectRelocationStore.FindProjectsUnder(connection, from, project.Id))
+                    problems.Add($"The project '{name}' is registered inside this folder. Move or remove it first, then move this one.");
             }
+
+            if (problems.Count == 0)
+                problems.AddRange(FindHistoryCollisions(from, to));
 
             return problems;
         }
@@ -162,9 +178,11 @@ namespace MultiTerminal.Services
                 {
                     if (crossVolume)
                     {
-                        CopyVerified(from, to, progress, cancel);
+                        // Registered BEFORE the copy starts, so a cancel or a failure half way removes what was
+                        // copied (pipeline Run 1). Check guaranteed the destination was new or empty.
                         undo.Push(() => TryDeleteCopy(to));
-                        result.Done.Add($"Copied the project to '{to}' and checked the copy.");
+                        CopyVerified(from, to, progress, cancel);
+                        result.Done.Add($"Copied the project to '{to}' and checked every file's contents against the original.");
                     }
                     else
                     {
@@ -185,8 +203,7 @@ namespace MultiTerminal.Services
                 RelocationDbResult db;
                 using (var connection = _host.OpenDatabase())
                 {
-                    db = ProjectRelocationStore.Apply(connection, project.Id, from, to, claudeMoves);
-                    if (db.Succeeded) ResetCodeGraphFreshness(connection, project.Name);
+                    db = ProjectRelocationStore.Apply(connection, project.Id, project.Name, from, to, claudeMoves);
                 }
 
                 if (!db.Succeeded)
@@ -198,20 +215,21 @@ namespace MultiTerminal.Services
                 result.Done.Add($"Updated {db.Total} record(s): " +
                     string.Join(", ", db.RowsChanged.Select(kv => $"{kv.Key} {kv.Value}")) + ".");
             }
-            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is RelocationAbortedException
-                                       || ex is OperationCanceledException || ex is SQLiteException)
+#pragma warning disable CA1031 // Every failure before the commit must run the undo: "fully moved or untouched" (pipeline Run 1).
+            catch (Exception ex)
             {
                 string why = ex is OperationCanceledException ? "The move was cancelled." : ex.Message;
                 result.Refusals.Add(why + " Nothing was changed.");
                 while (undo.Count > 0)
                 {
                     try { undo.Pop()(); }
-                    catch (Exception undoEx) when (undoEx is IOException || undoEx is UnauthorizedAccessException)
+                    catch (Exception undoEx)
                     {
                         result.Refusals.Add("Undoing part of the move failed: " + undoEx.Message + " Check both folders.");
                     }
                 }
             }
+#pragma warning restore CA1031
             finally
             {
                 if (watchersPaused) TryRun(_host.ResumeWatchers, "Restarting MT's folder watchers", result);
@@ -235,10 +253,28 @@ namespace MultiTerminal.Services
 
         // ── Folder copy (cross-volume) ──────────────────────────────────────────────
 
+        /// <summary>
+        /// Copies <paramref name="from"/> to <paramref name="to"/> and proves the copy (pipeline Run 1, Codex):
+        /// <list type="bullet">
+        ///   <item>refuses a source holding a junction or symbolic link, which a recursive copy would follow
+        ///   out of the project (or into a loop);</item>
+        ///   <item>hashes each file while reading it and re-hashes the written copy, so equal sizes with different
+        ///   contents fail;</item>
+        ///   <item>re-reads the source listing afterwards and fails if any file appeared, vanished, or changed
+        ///   size or write time while the copy ran.</item>
+        /// </list>
+        /// A failure throws; the caller's undo removes the partial copy.
+        /// </summary>
         private static void CopyVerified(string from, string to, IProgress<RelocationProgress> progress, CancellationToken cancel)
         {
-            var files = Directory.EnumerateFiles(from, "*", SearchOption.AllDirectories).ToList();
-            long totalBytes = files.Sum(f => new FileInfo(f).Length);
+            var links = FindReparsePoints(from).Take(3).ToList();
+            if (links.Count > 0)
+                throw new RelocationAbortedException(
+                    "The project contains a junction or symbolic link (" + string.Join(", ", links.Select(l => Path.GetRelativePath(from, l))) +
+                    "). Copying it to another drive would follow the link, so MT will not move it. Remove the link or move the folder yourself.");
+
+            var before = Snapshot(from);
+            long totalBytes = before.Values.Sum(v => v.Length);
 
             var drive = new DriveInfo(Path.GetPathRoot(to));
             if (drive.AvailableFreeSpace < totalBytes)
@@ -250,13 +286,17 @@ namespace MultiTerminal.Services
 
             long copied = 0;
             int lastPercent = -1;
-            foreach (var file in files)
+            foreach (var (relative, info) in before)
             {
                 cancel.ThrowIfCancellationRequested();
-                string target = Path.Combine(to, Path.GetRelativePath(from, file));
-                File.Copy(file, target, overwrite: false);
-                File.SetAttributes(target, File.GetAttributes(file));
-                copied += new FileInfo(file).Length;
+                string source = Path.Combine(from, relative);
+                string target = Path.Combine(to, relative);
+                byte[] sourceHash = CopyHashing(source, target);
+                if (!sourceHash.AsSpan().SequenceEqual(HashFile(target)))
+                    throw new RelocationAbortedException($"The copy of '{relative}' does not match the original.");
+                File.SetAttributes(target, File.GetAttributes(source));
+
+                copied += info.Length;
                 int percent = totalBytes == 0 ? 100 : (int)(copied * 100 / totalBytes);
                 if (percent != lastPercent)
                 {
@@ -265,11 +305,68 @@ namespace MultiTerminal.Services
                 }
             }
 
-            var copiedFiles = Directory.EnumerateFiles(to, "*", SearchOption.AllDirectories).ToList();
-            long copiedBytes = copiedFiles.Sum(f => new FileInfo(f).Length);
-            if (copiedFiles.Count != files.Count || copiedBytes != totalBytes)
+            var after = Snapshot(from);
+            var changed = before.Keys.Union(after.Keys, StringComparer.OrdinalIgnoreCase)
+                .Where(k => !before.TryGetValue(k, out var b) || !after.TryGetValue(k, out var a) || a != b)
+                .Take(3).ToList();
+            if (changed.Count > 0)
                 throw new RelocationAbortedException(
-                    $"The copy does not match the original ({copiedFiles.Count} files, {FormatBytes(copiedBytes)} against {files.Count} files, {FormatBytes(totalBytes)}).");
+                    "Files in the project changed while it was being copied (" + string.Join(", ", changed) +
+                    "). Close whatever is writing to it and try again.");
+
+            int copiedFiles = Directory.EnumerateFiles(to, "*", SearchOption.AllDirectories).Count();
+            if (copiedFiles != before.Count)
+                throw new RelocationAbortedException($"The copy holds {copiedFiles} files; the original has {before.Count}.");
+        }
+
+        private static Dictionary<string, (long Length, DateTime WrittenUtc)> Snapshot(string root)
+        {
+            var map = new Dictionary<string, (long Length, DateTime WrittenUtc)>(StringComparer.OrdinalIgnoreCase);
+            foreach (var file in new DirectoryInfo(root).EnumerateFiles("*", SearchOption.AllDirectories))
+                map[Path.GetRelativePath(root, file.FullName)] = (file.Length, file.LastWriteTimeUtc);
+            return map;
+        }
+
+        /// <summary>Folders and files under <paramref name="root"/> that are junctions or symbolic links, without following them.</summary>
+        internal static IEnumerable<string> FindReparsePoints(string root)
+        {
+            var pending = new Stack<DirectoryInfo>();
+            pending.Push(new DirectoryInfo(root));
+            while (pending.Count > 0)
+            {
+                foreach (var entry in pending.Pop().EnumerateFileSystemInfos())
+                {
+                    if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)
+                        yield return entry.FullName;
+                    else if (entry is DirectoryInfo dir)
+                        pending.Push(dir);
+                }
+            }
+        }
+
+        private static byte[] CopyHashing(string source, string target)
+        {
+            using var sha = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+            using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (var output = new FileStream(target, FileMode.CreateNew, FileAccess.Write))
+            {
+                var buffer = new byte[1 << 16];
+                int read;
+                while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    sha.AppendData(buffer, 0, read);
+                    output.Write(buffer, 0, read);
+                }
+            }
+
+            File.SetLastWriteTimeUtc(target, File.GetLastWriteTimeUtc(source));
+            return sha.GetHashAndReset();
+        }
+
+        private static byte[] HashFile(string path)
+        {
+            using var stream = File.OpenRead(path);
+            return System.Security.Cryptography.SHA256.HashData(stream);
         }
 
         private static void TryDeleteCopy(string to)
@@ -301,6 +398,27 @@ namespace MultiTerminal.Services
         }
 
         // ── Claude Code history ─────────────────────────────────────────────────────
+
+        /// <summary>
+        /// A history folder for the new location that already exists while the old location has one to move
+        /// (pipeline Run 1, Codex). Moving would leave the old sessions unreachable, so the move is refused.
+        /// </summary>
+        private IEnumerable<string> FindHistoryCollisions(string from, string to)
+        {
+            if (from == null || to == null) yield break;
+            string newName = SessionCatalog.EncodeProjectPath(to);
+            foreach (var configRoot in _host.ClaudeConfigRoots ?? Array.Empty<string>())
+            {
+                string projectsDir = Path.Combine(configRoot, "projects");
+                if (!Directory.Exists(projectsDir)) continue;
+                foreach (var (folder, suffix) in FindHistoryFolders(projectsDir, from))
+                {
+                    string target = Path.Combine(projectsDir, newName + suffix);
+                    if (!string.Equals(folder, target, StringComparison.OrdinalIgnoreCase) && Directory.Exists(target))
+                        yield return $"Claude Code already has history for the new folder ('{target}'). Moving would hide this project's past sessions. Choose another folder, or remove that history first.";
+                }
+            }
+        }
 
         /// <summary>
         /// Renames each Claude history folder of the old root (and its worktree folders) to the new root's
@@ -395,17 +513,6 @@ namespace MultiTerminal.Services
             {
                 result.Warnings.Add($"Could not run git ({ex.Message}). Run 'git worktree repair' yourself in '{root}'.");
             }
-        }
-
-        private static void ResetCodeGraphFreshness(SQLiteConnection connection, string projectName)
-        {
-            // The watcher skips a project indexed recently; the old index points at the old folder.
-            using var command = new SQLiteCommand(
-                "DELETE FROM cg_index_metadata WHERE key = @k AND EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='cg_index_metadata')",
-                connection);
-            command.Parameters.AddWithValue("@k", $"project:{projectName}:last_indexed");
-            try { command.ExecuteNonQuery(); }
-            catch (SQLiteException) { /* no code graph table yet: nothing to reset */ }
         }
 
         // ── Repoint mode ────────────────────────────────────────────────────────────

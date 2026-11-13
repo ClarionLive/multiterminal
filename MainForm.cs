@@ -4952,13 +4952,16 @@ namespace MultiTerminal
         /// <summary>The running app's side of a Move Project: open panes, Claude roots, watchers and refresh.</summary>
         private RelocationHost BuildRelocationHost()
         {
-            var panes = _dockPanel.Documents.OfType<TerminalDocument>()
+            // Read live on the UI thread each time, so the check the move runs after the confirmation sees a
+            // terminal opened while the dialog was up (pipeline Run 1). The worker Invokes; the UI thread is
+            // pumping the progress dialog.
+            IReadOnlyList<RelocationPane> ReadPanes() => _dockPanel.Documents.OfType<TerminalDocument>()
                 .Select(d => new RelocationPane(d.Text, d.LaunchProjectId, SafeWorkingDirectory(d)))
                 .ToList();
 
             return new RelocationHost
             {
-                Panes = panes,
+                GetPanes = () => InvokeRequired ? (IReadOnlyList<RelocationPane>)Invoke(new Func<IReadOnlyList<RelocationPane>>(ReadPanes)) : ReadPanes(),
                 ClaudeConfigRoots = ClaudeProfileResolver.GetAllRoots(),
                 PauseWatchers = () => _codeGraphWatcher?.Stop(),
                 ResumeWatchers = () => _codeGraphWatcher?.Start(),

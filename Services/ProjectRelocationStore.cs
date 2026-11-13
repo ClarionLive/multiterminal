@@ -87,13 +87,39 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Names of registered projects, other than <paramref name="exceptId"/>, whose folder or source folder is
+        /// <paramref name="root"/> or lies inside it.
+        /// </summary>
+        public static IReadOnlyList<string> FindProjectsUnder(SQLiteConnection connection, string root, string exceptId)
+        {
+            var names = new List<string>();
+            if (string.IsNullOrWhiteSpace(root) || !HasColumn(connection, "projects", "path")) return names;
+            bool hasSource = HasColumn(connection, "projects", "source_path");
+            const string withSource = "SELECT id, name, path, source_path FROM projects";
+            const string withoutSource = "SELECT id, name, path, NULL FROM projects";
+            using var command = hasSource ? new SQLiteCommand(withSource, connection) : new SQLiteCommand(withoutSource, connection);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                if (string.Equals(reader.GetValue(0) as string, exceptId, StringComparison.OrdinalIgnoreCase)) continue;
+                if (RelocationPaths.IsSameOrUnder(reader.GetValue(2) as string, root) || RelocationPaths.IsSameOrUnder(reader.GetValue(3) as string, root))
+                    names.Add(reader.GetValue(1) as string ?? reader.GetValue(0) as string);
+            }
+
+            return names;
+        }
+
+        /// <summary>
         /// Repoints every path under <paramref name="oldRoot"/> to <paramref name="newRoot"/>, rewrites the
-        /// Claude history folder prefixes in <paramref name="claudeFolderMoves"/>, and records
-        /// <paramref name="oldRoot"/> in the project's previous folders. All in one transaction.
+        /// Claude history folder prefixes in <paramref name="claudeFolderMoves"/>, records
+        /// <paramref name="oldRoot"/> in the project's previous folders, and clears the code graph's
+        /// "indexed recently" mark for <paramref name="projectName"/> so the watcher re-indexes the new folder.
+        /// All in one transaction (the code graph mark was outside it before pipeline Run 1).
         /// </summary>
         public static RelocationDbResult Apply(
             SQLiteConnection connection,
             string projectId,
+            string projectName,
             string oldRoot,
             string newRoot,
             IEnumerable<(string OldFolder, string NewFolder)> claudeFolderMoves)
@@ -113,6 +139,7 @@ namespace MultiTerminal.Services
                 }
 
                 AddPreviousPath(connection, transaction, projectId, oldRoot);
+                ResetCodeGraphFreshness(connection, transaction, projectName);
                 transaction.Commit();
                 return new RelocationDbResult { Succeeded = true, RowsChanged = changed };
             }
@@ -154,6 +181,14 @@ namespace MultiTerminal.Services
             command.ExecuteNonQuery();
         }
 
+        private static void ResetCodeGraphFreshness(SQLiteConnection connection, SQLiteTransaction transaction, string projectName)
+        {
+            if (string.IsNullOrEmpty(projectName) || !HasColumn(connection, "cg_index_metadata", "key")) return;
+            using var command = new SQLiteCommand("DELETE FROM cg_index_metadata WHERE key = @k", connection, transaction);
+            command.Parameters.AddWithValue("@k", $"project:{projectName}:last_indexed");
+            command.ExecuteNonQuery();
+        }
+
         private static void Add(Dictionary<string, int> changed, string table, string column, int count)
         {
             if (count <= 0) return;
@@ -165,17 +200,18 @@ namespace MultiTerminal.Services
         {
             if (!HasColumn(connection, table, column)) return 0;
             int count = 0;
-            foreach (var (rowId, value) in SelectUnder(connection, table, column, oldRoot, transaction))
-            {
-                string rebased = RelocationPaths.Rebase(value, oldRoot, newRoot);
-                if (rebased == null || string.Equals(rebased, value, StringComparison.Ordinal)) continue;
-
-                // CA2100: table/column come from the fixed lists above; values are parameters.
+            // CA2100: table/column come from the fixed lists above; values are parameters.
 #pragma warning disable CA2100
-                using var update = new SQLiteCommand($"UPDATE {table} SET {column} = @v WHERE rowid = @r", connection, transaction);
+            using var update = new SQLiteCommand($"UPDATE {table} SET {column} = @v WHERE rowid = @r", connection, transaction);
 #pragma warning restore CA2100
-                update.Parameters.AddWithValue("@v", rebased);
-                update.Parameters.AddWithValue("@r", rowId);
+            var value = update.Parameters.Add("@v", System.Data.DbType.String);
+            var row = update.Parameters.Add("@r", System.Data.DbType.Int64);
+            foreach (var (rowId, current) in SelectUnder(connection, table, column, oldRoot, transaction))
+            {
+                string rebased = RelocationPaths.Rebase(current, oldRoot, newRoot);
+                if (rebased == null || string.Equals(rebased, current, StringComparison.Ordinal)) continue;
+                value.Value = rebased;
+                row.Value = rowId;
                 count += update.ExecuteNonQuery();
             }
 
@@ -183,30 +219,25 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Rows whose value is <paramref name="root"/> or under it. The SQL narrows by a case-folded
-        /// prefix (either separator); <see cref="RelocationPaths.IsSameOrUnder"/> makes the final call.
+        /// Rows whose value is <paramref name="root"/> or under it. Every non-null value is read and
+        /// <see cref="RelocationPaths.IsSameOrUnder"/> decides: SQLite's <c>lower()</c> folds only ASCII, so a
+        /// SQL prefix filter silently skipped a folder such as <c>C:\Users\Émile</c> (pipeline Run 1). A value
+        /// that is not text is skipped rather than throwing mid-transaction.
         /// </summary>
         private static List<(long RowId, string Value)> SelectUnder(SQLiteConnection connection, string table, string column, string root, SQLiteTransaction transaction = null)
         {
             var rows = new List<(long, string)>();
-            string r = root.Replace('/', '\\').TrimEnd('\\').ToLowerInvariant();
-            if (r.Length == 0) return rows;
+            if (string.IsNullOrWhiteSpace(root)) return rows;
 
-            // CA2100: table/column come from the fixed lists in this class; values are parameters.
+            // CA2100: table/column come from the fixed lists in this class.
 #pragma warning disable CA2100
-            using var command = new SQLiteCommand(
-                $"SELECT rowid, {column} FROM {table} WHERE {column} IS NOT NULL AND (" +
-                $"lower(replace({column}, '/', '\\')) = @root OR substr(lower(replace({column}, '/', '\\')), 1, @n) = @prefix)",
-                connection, transaction);
+            using var command = new SQLiteCommand($"SELECT rowid, {column} FROM {table} WHERE {column} IS NOT NULL", connection, transaction);
 #pragma warning restore CA2100
-            command.Parameters.AddWithValue("@root", r);
-            command.Parameters.AddWithValue("@prefix", r + "\\");
-            command.Parameters.AddWithValue("@n", r.Length + 1);
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {
-                string value = reader.GetString(1);
-                if (RelocationPaths.IsSameOrUnder(value, root)) rows.Add((reader.GetInt64(0), value));
+                if (reader.GetValue(1) is string value && RelocationPaths.IsSameOrUnder(value, root))
+                    rows.Add((reader.GetInt64(0), value));
             }
 
             return rows;

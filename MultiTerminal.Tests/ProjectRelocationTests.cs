@@ -151,7 +151,7 @@ namespace MultiTerminal.Tests
             using var c = Open();
             SeedProject(c, @"C:\old\proj", deploy: @"E:\deploy");
 
-            var result = ProjectRelocationStore.Apply(c, "p1", @"C:\old\proj", @"D:\new\proj",
+            var result = ProjectRelocationStore.Apply(c, "p1", "Proj", @"C:\old\proj", @"D:\new\proj",
                 new[] { (@"C:\cfg\projects\C--old-proj", @"C:\cfg\projects\D--new-proj") });
 
             Assert.True(result.Succeeded, result.Error);
@@ -172,7 +172,7 @@ namespace MultiTerminal.Tests
             Exec(c, "INSERT INTO project_note_tabs (project_path, tab_name, content) VALUES ('D:\\new\\proj', 'Main', 'other')");
 
             Assert.NotEmpty(ProjectRelocationStore.FindConflicts(c, @"D:\new\proj"));
-            var result = ProjectRelocationStore.Apply(c, "p1", @"C:\old\proj", @"D:\new\proj", null);
+            var result = ProjectRelocationStore.Apply(c, "p1", "Proj", @"C:\old\proj", @"D:\new\proj", null);
 
             Assert.False(result.Succeeded);
             Assert.Equal(@"C:\old\proj", Scalar(c, "SELECT path FROM projects WHERE id='p1'"));
@@ -210,10 +210,10 @@ namespace MultiTerminal.Tests
 
         // ── The move itself ─────────────────────────────────────────────────────────
 
-        private ProjectRelocationService Service(string claudeRoot) => new ProjectRelocationService(new RelocationHost
+        private ProjectRelocationService Service(string claudeRoot, Func<SQLiteConnection> open = null) => new ProjectRelocationService(new RelocationHost
         {
             ClaudeConfigRoots = new[] { claudeRoot },
-            OpenDatabase = Open,
+            OpenDatabase = open ?? Open,
             RunGit = null,
         });
 
@@ -265,6 +265,88 @@ namespace MultiTerminal.Tests
             Assert.True(Directory.Exists(oldHistory));
             using var check = Open();
             Assert.Equal(from, Scalar(check, "SELECT path FROM projects WHERE id='p1'"));
+        }
+
+        // ── Pipeline Run 1 fixes ────────────────────────────────────────────────────
+
+        [Fact]
+        public void Apply_rebases_a_folder_whose_name_has_a_non_ascii_capital()
+        {
+            // SQLite lower() folds ASCII only; the old SQL prefilter skipped these rows and still committed.
+            using var c = Open();
+            SeedProject(c, @"C:\Users\Émile\proj");
+
+            var result = ProjectRelocationStore.Apply(c, "p1", "Proj", @"C:\Users\Émile\proj", @"D:\new\proj", null);
+
+            Assert.True(result.Succeeded, result.Error);
+            Assert.Equal(@"D:\new\proj", Scalar(c, "SELECT path FROM projects WHERE id='p1'"));
+            Assert.Equal(@"D:\new\proj", Scalar(c, "SELECT project_path FROM project_note_tabs WHERE tab_name='Main'"));
+        }
+
+        [Fact]
+        public void Check_refuses_while_another_registered_project_is_inside_the_folder()
+        {
+            string from = Path.Combine(_sandbox, "outer");
+            Directory.CreateDirectory(from);
+            using (var c = Open())
+            {
+                SeedProject(c, from);
+                Exec(c, "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES ('p2', 'Inner', @p, datetime('now'), datetime('now'))", ("@p", Path.Combine(from, "inner")));
+            }
+
+            var problems = Service(Path.Combine(_sandbox, "claude")).Check(new Project { Id = "p1", Name = "Proj", Path = from }, Path.Combine(_sandbox, "new", "outer"), moveFolder: true);
+
+            Assert.Contains(problems, p => p.Contains("'Inner' is registered inside this folder"));
+        }
+
+        [Fact]
+        public void Check_refuses_when_the_new_folder_already_has_claude_history()
+        {
+            string from = Path.Combine(_sandbox, "old", "proj");
+            string to = Path.Combine(_sandbox, "new", "proj");
+            Directory.CreateDirectory(from);
+            string claude = Path.Combine(_sandbox, "claude");
+            Directory.CreateDirectory(Path.Combine(claude, "projects", SessionCatalog.EncodeProjectPath(from)));
+            Directory.CreateDirectory(Path.Combine(claude, "projects", SessionCatalog.EncodeProjectPath(to)));
+            using (var c = Open()) SeedProject(c, from);
+
+            var problems = Service(claude).Check(new Project { Id = "p1", Name = "Proj", Path = from }, to, moveFolder: true);
+
+            Assert.Contains(problems, p => p.Contains("already has history for the new folder"));
+        }
+
+        [Fact]
+        public void Move_is_undone_by_an_unexpected_kind_of_failure_after_the_folder_moved()
+        {
+            string from = Path.Combine(_sandbox, "old", "proj");
+            string to = Path.Combine(_sandbox, "new", "proj");
+            Directory.CreateDirectory(from);
+            File.WriteAllText(Path.Combine(from, "a.txt"), "a");
+            using (var c = Open()) SeedProject(c, from);
+
+            // Open 1 is the check Move runs itself; open 2 is the records update, after the folder moved.
+            int opens = 0;
+            SQLiteConnection Failing() => ++opens == 2 ? throw new InvalidOperationException("not an IO error") : Open();
+            var result = Service(Path.Combine(_sandbox, "claude"), Failing).Move(new Project { Id = "p1", Name = "Proj", Path = from }, to);
+
+            Assert.Equal(2, opens);
+            Assert.False(result.Succeeded);
+            Assert.True(File.Exists(Path.Combine(from, "a.txt")));
+            Assert.False(Directory.Exists(to));
+        }
+
+        [Fact]
+        public void FindReparsePoints_reports_a_junction_without_following_it()
+        {
+            string root = Path.Combine(_sandbox, "src");
+            string outside = Path.Combine(_sandbox, "outside");
+            Directory.CreateDirectory(root);
+            Directory.CreateDirectory(Path.Combine(outside, "deep"));
+            Directory.CreateSymbolicLink(Path.Combine(root, "link"), outside);
+
+            var found = ProjectRelocationService.FindReparsePoints(root).ToList();
+
+            Assert.Equal(new[] { Path.Combine(root, "link") }, found);
         }
 
         [Fact]
