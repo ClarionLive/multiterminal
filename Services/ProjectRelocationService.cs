@@ -254,39 +254,41 @@ namespace MultiTerminal.Services
         // ── Folder copy (cross-volume) ──────────────────────────────────────────────
 
         /// <summary>
-        /// Copies <paramref name="from"/> to <paramref name="to"/> and proves the copy (pipeline Run 1, Codex):
+        /// Copies <paramref name="from"/> to <paramref name="to"/> and proves the copy (pipeline Runs 1 and 2, Codex):
         /// <list type="bullet">
-        ///   <item>refuses a source holding a junction or symbolic link, which a recursive copy would follow
-        ///   out of the project (or into a loop);</item>
-        ///   <item>hashes each file while reading it and re-hashes the written copy, so equal sizes with different
-        ///   contents fail;</item>
-        ///   <item>re-reads the source listing afterwards and fails if any file appeared, vanished, or changed
-        ///   size or write time while the copy ran.</item>
+        ///   <item>refuses a source holding a junction or symbolic link, and walks the tree without following
+        ///   links, so a link created after the first scan is refused too, never followed;</item>
+        ///   <item>resolves links in both roots and refuses a destination that lands inside the source (or the
+        ///   other way round);</item>
+        ///   <item>hashes each file while copying it and re-hashes the written copy;</item>
+        ///   <item>after everything is copied, re-hashes every SOURCE file and compares it with the hash taken
+        ///   while copying, and compares the source listing (names, sizes, write times) with the one taken
+        ///   before. A file rewritten during the copy fails, even with the same length and a restored time.</item>
         /// </list>
         /// A failure throws; the caller's undo removes the partial copy.
         /// </summary>
-        private static void CopyVerified(string from, string to, IProgress<RelocationProgress> progress, CancellationToken cancel)
+        internal static void CopyVerified(string from, string to, IProgress<RelocationProgress> progress, CancellationToken cancel)
         {
-            var links = FindReparsePoints(from).Take(3).ToList();
-            if (links.Count > 0)
-                throw new RelocationAbortedException(
-                    "The project contains a junction or symbolic link (" + string.Join(", ", links.Select(l => Path.GetRelativePath(from, l))) +
-                    "). Copying it to another drive would follow the link, so MT will not move it. Remove the link or move the folder yourself.");
+            string realFrom = ResolveReal(from);
+            string realTo = ResolveReal(to);
+            if (RelocationPaths.IsSameOrUnder(realTo, realFrom) || RelocationPaths.IsSameOrUnder(realFrom, realTo))
+                throw new RelocationAbortedException($"'{to}' leads to '{realTo}', which overlaps the project's own folder '{realFrom}'.");
 
-            var before = Snapshot(from);
-            long totalBytes = before.Values.Sum(v => v.Length);
+            var before = Walk(from);
+            long totalBytes = before.Files.Values.Sum(v => v.Length);
 
             var drive = new DriveInfo(Path.GetPathRoot(to));
             if (drive.AvailableFreeSpace < totalBytes)
                 throw new RelocationAbortedException($"'{drive.Name}' has {FormatBytes(drive.AvailableFreeSpace)} free; the project needs {FormatBytes(totalBytes)}.");
 
             Directory.CreateDirectory(to);
-            foreach (var dir in Directory.EnumerateDirectories(from, "*", SearchOption.AllDirectories))
-                Directory.CreateDirectory(Path.Combine(to, Path.GetRelativePath(from, dir)));
+            foreach (var dir in before.Directories)
+                Directory.CreateDirectory(Path.Combine(to, dir));
 
+            var hashes = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
             long copied = 0;
             int lastPercent = -1;
-            foreach (var (relative, info) in before)
+            foreach (var (relative, info) in before.Files)
             {
                 cancel.ThrowIfCancellationRequested();
                 string source = Path.Combine(from, relative);
@@ -295,6 +297,7 @@ namespace MultiTerminal.Services
                 if (!sourceHash.AsSpan().SequenceEqual(HashFile(target)))
                     throw new RelocationAbortedException($"The copy of '{relative}' does not match the original.");
                 File.SetAttributes(target, File.GetAttributes(source));
+                hashes[relative] = sourceHash;
 
                 copied += info.Length;
                 int percent = totalBytes == 0 ? 100 : (int)(copied * 100 / totalBytes);
@@ -305,26 +308,66 @@ namespace MultiTerminal.Services
                 }
             }
 
-            var after = Snapshot(from);
-            var changed = before.Keys.Union(after.Keys, StringComparer.OrdinalIgnoreCase)
-                .Where(k => !before.TryGetValue(k, out var b) || !after.TryGetValue(k, out var a) || a != b)
-                .Take(3).ToList();
+            progress?.Report(new RelocationProgress("Checking the original did not change during the copy", null));
+            var after = Walk(from);
+            var changed = before.Files.Keys.Union(after.Files.Keys, StringComparer.OrdinalIgnoreCase)
+                .Where(k => !before.Files.TryGetValue(k, out var b) || !after.Files.TryGetValue(k, out var a) || a != b)
+                .ToList();
+            foreach (var (relative, hash) in hashes)
+            {
+                cancel.ThrowIfCancellationRequested();
+                if (!changed.Contains(relative, StringComparer.OrdinalIgnoreCase) && !hash.AsSpan().SequenceEqual(HashFile(Path.Combine(from, relative))))
+                    changed.Add(relative);
+            }
+
             if (changed.Count > 0)
                 throw new RelocationAbortedException(
-                    "Files in the project changed while it was being copied (" + string.Join(", ", changed) +
+                    "Files in the project changed while it was being copied (" + string.Join(", ", changed.Take(3)) +
                     "). Close whatever is writing to it and try again.");
 
             int copiedFiles = Directory.EnumerateFiles(to, "*", SearchOption.AllDirectories).Count();
-            if (copiedFiles != before.Count)
-                throw new RelocationAbortedException($"The copy holds {copiedFiles} files; the original has {before.Count}.");
+            if (copiedFiles != before.Files.Count)
+                throw new RelocationAbortedException($"The copy holds {copiedFiles} files; the original has {before.Files.Count}.");
         }
 
-        private static Dictionary<string, (long Length, DateTime WrittenUtc)> Snapshot(string root)
+        /// <summary>
+        /// Every folder and file under <paramref name="root"/> (relative paths), walked WITHOUT following links.
+        /// A junction or symbolic link anywhere refuses the move: a recursive copy would follow it out of the
+        /// project or into a loop.
+        /// </summary>
+        private static (List<string> Directories, Dictionary<string, (long Length, DateTime WrittenUtc)> Files) Walk(string root)
         {
-            var map = new Dictionary<string, (long Length, DateTime WrittenUtc)>(StringComparer.OrdinalIgnoreCase);
-            foreach (var file in new DirectoryInfo(root).EnumerateFiles("*", SearchOption.AllDirectories))
-                map[Path.GetRelativePath(root, file.FullName)] = (file.Length, file.LastWriteTimeUtc);
-            return map;
+            var directories = new List<string>();
+            var files = new Dictionary<string, (long Length, DateTime WrittenUtc)>(StringComparer.OrdinalIgnoreCase);
+            var links = new List<string>();
+            var pending = new Stack<DirectoryInfo>();
+            pending.Push(new DirectoryInfo(root));
+            while (pending.Count > 0)
+            {
+                foreach (var entry in pending.Pop().EnumerateFileSystemInfos())
+                {
+                    string relative = Path.GetRelativePath(root, entry.FullName);
+                    if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)
+                    {
+                        links.Add(relative);
+                    }
+                    else if (entry is DirectoryInfo dir)
+                    {
+                        directories.Add(relative);
+                        pending.Push(dir);
+                    }
+                    else if (entry is FileInfo file)
+                    {
+                        files[relative] = (file.Length, file.LastWriteTimeUtc);
+                    }
+                }
+            }
+
+            if (links.Count > 0)
+                throw new RelocationAbortedException(
+                    "The project contains a junction or symbolic link (" + string.Join(", ", links.Take(3)) +
+                    "). Copying it to another drive would follow the link, so MT will not move it. Remove the link or move the folder yourself.");
+            return (directories, files);
         }
 
         /// <summary>Folders and files under <paramref name="root"/> that are junctions or symbolic links, without following them.</summary>
@@ -342,6 +385,29 @@ namespace MultiTerminal.Services
                         pending.Push(dir);
                 }
             }
+        }
+
+        /// <summary>
+        /// <paramref name="path"/> with every existing link along it resolved, segment by segment from the drive
+        /// root; segments that do not exist yet are appended as they are.
+        /// </summary>
+        internal static string ResolveReal(string path)
+        {
+            string full = Path.GetFullPath(path);
+            string current = Path.GetPathRoot(full);
+            foreach (var segment in full.Substring(current.Length).Split('\\', StringSplitOptions.RemoveEmptyEntries))
+            {
+                string next = Path.Combine(current, segment);
+                if (Directory.Exists(next))
+                {
+                    var target = new DirectoryInfo(next).ResolveLinkTarget(returnFinalTarget: true);
+                    next = target?.FullName ?? next;
+                }
+
+                current = next;
+            }
+
+            return current.TrimEnd('\\');
         }
 
         private static byte[] CopyHashing(string source, string target)
@@ -590,7 +656,7 @@ namespace MultiTerminal.Services
             : bytes >= 1L << 20 ? $"{bytes / (double)(1L << 20):0.0} MB"
             : $"{bytes / 1024.0:0} KB";
 
-        private sealed class RelocationAbortedException : Exception
+        internal sealed class RelocationAbortedException : Exception
         {
             public RelocationAbortedException(string message) : base(message) { }
         }

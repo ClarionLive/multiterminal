@@ -349,6 +349,95 @@ namespace MultiTerminal.Tests
             Assert.Equal(new[] { Path.Combine(root, "link") }, found);
         }
 
+        // ── The copy used for a move to another drive (pipeline Run 2) ───────────────
+
+        [Fact]
+        public void CopyVerified_copies_every_file_and_folder_byte_for_byte()
+        {
+            string from = Path.Combine(_sandbox, "src");
+            string to = Path.Combine(_sandbox, "dst");
+            Directory.CreateDirectory(Path.Combine(from, "a", "empty"));
+            File.WriteAllText(Path.Combine(from, "a", "x.txt"), "hello");
+            File.WriteAllBytes(Path.Combine(from, "b.bin"), new byte[] { 0, 1, 2, 255 });
+
+            ProjectRelocationService.CopyVerified(from, to, null, default);
+
+            Assert.Equal("hello", File.ReadAllText(Path.Combine(to, "a", "x.txt")));
+            Assert.Equal(new byte[] { 0, 1, 2, 255 }, File.ReadAllBytes(Path.Combine(to, "b.bin")));
+            Assert.True(Directory.Exists(Path.Combine(to, "a", "empty")));
+        }
+
+        [Fact]
+        public void CopyVerified_refuses_a_source_holding_a_link_and_copies_nothing_through_it()
+        {
+            string from = Path.Combine(_sandbox, "src");
+            string outside = Path.Combine(_sandbox, "secret");
+            Directory.CreateDirectory(from);
+            Directory.CreateDirectory(outside);
+            File.WriteAllText(Path.Combine(outside, "key.txt"), "secret");
+            Directory.CreateSymbolicLink(Path.Combine(from, "link"), outside);
+            string to = Path.Combine(_sandbox, "dst");
+
+            var ex = Assert.ThrowsAny<Exception>(() => ProjectRelocationService.CopyVerified(from, to, null, default));
+
+            Assert.Contains("junction or symbolic link", ex.Message);
+            Assert.False(File.Exists(Path.Combine(to, "link", "key.txt")));
+        }
+
+        private sealed class OnFirstReport : IProgress<RelocationProgress>
+        {
+            private readonly Action _action;
+            private bool _done;
+
+            public OnFirstReport(Action action) => _action = action;
+
+            public void Report(RelocationProgress value)
+            {
+                if (_done || value.Percent == null) return;
+                _done = true;
+                _action();
+            }
+        }
+
+        [Fact]
+        public void CopyVerified_fails_when_a_copied_file_is_rewritten_with_the_same_length_and_time()
+        {
+            // The Run 2 adversary case: size and write time alone cannot see this; the source re-hash must.
+            string from = Path.Combine(_sandbox, "src");
+            Directory.CreateDirectory(from);
+            foreach (var name in new[] { "1.txt", "2.txt", "3.txt" })
+                File.WriteAllText(Path.Combine(from, name), "AAAA");
+
+            // At the first progress report exactly one file has been copied; rewrite every source file
+            // in place, keeping its length and putting its write time back.
+            var tamper = new OnFirstReport(() =>
+            {
+                foreach (var file in Directory.GetFiles(from))
+                {
+                    var written = File.GetLastWriteTimeUtc(file);
+                    File.WriteAllText(file, "BBBB");
+                    File.SetLastWriteTimeUtc(file, written);
+                }
+            });
+
+            var ex = Assert.ThrowsAny<Exception>(() => ProjectRelocationService.CopyVerified(from, Path.Combine(_sandbox, "dst"), tamper, default));
+
+            Assert.Contains("changed while it was being copied", ex.Message);
+        }
+
+        [Fact]
+        public void CopyVerified_refuses_a_destination_that_leads_back_into_the_source()
+        {
+            string from = Path.Combine(_sandbox, "src");
+            Directory.CreateDirectory(Path.Combine(from, "inner"));
+            string alias = Path.Combine(_sandbox, "alias");
+            Directory.CreateSymbolicLink(alias, Path.Combine(from, "inner"));
+
+            var ex = Assert.ThrowsAny<Exception>(() => ProjectRelocationService.CopyVerified(from, Path.Combine(alias, "copy"), null, default));
+
+            Assert.Contains("overlaps the project's own folder", ex.Message);
+        }
+
         [Fact]
         public void Repoint_refuses_a_folder_holding_another_project()
         {
