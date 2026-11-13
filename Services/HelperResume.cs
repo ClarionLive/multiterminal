@@ -42,6 +42,29 @@ namespace MultiTerminal.Services
     public static class HelperResume
     {
         /// <summary>
+        /// How many helpers come back with their PM (Owner decision, task 592ade03; it was 6, and a PM with
+        /// 8 lost its 2 oldest without a word).
+        /// </summary>
+        public const int MaxHelpersWithPm = 12;
+
+        /// <summary>
+        /// The helpers to resume: the first <see cref="MaxHelpersWithPm"/> of <paramref name="helpers"/>, in
+        /// the order given (<see cref="PaneLaunchRecorder.GetOpenHelpers"/> is newest first). Every helper
+        /// beyond the limit is recorded in <paramref name="report"/> as not resumed, by name, so the summary
+        /// says who was left out and how to get them back.
+        /// </summary>
+        public static IReadOnlyList<OpenHelper> ApplyLimit(IReadOnlyList<OpenHelper> helpers, HelperResumeReport report)
+        {
+            if (helpers == null || helpers.Count <= MaxHelpersWithPm)
+                return helpers ?? Array.Empty<OpenHelper>();
+
+            foreach (var left in helpers.Skip(MaxHelpersWithPm))
+                report?.AddSkipped(left?.TerminalName,
+                    $"MT reopens at most {MaxHelpersWithPm} helpers with their PM; resume it from the project's past sessions");
+            return helpers.Take(MaxHelpersWithPm).ToList();
+        }
+
+        /// <summary>
         /// Whether a pane created for <paramref name="requestedName"/> came up as that helper:
         /// <paramref name="resolvedName"/> is the name or a suffixed form of it (a held name),
         /// ordinal-ignore-case. Anything else is a pool placeholder, which is not the helper and is not

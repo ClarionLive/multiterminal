@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
 using Xunit;
@@ -13,6 +14,44 @@ namespace MultiTerminal.Tests
     /// </summary>
     public sealed class HelperResumeTests
     {
+        // ── The limit on helpers resumed with their PM (task 592ade03) ─────────────
+
+        private static List<OpenHelper> Helpers(int count)
+        {
+            // Newest first, as PaneLaunchRecorder.GetOpenHelpers returns them: H14 is the newest.
+            var list = new List<OpenHelper>();
+            for (int i = count; i >= 1; i--) list.Add(new OpenHelper { SessionId = "s" + i, TerminalName = "H" + i });
+            return list;
+        }
+
+        [Fact]
+        public void Eight_helpers_all_come_back_and_nothing_is_reported()
+        {
+            var report = new HelperResumeReport();
+
+            var kept = HelperResume.ApplyLimit(Helpers(8), report);
+
+            Assert.Equal(8, kept.Count);
+            Assert.False(report.HasAnythingToReport);
+        }
+
+        [Fact]
+        public void Beyond_twelve_the_oldest_are_left_out_and_named_in_the_summary()
+        {
+            var report = new HelperResumeReport();
+
+            var kept = HelperResume.ApplyLimit(Helpers(14), report);
+
+            Assert.Equal(12, HelperResume.MaxHelpersWithPm);
+            Assert.Equal(12, kept.Count);
+            Assert.Equal("H14", kept[0].TerminalName);
+            Assert.Equal("H3", kept[11].TerminalName);
+            Assert.Equal(new[] { "H2", "H1" }, report.Skipped.Select(x => x.Name));
+            string summary = report.BuildSummary("Grace");
+            Assert.Contains("H2: MT reopens at most 12 helpers with their PM", summary);
+            Assert.Contains("H1: MT reopens at most 12 helpers with their PM", summary);
+        }
+
         private const string Root = @"C:\proj";
         private const string Sid = "11111111-2222-3333-4444-555555555555";
         private static readonly DateTime Written = new DateTime(2026, 10, 19, 10, 0, 0, DateTimeKind.Utc);

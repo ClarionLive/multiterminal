@@ -414,7 +414,10 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// The helper sessions <paramref name="pmSessionId"/> left open, newest first, at most
-        /// <paramref name="max"/> (Owner-approved rule, task 7d20e94c). "Newest" and "later" are by
+        /// <paramref name="max"/> (all of them by default). The limit on how many come back WITH the PM is
+        /// <see cref="HelperResume.MaxHelpersWithPm"/>, applied by <see cref="HelperResume.ApplyLimit"/> where
+        /// the helpers are resumed, so the ones beyond it can be named to the Owner (task 592ade03; a default
+        /// of 6 here used to drop the oldest silently). "Newest" and "later" are by
         /// <see cref="PaneLaunchRecord.Seq"/> (pipeline Run 1), never by start time, which can tie.
         /// <list type="number">
         /// <item>Every launch of the PM session, including earlier resumes (a resume keeps the session id)
@@ -429,7 +432,7 @@ namespace MultiTerminal.Services
         /// (a later <c>closed_with_pm</c> or <c>mt_exit</c> is not closed).</item>
         /// </list>
         /// </summary>
-        public IReadOnlyList<OpenHelper> GetOpenHelpers(string pmSessionId, int max = 6)
+        public IReadOnlyList<OpenHelper> GetOpenHelpers(string pmSessionId, int max = int.MaxValue)
         {
             if (string.IsNullOrEmpty(pmSessionId) || max <= 0) return Array.Empty<OpenHelper>();
             try

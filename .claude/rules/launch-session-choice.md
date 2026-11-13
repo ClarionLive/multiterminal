@@ -201,7 +201,10 @@ Sonnet for helpers, Sonnet for subagents; they are settings, because Anthropic's
 Resuming a PM session also reopens the helper panes it had open when it last ended. Owner decisions:
 Continue mode (no dialog) resumes all of them and reports what it skipped; a helper whose Claude
 process exited while its pane stayed open counts as CLOSED; one level only (no helpers of helpers),
-at most 6. A new session never resumes helpers. Closing a PM's tab can close its helpers with it,
+at most 12 (task 592ade03; it was 6, and a PM with 8 silently lost its 2 oldest). The limit is
+`HelperResume.MaxHelpersWithPm`, applied once by `HelperResume.ApplyLimit` in `MainForm.ResumeHelpersFor`, so every
+path (dialog, Continue mode, startup restore) obeys it and the summary names each helper left out;
+`PaneLaunchRecorder.GetOpenHelpers` itself returns all of them. A new session never resumes helpers. Closing a PM's tab can close its helpers with it,
 and they come back when the PM is resumed (item 8, below).
 
 ### The launch record
