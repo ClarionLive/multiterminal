@@ -145,7 +145,7 @@
         <span class="arch-layer-title">MessageBroker</span>
         <span class="arch-layer-sub">MessageBroker.cs &middot; ~5.5K LOC</span>
       </div>
-      <p class="arch-desc">The central hub. Routes messages, caches tasks/terminals/profiles in <code>ConcurrentDictionary</code> stores, delivers webhooks, and fires ~19 events to the UI panels &mdash; everything flows through here. It owns these services:</p>
+      <p class="arch-desc">The central hub. Routes messages, caches tasks/terminals/profiles in <code>ConcurrentDictionary</code> stores, and fires ~19 events to the UI panels &mdash; everything flows through here. It owns these services:</p>
       <div class="arch-rows">
         <div class="arch-row"><span class="arch-key">ActivityService</span><span class="arch-val">Records workflow events to the activity feed.</span></div>
         <div class="arch-row"><span class="arch-key">PoolCoordinator</span><span class="arch-val">Shared pool memory and cross-agent learnings.</span></div>
@@ -154,7 +154,6 @@
         <div class="arch-row"><span class="arch-key">StaleTaskService</span><span class="arch-val">Flags paused tasks at 7 and 14 days.</span></div>
         <div class="arch-row"><span class="arch-key">SpawnService</span><span class="arch-val">Orchestrates agent spawning and registration.</span></div>
         <div class="arch-row"><span class="arch-key">SummaryService</span><span class="arch-val">Auto-summarizes task progress on status transitions.</span></div>
-        <div class="arch-row"><span class="arch-key">HttpWebhookService</span><span class="arch-val">At-least-once webhook / message delivery with retries.</span></div>
       </div>
     </div>
 
@@ -210,7 +209,7 @@
       <tr>
         <td><code>MCPServer/Services/MessageBroker.cs</code></td>
         <td>~5,512</td>
-        <td><strong>Central hub.</strong> Routes all messages, caches tasks/terminals/profiles in ConcurrentDictionaries, delivers webhooks, fires 19 events. Everything flows through here.</td>
+        <td><strong>Central hub.</strong> Routes all messages, caches tasks/terminals/profiles in ConcurrentDictionaries, fires 19 events. Everything flows through here.</td>
       </tr>
       <tr>
         <td><code>Services/TaskDatabase.cs</code></td>
@@ -1209,7 +1208,7 @@
     </thead>
     <tbody>
       <tr><td><code>Services/</code></td><td>Business logic &amp; SQLite persistence</td><td>TaskDatabase, ProjectService, ProjectDatabase, ProjectContextService, ProjectJsonMigrationService, SettingsService, KnowledgeDatabase, DebugLogService, TeamWatcherService, CompanionProcessManager, GatewayIntegrationService, OwnerProfileService, RipgrepService, TerminalStreamService</td></tr>
-      <tr><td><code>MCPServer/Services/</code></td><td>MCP server services</td><td><strong>MessageBroker</strong>, PoolCoordinator, ActivityService, StaleTaskService, SpawnService, HttpWebhookService, SessionDiscovery, ComplexityDetector, SummaryService</td></tr>
+      <tr><td><code>MCPServer/Services/</code></td><td>MCP server services</td><td><strong>MessageBroker</strong>, PoolCoordinator, ActivityService, StaleTaskService, SpawnService, SessionDiscovery, ComplexityDetector, SummaryService</td></tr>
       <tr><td><code>MCPServer/Models/</code></td><td>Data models (19 files)</td><td>KanbanTask, Plan, Message, InboxMessage, TeamMemberProfile, TaskSummary, HelperSession, CodeDigest, KnowledgeEntry, ActivityEvent, TerminalInfo, TaskAttachment, ComplexityStats</td></tr>
       <tr><td><code>Models/</code></td><td>App-level models (8+ files)</td><td>TerminalSessionInfo, SpawnedTeammate, Project, ProjectAgent, ProjectMcpServer, ProjectSpecialistAgent, ProjectPath, ProjectPromptEntry, ProjectSkill, DebugLogEntry</td></tr>
       <tr><td><code>API/Controllers/</code></td><td>REST endpoints (~25 controllers)</td><td>TasksController, MessagingController, OfficeController, SpawnController, KnowledgeController, SessionLineageController, ProjectContextController, TeamController, DebugController, ToolsController, AgentPanelsController, AgentStatsController, BrowserTabsController, CompanionController, GatewayController, NotificationsController, OwnerProfileController, TaskReportsController, TerminalStreamController, XamlPreviewController, RipgrepController, CodeGraphController, SettingsController, WorktreesController, MultiConnectController, BranchMetadataController, WikiController, SessionMemoryController, RemoteModeController</td></tr>

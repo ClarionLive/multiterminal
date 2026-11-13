@@ -79,7 +79,7 @@ namespace MultiTerminal.MCPServer.Services
         // Message queue persistence for reliable delivery
         private readonly MessageQueueDatabase _messageQueueDb;
 
-        // HTTP client for webhook delivery
+        // HTTP client for the gateway notification forward (ForwardMessagePushAsync)
         private static readonly HttpClient _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
 
         // Terminal colors for chat UI
@@ -2140,7 +2140,7 @@ namespace MultiTerminal.MCPServer.Services
                             && !t.Name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
 
                             // Ordered by when the OWNER was bound, not by LastActiveAt: the latter is
-                            // an activity clock that SendMessage/Broadcast/MarkAgentReady bump on the
+                            // an activity clock that SendMessage/Broadcast bump on the
                             // sender's row, so "newest wins" could run backwards after ordinary
                             // traffic and resolve to a stale identity.
                 .OrderByDescending(t => t.OwnerBoundAt ?? DateTime.MinValue)
@@ -3327,56 +3327,6 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
-        /// Mark an agent as ready (initialized and able to receive work).
-        /// Called by HttpWebhookService when agent sends ready notification.
-        /// </summary>
-        /// <param name="agentName">Name of the agent</param>
-        /// <param name="docId">Document ID (optional, for validation)</param>
-        /// <returns>True if agent was found and marked ready, false otherwise</returns>
-        public bool MarkAgentReady(string agentName, string docId = null)
-        {
-            var terminal = _terminals.Values.FirstOrDefault(t =>
-                t.Name.Equals(agentName, StringComparison.OrdinalIgnoreCase) &&
-                t.IsConnected);
-
-            if (terminal == null)
-            {
-                DebugLogService?.Warning("MessageBroker.MarkAgentReady", $"Agent not found: {agentName}");
-                return false;
-            }
-
-            // Validate docId if provided
-            if (!string.IsNullOrEmpty(docId) &&
-                !string.IsNullOrEmpty(terminal.DocId) &&
-                !terminal.DocId.Equals(docId, StringComparison.OrdinalIgnoreCase))
-            {
-                DebugLogService?.Warning("MessageBroker.MarkAgentReady", $"DocId mismatch for {agentName}: expected {terminal.DocId}, got {docId}");
-                return false;
-            }
-
-            terminal.IsReady = true;
-            terminal.LastActiveAt = DateTime.UtcNow;
-
-            DebugLogService?.Trace("MessageBroker.MarkAgentReady", $"Agent {agentName} marked as ready");
-
-            return true;
-        }
-
-        /// <summary>
-        /// Check if an agent is ready (initialized and able to receive work).
-        /// </summary>
-        /// <param name="agentName">Name of the agent</param>
-        /// <returns>True if agent is registered, connected, and ready</returns>
-        public bool IsAgentReady(string agentName)
-        {
-            var terminal = _terminals.Values.FirstOrDefault(t =>
-                t.Name.Equals(agentName, StringComparison.OrdinalIgnoreCase) &&
-                t.IsConnected);
-
-            return terminal?.IsReady ?? false;
-        }
-
-        /// <summary>
         /// Unregister a terminal.
         /// </summary>
         public void UnregisterTerminal(string terminalId)
@@ -4283,49 +4233,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
             }
 
-            // **TIER 1: Webhook delivery DISABLED — using inbox file delivery (Tier 2) instead.
-            // To re-enable, uncomment the block below.
             bool deliverySuccess = false;
-            /*
-            try
-            {
-                LogInfo($"TIER 1: Attempting webhook delivery for message {message.Id}");
-                deliverySuccess = await SendViaWebhook(message.Id, toTerminal.Name, fromTerminal.Name, content);
-
-                if (deliverySuccess)
-                {
-                    LogInfo($"TIER 1: SUCCESS - Webhook delivered message {message.Id}");
-
-                    // Mark as delivered in database
-                    if (queuedMessageId > 0)
-                    {
-                        try
-                        {
-                            _messageQueueDb.MarkDelivered(queuedMessageId);
-                            DebugLogService?.Trace("MessageBroker", $"Message {queuedMessageId} marked as delivered after webhook delivery");
-                        }
-                        catch (Exception ex)
-                        {
-                            LogError($"Failed to mark message as delivered: {ex.Message}");
-                        }
-                    }
-
-                    return new SendResult
-                    {
-                        Success = true,
-                        MessageId = message.Id
-                    };
-                }
-                else
-                {
-                    LogInfo($"TIER 1: FAILED - Falling back to Tier 2 (callback) for message {message.Id}");
-                }
-            }
-            catch (Exception ex)
-            {
-                LogError($"TIER 1: EXCEPTION - {ex.Message}, falling back to Tier 2");
-            }
-            */
 
             // **TIER 2: Try callback delivery (existing code)**
             try
@@ -4397,102 +4305,6 @@ namespace MultiTerminal.MCPServer.Services
                 MessageId = message.Id,
                 Delivered = false
             };
-        }
-
-        /// <summary>
-        /// Deliver a message via webhook. Called by HttpWebhookService.
-        /// </summary>
-        public async Task<bool> DeliverMessageViaWebhook(string messageId, string toTerminalName, string fromTerminalName, string content)
-        {
-            LogTrace($"DeliverMessageViaWebhook: messageId={messageId}, to={toTerminalName}, from={fromTerminalName}");
-
-            // Find recipient terminal
-            var toTerminal = GetTerminal(toTerminalName);
-            if (toTerminal == null)
-            {
-                LogError($"DeliverMessageViaWebhook: Recipient {toTerminalName} not found");
-                return false;
-            }
-
-            // Attempt delivery via OnMessageDelivery callback
-            bool deliverySuccess = false;
-            try
-            {
-                if (OnMessageDelivery != null)
-                {
-                    LogInfo($"DeliverMessageViaWebhook: Calling OnMessageDelivery for message {messageId} to {toTerminal.Id}");
-                    deliverySuccess = await OnMessageDelivery(messageId, toTerminal.Id, fromTerminalName, content);
-                    LogInfo($"DeliverMessageViaWebhook: OnMessageDelivery returned {deliverySuccess}");
-                }
-                else
-                {
-                    LogInfo("DeliverMessageViaWebhook: OnMessageDelivery callback is null");
-                }
-            }
-            catch (Exception ex)
-            {
-                LogError($"DeliverMessageViaWebhook: Delivery failed - {ex.Message}");
-                return false;
-            }
-
-            if (deliverySuccess)
-            {
-                // Mark as delivered in database
-                if (long.TryParse(messageId, out long msgId))
-                {
-                    try
-                    {
-                        _messageQueueDb.MarkDelivered(msgId);
-                        LogInfo($"DeliverMessageViaWebhook: Message {messageId} marked as delivered");
-                    }
-                    catch (Exception ex)
-                    {
-                        LogError($"DeliverMessageViaWebhook: Failed to mark as delivered - {ex.Message}");
-                    }
-                }
-
-                return true;
-            }
-
-            return false;
-        }
-
-        /// <summary>
-        /// Attempt to deliver message via webhook POST.
-        /// </summary>
-        private async Task<bool> SendViaWebhook(string messageId, string toTerminalName, string fromTerminalName, string content)
-        {
-            try
-            {
-                LogTrace($"SendViaWebhook: Attempting webhook delivery for message {messageId}");
-
-                // Build POST data (form-encoded for simplicity)
-                var postData = $"messageId={Uri.EscapeDataString(messageId)}" +
-                              $"&to={Uri.EscapeDataString(toTerminalName)}" +
-                              $"&from={Uri.EscapeDataString(fromTerminalName)}" +
-                              $"&content={Uri.EscapeDataString(content)}";
-
-                using var httpContent = new StringContent(postData, Encoding.UTF8, "application/x-www-form-urlencoded");
-
-                var response = await _httpClient.PostAsync("http://localhost:5000/message", httpContent);
-
-                if (response.IsSuccessStatusCode)
-                {
-                    var responseBody = await response.Content.ReadAsStringAsync();
-                    LogInfo($"SendViaWebhook: SUCCESS - {responseBody}");
-                    return true;
-                }
-                else
-                {
-                    LogInfo($"SendViaWebhook: FAILED - Status {response.StatusCode}");
-                    return false;
-                }
-            }
-            catch (Exception ex)
-            {
-                LogError($"SendViaWebhook: EXCEPTION - {ex.Message}");
-                return false;
-            }
         }
 
         /// <summary>
