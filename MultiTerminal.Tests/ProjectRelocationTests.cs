@@ -426,6 +426,19 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void CopyVerified_fails_when_an_empty_folder_appears_during_the_copy()
+        {
+            string from = Path.Combine(_sandbox, "src");
+            Directory.CreateDirectory(from);
+            File.WriteAllText(Path.Combine(from, "1.txt"), "A");
+            var tamper = new OnFirstReport(() => Directory.CreateDirectory(Path.Combine(from, "late")));
+
+            var ex = Assert.ThrowsAny<Exception>(() => ProjectRelocationService.CopyVerified(from, Path.Combine(_sandbox, "dst"), tamper, default));
+
+            Assert.Contains("late", ex.Message);
+        }
+
+        [Fact]
         public void CopyVerified_refuses_a_destination_that_leads_back_into_the_source()
         {
             string from = Path.Combine(_sandbox, "src");

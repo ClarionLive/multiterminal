@@ -320,6 +320,11 @@ namespace MultiTerminal.Services
                     changed.Add(relative);
             }
 
+            // Folders too: an empty folder added or removed during the copy changes no file (pipeline Run 3).
+            var beforeDirs = new HashSet<string>(before.Directories, StringComparer.OrdinalIgnoreCase);
+            changed.AddRange(after.Directories.Where(d => !beforeDirs.Contains(d)));
+            changed.AddRange(before.Directories.Except(after.Directories, StringComparer.OrdinalIgnoreCase));
+
             if (changed.Count > 0)
                 throw new RelocationAbortedException(
                     "Files in the project changed while it was being copied (" + string.Join(", ", changed.Take(3)) +
