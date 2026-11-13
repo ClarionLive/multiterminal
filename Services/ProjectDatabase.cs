@@ -218,7 +218,11 @@ namespace MultiTerminal.Services
                 ("claude_helper_model",   "TEXT"),
                 // Extra GitHub repositories to watch besides git_repo_url (ticket a923589f): one per line,
                 // free text. NULL = none. SQLite-only, not in project.json or the SaveRichProject UPSERT.
-                ("github_extra_repos",    "TEXT")
+                ("github_extra_repos",    "TEXT"),
+                // Folders the project lived in before a Move Project (ticket 6f879683), newline-separated,
+                // oldest first. Written only by ProjectRelocationStore; read so old Claude sessions stay
+                // resumable. SQLite-only, not in project.json or the SaveRichProject UPSERT.
+                ("previous_paths",        "TEXT")
             };
 
             foreach (var (colName, colDef) in newColumns)
@@ -706,9 +710,12 @@ namespace MultiTerminal.Services
 
         // Whitelist of project columns that are safe to update via UpdateProjectField.
         // Boolean fields are stored as INTEGER 0/1 in SQLite.
+        // "path" is deliberately absent (ticket 6f879683): it is the project's identity folder, and notes,
+        // sessions, worktrees and Claude history are filed under it, so it changes only through Move
+        // Project (ProjectRelocationService), which repoints all of them. A raw write here left them behind.
         private static readonly HashSet<string> _allowedProjectFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "name", "description", "path", "source_path", "deploy_path", "build_output_path",
+            "name", "description", "source_path", "deploy_path", "build_output_path",
             "build_command", "deploy_command", "launch_command", "project_type", "current_version",
             "change_log", "icon", "icon_color", "git_repo_url", "git_default_branch", "git_auto_commit",
             "is_pinned", "status", "created_by", "last_opened_at", "team_lead", "default_terminal",
@@ -721,7 +728,7 @@ namespace MultiTerminal.Services
         // JS sends data-field attributes in camelCase; SQLite columns are snake_case.
         private static readonly Dictionary<string, string> _fieldNameMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["name"] = "name", ["description"] = "description", ["path"] = "path",
+            ["name"] = "name", ["description"] = "description",
             ["sourcePath"] = "source_path", ["deployPath"] = "deploy_path",
             ["buildOutputPath"] = "build_output_path", ["buildCommand"] = "build_command",
             ["deployCommand"] = "deploy_command", ["launchCommand"] = "launch_command",
@@ -787,15 +794,6 @@ namespace MultiTerminal.Services
             {
                 bool boolVal = value == "true" || value == "1";
                 paramValue = boolVal ? 1 : 0;
-            }
-            else if (string.Equals(fieldName, "path", StringComparison.OrdinalIgnoreCase))
-            {
-                // Guard the canonical path column: a worktree path must never be persisted here
-                // (task 19d0d867). Load the row's existing source_path so a csproj-in-subfolder
-                // project canonicalizes to its real subfolder (within the repo) instead of the bare,
-                // unwatchable repo root. projectName is unavailable here; the id traces the correction.
-                string existingSourcePath = ReadProjectSourcePath(projectId);
-                paramValue = (object)CanonicalizeProjectPath(value, existingSourcePath, projectId, projectId) ?? DBNull.Value;
             }
             else if (string.Equals(fieldName, "claude_profile", StringComparison.OrdinalIgnoreCase))
             {
@@ -1128,22 +1126,6 @@ namespace MultiTerminal.Services
         /// (<c>get_active_worktree</c>). A correction is logged (not silent) so the original
         /// injecting caller can be traced. Task 19d0d867.
         /// </summary>
-        /// <summary>
-        /// Reads a project's stored <c>source_path</c> by id (null if unset/not found). Used by the
-        /// single-field <see cref="UpdateProjectField"/> path-guard so a worktree path can be
-        /// canonicalized to the project's real subfolder, not just the bare repo root. Task 19d0d867.
-        /// </summary>
-        private string ReadProjectSourcePath(string projectId)
-        {
-            lock (_dbLock)
-            {
-                using var command = new SQLiteCommand("SELECT source_path FROM projects WHERE id = @id", _connection);
-                command.Parameters.AddWithValue("@id", projectId);
-                var result = command.ExecuteScalar();
-                return (result == null || result == DBNull.Value) ? null : (string)result;
-            }
-        }
-
         private static string CanonicalizeProjectPath(string path, string sourcePath, string projectId, string projectName)
         {
             if (WorktreeLayout.TryResolveStableProjectPath(path, sourcePath, out var stable))
@@ -1667,6 +1649,19 @@ namespace MultiTerminal.Services
                 command.Parameters.AddWithValue("@r", RepoKey(repo));
                 command.Parameters.AddWithValue("@n", number);
                 command.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// The folders the project lived in before a Move Project, oldest first (ticket 6f879683,
+        /// <c>previous_paths</c>). Empty when it never moved or the project is unknown.
+        /// </summary>
+        public IReadOnlyList<string> GetPreviousPaths(string projectId)
+        {
+            if (string.IsNullOrWhiteSpace(projectId)) return Array.Empty<string>();
+            lock (_dbLock)
+            {
+                return ProjectRelocationStore.GetPreviousPaths(_connection, projectId);
             }
         }
 

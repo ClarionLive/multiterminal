@@ -227,6 +227,17 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Raises <see cref="ProjectUpdated"/> after Move Project (ticket 6f879683) changed the project's
+        /// folder in the database, so watchers keyed by folder (CodeGraphWatcher) drop the old one and pick
+        /// up the new one. Writes nothing: the row is already written, and project.json holds no path.
+        /// </summary>
+        public void RaiseProjectRelocated(string projectId)
+        {
+            var project = _projectDb.GetRichProject(projectId);
+            if (project != null) ProjectUpdated?.Invoke(this, new ProjectEventArgs(project));
+        }
+
+        /// <summary>
         /// Auto-registers a project discovered in a terminal's working directory by re-saving the folder's
         /// OWN project.json under its own id. Skipped (returns false) when the file has no id, or when that
         /// id is already registered at a different folder: the folder is then a copy, clone or move of

@@ -2504,6 +2504,7 @@ ws.onmessage = (e) => { /* handle terminal output */ };</code></pre>
 
   <div class="endpoint-block">
     <span class="method patch">PATCH</span> <code>/api/projects/{projectId}</code>
+    <p>Updates individual fields: <code>{"fields": {"deployPath": "..."}}</code>. The response lists <code>updated</code> and <code>rejected</code> field names. <code>path</code>, the project's own folder, is always rejected: it changes only through Move Project in Project Settings, which also moves the notes, sessions, worktrees and Claude Code history filed under it (ticket 6f879683).</p>
   </div>
 
   <div class="endpoint-block">

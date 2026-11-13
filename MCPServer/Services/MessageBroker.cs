@@ -6936,6 +6936,17 @@ namespace MultiTerminal.MCPServer.Services
                 _projects[row.Id] = row;
         }
 
+        /// <summary>
+        /// After Move Project (ticket 6f879683) rewrote the project's row itself: re-reads the row into the
+        /// cache and tells every listener the projects changed. Seeds FROM the database; not a mutation.
+        /// </summary>
+        public void RefreshProjectAfterRelocation(string projectId)
+        {
+            if (string.IsNullOrWhiteSpace(projectId)) return;
+            RecacheProjectRowFromDb(projectId);
+            NotifyProjectsChanged();
+        }
+
         private Project InsertProjectInternal(Project project)
         {
             _projectDb.SaveProject(project);   // persist FIRST
