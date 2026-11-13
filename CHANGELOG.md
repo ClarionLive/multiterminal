@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MultiTerminal starts when another program uses port 5000** (GitHub #101).
+  MT opened an unused listener on localhost:5000 at startup, and when the port
+  was taken the rest of its startup was skipped. The listener and the message
+  route that once used it are removed; MT no longer opens port 5000.
 - **Installed copies now include the Attention panel, the statusline script
   (context and quota in each terminal's header), the code review page and the
   Multi-Connect phone gateway's web app.** 3.0.0's installer left these folders

@@ -24,7 +24,6 @@ const CONVERTED = new Set([
   'MCPServer/Services/TaskService.cs',
   'MainForm.cs',
   'Services/CodeReviewService.cs',
-  'MCPServer/Services/HttpWebhookService.cs',
   'Services/CodeGraphWatcher.cs',
   'Services/TeamWatcherService.cs',
   'Services/OracleService.cs',

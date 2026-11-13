@@ -44,7 +44,7 @@ namespace MultiTerminal
         // - *PanelDocument fields are DockContent panels registered with _dockPanel; disposed transitively via _dockPanel?.Dispose() in Dispose(bool).
         // - _lastActiveTerminal is a borrowed reference (points to whichever TerminalDocument is currently active); not owned.
         // - _mcpServer is deliberately not disposed here because OnFormClosing already called StopAsync; a second dispose would deadlock the UI thread.
-        // - _projectService, _webhookService have explicit disposal added to Dispose(bool) below; the pragma is a no-op on them.
+        // - _projectService has explicit disposal added to Dispose(bool) below; the pragma is a no-op on it.
 #pragma warning disable CA2213
         private ToolStripButton _themeButton;
         private ToolStripDropDownButton _gridDropdown;
@@ -61,7 +61,6 @@ namespace MultiTerminal
         // MultiRemote phone-gateway in-process host (Phase 2, task ca6c5344) — second,
         // independent Kestrel on :5100 serving the PWA. Started alongside the REST server.
         private MultiTerminal.API.Gateway.MultiRemoteGatewayHost _remoteGateway;
-        private MCPServer.Services.HttpWebhookService _webhookService;
         private ChatPanelDocument _chatPanel;
         private SessionIndexingService _sessionIndexingService;
         private TaskDatabase _chatTaskDatabase; // Used for chat message persistence
@@ -1446,17 +1445,6 @@ namespace MultiTerminal
                 // throttles them; MainForm owns process spawning, so it supplies the how.
                 _mcpServer.Broker.GlossWriterSpawner = SpawnGlossWriterAsync;
                 _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 19: All wiring complete");
-
-                // Initialize HTTP webhook service for agent ready notifications
-                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 20: Creating HttpWebhookService");
-                _webhookService = new MCPServer.Services.HttpWebhookService(_mcpServer.Broker);
-                _webhookService.AgentReady += (s, args) =>
-                {
-                    _debugLogService?.Trace("MainForm", $"Agent ready webhook received: {args.AgentName}");
-                    _debugLogService.Info("MainForm", $"Agent {args.AgentName} sent ready notification via webhook");
-                };
-                _webhookService.Start();
-                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 21: HttpWebhookService started on http://localhost:5000/");
 
                 // Start native agent team watcher
                 InitializeTeamWatcher();
@@ -8677,14 +8665,6 @@ namespace MultiTerminal
                 Environment.Exit(0);
             });
 
-            // Stop HTTP webhook service (cancel, don't wait for listener task)
-            try
-            {
-                _webhookService?.Stop();
-                _webhookService?.Dispose();
-            }
-            catch { }
-
             // Stop Oracle advisory agent and digest timer
             try
             {
@@ -11269,7 +11249,6 @@ namespace MultiTerminal
                 _oracleDigestTimer?.Stop();
                 _oracleDigestTimer?.Dispose();
                 _oracleService?.Dispose();
-                _webhookService?.Dispose();
                 _projectService?.Dispose();
 
                 _messageQueueTimer?.Stop();
