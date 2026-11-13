@@ -131,7 +131,8 @@ namespace MultiTerminal.MCPServer.Models
         public DateTime? OwnerBoundAt { get; set; }
 
         /// <summary>
-        /// Whether the agent has sent the ready confirmation (via webhook or message).
+        /// A ready-handshake flag. Nothing sets it true since the port-5000 listener that did was removed
+        /// (ticket e4de2437); the broker still resets it on re-registration.
         /// Used for spawn handshake to ensure agent is initialized before sending work.
         /// </summary>
         public bool IsReady { get; set; } = false;
