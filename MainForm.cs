@@ -6001,6 +6001,7 @@ namespace MultiTerminal
             Cwd = pane.Cwd,
             ProjectId = pane.ProjectId,
             Kind = Services.PaneLaunchKind.Claude,
+            Seq = pane.Seq,
         };
 
         /// <summary>

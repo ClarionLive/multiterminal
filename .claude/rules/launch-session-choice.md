@@ -203,8 +203,10 @@ Continue mode (no dialog) resumes all of them and reports what it skipped; a hel
 process exited while its pane stayed open counts as CLOSED; one level only (no helpers of helpers),
 at most 12 (task 592ade03; it was 6, and a PM with 8 silently lost its 2 oldest). The limit is
 `HelperResume.MaxHelpersWithPm`, applied once by `HelperResume.ApplyLimit` in `MainForm.ResumeHelpersFor`, so every
-path (dialog, Continue mode, startup restore) obeys it and the summary names each helper left out;
-`PaneLaunchRecorder.GetOpenHelpers` itself returns all of them. A new session never resumes helpers. Closing a PM's tab can close its helpers with it,
+path (dialog, Continue mode, startup restore) obeys it. It keeps the 12 NEWEST by `OpenHelper.Seq`, whatever
+order they arrive in (the startup restore passes them oldest first), and the summary names each one left out
+(10 by name, then a count). `PaneLaunchRecorder.GetOpenHelpers` looks up at most `HelperResume.LookupLimit` (40),
+a bound on its per-helper queries. A new session never resumes helpers. Closing a PM's tab can close its helpers with it,
 and they come back when the PM is resumed (item 8, below).
 
 ### The launch record

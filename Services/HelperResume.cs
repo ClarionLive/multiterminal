@@ -48,20 +48,37 @@ namespace MultiTerminal.Services
         public const int MaxHelpersWithPm = 12;
 
         /// <summary>
-        /// The helpers to resume: the first <see cref="MaxHelpersWithPm"/> of <paramref name="helpers"/>, in
-        /// the order given (<see cref="PaneLaunchRecorder.GetOpenHelpers"/> is newest first). Every helper
-        /// beyond the limit is recorded in <paramref name="report"/> as not resumed, by name, so the summary
-        /// says who was left out and how to get them back.
+        /// How many open helpers <see cref="PaneLaunchRecorder.GetOpenHelpers"/> looks up by default: a bound on
+        /// that lookup's work (one query per candidate, on the UI thread), well above <see cref="MaxHelpersWithPm"/>
+        /// so the helpers left out can still be named (pipeline Run 1, Codex).
+        /// </summary>
+        public const int LookupLimit = 40;
+
+        /// <summary>At most this many left-out helpers are named in the summary; the rest are counted.</summary>
+        internal const int NamedLeftOutLimit = 10;
+
+        /// <summary>
+        /// The helpers to resume: the <see cref="MaxHelpersWithPm"/> NEWEST of <paramref name="helpers"/> by
+        /// <see cref="OpenHelper.Seq"/>, whatever order they arrive in (pipeline Run 1: the startup restore
+        /// passes them oldest first, and an order-based cut kept the oldest). Ties keep the given order. Each
+        /// helper left out is recorded in <paramref name="report"/> by name (up to <see cref="NamedLeftOutLimit"/>,
+        /// then a count), so the summary says who did not come back and where to find them.
         /// </summary>
         public static IReadOnlyList<OpenHelper> ApplyLimit(IReadOnlyList<OpenHelper> helpers, HelperResumeReport report)
         {
             if (helpers == null || helpers.Count <= MaxHelpersWithPm)
                 return helpers ?? Array.Empty<OpenHelper>();
 
-            foreach (var left in helpers.Skip(MaxHelpersWithPm))
-                report?.AddSkipped(left?.TerminalName,
-                    $"MT reopens at most {MaxHelpersWithPm} helpers with their PM; resume it from the project's past sessions");
-            return helpers.Take(MaxHelpersWithPm).ToList();
+            var newestFirst = helpers.OrderByDescending(h => h?.Seq ?? long.MinValue).ToList();
+            var left = newestFirst.Skip(MaxHelpersWithPm).ToList();
+            string reason = $"only the {MaxHelpersWithPm} newest helpers reopen with their PM; resume this one from the project's past sessions";
+            foreach (var helper in left.Take(NamedLeftOutLimit))
+                report?.AddSkipped(helper?.TerminalName, reason);
+            if (left.Count > NamedLeftOutLimit)
+                report?.AddSkipped($"{left.Count - NamedLeftOutLimit} more", reason);
+
+            var kept = new HashSet<OpenHelper>(newestFirst.Take(MaxHelpersWithPm));
+            return helpers.Where(kept.Contains).ToList(); // the caller's order, minus the ones left out
         }
 
         /// <summary>

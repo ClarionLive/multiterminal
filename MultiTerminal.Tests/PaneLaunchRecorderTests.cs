@@ -235,6 +235,8 @@ namespace MultiTerminal.Tests
 
             Assert.Equal(new[] { "h8", "h7", "h6", "h5", "h4", "h3", "h2", "h1" }, Sessions(rec.GetOpenHelpers(Pm)));
             Assert.Equal(new[] { "h8", "h7" }, Sessions(rec.GetOpenHelpers(Pm, 2)));
+            var helpers = rec.GetOpenHelpers(Pm);
+            Assert.True(helpers[0].Seq > helpers[7].Seq, "Seq must be filled so ApplyLimit can find the newest");
         }
 
         [Fact]
