@@ -5671,7 +5671,9 @@ namespace MultiTerminal
             {
                 if (pmDoc == null || pmDoc.IsDisposed || project == null || helpers == null || helpers.Count == 0)
                     return report;
-                ResumeHelpersInto(pmDoc, project, helpers, placement, report);
+                // The one limit on how many helpers come back with their PM, for every resume path (dialog,
+                // Continue mode, startup restore); the ones beyond it are named in the summary (task 592ade03).
+                ResumeHelpersInto(pmDoc, project, HelperResume.ApplyLimit(helpers, report), placement, report);
                 return report;
             }
             finally
@@ -6101,6 +6103,7 @@ namespace MultiTerminal
             Cwd = pane.Cwd,
             ProjectId = pane.ProjectId,
             Kind = Services.PaneLaunchKind.Claude,
+            Seq = pane.Seq,
         };
 
         /// <summary>

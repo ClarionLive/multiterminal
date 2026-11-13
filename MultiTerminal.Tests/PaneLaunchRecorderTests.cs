@@ -224,15 +224,19 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
-        public void The_cap_keeps_the_newest()
+        public void Every_open_helper_is_returned_newest_first_and_max_still_limits()
         {
+            // The Owner's case (task 592ade03): a PM with 8 helpers. The old default of 6 dropped h1 and h2 here.
+            // How many come back WITH the PM is HelperResume.ApplyLimit's decision, not this lookup's.
             using var db = new TaskDatabase();
             var rec = Recorder(db);
             var pm = Launch(rec, "Pat", Pm);
             for (int i = 1; i <= 8; i++) Launch(rec, "H" + i, "h" + i, pm);
 
-            Assert.Equal(new[] { "h8", "h7", "h6", "h5", "h4", "h3" }, Sessions(rec.GetOpenHelpers(Pm)));
+            Assert.Equal(new[] { "h8", "h7", "h6", "h5", "h4", "h3", "h2", "h1" }, Sessions(rec.GetOpenHelpers(Pm)));
             Assert.Equal(new[] { "h8", "h7" }, Sessions(rec.GetOpenHelpers(Pm, 2)));
+            var helpers = rec.GetOpenHelpers(Pm);
+            Assert.True(helpers[0].Seq > helpers[7].Seq, "Seq must be filled so ApplyLimit can find the newest");
         }
 
         [Fact]

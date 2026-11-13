@@ -222,6 +222,13 @@ namespace MultiTerminal.Services
         public string ProjectId { get; set; }
         public string Kind { get; set; }
         public DateTime LastStartedAt { get; set; }
+
+        /// <summary>
+        /// The helper's launch order (<c>pane_launches.seq</c>): higher is newer. <see cref="HelperResume.ApplyLimit"/>
+        /// keeps the newest by this, whatever order a caller passes the helpers in (task 592ade03: the startup
+        /// restore passes them oldest first).
+        /// </summary>
+        public long Seq { get; set; }
     }
 
     /// <summary>
@@ -414,7 +421,11 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// The helper sessions <paramref name="pmSessionId"/> left open, newest first, at most
-        /// <paramref name="max"/> (Owner-approved rule, task 7d20e94c). "Newest" and "later" are by
+        /// <paramref name="max"/> (by default <see cref="HelperResume.LookupLimit"/>, a bound on the work done here, one
+        /// query per candidate on the UI thread). The limit on how many come back WITH the PM is
+        /// <see cref="HelperResume.MaxHelpersWithPm"/>, applied by <see cref="HelperResume.ApplyLimit"/> where
+        /// the helpers are resumed, so the ones beyond it can be named to the Owner (task 592ade03; a default
+        /// of 6 here used to drop the oldest silently). "Newest" and "later" are by
         /// <see cref="PaneLaunchRecord.Seq"/> (pipeline Run 1), never by start time, which can tie.
         /// <list type="number">
         /// <item>Every launch of the PM session, including earlier resumes (a resume keeps the session id)
@@ -429,7 +440,7 @@ namespace MultiTerminal.Services
         /// (a later <c>closed_with_pm</c> or <c>mt_exit</c> is not closed).</item>
         /// </list>
         /// </summary>
-        public IReadOnlyList<OpenHelper> GetOpenHelpers(string pmSessionId, int max = 6)
+        public IReadOnlyList<OpenHelper> GetOpenHelpers(string pmSessionId, int max = HelperResume.LookupLimit)
         {
             if (string.IsNullOrEmpty(pmSessionId) || max <= 0) return Array.Empty<OpenHelper>();
             try
@@ -463,6 +474,7 @@ namespace MultiTerminal.Services
                         ProjectId = child.ProjectId,
                         Kind = child.Kind,
                         LastStartedAt = child.StartedAt,
+                        Seq = child.Seq,
                     });
                 }
                 return result;

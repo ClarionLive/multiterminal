@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
 using Xunit;
@@ -131,6 +132,76 @@ namespace MultiTerminal.Tests
             Assert.Contains("Resumed 1 of 2 helpers of Alice.", summary);
             Assert.Contains("- Bob: the folder it ran in no longer exists (C:\\x).", summary);
             Assert.Contains("- Notes came back as Notes-2.", summary);
+        }
+        // ── The limit on helpers resumed with their PM (task 592ade03) ─────────────
+
+        /// <summary>Helpers H1..H<paramref name="count"/>, where a higher number is a newer launch (Seq).</summary>
+        private static List<OpenHelper> Helpers(int count, bool newestFirst = true)
+        {
+            var list = new List<OpenHelper>();
+            for (int i = 1; i <= count; i++) list.Add(new OpenHelper { SessionId = "s" + i, TerminalName = "H" + i, Seq = 100 + i });
+            if (newestFirst) list.Reverse();
+            return list;
+        }
+
+        [Theory]
+        [InlineData(8)]
+        [InlineData(12)]
+        public void Up_to_twelve_helpers_all_come_back_and_nothing_is_reported(int count)
+        {
+            var report = new HelperResumeReport();
+
+            var kept = HelperResume.ApplyLimit(Helpers(count), report);
+
+            Assert.Equal(count, kept.Count);
+            Assert.False(report.HasAnythingToReport);
+        }
+
+        [Fact]
+        public void The_thirteenth_helper_is_the_oldest_and_is_reported()
+        {
+            var report = new HelperResumeReport();
+
+            var kept = HelperResume.ApplyLimit(Helpers(13), report);
+
+            Assert.Equal(12, kept.Count);
+            Assert.DoesNotContain(kept, h => h.TerminalName == "H1");
+            Assert.Equal(new[] { "H1" }, report.Skipped.Select(x => x.Name));
+            Assert.Contains("H1: only the 12 newest helpers reopen with their PM", report.BuildSummary("Grace"));
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)] // the startup restore passes helpers oldest first (pipeline Run 1, Debugger)
+        public void The_newest_twelve_are_kept_whatever_order_the_helpers_arrive_in(bool newestFirst)
+        {
+            var report = new HelperResumeReport();
+            var given = Helpers(14, newestFirst);
+
+            var kept = HelperResume.ApplyLimit(given, report);
+
+            Assert.Equal(Enumerable.Range(3, 12).Select(i => "H" + i).OrderBy(n => n), kept.Select(h => h.TerminalName).OrderBy(n => n));
+            Assert.Equal(given.Where(h => h.Seq > 102).Select(h => h.TerminalName), kept.Select(h => h.TerminalName)); // caller's order kept
+            Assert.Equal(new[] { "H2", "H1" }, report.Skipped.Select(x => x.Name));
+        }
+
+        [Fact]
+        public void Many_left_out_are_named_up_to_ten_then_counted()
+        {
+            var report = new HelperResumeReport();
+
+            HelperResume.ApplyLimit(Helpers(25), report);
+
+            Assert.Equal(11, report.Skipped.Count);
+            Assert.Equal("H13", report.Skipped[0].Name);
+            Assert.Equal("3 more", report.Skipped[10].Name);
+        }
+
+        [Fact]
+        public void Null_helpers_and_a_null_report_are_tolerated()
+        {
+            Assert.Empty(HelperResume.ApplyLimit(null, new HelperResumeReport()));
+            Assert.Equal(12, HelperResume.ApplyLimit(Helpers(14), null).Count);
         }
     }
 }
