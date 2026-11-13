@@ -188,6 +188,16 @@ namespace MultiTerminal.MCPServer.Services
             _summaryLookup = summaryLookup;
         }
 
+        /// <summary>
+        /// Folders the project lived in before a Move Project (ticket 6f879683, <c>projects.previous_paths</c>).
+        /// A moved project's transcripts still record the old folder as their cwd; the move renamed their
+        /// Claude history folder to the new folder's encoding. A recorded cwd at or under one of these is
+        /// read as the same place under the current root (<see cref="TranslateMovedCwds"/>) BEFORE any
+        /// validation, so it then passes or fails <see cref="ValidateResumeCwd"/> exactly like a cwd
+        /// recorded after the move. String arithmetic only; nothing here touches the file system.
+        /// </summary>
+        public IReadOnlyList<string> PreviousRoots { get; set; } = Array.Empty<string>();
+
         /// <summary>How many transcripts one <see cref="List"/> call may read, as a multiple of its <c>max</c>.</summary>
         internal const int ReadBudgetFactor = 3;
 
@@ -633,6 +643,11 @@ namespace MultiTerminal.MCPServer.Services
         {
             missReason = null;
             var scan = TranscriptScan.Read(path, meter);
+            if (scan != null)
+            {
+                TranslateMovedCwds(scan.HeadCwds, root, PreviousRoots);
+                TranslateMovedCwds(scan.TailCwds, root, PreviousRoots);
+            }
             if (scan == null || !scan.HasTurns)
             {
                 missReason = "its transcript holds no conversation";
@@ -835,6 +850,40 @@ namespace MultiTerminal.MCPServer.Services
                 && IsUnderWorktrees(repo, dir))
                 return dir;
             return null;
+        }
+
+        /// <summary>
+        /// Rewrites, in place, each cwd that is a previous root or lies under one to the same place under
+        /// <paramref name="root"/> (ticket 6f879683). A cwd that is not a canonical local path, or is under
+        /// no previous root, is left exactly as recorded. The result is still untrusted: callers validate it.
+        /// </summary>
+        internal static void TranslateMovedCwds(List<string> cwds, string root, IReadOnlyList<string> previousRoots)
+        {
+            if (cwds == null || previousRoots == null || previousRoots.Count == 0 || !TryCanonicalLocalPath(root, out var current))
+                return;
+
+            for (var i = 0; i < cwds.Count; i++)
+            {
+                if (!TryCanonicalLocalPath(cwds[i], out var dir))
+                    continue;
+                foreach (var previous in previousRoots)
+                {
+                    if (!TryCanonicalLocalPath(previous, out var prev)
+                        || string.Equals(prev, current, StringComparison.OrdinalIgnoreCase)
+                        || prev.EndsWith(":\\", StringComparison.Ordinal))
+                        continue;
+                    if (string.Equals(dir, prev, StringComparison.OrdinalIgnoreCase))
+                    {
+                        cwds[i] = current;
+                        break;
+                    }
+                    if (dir.StartsWith(prev + "\\", StringComparison.OrdinalIgnoreCase))
+                    {
+                        cwds[i] = current.TrimEnd('\\') + dir.Substring(prev.Length);
+                        break;
+                    }
+                }
+            }
         }
 
         // The transcript's first recorded cwd is exactly the project root (string checks only). Exact,

@@ -8,7 +8,7 @@
   Project settings form (ticket e20e2ce0). Hosted by ProjectSettings/ProjectSettingsForm.cs.
   Contract (ProjectSettingsPayload.cs):
     C# -> page : load, stats, saveResult, folderPicked, notice, theme, missing
-    page -> C# : ready, save, reload, dirty, browseFolder, copyPath, openFolder, syncMcp, deleteProject, close
+    page -> C# : ready, save, reload, dirty, browseFolder, copyPath, openFolder, moveProject, repointProject, syncMcp, deleteProject, close
   Every scalar input carries data-field="<camelCase name>"; the set must equal
   ProjectSettingsService.EditableFields (ProjectSettingsPayloadTests pins it).
   All project values are written with textContent / .value, never innerHTML.
@@ -223,7 +223,10 @@
                 <div class="row"><input type="text" id="about-path-input" readonly>
                     <button class="btn" id="btn-copy-path">Copy</button>
                     <button class="btn" id="btn-open-folder">Open folder</button></div>
-                <div class="hint">The project's identity folder; it is not changed here.</div></div>
+                <div class="row" style="margin-top:8px">
+                    <button class="btn" id="btn-move-project">Move project…</button>
+                    <button class="btn" id="btn-repoint-project">Folder was moved…</button></div>
+                <div class="hint">Move project moves the folder and updates notes, sessions, worktrees and Claude Code history to match. Use "Folder was moved…" if you already moved it yourself.</div></div>
             <div class="field"><label for="f-sourcePath">Source</label>
                 <div class="row"><input type="text" id="f-sourcePath" data-field="sourcePath"><button class="btn" data-browse="sourcePath">Browse…</button></div></div>
             <div class="field"><label for="f-deployPath">Deploy</label>
@@ -581,6 +584,8 @@
     $('btn-close').addEventListener('click', function () { post({ type: 'close' }); });
     $('btn-copy-path').addEventListener('click', function () { post({ type: 'copyPath' }); });
     $('btn-open-folder').addEventListener('click', function () { post({ type: 'openFolder' }); });
+    $('btn-move-project').addEventListener('click', function () { post({ type: 'moveProject' }); });
+    $('btn-repoint-project').addEventListener('click', function () { post({ type: 'repointProject' }); });
     $('btn-sync-mcp').addEventListener('click', function () { post({ type: 'syncMcp' }); });
     $('btn-delete').addEventListener('click', function () { post({ type: 'deleteProject' }); });
     document.querySelectorAll('[data-browse]').forEach(function (b) {

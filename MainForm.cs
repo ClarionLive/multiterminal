@@ -4862,12 +4862,119 @@ namespace MultiTerminal
                     Gateway = () => _gatewayService,
                     SyncMcpConfig = SyncProjectMcpConfig,
                     DeleteProject = ConfirmAndDeleteProject,
+                    RelocateProject = RelocateProject,
                     ProjectSaved = RefreshAfterProjectSettingsSaved,
                     Log = _debugLogService,
                 };
             }
 
             ProjectSettings.ProjectSettingsForm.Open(this, projectId, _projectSettingsContext, _currentTheme.IsDark);
+        }
+
+        /// <summary>
+        /// Move Project (ticket 6f879683), from the settings form's Paths section. <paramref name="moveFolder"/>
+        /// true: the Owner picks where the folder goes and MT moves it. False ("Folder was moved…"): the Owner
+        /// picks where it already is. Checks first and shows every reason it cannot go ahead, confirms, runs the
+        /// move behind a progress window, then shows what was done. Returns true when the folder changed.
+        /// </summary>
+        private bool RelocateProject(System.Windows.Forms.IWin32Window owner, string projectId, bool moveFolder)
+        {
+            var project = _sharedProjectDatabase?.GetRichProject(projectId);
+            if (project == null || string.IsNullOrWhiteSpace(project.Path))
+                return false;
+
+            string currentName = Path.GetFileName(project.Path.TrimEnd('\\', '/'));
+            string newRoot;
+            using (var picker = new FolderBrowserDialog
+            {
+                UseDescriptionForTitle = true,
+                ShowNewFolderButton = true,
+                Description = moveFolder
+                    ? $"Choose where to move '{project.Name}'. It will be moved into a folder named '{currentName}' there."
+                    : $"Choose the folder '{project.Name}' is in now.",
+            })
+            {
+                if (picker.ShowDialog(owner) != DialogResult.OK || string.IsNullOrWhiteSpace(picker.SelectedPath))
+                    return false;
+                newRoot = moveFolder ? Path.Combine(picker.SelectedPath, currentName) : picker.SelectedPath;
+            }
+
+            var service = new ProjectRelocationService(BuildRelocationHost());
+            var problems = service.Check(project, newRoot, moveFolder);
+            if (problems.Count > 0)
+            {
+                MessageBox.Show(owner, string.Join(Environment.NewLine + Environment.NewLine, problems),
+                    moveFolder ? "Cannot move the project" : "Cannot use that folder", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+
+            string from = RelocationPaths.Normalize(project.Path);
+            string to = RelocationPaths.Normalize(newRoot);
+            string question = moveFolder
+                ? $"Move '{project.Name}'{Environment.NewLine}from  {from}{Environment.NewLine}to    {to}?{Environment.NewLine}{Environment.NewLine}"
+                  + (ProjectRelocationService.SameVolume(from, to)
+                      ? "Both are on the same drive, so this is a quick rename."
+                      : $"This copies the folder to the other drive and checks the copy. The original is kept, renamed to '{Path.GetFileName(from)}{ProjectRelocationService.KeptSuffix}', for you to delete later.")
+                : $"Point '{project.Name}' at{Environment.NewLine}{to}{Environment.NewLine}instead of{Environment.NewLine}{from}?";
+            if (MessageBox.Show(owner, question, moveFolder ? "Move project" : "Folder was moved", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK)
+                return false;
+
+            var result = Dialogs.MoveProjectProgressForm.Run(owner, moveFolder ? "Moving project" : "Updating project folder",
+                (progress, cancel) => moveFolder ? service.Move(project, newRoot, progress, cancel) : service.Repoint(project, newRoot, progress));
+            if (result == null)
+                return false;
+
+            _debugLogService?.Info("MoveProject", $"{project.Name} ({project.Id}) {from} -> {to}: "
+                + (result.Succeeded ? "moved" : "not moved") + ". " + string.Join(" ", result.Done.Concat(result.Refusals).Concat(result.Warnings)));
+
+            var summary = new System.Text.StringBuilder();
+            if (result.Succeeded)
+            {
+                summary.AppendLine($"'{project.Name}' is now in {to}.").AppendLine();
+                foreach (var line in result.Done) summary.AppendLine("• " + line);
+            }
+            else
+            {
+                foreach (var line in result.Refusals) summary.AppendLine(line);
+            }
+
+            if (result.Warnings.Count > 0)
+            {
+                summary.AppendLine().AppendLine("Needs a look:");
+                foreach (var line in result.Warnings) summary.AppendLine("• " + line);
+            }
+
+            MessageBox.Show(owner, summary.ToString().TrimEnd(), result.Succeeded ? "Project moved" : "Project not moved",
+                MessageBoxButtons.OK, result.Succeeded && result.Warnings.Count == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+            return result.Succeeded;
+        }
+
+        /// <summary>The running app's side of a Move Project: open panes, Claude roots, watchers and refresh.</summary>
+        private RelocationHost BuildRelocationHost()
+        {
+            var panes = _dockPanel.Documents.OfType<TerminalDocument>()
+                .Select(d => new RelocationPane(d.Text, d.LaunchProjectId, SafeWorkingDirectory(d)))
+                .ToList();
+
+            return new RelocationHost
+            {
+                Panes = panes,
+                ClaudeConfigRoots = ClaudeProfileResolver.GetAllRoots(),
+                PauseWatchers = () => _codeGraphWatcher?.Stop(),
+                ResumeWatchers = () => _codeGraphWatcher?.Start(),
+                ProjectChanged = id => Invoke(new Action(() =>
+                {
+                    _mcpServer?.Broker?.RefreshProjectAfterRelocation(id);
+                    _projectService?.RaiseProjectRelocated(id);
+                    RefreshAfterProjectSettingsSaved(id);
+                })),
+            };
+
+            static string SafeWorkingDirectory(TerminalDocument doc)
+            {
+                try { return doc.GetWorkingDirectory(); }
+                catch (Exception ex) when (ex is InvalidOperationException || ex is ObjectDisposedException) { return null; }
+            }
         }
 
         /// <summary>
@@ -5540,7 +5647,11 @@ namespace MultiTerminal
             return new SessionCatalog(
                 root.Root.ProjectsDir,
                 sid => agentMap != null && agentMap.TryGetValue(sid, out var agent) ? agent : null,
-                sid => taskDb?.GetSessionById(sid)?.Summary);
+                sid => taskDb?.GetSessionById(sid)?.Summary)
+            {
+                // A moved project's older transcripts record its old folder (ticket 6f879683).
+                PreviousRoots = _sharedProjectDatabase?.GetPreviousPaths(project?.Id) ?? Array.Empty<string>(),
+            };
         }
 
         /// <summary>

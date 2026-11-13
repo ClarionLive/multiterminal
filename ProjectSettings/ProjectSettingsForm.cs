@@ -29,6 +29,13 @@ namespace MultiTerminal.ProjectSettings
         /// <summary>Confirms with the user and deletes the project. Returns true when it was deleted.</summary>
         public Func<IWin32Window, string, bool> DeleteProject { get; set; }
 
+        /// <summary>
+        /// Move Project (ticket 6f879683): asks where, checks, confirms, runs and reports. The bool is true for
+        /// "Move project…" (MT moves the folder) and false for "Folder was moved…". Returns true when the
+        /// project's folder changed.
+        /// </summary>
+        public Func<IWin32Window, string, bool, bool> RelocateProject { get; set; }
+
         /// <summary>Called after a save wrote something, with the project id, so the app can refresh what it shows.</summary>
         public Action<string> ProjectSaved { get; set; }
 
@@ -222,6 +229,10 @@ namespace MultiTerminal.ProjectSettings
                     break;
                 case "openFolder":
                     OpenFolder();
+                    break;
+                case "moveProject":
+                case "repointProject":
+                    RelocateProject(type == "moveProject");
                     break;
                 case "syncMcp":
                     SyncMcp();
@@ -467,6 +478,21 @@ namespace MultiTerminal.ProjectSettings
 
             if (dialog.ShowDialog(this) == DialogResult.OK)
                 Post(new { type = "folderPicked", field, path = dialog.SelectedPath });
+        }
+
+        private void RelocateProject(bool moveFolder)
+        {
+            if (_dirty)
+            {
+                Notice("Save or reload your changes first, then move the project.", "error");
+                return;
+            }
+
+            if (_context.RelocateProject == null)
+                return;
+
+            if (_context.RelocateProject(this, _projectId, moveFolder))
+                SendLoad();
         }
 
         private void OpenFolder()
