@@ -728,6 +728,29 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: "respond_to_stale",
+        description: "Answer a stale-task reminder (\"⏰ Stale task check: ... Use respond_to_stale\"), sent when a task you own has been paused for 7+ days. still_relevant keeps the task as it is and restarts the 7-day clock; reprioritize moves it back to To Do; will_close records that you will close it and keeps the flag. Ask the Owner first unless the answer is obvious from the board.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            taskId: {
+              type: "string",
+              description: "Task ID from the reminder",
+            },
+            response: {
+              type: "string",
+              enum: ["still_relevant", "reprioritize", "will_close"],
+              description: "still_relevant, reprioritize or will_close",
+            },
+            respondedBy: {
+              type: "string",
+              description: "Your name",
+            },
+          },
+          required: ["taskId", "response", "respondedBy"],
+        },
+      },
+      {
         name: "delete_task",
         description: "Delete a kanban task",
         inputSchema: {
@@ -3183,6 +3206,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: "text",
               text: `✅ Task ${args.taskId} renamed to: ${args.newTitle}`,
+            },
+          ],
+        };
+      }
+
+      case "respond_to_stale": {
+        const r = await apiCall(`/api/tasks/${seg(args.taskId)}/stale-response`, "POST", {
+          response: args.response,
+          respondedBy: args.respondedBy,
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: `✅ Stale reminder for task ${args.taskId} answered: ${args.response}${r && r.message ? ` (${r.message})` : ""}`,
             },
           ],
         };

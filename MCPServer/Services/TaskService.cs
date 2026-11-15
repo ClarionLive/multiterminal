@@ -4008,6 +4008,44 @@ namespace MultiTerminal.MCPServer.Services
 
 
         /// <summary>
+        /// Sets a paused task's stale level (1 = day 7, 2 = day 14) through the single write path, so the
+        /// cached task carries it too (ticket 28845a5f). Before this, <c>StaleTaskService</c> wrote the
+        /// level straight to the database; the cache kept level 0, the next ordinary save of the task
+        /// (<c>SaveTask</c> writes the whole row) put 0 back, and the next hourly check reminded the assignee
+        /// again. The clone mirrors exactly the columns <see cref="TaskDatabase.UpdateStaleLevel"/> writes.
+        /// A task not in the cache gets the direct write, as before. Returns false when nothing was written.
+        /// </summary>
+        public bool FlagStale(string taskId, int level)
+        {
+            var now = DateTime.UtcNow;
+            try
+            {
+                var updated = MutateTaskInternal(taskId, t =>
+                {
+                    t.StaleLevel = level;
+                    t.FlaggedStaleAt = now;
+                    t.StaleNotifiedAt = now;
+                    t.UpdatedAt = now;
+                }, _ =>
+                {
+                    // A cached task whose row is gone (or drifted) must not be reported as flagged, or it would
+                    // be reminded about with nothing stored (pipeline Run 2, Codex). Throwing keeps the cache as it was.
+                    if (!_taskDb.UpdateStaleLevel(taskId, level))
+                        throw new InvalidOperationException($"No row for task {taskId}");
+                });
+                if (updated == null)
+                    return _taskDb.UpdateStaleLevel(taskId, level);
+                BroadcastTaskUpdate(); // the board shows the stale state from the cache
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _host.LogError($"FlagStale: persist failed for {taskId}: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
         /// Respond to a stale task notification.
         /// </summary>
         /// <param name="taskId">The task ID.</param>
@@ -4034,15 +4072,19 @@ namespace MultiTerminal.MCPServer.Services
                 KanbanTask updated;
                 if (response == "still_relevant")
                 {
-                    // Clear the stale flag + reset the timer. Mirror EXACTLY what ClearStaleTracking writes
-                    // (stale_level=0, flagged_stale_at/stale_notified_at/stale_response = NULL) in the clone.
+                    // Clear the stale flag AND restart the 7-day clock (ticket 28845a5f, pipeline Run 1: clearing
+                    // alone left paused_at old, so the next hourly check flagged the task and reminded again).
+                    // Mirror EXACTLY what ClearStaleTrackingAndRestartClock writes, with the same timestamp.
+                    var now = DateTime.UtcNow;
                     updated = MutateTaskInternal(taskId, t =>
                     {
                         t.StaleLevel = 0;
                         t.FlaggedStaleAt = null;
                         t.StaleNotifiedAt = null;
                         t.StaleResponse = null;
-                    }, _ => _taskDb.ClearStaleTracking(taskId));
+                        if (t.SubStatus == "paused") t.PausedAt = now;
+                        t.UpdatedAt = now;
+                    }, _ => _taskDb.ClearStaleTrackingAndRestartClock(taskId, now));
                 }
                 else if (response == "reprioritize")
                 {

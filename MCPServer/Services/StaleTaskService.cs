@@ -23,6 +23,29 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Writes a task's stale level. MultiTerminalRestServer points this at
+        /// <c>MessageBroker.FlagTaskStale</c>, so the level goes through the task write path and a later save
+        /// cannot reset it (ticket 28845a5f: a reset level made the reminder repeat). Null (tests, no broker)
+        /// writes the database directly, as before.
+        /// </summary>
+        public Func<string, int, bool> ApplyLevel { get; set; }
+
+        /// <summary>True when the level was written. A task that was not written gets no reminder (pipeline Run 1).</summary>
+        private bool SetLevel(string taskId, int level)
+        {
+            try
+            {
+                return ApplyLevel != null ? ApplyLevel(taskId, level) : _taskDb.UpdateStaleLevel(taskId, level);
+            }
+#pragma warning disable CA1031 // One task's failed write must not stop the check for the others; it is simply not reported.
+            catch (Exception)
+            {
+                return false;
+            }
+#pragma warning restore CA1031
+        }
+
+        /// <summary>
         /// Check all paused tasks and update stale flags.
         /// Call this periodically (e.g., on startup, hourly).
         /// </summary>
@@ -41,7 +64,7 @@ namespace MultiTerminal.MCPServer.Services
 
                 var daysPaused = (now - task.PausedAt.Value).TotalDays;
                 // Flag as level 1 (day 7 warning)
-                _taskDb.UpdateStaleLevel(task.Id, 1);
+                if (!SetLevel(task.Id, 1)) continue;
                 results.Add(new StaleFlagResult
                 {
                     TaskId = task.Id,
@@ -62,7 +85,7 @@ namespace MultiTerminal.MCPServer.Services
 
                 var daysPaused = (now - task.PausedAt.Value).TotalDays;
                 // Flag as level 2 (day 14 urgent)
-                _taskDb.UpdateStaleLevel(task.Id, 2);
+                if (!SetLevel(task.Id, 2)) continue;
                 results.Add(new StaleFlagResult
                 {
                     TaskId = task.Id,
@@ -125,7 +148,8 @@ namespace MultiTerminal.MCPServer.Services
         /// <param name="staleLevel">The stale level (1=day7 warning, 2=day14 urgent).</param>
         public void FlagTaskAsStale(string taskId, int staleLevel)
         {
-            _taskDb.FlagTaskAsStale(taskId, staleLevel);
+            // Through the same hook as the hourly check, so a later save cannot reset it (ticket 28845a5f).
+            SetLevel(taskId, staleLevel);
         }
 
         /// <summary>
