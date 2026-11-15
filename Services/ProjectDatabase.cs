@@ -276,7 +276,7 @@ namespace MultiTerminal.Services
                 -- Projects deleted in MT (GitHub #102, ticket da0fcff8): a leftover .claude/project.json
                 -- carrying one of these ids is never re-adopted silently; New Project offers Restore or New.
                 CREATE TABLE IF NOT EXISTS deleted_projects (
-                    id TEXT PRIMARY KEY,
+                    id TEXT PRIMARY KEY COLLATE NOCASE,
                     name TEXT,
                     path TEXT,
                     deleted_at DATETIME NOT NULL
@@ -683,9 +683,6 @@ namespace MultiTerminal.Services
             }
         }
 
-        /// <summary>
-        /// Delete a project by ID.
-        /// </summary>
         /// <summary>Remembers that a project was deleted in MT (GitHub #102). A later delete of the same id replaces it.</summary>
         public void RecordDeletedProject(string projectId, string name, string path)
         {
@@ -712,6 +709,7 @@ namespace MultiTerminal.Services
                 using var command = new SQLiteCommand("SELECT deleted_at FROM deleted_projects WHERE id = @id", _connection);
                 command.Parameters.AddWithValue("@id", projectId);
                 var value = command.ExecuteScalar();
+                // deleted_at is only ever written as DateTime.UtcNow (RecordDeletedProject), so it is UTC.
                 return value == null || value == DBNull.Value ? null : DateTime.SpecifyKind(Convert.ToDateTime(value, System.Globalization.CultureInfo.InvariantCulture), DateTimeKind.Utc);
             }
         }
@@ -729,6 +727,9 @@ namespace MultiTerminal.Services
             }
         }
 
+        /// <summary>
+        /// Delete a project by ID.
+        /// </summary>
         public bool DeleteProject(string projectId)
         {
             // One transaction: the child rows, then the project row (task 9f95ab0c Run 4). The child tables

@@ -135,6 +135,77 @@ namespace MultiTerminal.Tests
             Assert.NotNull(db.GetRichProject(fresh.Id));
         }
 
+        private const string NoTombstonesTrigger =
+            "CREATE TRIGGER no_tombstones BEFORE INSERT ON deleted_projects BEGIN SELECT RAISE(ABORT, 'disk full'); END;";
+
+        private const string NoProjectsTrigger =
+            "CREATE TRIGGER no_projects BEFORE INSERT ON projects BEGIN SELECT RAISE(ABORT, 'disk full'); END;";
+
+        // Injects a write failure: the trigger text is one of the constants above, never input.
+        private void AddFailingTrigger(bool tombstones)
+        {
+            using var c = new SQLiteConnection($"Data Source={_dbPath}");
+            c.Open();
+            using var cmd = c.CreateCommand();
+            if (tombstones)
+                cmd.CommandText = NoTombstonesTrigger;
+            else
+                cmd.CommandText = NoProjectsTrigger;
+            cmd.ExecuteNonQuery();
+        }
+
+        // Pipeline Run 1 (Codex): a delete that cannot record its tombstone must fail, not succeed and leave a
+        // project.json that auto-add on cd would re-adopt.
+        [Fact]
+        public void Delete_fails_and_keeps_the_project_when_the_deletion_cannot_be_recorded()
+        {
+            using var db = new ProjectDatabase();
+            using var service = new ProjectService(db);
+            using var broker = new MessageBroker { ProjectService = service };
+            var p = FileProject.Create("FlexFriend", _folder);
+            p.Id = OldId;
+            service.SaveProject(p);
+            AddFailingTrigger(tombstones: true);
+
+            var result = broker.DeleteProject(OldId, "test");
+
+            Assert.False(result.Success);
+            Assert.NotNull(db.GetRichProject(OldId));
+        }
+
+        // Pipeline Run 1 (debugger + Codex): "new" puts the old file back when the create fails afterwards.
+        [Fact]
+        public void Start_new_puts_the_old_file_back_when_the_create_fails()
+        {
+            using var db = new ProjectDatabase();
+            using var service = new ProjectService(db);
+            using var broker = new MessageBroker { ProjectService = service };
+            RegisterThenDelete(service, broker, _folder);
+            AddFailingTrigger(tombstones: false);
+
+            var result = broker.CreateProject("FlexFriend", null, "agent", _folder, existingProject: "new");
+
+            Assert.False(result.Success);
+            Assert.True(File.Exists(Path.Combine(_folder, ".claude", "project.json")));
+            Assert.False(File.Exists(Path.Combine(_folder, ".claude", "project.json.old")));
+            Assert.Equal(OldId, service.LoadProject(_folder).Id);
+        }
+
+        // Pipeline Run 1 (debugger): an id that differs only in case is still the deleted project.
+        [Fact]
+        public void Auto_add_skips_a_deleted_project_whose_id_differs_in_case()
+        {
+            using var db = new ProjectDatabase();
+            using var service = new ProjectService(db);
+            using var broker = new MessageBroker { ProjectService = service };
+            RegisterThenDelete(service, broker, _folder);
+            var upper = service.LoadProject(_folder);
+            upper.Id = OldId.ToUpperInvariant();
+
+            Assert.True(service.IsDeletedProject(upper.Id));
+            Assert.False(service.AutoRegisterDiscoveredProject(_folder, upper));
+        }
+
         [Theory]
         [InlineData(false, 2)]
         [InlineData(true, 0)]

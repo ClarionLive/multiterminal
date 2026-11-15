@@ -6352,12 +6352,6 @@ namespace MultiTerminal
                 string projectFolder = wpfDialog.ProjectFolder;
                 System.IO.Directory.CreateDirectory(projectFolder); // no-op if already exists
 
-                // GitHub #102 "Start a new project here": set the old project's file aside, then create as usual.
-                if (wpfDialog.Decision == Services.NewProjectFolderDecision.StartNewHere)
-                {
-                    string kept = MCPServer.Services.MessageBroker.SetAsideProjectFile(wpfDialog.ExistingProject?.ProjectPath ?? projectFolder);
-                    _debugLogService?.Info("NewProject", $"Set the old project.json aside as {kept}");
-                }
 
                 // Converged creation path: the broker.CreateProject method is the shared
                 // entry point for both this UI dialog and the create_project MCP tool. It
@@ -6379,7 +6373,12 @@ namespace MultiTerminal
                         // Never reuse (task 9f95ab0c): reuse once wrote this dialog's name, an empty
                         // description and a fresh createdAt over the folder's existing project. An
                         // occupied folder is caught by the dialog; this refusal is the backstop.
-                        allowReuseExisting: false);
+                        allowReuseExisting: false,
+                        // GitHub #102 "Start a new project here": the broker sets the old project.json aside
+                        // under its create lock, and puts it back if the create fails.
+                        existingProject: wpfDialog.Decision == Services.NewProjectFolderDecision.StartNewHere
+                            ? Services.ExistingProjectChoice.New
+                            : null);
                     if (!createResult.Success || createResult.CreatedFileProject == null)
                         throw new InvalidOperationException(createResult.Error ?? "Failed to create project");
                     project = createResult.CreatedFileProject;
@@ -7536,7 +7535,8 @@ namespace MultiTerminal
             {
                 // Auto-register the discovered project (skipped when its id belongs to another folder)
                 _projectService.AutoRegisterDiscoveredProject(directory, discoveredProject);
-                _currentProject = discoveredProject;
+                // A project deleted in MT is not current, though its folder still holds project.json (GitHub #102).
+                _currentProject = _projectService.IsDeletedProject(discoveredProject?.Id) ? null : discoveredProject;
             }
         }
 
@@ -11155,7 +11155,9 @@ namespace MultiTerminal
                     {
                         _projectService.AutoRegisterDiscoveredProject(workingDir, project);
                     }
-                    _currentProject = project;
+
+                    // A project deleted in MT is not current, though its folder still holds project.json (GitHub #102).
+                    _currentProject = _projectService.IsDeletedProject(project.Id) ? null : project;
                     return;
                 }
             }

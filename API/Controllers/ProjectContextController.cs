@@ -64,7 +64,7 @@ namespace MultiTerminal.API.Controllers
                 return Problem(detail: $"Failed to create project folder: {ex.Message}", statusCode: 400);
             }
 
-            if (request.ExistingProject != null && request.ExistingProject != "restore" && request.ExistingProject != "new")
+            if (!MultiTerminal.Services.ExistingProjectChoice.IsValid(request.ExistingProject))
                 return Problem(detail: "existingProject must be \"restore\" or \"new\"", statusCode: 400);
 
             var result = _broker.CreateProject(

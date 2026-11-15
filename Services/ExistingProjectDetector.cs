@@ -140,6 +140,22 @@ namespace MultiTerminal.Services
     /// <summary>
     /// What the New Project flow should do once the folder has been checked.
     /// </summary>
+    /// <summary>
+    /// The values of create_project's existingProject (REST and MCP) for a folder holding an unregistered
+    /// project's project.json (GitHub #102).
+    /// </summary>
+    public static class ExistingProjectChoice
+    {
+        /// <summary>Bring the folder's project back: its id, settings and kept tasks.</summary>
+        public const string Restore = "restore";
+
+        /// <summary>Set the old project.json aside as project.json.old and create a new project (new id).</summary>
+        public const string New = "new";
+
+        /// <summary>True for null (no choice) and for the two known values.</summary>
+        public static bool IsValid(string value) => value == null || value == Restore || value == New;
+    }
+
     public enum NewProjectFolderDecision
     {
         /// <summary>
@@ -490,14 +506,6 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// The New Project dialog's decision for a folder. <paramref name="ask"/> is called only when a
-        /// project already exists there; it never returns <see cref="NewProjectFolderDecision.CreateNew"/>
-        /// for an occupied folder, whatever <paramref name="ask"/> answers: a second project on one
-        /// folder is not offered (Owner decision, 2026-10-02). Nor does it return Open/Rename when the
-        /// match carries a <see cref="ExistingProjectMatch.Problem"/>: those would act on the wrong
-        /// project, or on a file nobody can read.
-        /// </summary>
-        /// <summary>
         /// One sentence describing an unregistered project's file (GitHub #102): name, id, creation date, and
         /// whether it was deleted in MT (with the date) or was never registered here.
         /// </summary>
@@ -512,6 +520,14 @@ namespace MultiTerminal.Services
             return $"This folder holds the project '{match.ProjectName}' (id {match.ProjectId}{created}), which {state}.";
         }
 
+        /// <summary>
+        /// The New Project dialog's decision for a folder. <paramref name="ask"/> is called only when a
+        /// project already exists there; it never returns <see cref="NewProjectFolderDecision.CreateNew"/>
+        /// for an occupied folder, whatever <paramref name="ask"/> answers: a second project on one
+        /// folder is not offered (Owner decision, 2026-10-02). Nor does it return Open/Rename when the
+        /// match carries a <see cref="ExistingProjectMatch.Problem"/>: those would act on the wrong
+        /// project, or on a file nobody can read.
+        /// </summary>
         public static NewProjectFolderDecision Decide(ExistingProjectMatch match, Func<ExistingProjectMatch, NewProjectFolderDecision> ask)
         {
             if (match == null || !match.Exists)

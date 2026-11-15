@@ -233,6 +233,13 @@ namespace MultiTerminal.Services
         /// another project, and the re-save would rebind that project's row to this folder
         /// (task 9f95ab0c Run 2). Returns true when it registered.
         /// </summary>
+        /// <summary>
+        /// True when this id belongs to a project deleted in MT and not restored (GitHub #102): such a folder
+        /// is not the current project, and auto-add on cd skips it.
+        /// </summary>
+        public bool IsDeletedProject(string projectId) =>
+            !string.IsNullOrWhiteSpace(projectId) && _projectDb.GetRichProject(projectId) == null && _projectDb.GetDeletedAt(projectId) != null;
+
         public bool AutoRegisterDiscoveredProject(string directory, Project discovered)
         {
             if (discovered == null || string.IsNullOrEmpty(directory) || string.IsNullOrWhiteSpace(discovered.Id))

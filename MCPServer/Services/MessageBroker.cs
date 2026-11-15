@@ -6114,23 +6114,37 @@ namespace MultiTerminal.MCPServer.Services
                     {
                         // GitHub #102: a leftover project.json of a deleted (or copied) project is never adopted
                         // silently. The caller must say which: restore it, or start a new project here.
-                        if (string.Equals(existingProject, "restore", StringComparison.Ordinal))
+                        if (string.Equals(existingProject, ExistingProjectChoice.Restore, StringComparison.Ordinal))
                         {
                             result = AdoptExistingProjectLocked(existing, createdBy, out activity);
                             return;
                         }
 
-                        if (string.Equals(existingProject, "new", StringComparison.Ordinal))
+                        if (string.Equals(existingProject, ExistingProjectChoice.New, StringComparison.Ordinal))
                         {
-                            try { SetAsideProjectFile(existing.ProjectPath ?? path); }
+                            string folderWithFile = existing.ProjectPath ?? path;
+                            string kept;
+                            try { kept = SetAsideProjectFile(folderWithFile); }
                             catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
                             {
                                 result = new CreateProjectResult { Success = false, FolderOccupied = true, ExistingProjectId = existing.ProjectId, Error = $"Could not set the old project.json aside: {ex.Message}" };
                                 return;
                             }
 
-                            result = CreateNewProjectLocked(name, description, createdBy, path, teamLead, defaultTerminal,
-                                projectType, currentVersion, out activity);
+                            // A failed create puts the old file back, so the folder is not left with only
+                            // project.json.old (pipeline Run 1, debugger + Codex).
+                            bool created = false;
+                            try
+                            {
+                                result = CreateNewProjectLocked(name, description, createdBy, path, teamLead, defaultTerminal,
+                                    projectType, currentVersion, out activity);
+                                created = result != null && result.Success;
+                            }
+                            finally
+                            {
+                                if (!created) RestoreSetAsideProjectFile(folderWithFile, kept);
+                            }
+
                             return;
                         }
 
@@ -6584,6 +6598,24 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Puts a project.json set aside by <see cref="SetAsideProjectFile"/> back, when a create after it
+        /// failed. Never overwrites a project.json that exists again by then. Best-effort: logs and returns.
+        /// </summary>
+        private void RestoreSetAsideProjectFile(string folder, string kept)
+        {
+            try
+            {
+                string file = System.IO.Path.Combine(folder, ".claude", "project.json");
+                if (!System.IO.File.Exists(file) && System.IO.File.Exists(kept))
+                    System.IO.File.Move(kept, file);
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                LogError($"Could not put {kept} back as project.json after a failed create: {ex.Message}");
+            }
+        }
+
+        /// <summary>
         /// Sets a folder's .claude/project.json aside as project.json.old (project.json.old2, ... when taken),
         /// so a new project can be created in the folder (GitHub #102, "Start a new project here"). Returns
         /// the backup's path. Throws when the file cannot be moved; nothing is created then.
@@ -6903,8 +6935,11 @@ namespace MultiTerminal.MCPServer.Services
         ///    the root's FileSystemWatcher) AND deletes .claude/project.json when asked;
         ///  - its stale code-graph rows evicted via the gated <see cref="CodeGraphIndexCoordinator"/>;
         ///  - broadcast + recorded in the activity feed.
-        /// Associated tasks are intentionally NOT deleted. <paramref name="deleteLocalConfig"/> also
-        /// removes the on-disk .claude/project.json (default false = unregister only).
+        /// The deletion is recorded in deleted_projects BEFORE the unregister, and the delete fails if it
+        /// cannot be, so a leftover project.json is never re-adopted silently (GitHub #102).
+        /// Tasks are kept unless <paramref name="deleteTasks"/> is set (the delete dialog asks; a kept
+        /// task comes back with a restore). <paramref name="deleteLocalConfig"/> also removes the on-disk
+        /// .claude/project.json (default false = unregister only).
         /// </summary>
         public DeleteProjectResult DeleteProject(string projectId, string deletedBy, bool deleteLocalConfig = false, bool deleteTasks = false)
         {
@@ -6919,6 +6954,17 @@ namespace MultiTerminal.MCPServer.Services
                 return new DeleteProjectResult { Success = false, Error = $"Project not found: {projectId}" };
 
             string projectName = rich?.Name ?? cached?.Name ?? projectId;
+
+            // GitHub #102: remember the deletion FIRST, so there is no moment when the row is gone and the
+            // tombstone is not there (auto-add on cd would re-adopt the leftover project.json then). If it
+            // cannot be recorded, the project is not deleted (pipeline Run 1, Codex).
+            try { _projectDb.RecordDeletedProject(projectId, projectName, rich?.Path ?? cached?.Path); }
+            catch (Exception ex)
+            {
+                LogError($"Failed to record the deletion of project {projectId}: {ex.Message}");
+                if (cached != null) _projects.TryAdd(projectId, cached);
+                return new DeleteProjectResult { Success = false, Error = $"Failed to delete project: could not record the deletion ({ex.Message})" };
+            }
 
             // Canonical unregister: DB delete + optional .claude/project.json + fires
             // ProjectRemoved/RegistryChangedExternally (CodeGraphWatcher reconciles and drops the
@@ -6937,13 +6983,10 @@ namespace MultiTerminal.MCPServer.Services
             {
                 LogError($"Failed to delete project {projectId}: {ex.Message}");
                 if (cached != null) _projects.TryAdd(projectId, cached);
+                try { _projectDb.ForgetDeletedProject(projectId); } // not deleted after all
+                catch (Exception forgetEx) { LogError($"Failed to forget the deletion of project {projectId}: {forgetEx.Message}"); }
                 return new DeleteProjectResult { Success = false, Error = $"Failed to delete project: {ex.Message}" };
             }
-
-            // GitHub #102: remember the deletion, so a leftover project.json with this id is offered as
-            // "Restore it" rather than adopted silently (New Project, create_project, auto-add on cd).
-            try { _projectDb.RecordDeletedProject(projectId, projectName, rich?.Path ?? cached?.Path); }
-            catch (Exception ex) { LogError($"Failed to record the deletion of project {projectId}: {ex.Message}"); }
 
             // The Owner chose in the delete dialog (GitHub #102): kept tasks come back with a restore.
             int tasksDeleted = 0;
