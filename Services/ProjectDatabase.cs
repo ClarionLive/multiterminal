@@ -276,7 +276,7 @@ namespace MultiTerminal.Services
                 -- Projects deleted in MT (GitHub #102, ticket da0fcff8): a leftover .claude/project.json
                 -- carrying one of these ids is never re-adopted silently; New Project offers Restore or New.
                 CREATE TABLE IF NOT EXISTS deleted_projects (
-                    id TEXT PRIMARY KEY COLLATE NOCASE,
+                    id TEXT PRIMARY KEY COLLATE NOCASE, -- the reads also say COLLATE NOCASE, whatever this table was created with
                     name TEXT,
                     path TEXT,
                     deleted_at DATETIME NOT NULL
@@ -706,7 +706,7 @@ namespace MultiTerminal.Services
             if (string.IsNullOrWhiteSpace(projectId)) return null;
             lock (_dbLock)
             {
-                using var command = new SQLiteCommand("SELECT deleted_at FROM deleted_projects WHERE id = @id", _connection);
+                using var command = new SQLiteCommand("SELECT deleted_at FROM deleted_projects WHERE id = @id COLLATE NOCASE", _connection);
                 command.Parameters.AddWithValue("@id", projectId);
                 var value = command.ExecuteScalar();
                 // deleted_at is only ever written as DateTime.UtcNow (RecordDeletedProject), so it is UTC.
@@ -721,7 +721,7 @@ namespace MultiTerminal.Services
             using var writeGate = SqliteWriteGate.EnterWrite("ProjectDatabase.ForgetDeletedProject", projectId);
             lock (_dbLock)
             {
-                using var command = new SQLiteCommand("DELETE FROM deleted_projects WHERE id = @id", _connection);
+                using var command = new SQLiteCommand("DELETE FROM deleted_projects WHERE id = @id COLLATE NOCASE", _connection);
                 command.Parameters.AddWithValue("@id", projectId);
                 command.ExecuteNonQuery();
             }

@@ -206,6 +206,51 @@ namespace MultiTerminal.Tests
             Assert.False(service.AutoRegisterDiscoveredProject(_folder, upper));
         }
 
+        // Pipeline Run 2 (Codex): UnregisterProject removes the row and then raises its events. A throwing
+        // listener must not make the delete forget its tombstone, or the leftover file is re-adopted.
+        [Fact]
+        public void A_failing_removal_listener_keeps_the_tombstone_of_a_committed_delete()
+        {
+            using var db = new ProjectDatabase();
+            using var service = new ProjectService(db);
+            using var broker = new MessageBroker { ProjectService = service };
+            var p = FileProject.Create("FlexFriend", _folder);
+            p.Id = OldId;
+            service.SaveProject(p);
+            service.ProjectRemoved += (_, _) => throw new InvalidOperationException("listener failed");
+
+            var result = broker.DeleteProject(OldId, "test");
+
+            Assert.True(result.Success, result.Error);
+            Assert.Null(db.GetRichProject(OldId));
+            Assert.NotNull(db.GetDeletedAt(OldId));
+            Assert.False(service.AutoRegisterDiscoveredProject(_folder, service.LoadProject(_folder)));
+        }
+
+        // Pipeline Run 2 (Codex): a deleted_projects table created without COLLATE NOCASE (CREATE TABLE IF NOT
+        // EXISTS never alters it) still matches an id that differs only in case.
+        [Fact]
+        public void A_table_created_without_nocase_still_matches_ids_in_any_case()
+        {
+            using (var c = new SQLiteConnection($"Data Source={_dbPath}"))
+            {
+                c.Open();
+                using var cmd = c.CreateCommand();
+                cmd.CommandText = OldSchemaTable;
+                cmd.ExecuteNonQuery();
+            }
+
+            using var db = new ProjectDatabase();
+            db.RecordDeletedProject(OldId, "FlexFriend", _folder);
+
+            Assert.NotNull(db.GetDeletedAt(OldId.ToUpperInvariant()));
+            db.ForgetDeletedProject(OldId.ToUpperInvariant());
+            Assert.Null(db.GetDeletedAt(OldId));
+        }
+
+        private const string OldSchemaTable =
+            "CREATE TABLE deleted_projects (id TEXT PRIMARY KEY, name TEXT, path TEXT, deleted_at DATETIME NOT NULL);";
+
         [Theory]
         [InlineData(false, 2)]
         [InlineData(true, 0)]

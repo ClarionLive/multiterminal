@@ -6981,11 +6981,29 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                LogError($"Failed to delete project {projectId}: {ex.Message}");
-                if (cached != null) _projects.TryAdd(projectId, cached);
-                try { _projectDb.ForgetDeletedProject(projectId); } // not deleted after all
-                catch (Exception forgetEx) { LogError($"Failed to forget the deletion of project {projectId}: {forgetEx.Message}"); }
-                return new DeleteProjectResult { Success = false, Error = $"Failed to delete project: {ex.Message}" };
+                // UnregisterProject deletes the row and THEN raises its events, so an exception does not mean
+                // the project is still there (pipeline Run 2, Codex). Only a row that is still there undoes
+                // the delete; a committed delete keeps its tombstone and carries on. Unknown keeps it too: a
+                // tombstone beside a registered row changes nothing (auto-add and create check the row first).
+                bool rowStillThere;
+                try { rowStillThere = _projectDb.GetRichProject(projectId) != null; }
+                catch (Exception checkEx)
+                {
+                    LogError($"Failed to delete project {projectId}: {ex.Message}; could not check its row: {checkEx.Message}");
+                    if (cached != null) _projects.TryAdd(projectId, cached);
+                    return new DeleteProjectResult { Success = false, Error = $"Failed to delete project: {ex.Message}" };
+                }
+
+                if (rowStillThere)
+                {
+                    LogError($"Failed to delete project {projectId}: {ex.Message}");
+                    if (cached != null) _projects.TryAdd(projectId, cached);
+                    try { _projectDb.ForgetDeletedProject(projectId); } // not deleted after all
+                    catch (Exception forgetEx) { LogError($"Failed to forget the deletion of project {projectId}: {forgetEx.Message}"); }
+                    return new DeleteProjectResult { Success = false, Error = $"Failed to delete project: {ex.Message}" };
+                }
+
+                LogError($"Project {projectId} was deleted, but a listener of its removal failed: {ex.Message}");
             }
 
             // The Owner chose in the delete dialog (GitHub #102): kept tasks come back with a restore.
