@@ -149,5 +149,21 @@ namespace MultiTerminal.Tests
             Assert.Empty(failing.CheckAndFlagStaleTasks());
             Assert.Empty(throwing.CheckAndFlagStaleTasks());
         }
+        [Fact]
+        public void A_cached_task_whose_row_is_gone_is_not_reported_as_flagged()
+        {
+            using var broker = new MessageBroker();
+            string id = broker.CreateTask("cached only", "desc", "tester").TaskId;
+            using (var c = new SQLiteConnection($"Data Source={_dbPath}"))
+            {
+                c.Open();
+                using var del = new SQLiteCommand("DELETE FROM tasks WHERE id = @id", c);
+                del.Parameters.AddWithValue("@id", id);
+                Assert.Equal(1, del.ExecuteNonQuery());
+            }
+
+            Assert.False(broker.FlagTaskStale(id, 1));
+            Assert.Equal(0, broker.GetTask(id).StaleLevel); // the cache was not changed either
+        }
     }
 }

@@ -3493,12 +3493,6 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Clear stale tracking when a task is un-paused or becomes active again.
-        /// Resets stale_level to 0 and clears stale_response.
-        /// </summary>
-        /// <param name="taskId">The task ID to clear.</param>
-        /// <returns>True if task was updated, false if task not found.</returns>
-        /// <summary>
         /// The "still relevant" answer to a stale reminder (ticket 28845a5f): clears the stale tracking like
         /// <see cref="ClearStaleTracking"/> AND restarts the 7-day clock, so the hourly check does not flag the
         /// task again at once. paused_at moves to <paramref name="now"/> only while the task is still paused.
@@ -3525,6 +3519,12 @@ namespace MultiTerminal.Services
             return command.ExecuteNonQuery() > 0;
         }
 
+        /// <summary>
+        /// Clear stale tracking when a task is un-paused or becomes active again.
+        /// Resets stale_level to 0 and clears stale_response.
+        /// </summary>
+        /// <param name="taskId">The task ID to clear.</param>
+        /// <returns>True if task was updated, false if task not found.</returns>
         public bool ClearStaleTracking(string taskId)
         {
             using var gate = LockConn();

@@ -4026,7 +4026,13 @@ namespace MultiTerminal.MCPServer.Services
                     t.FlaggedStaleAt = now;
                     t.StaleNotifiedAt = now;
                     t.UpdatedAt = now;
-                }, _ => _taskDb.UpdateStaleLevel(taskId, level));
+                }, _ =>
+                {
+                    // A cached task whose row is gone (or drifted) must not be reported as flagged, or it would
+                    // be reminded about with nothing stored (pipeline Run 2, Codex). Throwing keeps the cache as it was.
+                    if (!_taskDb.UpdateStaleLevel(taskId, level))
+                        throw new InvalidOperationException($"No row for task {taskId}");
+                });
                 if (updated == null)
                     return _taskDb.UpdateStaleLevel(taskId, level);
                 BroadcastTaskUpdate(); // the board shows the stale state from the cache
