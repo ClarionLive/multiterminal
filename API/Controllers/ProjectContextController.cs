@@ -64,6 +64,9 @@ namespace MultiTerminal.API.Controllers
                 return Problem(detail: $"Failed to create project folder: {ex.Message}", statusCode: 400);
             }
 
+            if (request.ExistingProject != null && request.ExistingProject != "restore" && request.ExistingProject != "new")
+                return Problem(detail: "existingProject must be \"restore\" or \"new\"", statusCode: 400);
+
             var result = _broker.CreateProject(
                 name: request.Name,
                 description: request.Description,
@@ -72,7 +75,8 @@ namespace MultiTerminal.API.Controllers
                 teamLead: request.TeamLead,
                 defaultTerminal: request.DefaultTerminal,
                 projectType: request.ProjectType,
-                currentVersion: request.CurrentVersion);
+                currentVersion: request.CurrentVersion,
+                existingProject: request.ExistingProject);
 
             // An occupied folder is a conflict, not a malformed request (task 9f95ab0c). The detail
             // names the existing id (or says the project.json is unreadable); nothing is reused or overwritten.
@@ -426,6 +430,12 @@ namespace MultiTerminal.API.Controllers
             public string ProjectType { get; set; }
             public string CurrentVersion { get; set; }
             public string CreatedBy { get; set; }
+
+            /// <summary>
+            /// For a folder holding an unregistered project's .claude/project.json (GitHub #102): "restore" brings
+            /// that project back, "new" sets the file aside and creates a new project. Null refuses with a 409.
+            /// </summary>
+            public string ExistingProject { get; set; }
         }
 
         public class UpdateProjectRequest

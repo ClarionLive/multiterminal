@@ -239,6 +239,12 @@ namespace MultiTerminal.Services
                 return false;
 
             var registered = _projectDb.GetRichProject(discovered.Id);
+
+            // GitHub #102 (Owner decision): a project deleted in MT never comes back by cd-ing into its folder.
+            // Restoring it is New Project's "Restore it". Folders MT has never seen are still auto-added.
+            if (registered == null && _projectDb.GetDeletedAt(discovered.Id) != null)
+                return false;
+
             if (registered != null)
             {
                 // SaveProject stores a worktree folder as its repo root, so compare against that.

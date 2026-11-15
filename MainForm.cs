@@ -4806,18 +4806,28 @@ namespace MultiTerminal
             {
                 Caption = "Delete Project",
                 Heading = $"Delete project '{name}' from MultiTerminal?",
-                Text = "The project is unregistered and its code-graph data removed. Tasks are not deleted.",
+                Text = "The project is unregistered and its code-graph data removed.",
                 Icon = TaskDialogIcon.Warning,
                 DefaultButton = cancelButton,
                 Verification = new TaskDialogVerificationCheckBox("Also delete the project's .claude/project.json config"),
             };
+
+            // GitHub #102 (Owner decision): ask about the tasks; keeping them is the default.
+            int taskCount = broker.GetTasks(projectId)?.Count ?? 0;
+            var keepTasks = new TaskDialogRadioButton($"Keep its {taskCount} task{(taskCount == 1 ? "" : "s")} (they come back if you restore the project)") { Checked = true };
+            var deleteTasks = new TaskDialogRadioButton($"Also delete its {taskCount} task{(taskCount == 1 ? "" : "s")}");
+            if (taskCount > 0)
+            {
+                page.RadioButtons.Add(keepTasks);
+                page.RadioButtons.Add(deleteTasks);
+            }
             page.Buttons.Add(deleteButton);
             page.Buttons.Add(cancelButton);
             var ownerHandle = owner?.Handle ?? Handle;
             if (TaskDialog.ShowDialog(ownerHandle, page) != deleteButton) return false;
             bool deleteLocalConfig = page.Verification.Checked;
 
-            var result = broker.DeleteProject(projectId, "ui", deleteLocalConfig: deleteLocalConfig);
+            var result = broker.DeleteProject(projectId, "ui", deleteLocalConfig: deleteLocalConfig, deleteTasks: taskCount > 0 && deleteTasks.Checked);
             if (!result.Success)
             {
                 MessageBox.Show(
@@ -6330,7 +6340,8 @@ namespace MultiTerminal
             if (wpfDialog.ShowDialog() != true) return;
 
             // The folder already had a project and the user chose Open or Rename (task 9f95ab0c).
-            if (wpfDialog.Decision != Services.NewProjectFolderDecision.CreateNew)
+            if (wpfDialog.Decision != Services.NewProjectFolderDecision.CreateNew
+                && wpfDialog.Decision != Services.NewProjectFolderDecision.StartNewHere)
             {
                 LaunchExistingFromNewProject(sourceDoc, wpfDialog);
                 return;
@@ -6340,6 +6351,13 @@ namespace MultiTerminal
             {
                 string projectFolder = wpfDialog.ProjectFolder;
                 System.IO.Directory.CreateDirectory(projectFolder); // no-op if already exists
+
+                // GitHub #102 "Start a new project here": set the old project's file aside, then create as usual.
+                if (wpfDialog.Decision == Services.NewProjectFolderDecision.StartNewHere)
+                {
+                    string kept = MCPServer.Services.MessageBroker.SetAsideProjectFile(wpfDialog.ExistingProject?.ProjectPath ?? projectFolder);
+                    _debugLogService?.Info("NewProject", $"Set the old project.json aside as {kept}");
+                }
 
                 // Converged creation path: the broker.CreateProject method is the shared
                 // entry point for both this UI dialog and the create_project MCP tool. It

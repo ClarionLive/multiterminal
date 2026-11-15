@@ -273,6 +273,15 @@ namespace MultiTerminal.Services
                 );
                 CREATE INDEX IF NOT EXISTS idx_project_specialist_agents_project ON project_specialist_agents(project_id);
 
+                -- Projects deleted in MT (GitHub #102, ticket da0fcff8): a leftover .claude/project.json
+                -- carrying one of these ids is never re-adopted silently; New Project offers Restore or New.
+                CREATE TABLE IF NOT EXISTS deleted_projects (
+                    id TEXT PRIMARY KEY,
+                    name TEXT,
+                    path TEXT,
+                    deleted_at DATETIME NOT NULL
+                );
+
                 -- Important paths for a project
                 CREATE TABLE IF NOT EXISTS project_paths (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -677,6 +686,49 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Delete a project by ID.
         /// </summary>
+        /// <summary>Remembers that a project was deleted in MT (GitHub #102). A later delete of the same id replaces it.</summary>
+        public void RecordDeletedProject(string projectId, string name, string path)
+        {
+            if (string.IsNullOrWhiteSpace(projectId)) return;
+            using var writeGate = SqliteWriteGate.EnterWrite("ProjectDatabase.RecordDeletedProject", projectId);
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand(
+                    "INSERT OR REPLACE INTO deleted_projects (id, name, path, deleted_at) VALUES (@id, @name, @path, @at)", _connection);
+                command.Parameters.AddWithValue("@id", projectId);
+                command.Parameters.AddWithValue("@name", (object)name ?? DBNull.Value);
+                command.Parameters.AddWithValue("@path", (object)path ?? DBNull.Value);
+                command.Parameters.AddWithValue("@at", DateTime.UtcNow);
+                command.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>When the project with this id was deleted in MT (UTC), or null if it never was.</summary>
+        public DateTime? GetDeletedAt(string projectId)
+        {
+            if (string.IsNullOrWhiteSpace(projectId)) return null;
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand("SELECT deleted_at FROM deleted_projects WHERE id = @id", _connection);
+                command.Parameters.AddWithValue("@id", projectId);
+                var value = command.ExecuteScalar();
+                return value == null || value == DBNull.Value ? null : DateTime.SpecifyKind(Convert.ToDateTime(value, System.Globalization.CultureInfo.InvariantCulture), DateTimeKind.Utc);
+            }
+        }
+
+        /// <summary>Forgets a deletion: the project with this id was restored (GitHub #102).</summary>
+        public void ForgetDeletedProject(string projectId)
+        {
+            if (string.IsNullOrWhiteSpace(projectId)) return;
+            using var writeGate = SqliteWriteGate.EnterWrite("ProjectDatabase.ForgetDeletedProject", projectId);
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand("DELETE FROM deleted_projects WHERE id = @id", _connection);
+                command.Parameters.AddWithValue("@id", projectId);
+                command.ExecuteNonQuery();
+            }
+        }
+
         public bool DeleteProject(string projectId)
         {
             // One transaction: the child rows, then the project row (task 9f95ab0c Run 4). The child tables

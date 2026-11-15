@@ -122,6 +122,19 @@ namespace MultiTerminal.Services
 
         /// <summary>The folder's parsed project.json (null when absent or unreadable), so callers need not parse it again.</summary>
         public MultiTerminal.Models.Project ProjectJson { get; }
+
+        /// <summary>
+        /// When the folder's project was deleted in MT (UTC), for a folder with only a project.json; null when
+        /// it never was (a copy, or a folder from another machine). Set by the broker from deleted_projects
+        /// (GitHub #102).
+        /// </summary>
+        public DateTime? DeletedAt { get; internal set; }
+
+        /// <summary>
+        /// The folder holds a readable project.json whose project is not registered in MT: Restore and Start new
+        /// are the choices, never a silent adopt (GitHub #102).
+        /// </summary>
+        public bool IsUnregisteredProjectFile => Source == ExistingProjectSource.ProjectJson && CanOpenOrRename && ProjectJson != null;
     }
 
     /// <summary>
@@ -129,6 +142,12 @@ namespace MultiTerminal.Services
     /// </summary>
     public enum NewProjectFolderDecision
     {
+        /// <summary>
+        /// The folder holds an unregistered project's project.json: keep that file as project.json.old and
+        /// create a new project, with a new id, in the folder (GitHub #102).
+        /// </summary>
+        StartNewHere,
+
         /// <summary>The folder is free: create a new project.</summary>
         CreateNew,
 
@@ -478,6 +497,21 @@ namespace MultiTerminal.Services
         /// match carries a <see cref="ExistingProjectMatch.Problem"/>: those would act on the wrong
         /// project, or on a file nobody can read.
         /// </summary>
+        /// <summary>
+        /// One sentence describing an unregistered project's file (GitHub #102): name, id, creation date, and
+        /// whether it was deleted in MT (with the date) or was never registered here.
+        /// </summary>
+        public static string DescribeUnregistered(ExistingProjectMatch match)
+        {
+            if (match == null || !match.IsUnregisteredProjectFile) return null;
+            var file = match.ProjectJson;
+            string created = file.CreatedAt == default ? "" : $", created {file.CreatedAt.ToLocalTime():yyyy-MM-dd}";
+            string state = match.DeletedAt is DateTime deleted
+                ? $"was deleted from MultiTerminal on {deleted.ToLocalTime():yyyy-MM-dd}"
+                : "is not registered in MultiTerminal (a copied folder, or one from another machine)";
+            return $"This folder holds the project '{match.ProjectName}' (id {match.ProjectId}{created}), which {state}.";
+        }
+
         public static NewProjectFolderDecision Decide(ExistingProjectMatch match, Func<ExistingProjectMatch, NewProjectFolderDecision> ask)
         {
             if (match == null || !match.Exists)
@@ -486,6 +520,8 @@ namespace MultiTerminal.Services
             var answer = ask?.Invoke(match) ?? NewProjectFolderDecision.Cancel;
             if (answer == NewProjectFolderDecision.CreateNew)
                 return NewProjectFolderDecision.Cancel;
+            if (answer == NewProjectFolderDecision.StartNewHere && !match.IsUnregisteredProjectFile)
+                return NewProjectFolderDecision.Cancel; // only a leftover, unregistered file may be set aside
             if (!match.CanOpenOrRename
                 && (answer == NewProjectFolderDecision.OpenExisting || answer == NewProjectFolderDecision.RenameExisting))
                 return NewProjectFolderDecision.Cancel;
