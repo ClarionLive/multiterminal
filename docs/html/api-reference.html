@@ -2497,6 +2497,8 @@ ws.onmessage = (e) => { /* handle terminal output */ };</code></pre>
 
   <div class="endpoint-block">
     <span class="method post">POST</span> <code>/api/projects</code>
+  
+    <p>A folder holding the <code>.claude/project.json</code> of a project MT does not have (deleted in MT, or copied) is refused with 409 and a description of that project (GitHub #102). Call again with <code>"existingProject": "restore"</code> to bring that project back (its id, settings and tasks), or <code>"new"</code> to start a new project there with a new id (the old file is kept as <code>.claude/project.json.old</code>).</p>
   </div>
 
   <div class="endpoint-block">

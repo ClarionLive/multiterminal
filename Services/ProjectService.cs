@@ -244,12 +244,25 @@ namespace MultiTerminal.Services
         /// another project, and the re-save would rebind that project's row to this folder
         /// (task 9f95ab0c Run 2). Returns true when it registered.
         /// </summary>
+        /// <summary>
+        /// True when this id belongs to a project deleted in MT and not restored (GitHub #102): such a folder
+        /// is not the current project, and auto-add on cd skips it.
+        /// </summary>
+        public bool IsDeletedProject(string projectId) =>
+            !string.IsNullOrWhiteSpace(projectId) && _projectDb.GetRichProject(projectId) == null && _projectDb.GetDeletedAt(projectId) != null;
+
         public bool AutoRegisterDiscoveredProject(string directory, Project discovered)
         {
             if (discovered == null || string.IsNullOrEmpty(directory) || string.IsNullOrWhiteSpace(discovered.Id))
                 return false;
 
             var registered = _projectDb.GetRichProject(discovered.Id);
+
+            // GitHub #102 (Owner decision): a project deleted in MT never comes back by cd-ing into its folder.
+            // Restoring it is New Project's "Restore it". Folders MT has never seen are still auto-added.
+            if (registered == null && _projectDb.GetDeletedAt(discovered.Id) != null)
+                return false;
+
             if (registered != null)
             {
                 // SaveProject stores a worktree folder as its repo root, so compare against that.
@@ -287,13 +300,14 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Removes a project from SQLite.
-        /// Optionally deletes the .claude/project.json file.
+        /// Optionally deletes the .claude/project.json file. Returns the removal listeners' exceptions (each
+        /// listener runs on its own; see <see cref="NotifyProjectRemoved"/>) for the caller to log.
         /// </summary>
-        public void UnregisterProject(string projectId, bool deleteLocalConfig = false)
+        public IReadOnlyList<Exception> UnregisterProject(string projectId, bool deleteLocalConfig = false)
         {
             var richProject = _projectDb.GetRichProject(projectId);
             if (richProject == null)
-                return;
+                return Array.Empty<Exception>();
 
             if (deleteLocalConfig && !string.IsNullOrEmpty(richProject.Path))
             {
@@ -313,8 +327,9 @@ namespace MultiTerminal.Services
 
             _projectDb.DeleteProject(projectId);
 
-            ProjectRemoved?.Invoke(this, new ProjectEventArgs(richProject));
-            RegistryChangedExternally?.Invoke(this, EventArgs.Empty);
+            // The row is gone: tell every listener, each on its own, so one that throws cannot stop the others
+            // (CodeGraphWatcher among them) or RegistryChangedExternally (GitHub #102 pipeline Run 3, Codex).
+            return NotifyProjectRemoved(richProject);
         }
 
         /// <summary>

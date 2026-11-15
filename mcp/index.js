@@ -1535,6 +1535,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "Initial semantic version (default '0.1.0').",
             },
+            existingProject: {
+              type: "string",
+              enum: ["restore", "new"],
+              description: "Only when a create was refused because the folder holds the .claude/project.json of a project that is not registered (deleted in MT, or copied). Ask the Owner, then pass \"restore\" to bring that project back (its id, settings and tasks) or \"new\" to start a new project there (new id; the old file is kept as .claude\\project.json.old).",
+            },
             createdBy: {
               type: "string",
               description: "Agent name attributed as the creator. Defaults to 'api' when omitted.",
@@ -4539,6 +4544,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           projectType: args.projectType || null,
           currentVersion: args.currentVersion || null,
           createdBy: args.createdBy || null,
+          existingProject: args.existingProject || null,
         };
         const result = await apiCall("/api/projects", "POST", body);
         let text = `✅ Project created.\n`;
