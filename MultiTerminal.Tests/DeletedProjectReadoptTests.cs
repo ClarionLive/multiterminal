@@ -206,8 +206,9 @@ namespace MultiTerminal.Tests
             Assert.False(service.AutoRegisterDiscoveredProject(_folder, upper));
         }
 
-        // Pipeline Run 2 (Codex): UnregisterProject removes the row and then raises its events. A throwing
-        // listener must not make the delete forget its tombstone, or the leftover file is re-adopted.
+        // Pipeline Runs 2 and 3 (Codex): UnregisterProject removes the row and then raises its events. A throwing
+        // listener must not make the delete forget its tombstone (the leftover file would be re-adopted), nor
+        // stop the listeners after it or RegistryChangedExternally (CodeGraphWatcher reconciles on those).
         [Fact]
         public void A_failing_removal_listener_keeps_the_tombstone_of_a_committed_delete()
         {
@@ -218,10 +219,15 @@ namespace MultiTerminal.Tests
             p.Id = OldId;
             service.SaveProject(p);
             service.ProjectRemoved += (_, _) => throw new InvalidOperationException("listener failed");
+            bool laterListenerRan = false, registryChangedRan = false;
+            service.ProjectRemoved += (_, _) => laterListenerRan = true;
+            service.RegistryChangedExternally += (_, _) => registryChangedRan = true;
 
             var result = broker.DeleteProject(OldId, "test");
 
             Assert.True(result.Success, result.Error);
+            Assert.True(laterListenerRan);
+            Assert.True(registryChangedRan);
             Assert.Null(db.GetRichProject(OldId));
             Assert.NotNull(db.GetDeletedAt(OldId));
             Assert.False(service.AutoRegisterDiscoveredProject(_folder, service.LoadProject(_folder)));

@@ -6975,7 +6975,10 @@ namespace MultiTerminal.MCPServer.Services
             try
             {
                 if (ProjectService != null)
-                    ProjectService.UnregisterProject(projectId, deleteLocalConfig);
+                {
+                    foreach (var failure in ProjectService.UnregisterProject(projectId, deleteLocalConfig))
+                        LogError($"Project {projectId} was deleted, but a listener of its removal failed: {failure.Message}");
+                }
                 else
                     _projectDb.DeleteProject(projectId);
             }

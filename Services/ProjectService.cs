@@ -289,13 +289,14 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Removes a project from SQLite.
-        /// Optionally deletes the .claude/project.json file.
+        /// Optionally deletes the .claude/project.json file. Returns the removal listeners' exceptions (each
+        /// listener runs on its own; see <see cref="NotifyProjectRemoved"/>) for the caller to log.
         /// </summary>
-        public void UnregisterProject(string projectId, bool deleteLocalConfig = false)
+        public IReadOnlyList<Exception> UnregisterProject(string projectId, bool deleteLocalConfig = false)
         {
             var richProject = _projectDb.GetRichProject(projectId);
             if (richProject == null)
-                return;
+                return Array.Empty<Exception>();
 
             if (deleteLocalConfig && !string.IsNullOrEmpty(richProject.Path))
             {
@@ -315,8 +316,9 @@ namespace MultiTerminal.Services
 
             _projectDb.DeleteProject(projectId);
 
-            ProjectRemoved?.Invoke(this, new ProjectEventArgs(richProject));
-            RegistryChangedExternally?.Invoke(this, EventArgs.Empty);
+            // The row is gone: tell every listener, each on its own, so one that throws cannot stop the others
+            // (CodeGraphWatcher among them) or RegistryChangedExternally (GitHub #102 pipeline Run 3, Codex).
+            return NotifyProjectRemoved(richProject);
         }
 
         /// <summary>
