@@ -895,12 +895,6 @@ namespace MultiTerminal.Terminal
         }
 
         /// <summary>
-        /// Sends Enter key via xterm.js input path and waits for acknowledgment.
-        /// Includes retry mechanism with output monitoring for busy terminals.
-        /// This routes through the same channel as physical keypresses.
-        /// Returns a Task that completes when Enter is processed by Claude.
-        /// </summary>
-        /// <summary>
         /// The text of the screen rows from <paramref name="rowsAbove"/> above the cursor down to the cursor
         /// row (xterm.js buffer, trailing spaces trimmed), joined by newlines; null when the page is not
         /// ready or the read fails (ticket 354f1efa). UI thread.
@@ -912,17 +906,84 @@ namespace MultiTerminal.Terminal
                 return null;
             }
 
-            int rows = Math.Clamp(rowsAbove, 0, 200);
-            string json = await _webView.CoreWebView2.ExecuteScriptAsync(
-                "window.terminalReadNearCursor ? window.terminalReadNearCursor(" + rows.ToString(System.Globalization.CultureInfo.InvariantCulture) + ") : null");
-            if (string.IsNullOrEmpty(json) || json == "null")
+            try
+            {
+                int rows = Math.Clamp(rowsAbove, 0, 200);
+                string json = await _webView.CoreWebView2.ExecuteScriptAsync(
+                    "window.terminalReadNearCursor ? window.terminalReadNearCursor(" + rows.ToString(System.Globalization.CultureInfo.InvariantCulture) + ") : null");
+                if (string.IsNullOrEmpty(json) || json == "null")
+                {
+                    return null;
+                }
+
+                return System.Text.Json.JsonSerializer.Deserialize<string>(json);
+            }
+            catch (Exception ex)
+            {
+                DebugLogService?.Trace("WebViewTerminalRenderer", $"ReadRowsNearCursorAsync failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// The page's count of keystrokes and pastes a person sent (<c>terminalInputEpoch</c>; terminal reports
+        /// and MT's own typing are not counted), or null when the page cannot be asked (ticket 354f1efa).
+        /// </summary>
+        public async System.Threading.Tasks.Task<long?> ReadInputEpochAsync()
+        {
+            if (!_isInitialized || _webView?.CoreWebView2 == null)
             {
                 return null;
             }
 
-            return System.Text.Json.JsonSerializer.Deserialize<string>(json);
+            try
+            {
+                string json = await _webView.CoreWebView2.ExecuteScriptAsync("window.terminalInputEpoch ? window.terminalInputEpoch() : null");
+                return long.TryParse(json, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out long epoch) ? epoch : null;
+            }
+            catch (Exception ex)
+            {
+                DebugLogService?.Trace("WebViewTerminalRenderer", $"ReadInputEpochAsync failed: {ex.Message}");
+                return null;
+            }
         }
 
+        /// <summary>
+        /// Sends a CR only if the page's input count still equals <paramref name="epoch"/>, checked and sent in one
+        /// step in the page (<c>terminalSendEnterIfNoInputSince</c>), so no keystroke can come between them
+        /// (ticket 354f1efa). True sent, false withheld, null when the page cannot be asked.
+        /// </summary>
+        public async System.Threading.Tasks.Task<bool?> SendEnterIfNoInputSinceAsync(long epoch)
+        {
+            if (!_isInitialized || _webView?.CoreWebView2 == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                string json = await _webView.CoreWebView2.ExecuteScriptAsync(
+                    "window.terminalSendEnterIfNoInputSince ? window.terminalSendEnterIfNoInputSince(" + epoch.ToString(System.Globalization.CultureInfo.InvariantCulture) + ") : null");
+                return json switch
+                {
+                    "true" => true,
+                    "false" => false,
+                    _ => null,
+                };
+            }
+            catch (Exception ex)
+            {
+                DebugLogService?.Trace("WebViewTerminalRenderer", $"SendEnterIfNoInputSinceAsync failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Sends Enter key via xterm.js input path and waits for acknowledgment.
+        /// Includes retry mechanism with output monitoring for busy terminals.
+        /// This routes through the same channel as physical keypresses.
+        /// Returns a Task that completes when Enter is processed by Claude.
+        /// </summary>
         public async System.Threading.Tasks.Task<bool> SendEnterViaXtermAsync()
         {
             return await SendEnterViaXtermAsync(System.Threading.CancellationToken.None);

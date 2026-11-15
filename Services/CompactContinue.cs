@@ -684,10 +684,12 @@ namespace MultiTerminal.Services
     /// cleared line is what shows it went in.
     /// </para>
     /// <para>
-    /// The one extra Enter is safe by construction: it is sent only when nobody has typed in the pane since
-    /// the inject, so the line holds only MT's own text, or nothing (an Enter on an empty line does nothing).
-    /// A screen that still shows the text for another reason (a queued message drawn near the input) costs
-    /// at most that harmless Enter and a "not verified" log line. Never a third Enter, and the continue
+    /// The one extra Enter is safe by construction: like the first (<see cref="GuardedSubmit"/>), it is a
+    /// page-side "send only if nobody typed since just before the text was written", so the line holds only
+    /// MT's own text, or nothing (an Enter on an empty line does nothing). A screen that still shows the text
+    /// for another reason costs at most that harmless Enter and a "not verified" log line: a queued message
+    /// drawn near the input, or the transcript's echo of a submitted <c>/compact</c> within
+    /// <see cref="RowsAbove"/> rows of the cursor (the "input line cleared" log cannot tell those apart). Never a third Enter, and the continue
     /// request stays armed either way: a compaction the Owner submits by hand is still followed up.
     /// </para>
     /// </remarks>
@@ -769,6 +771,56 @@ namespace MultiTerminal.Services
             }
 
             return sb.ToString();
+        }
+    }
+
+    /// <summary>How <see cref="GuardedSubmit.RunAsync"/> ended.</summary>
+    internal enum GuardedSubmitOutcome
+    {
+        /// <summary>The text was written and its Enter sent: nobody typed in between.</summary>
+        Submitted,
+
+        /// <summary>The text was written, but someone typed during the settle, so no Enter was sent: their text is not submitted.</summary>
+        OwnerTyped,
+
+        /// <summary>Nothing could be checked or sent (the page could not be asked). Nothing was written, or the Enter's fate is unknown.</summary>
+        Failed,
+    }
+
+    /// <summary>The outcome, and the input count read just before the text was written (null when it could not be read).</summary>
+    internal readonly record struct GuardedSubmitResult(GuardedSubmitOutcome Outcome, long? Epoch);
+
+    /// <summary>
+    /// Writes a command and presses Enter only if nobody typed in the pane in between (ticket 354f1efa, pipeline
+    /// Run 1, Codex). The input count is read BEFORE the write, and the Enter is a page-side "send only if the
+    /// count is unchanged", so the Owner's keystrokes during the settle can never be submitted with it. Pure: the
+    /// pane's operations are passed in.
+    /// </summary>
+    internal static class GuardedSubmit
+    {
+        public static async Task<GuardedSubmitResult> RunAsync(
+            string text,
+            int settleMs,
+            Func<Task<long?>> readInputEpoch,
+            Action<string> write,
+            Func<int, Task> delay,
+            Func<long, Task<bool?>> sendEnterIfNoInputSince)
+        {
+            long? epoch = await readInputEpoch();
+            if (epoch is not long before)
+            {
+                return new GuardedSubmitResult(GuardedSubmitOutcome.Failed, null);
+            }
+
+            write(text);
+            await delay(settleMs);
+
+            return await sendEnterIfNoInputSince(before) switch
+            {
+                true => new GuardedSubmitResult(GuardedSubmitOutcome.Submitted, before),
+                false => new GuardedSubmitResult(GuardedSubmitOutcome.OwnerTyped, before),
+                _ => new GuardedSubmitResult(GuardedSubmitOutcome.Failed, before),
+            };
         }
     }
 }

@@ -365,16 +365,7 @@ namespace MultiTerminal.Controls
         /// </summary>
         /// <param name="text">The text to inject.</param>
         /// <returns>A Task that completes when injection is finished. Returns true if successful.</returns>
-        public Task<bool> InjectInputAsync(string text) => InjectInputAsync(text, DefaultEnterSettleMs);
-
-        /// <summary>The pause between the text and its Enter for an ordinary inject.</summary>
-        private const int DefaultEnterSettleMs = 50;
-
-        /// <summary>
-        /// As <see cref="InjectInputAsync(string)"/>, with <paramref name="enterSettleMs"/> between writing the
-        /// text and pressing Enter (the agent-requested /compact uses a longer pause, ticket 354f1efa).
-        /// </summary>
-        public async Task<bool> InjectInputAsync(string text, int enterSettleMs)
+        public async Task<bool> InjectInputAsync(string text)
         {
             LogTrace($"InjectInputAsync called, text length={text?.Length ?? 0}");
 
@@ -394,7 +385,7 @@ namespace MultiTerminal.Controls
             if (submissions.Count == 1)
             {
                 LogTrace("InjectInputAsync: using single mode");
-                return await InjectSingleInputAsync(submissions[0], enterSettleMs);
+                return await InjectSingleInputAsync(submissions[0]);
             }
 
             LogTrace($"InjectInputAsync: using chunked mode ({Encoding.UTF8.GetByteCount(text)} bytes into {submissions.Count} chunks)");
@@ -404,7 +395,7 @@ namespace MultiTerminal.Controls
         /// <summary>
         /// Injects a single chunk of text (no chunking).
         /// </summary>
-        private async Task<bool> InjectSingleInputAsync(string text, int enterSettleMs = DefaultEnterSettleMs)
+        private async Task<bool> InjectSingleInputAsync(string text)
         {
             LogTrace("InjectSingleInputAsync called");
 
@@ -422,7 +413,7 @@ namespace MultiTerminal.Controls
             // Small delay to let text appear in prompt
             try
             {
-                await System.Threading.Tasks.Task.Delay(enterSettleMs);
+                await System.Threading.Tasks.Task.Delay(50);
                 LogTrace("Delay completed, checking terminal state...");
             }
             catch (Exception ex)
@@ -776,6 +767,66 @@ namespace MultiTerminal.Controls
         /// automatic), or null. Proof that an injected /compact went in (ticket 354f1efa).
         /// </summary>
         public DateTime? LastCompactionStartingUtc { get; private set; }
+
+        /// <summary>
+        /// Types an agent-requested slash command and presses Enter ONLY if nobody typed in the pane since just
+        /// before the text was written (ticket 354f1efa; the sequence is <see cref="GuardedSubmit"/>'s). The
+        /// check and the Enter are one step in the page (<c>terminalSendEnterIfNoInputSince</c>), so a keystroke
+        /// cannot slip between them: an Owner who starts typing during the settle keeps their text unsent.
+        /// UI thread.
+        /// </summary>
+        internal async Task<GuardedSubmitResult> InjectAndSubmitUnlessTypedAsync(string text, int enterSettleMs)
+        {
+            if (IsDisposed || _terminal == null || _renderer == null || string.IsNullOrEmpty(text))
+            {
+                return new GuardedSubmitResult(GuardedSubmitOutcome.Failed, null);
+            }
+
+            List<string> submissions = InjectionChunking.Plan(text, out int? truncatedFromBytes);
+            if (truncatedFromBytes is int originalBytes)
+            {
+                _debugLogService?.Warning("TerminalControl",
+                    $"InjectAndSubmitUnlessTypedAsync: slash command of {originalBytes} bytes cut to {InjectionChunking.MaxChunkBytes}");
+            }
+
+            if (submissions.Count != 1)
+            {
+                return new GuardedSubmitResult(GuardedSubmitOutcome.Failed, null);
+            }
+
+            return await GuardedSubmit.RunAsync(
+                submissions[0],
+                enterSettleMs,
+                ReadInputEpochAsync,
+                written => _terminal.Write(written),
+                ms => Task.Delay(ms),
+                SendEnterUnlessTypedSinceAsync);
+        }
+
+        /// <summary>The page's count of keystrokes and pastes a person sent (ticket 354f1efa), or null when it cannot be read.</summary>
+        private async Task<long?> ReadInputEpochAsync()
+        {
+            if (IsDisposed || _renderer == null)
+            {
+                return null;
+            }
+
+            return await _renderer.ReadInputEpochAsync();
+        }
+
+        /// <summary>
+        /// Presses Enter only if nobody typed in the pane since <paramref name="epoch"/> was read (ticket 354f1efa):
+        /// true sent, false withheld (someone typed), null unknown (the page could not be asked). UI thread.
+        /// </summary>
+        internal async Task<bool?> SendEnterUnlessTypedSinceAsync(long epoch)
+        {
+            if (IsDisposed || _renderer == null)
+            {
+                return null;
+            }
+
+            return await _renderer.SendEnterIfNoInputSinceAsync(epoch);
+        }
 
         /// <summary>
         /// The screen text from <paramref name="rowsAbove"/> rows above the cursor down to the cursor row, one
