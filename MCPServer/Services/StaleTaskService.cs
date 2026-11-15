@@ -139,7 +139,8 @@ namespace MultiTerminal.MCPServer.Services
         /// <param name="staleLevel">The stale level (1=day7 warning, 2=day14 urgent).</param>
         public void FlagTaskAsStale(string taskId, int staleLevel)
         {
-            _taskDb.FlagTaskAsStale(taskId, staleLevel);
+            // Through the same hook as the hourly check, so a later save cannot reset it (ticket 28845a5f).
+            SetLevel(taskId, staleLevel);
         }
 
         /// <summary>
