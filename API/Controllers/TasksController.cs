@@ -225,9 +225,12 @@ namespace MultiTerminal.API.Controllers
             if (request == null || !StaleResponseRequest.Allowed.Contains(request.Response ?? string.Empty))
                 return Problem(detail: "response must be one of: " + string.Join(", ", StaleResponseRequest.Allowed), statusCode: 400);
 
+            if (_broker.GetTask(taskId) == null)
+                return Problem(detail: $"Task {taskId} not found", statusCode: 404);
+
             var result = _broker.RespondToStale(taskId, request.Response, request.RespondedBy);
             if (!result.Success)
-                return Problem(detail: result.Error, statusCode: result.Error != null && result.Error.StartsWith("Task not found", StringComparison.Ordinal) ? 404 : 400);
+                return Problem(detail: result.Error, statusCode: 500); // the task exists, so this is a write failure
 
             return Ok(new { taskId, response = request.Response, message = result.Message });
         }

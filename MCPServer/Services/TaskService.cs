@@ -4027,7 +4027,10 @@ namespace MultiTerminal.MCPServer.Services
                     t.StaleNotifiedAt = now;
                     t.UpdatedAt = now;
                 }, _ => _taskDb.UpdateStaleLevel(taskId, level));
-                return updated != null || _taskDb.UpdateStaleLevel(taskId, level);
+                if (updated == null)
+                    return _taskDb.UpdateStaleLevel(taskId, level);
+                BroadcastTaskUpdate(); // the board shows the stale state from the cache
+                return true;
             }
             catch (Exception ex)
             {
@@ -4063,15 +4066,19 @@ namespace MultiTerminal.MCPServer.Services
                 KanbanTask updated;
                 if (response == "still_relevant")
                 {
-                    // Clear the stale flag + reset the timer. Mirror EXACTLY what ClearStaleTracking writes
-                    // (stale_level=0, flagged_stale_at/stale_notified_at/stale_response = NULL) in the clone.
+                    // Clear the stale flag AND restart the 7-day clock (ticket 28845a5f, pipeline Run 1: clearing
+                    // alone left paused_at old, so the next hourly check flagged the task and reminded again).
+                    // Mirror EXACTLY what ClearStaleTrackingAndRestartClock writes, with the same timestamp.
+                    var now = DateTime.UtcNow;
                     updated = MutateTaskInternal(taskId, t =>
                     {
                         t.StaleLevel = 0;
                         t.FlaggedStaleAt = null;
                         t.StaleNotifiedAt = null;
                         t.StaleResponse = null;
-                    }, _ => _taskDb.ClearStaleTracking(taskId));
+                        if (t.SubStatus == "paused") t.PausedAt = now;
+                        t.UpdatedAt = now;
+                    }, _ => _taskDb.ClearStaleTrackingAndRestartClock(taskId, now));
                 }
                 else if (response == "reprioritize")
                 {

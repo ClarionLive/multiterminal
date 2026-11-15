@@ -107,5 +107,47 @@ namespace MultiTerminal.Tests
             Assert.Single(flagged);
             Assert.Equal(0, StoredLevel("old1")); // the hook owns the write; nothing bypassed it
         }
+        private static void SeedPausedTask(string id, int daysPaused)
+        {
+            using var db = new TaskDatabase();
+            db.SaveTask(new MultiTerminal.MCPServer.Models.KanbanTask
+            {
+                Id = id,
+                Title = "paused for a while",
+                Status = "in_progress",
+                SubStatus = "paused",
+                PausedAt = DateTime.UtcNow.AddDays(-daysPaused),
+                Assignee = "Alice",
+            });
+        }
+
+        [Fact]
+        public void Still_relevant_restarts_the_clock_so_the_next_check_does_not_remind_again()
+        {
+            // Pipeline Run 1 (Codex, Debugger): clearing the flag alone left paused_at 10 days old, so the very
+            // next hourly check flagged the task again. The broker loads the seeded task into its cache.
+            SeedPausedTask("old2", 10);
+            using var broker = new MessageBroker();
+            var stale = new StaleTaskService(broker.TaskDb) { ApplyLevel = broker.FlagTaskStale };
+
+            Assert.Single(stale.CheckAndFlagStaleTasks());
+            Assert.True(broker.RespondToStale("old2", "still_relevant", "tester").Success);
+
+            Assert.Empty(stale.CheckAndFlagStaleTasks());
+            Assert.Equal(0, StoredLevel("old2"));
+            Assert.True(DateTime.UtcNow - broker.GetTask("old2").PausedAt.Value < TimeSpan.FromMinutes(1));
+        }
+
+        [Fact]
+        public void A_stale_level_that_was_not_written_sends_no_reminder()
+        {
+            SeedPausedTask("old3", 10);
+            using var db = new TaskDatabase();
+            var failing = new StaleTaskService(db) { ApplyLevel = (_, _) => false };
+            var throwing = new StaleTaskService(db) { ApplyLevel = (_, _) => throw new InvalidOperationException("disk") };
+
+            Assert.Empty(failing.CheckAndFlagStaleTasks());
+            Assert.Empty(throwing.CheckAndFlagStaleTasks());
+        }
     }
 }

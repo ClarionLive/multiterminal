@@ -3498,6 +3498,33 @@ namespace MultiTerminal.Services
         /// </summary>
         /// <param name="taskId">The task ID to clear.</param>
         /// <returns>True if task was updated, false if task not found.</returns>
+        /// <summary>
+        /// The "still relevant" answer to a stale reminder (ticket 28845a5f): clears the stale tracking like
+        /// <see cref="ClearStaleTracking"/> AND restarts the 7-day clock, so the hourly check does not flag the
+        /// task again at once. paused_at moves to <paramref name="now"/> only while the task is still paused.
+        /// TaskService.RespondToStale mirrors exactly this in its cached clone.
+        /// </summary>
+        public bool ClearStaleTrackingAndRestartClock(string taskId, DateTime now)
+        {
+            using var gate = LockConn();
+            const string sql = @"
+                UPDATE tasks
+                SET stale_level = 0,
+                    flagged_stale_at = NULL,
+                    stale_notified_at = NULL,
+                    stale_response = NULL,
+                    paused_at = CASE WHEN sub_status = 'paused' THEN @now ELSE paused_at END,
+                    updated_at = @now
+                WHERE id = @taskId
+            ";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@taskId", taskId);
+            command.Parameters.AddWithValue("@now", now);
+
+            return command.ExecuteNonQuery() > 0;
+        }
+
         public bool ClearStaleTracking(string taskId)
         {
             using var gate = LockConn();

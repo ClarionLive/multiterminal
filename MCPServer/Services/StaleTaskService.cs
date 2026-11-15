@@ -30,10 +30,19 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public Func<string, int, bool> ApplyLevel { get; set; }
 
-        private void SetLevel(string taskId, int level)
+        /// <summary>True when the level was written. A task that was not written gets no reminder (pipeline Run 1).</summary>
+        private bool SetLevel(string taskId, int level)
         {
-            if (ApplyLevel != null) ApplyLevel(taskId, level);
-            else _taskDb.UpdateStaleLevel(taskId, level);
+            try
+            {
+                return ApplyLevel != null ? ApplyLevel(taskId, level) : _taskDb.UpdateStaleLevel(taskId, level);
+            }
+#pragma warning disable CA1031 // One task's failed write must not stop the check for the others; it is simply not reported.
+            catch (Exception)
+            {
+                return false;
+            }
+#pragma warning restore CA1031
         }
 
         /// <summary>
@@ -55,7 +64,7 @@ namespace MultiTerminal.MCPServer.Services
 
                 var daysPaused = (now - task.PausedAt.Value).TotalDays;
                 // Flag as level 1 (day 7 warning)
-                SetLevel(task.Id, 1);
+                if (!SetLevel(task.Id, 1)) continue;
                 results.Add(new StaleFlagResult
                 {
                     TaskId = task.Id,
@@ -76,7 +85,7 @@ namespace MultiTerminal.MCPServer.Services
 
                 var daysPaused = (now - task.PausedAt.Value).TotalDays;
                 // Flag as level 2 (day 14 urgent)
-                SetLevel(task.Id, 2);
+                if (!SetLevel(task.Id, 2)) continue;
                 results.Add(new StaleFlagResult
                 {
                     TaskId = task.Id,
