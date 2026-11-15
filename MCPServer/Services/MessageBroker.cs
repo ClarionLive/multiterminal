@@ -5208,7 +5208,7 @@ namespace MultiTerminal.MCPServer.Services
             // Generate appropriate notification message based on stale level
             string content = staleLevel >= 2
                 ? $"\u26a0\ufe0f ATTENTION: '{taskTitle}' paused for {daysPaused} days. Please close or re-prioritize."
-                : $"\u23f0 Stale task check: '{taskTitle}' paused for {daysPaused} days. Still relevant? Use respond_to_stale to confirm.";
+                : $"\u23f0 Stale task check: '{taskTitle}' (task {taskId}) paused for {daysPaused} days. Still relevant? Answer with the respond_to_stale tool: still_relevant (keep it, restart the clock), reprioritize (back to To Do) or will_close.";
 
             // Persist to SQLite with notification type
             long queuedMessageId = 0;
@@ -6046,6 +6046,9 @@ namespace MultiTerminal.MCPServer.Services
         /// <returns>Result indicating success or failure.</returns>
         public RespondStaleResult RespondToStale(string taskId, string response, string terminalName)
             => _taskService.RespondToStale(taskId, response, terminalName);
+
+        /// <summary>Sets a task's stale level through the task write path (ticket 28845a5f).</summary>
+        public bool FlagTaskStale(string taskId, int level) => _taskService.FlagStale(taskId, level);
 
         /// <summary>
         /// Get helpers for a task.

@@ -373,6 +373,8 @@ namespace MultiTerminal.API
 
                 // Get stale service for timer
                 _staleService = app.Services.GetRequiredService<StaleTaskService>();
+                if (_broker != null)
+                    _staleService.ApplyLevel = _broker.FlagTaskStale; // through the task write path (ticket 28845a5f)
 
                 // Expose TerminalStreamService for MainForm wiring
                 _terminalStreamService = app.Services.GetRequiredService<TerminalStreamService>();

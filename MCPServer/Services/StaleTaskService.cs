@@ -23,6 +23,20 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Writes a task's stale level. MultiTerminalRestServer points this at
+        /// <c>MessageBroker.FlagTaskStale</c>, so the level goes through the task write path and a later save
+        /// cannot reset it (ticket 28845a5f: a reset level made the reminder repeat). Null (tests, no broker)
+        /// writes the database directly, as before.
+        /// </summary>
+        public Func<string, int, bool> ApplyLevel { get; set; }
+
+        private void SetLevel(string taskId, int level)
+        {
+            if (ApplyLevel != null) ApplyLevel(taskId, level);
+            else _taskDb.UpdateStaleLevel(taskId, level);
+        }
+
+        /// <summary>
         /// Check all paused tasks and update stale flags.
         /// Call this periodically (e.g., on startup, hourly).
         /// </summary>
@@ -41,7 +55,7 @@ namespace MultiTerminal.MCPServer.Services
 
                 var daysPaused = (now - task.PausedAt.Value).TotalDays;
                 // Flag as level 1 (day 7 warning)
-                _taskDb.UpdateStaleLevel(task.Id, 1);
+                SetLevel(task.Id, 1);
                 results.Add(new StaleFlagResult
                 {
                     TaskId = task.Id,
@@ -62,7 +76,7 @@ namespace MultiTerminal.MCPServer.Services
 
                 var daysPaused = (now - task.PausedAt.Value).TotalDays;
                 // Flag as level 2 (day 14 urgent)
-                _taskDb.UpdateStaleLevel(task.Id, 2);
+                SetLevel(task.Id, 2);
                 results.Add(new StaleFlagResult
                 {
                     TaskId = task.Id,

@@ -390,6 +390,11 @@
   <div class="endpoint-block">
     <span class="method patch">PATCH</span> <code>/api/tasks/{taskId}/status</code>
   </div>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/tasks/{taskId}/stale-response</code>
+    <p>Answers a stale-task reminder (ticket 28845a5f; the <code>respond_to_stale</code> MCP tool). Body: <code>{"response": "still_relevant" | "reprioritize" | "will_close", "respondedBy": "Alice"}</code>. <code>still_relevant</code> clears the flag and restarts the 7-day clock, <code>reprioritize</code> moves the task back to To Do, <code>will_close</code> records the answer and keeps the flag. Any other response is a 400; an unknown task is a 404.</p>
+  </div>
   <p>Update a task's status.</p>
   <h4>Request Body</h4>
   <pre><code>{

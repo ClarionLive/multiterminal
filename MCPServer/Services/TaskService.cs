@@ -4014,6 +4014,35 @@ namespace MultiTerminal.MCPServer.Services
         /// <param name="response">Response: 'still_relevant', 'will_close', or 'reprioritize'.</param>
         /// <param name="terminalName">Terminal name responding to the notification.</param>
         /// <returns>Result indicating success or failure.</returns>
+        /// <summary>
+        /// Sets a paused task's stale level (1 = day 7, 2 = day 14) through the single write path, so the
+        /// cached task carries it too (ticket 28845a5f). Before this, <c>StaleTaskService</c> wrote the
+        /// level straight to the database; the cache kept level 0, the next ordinary save of the task
+        /// (<c>SaveTask</c> writes the whole row) put 0 back, and the next hourly check reminded the assignee
+        /// again. The clone mirrors exactly the columns <see cref="TaskDatabase.UpdateStaleLevel"/> writes.
+        /// A task not in the cache gets the direct write, as before. Returns false when nothing was written.
+        /// </summary>
+        public bool FlagStale(string taskId, int level)
+        {
+            var now = DateTime.UtcNow;
+            try
+            {
+                var updated = MutateTaskInternal(taskId, t =>
+                {
+                    t.StaleLevel = level;
+                    t.FlaggedStaleAt = now;
+                    t.StaleNotifiedAt = now;
+                    t.UpdatedAt = now;
+                }, _ => _taskDb.UpdateStaleLevel(taskId, level));
+                return updated != null || _taskDb.UpdateStaleLevel(taskId, level);
+            }
+            catch (Exception ex)
+            {
+                _host.LogError($"FlagStale: persist failed for {taskId}: {ex.Message}");
+                return false;
+            }
+        }
+
         public RespondStaleResult RespondToStale(string taskId, string response, string terminalName)
         {
             // 7c59c004 item 3 (1df2a534 NIT: repeated-returns dedup) — the "task not found" result is returned
