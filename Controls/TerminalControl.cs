@@ -365,7 +365,16 @@ namespace MultiTerminal.Controls
         /// </summary>
         /// <param name="text">The text to inject.</param>
         /// <returns>A Task that completes when injection is finished. Returns true if successful.</returns>
-        public async Task<bool> InjectInputAsync(string text)
+        public Task<bool> InjectInputAsync(string text) => InjectInputAsync(text, DefaultEnterSettleMs);
+
+        /// <summary>The pause between the text and its Enter for an ordinary inject.</summary>
+        private const int DefaultEnterSettleMs = 50;
+
+        /// <summary>
+        /// As <see cref="InjectInputAsync(string)"/>, with <paramref name="enterSettleMs"/> between writing the
+        /// text and pressing Enter (the agent-requested /compact uses a longer pause, ticket 354f1efa).
+        /// </summary>
+        public async Task<bool> InjectInputAsync(string text, int enterSettleMs)
         {
             LogTrace($"InjectInputAsync called, text length={text?.Length ?? 0}");
 
@@ -385,7 +394,7 @@ namespace MultiTerminal.Controls
             if (submissions.Count == 1)
             {
                 LogTrace("InjectInputAsync: using single mode");
-                return await InjectSingleInputAsync(submissions[0]);
+                return await InjectSingleInputAsync(submissions[0], enterSettleMs);
             }
 
             LogTrace($"InjectInputAsync: using chunked mode ({Encoding.UTF8.GetByteCount(text)} bytes into {submissions.Count} chunks)");
@@ -395,7 +404,7 @@ namespace MultiTerminal.Controls
         /// <summary>
         /// Injects a single chunk of text (no chunking).
         /// </summary>
-        private async Task<bool> InjectSingleInputAsync(string text)
+        private async Task<bool> InjectSingleInputAsync(string text, int enterSettleMs = DefaultEnterSettleMs)
         {
             LogTrace("InjectSingleInputAsync called");
 
@@ -413,7 +422,7 @@ namespace MultiTerminal.Controls
             // Small delay to let text appear in prompt
             try
             {
-                await System.Threading.Tasks.Task.Delay(50);
+                await System.Threading.Tasks.Task.Delay(enterSettleMs);
                 LogTrace("Delay completed, checking terminal state...");
             }
             catch (Exception ex)
@@ -756,7 +765,39 @@ namespace MultiTerminal.Controls
         public bool InputLineHasTypedText => _inputLineBuffer.Length > 0;
 
         /// <summary>The plugin's PreCompact hook reported a compaction starting in this pane.</summary>
-        public void NoteCompactionStarting(bool manual) => _compactContinueGate.NoteCompactionStarting(manual);
+        public void NoteCompactionStarting(bool manual)
+        {
+            LastCompactionStartingUtc = DateTime.UtcNow;
+            _compactContinueGate.NoteCompactionStarting(manual);
+        }
+
+        /// <summary>
+        /// When the plugin's PreCompact hook last reported a compaction starting in this pane (manual or
+        /// automatic), or null. Proof that an injected /compact went in (ticket 354f1efa).
+        /// </summary>
+        public DateTime? LastCompactionStartingUtc { get; private set; }
+
+        /// <summary>
+        /// The screen text from <paramref name="rowsAbove"/> rows above the cursor down to the cursor row, one
+        /// line per row, or null when it cannot be read (ticket 354f1efa). UI thread.
+        /// </summary>
+        public async Task<string> ReadScreenNearCursorAsync(int rowsAbove)
+        {
+            if (IsDisposed || _renderer == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                return await _renderer.ReadRowsNearCursorAsync(rowsAbove);
+            }
+            catch (Exception ex)
+            {
+                LogTrace($"ReadScreenNearCursorAsync failed: {ex.Message}");
+                return null;
+            }
+        }
 
         /// <summary>
         /// True once per <see cref="ArmCompactContinue"/>, within <see cref="CompactContinueGate.Expiry"/>,

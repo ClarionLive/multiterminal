@@ -2020,16 +2020,69 @@ namespace MultiTerminal
                 }
 
                 terminal.ArmCompactContinue();
-                bool delivered = await targetDoc.InjectInputAsync(e.Text);
+                DateTime injectedAt = DateTime.UtcNow;
+                bool delivered = await targetDoc.InjectInputAsync(e.Text, CompactSubmitCheck.EnterSettleMs);
                 if (!delivered)
                 {
                     terminal.DisarmCompactContinue();
+                    return;
                 }
+
+                await VerifyCompactSubmittedAsync(targetDoc, e, injectedAt);
             }
             catch (Exception ex)
             {
                 _debugLogService?.Error("MainForm", $"TerminalInjectRequested(submit) for '{e.AgentName}' faulted: {ex.GetBaseException().Message}");
                 if (!terminal.IsDisposed) terminal.DisarmCompactContinue();
+            }
+        }
+
+        /// <summary>
+        /// Checks that the /compact just typed was submitted, and presses Enter once more when its text is
+        /// still in the input line and nobody has typed (ticket 354f1efa; the decisions are
+        /// <see cref="CompactSubmitCheck"/>'s). Never a third Enter; the continue request stays armed. UI thread.
+        /// </summary>
+        private async System.Threading.Tasks.Task VerifyCompactSubmittedAsync(TerminalDocument targetDoc, TerminalInjectEventArgs e, DateTime injectedAt)
+        {
+            var terminal = targetDoc.Terminal;
+            bool enterResent = false;
+            while (true)
+            {
+                await System.Threading.Tasks.Task.Delay(CompactSubmitCheck.CheckDelay);
+                if (terminal.IsDisposed || !terminal.IsLiveForInjection)
+                {
+                    return;
+                }
+
+                bool started = terminal.LastCompactionStartingUtc is DateTime startedAt && startedAt >= injectedAt;
+                string screen = started ? null : await terminal.ReadScreenNearCursorAsync(CompactSubmitCheck.RowsAbove);
+                bool? stillInLine = started ? null : screen == null ? null : CompactSubmitCheck.LineStillHolds(screen, e.Text);
+                bool someoneTyped = terminal.InputLineHasTypedText || (terminal.LastUserInputUtc is DateTime typedAt && typedAt >= injectedAt);
+
+                switch (CompactSubmitCheck.Decide(started, stillInLine, someoneTyped, enterResent))
+                {
+                    case CompactSubmitStep.Verified:
+                        _debugLogService?.Info("MainForm", $"compact request for '{e.AgentName}' submitted ({(started ? "compaction started" : "input line cleared")}{(enterResent ? ", after one extra Enter" : "")})");
+                        return;
+
+                    case CompactSubmitStep.SendEnterAgain:
+                        _debugLogService?.Warning("MainForm", $"compact request for '{e.AgentName}': the /compact is still in the input line; pressing Enter once more");
+                        enterResent = true;
+                        if (!await terminal.SendEnterAsync())
+                        {
+                            _debugLogService?.Warning("MainForm", $"compact request for '{e.AgentName}': the extra Enter could not be sent");
+                            return;
+                        }
+
+                        break;
+
+                    default:
+                        string why = stillInLine == null ? "the screen could not be read"
+                            : enterResent ? "its text is still in the input line after one extra Enter"
+                            : "someone typed in the pane, so no Enter was sent";
+                        _debugLogService?.Warning("MainForm", $"compact request for '{e.AgentName}' not verified as submitted: {why}");
+                        return;
+                }
             }
         }
 

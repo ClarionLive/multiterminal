@@ -900,6 +900,29 @@ namespace MultiTerminal.Terminal
         /// This routes through the same channel as physical keypresses.
         /// Returns a Task that completes when Enter is processed by Claude.
         /// </summary>
+        /// <summary>
+        /// The text of the screen rows from <paramref name="rowsAbove"/> above the cursor down to the cursor
+        /// row (xterm.js buffer, trailing spaces trimmed), joined by newlines; null when the page is not
+        /// ready or the read fails (ticket 354f1efa). UI thread.
+        /// </summary>
+        public async System.Threading.Tasks.Task<string> ReadRowsNearCursorAsync(int rowsAbove)
+        {
+            if (!_isInitialized || _webView?.CoreWebView2 == null)
+            {
+                return null;
+            }
+
+            int rows = Math.Clamp(rowsAbove, 0, 200);
+            string json = await _webView.CoreWebView2.ExecuteScriptAsync(
+                "window.terminalReadNearCursor ? window.terminalReadNearCursor(" + rows.ToString(System.Globalization.CultureInfo.InvariantCulture) + ") : null");
+            if (string.IsNullOrEmpty(json) || json == "null")
+            {
+                return null;
+            }
+
+            return System.Text.Json.JsonSerializer.Deserialize<string>(json);
+        }
+
         public async System.Threading.Tasks.Task<bool> SendEnterViaXtermAsync()
         {
             return await SendEnterViaXtermAsync(System.Threading.CancellationToken.None);

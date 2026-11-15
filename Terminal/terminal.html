@@ -829,6 +829,22 @@
         }
         window.terminalGetSelection = getSelectedText;
 
+        // The rows from rowsAbove above the cursor down to the cursor row, trailing spaces trimmed (ticket
+        // 354f1efa): the host checks whether an injected /compact is still sitting in the input line.
+        function readNearCursor(rowsAbove) {
+            if (!term) return null;
+            const buf = term.buffer.active;
+            const cursorRow = buf.baseY + buf.cursorY;
+            const from = Math.max(0, cursorRow - Math.max(0, rowsAbove | 0));
+            const lines = [];
+            for (let y = from; y <= cursorRow && y < buf.length; y++) {
+                const line = buf.getLine(y);
+                lines.push(line ? line.translateToString(true) : '');
+            }
+            return lines.join('\n');
+        }
+        window.terminalReadNearCursor = readNearCursor;
+
         // Listen for messages from C#
         if (window.chrome && window.chrome.webview) {
             window.chrome.webview.addEventListener('message', (event) => {

@@ -2517,6 +2517,19 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
+        /// As <see cref="InjectInputAsync(string)"/>, pausing <paramref name="enterSettleMs"/> between the text
+        /// and its Enter (ticket 354f1efa).
+        /// </summary>
+        public async System.Threading.Tasks.Task<bool> InjectInputAsync(string text, int enterSettleMs)
+        {
+            if (_terminal != null)
+            {
+                return await _terminal.InjectInputAsync(text, enterSettleMs);
+            }
+            return false;
+        }
+
+        /// <summary>
         /// Sends only the Enter key without writing text. Used to retry Enter when text is already in the prompt.
         /// </summary>
         public async System.Threading.Tasks.Task<bool> SendEnterAsync()

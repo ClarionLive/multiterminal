@@ -654,4 +654,121 @@ namespace MultiTerminal.Services
             return nowUtc - startedUtc >= MaxWait ? CompactInjectStep.GiveUp : CompactInjectStep.Wait;
         }
     }
+
+    /// <summary>What to do after an agent-requested <c>/compact</c> was typed and its Enter sent.</summary>
+    internal enum CompactSubmitStep
+    {
+        /// <summary>It went in: the compaction started, or the text left the input line (submitted or queued).</summary>
+        Verified,
+
+        /// <summary>The text is still in the input line and nobody has typed: press Enter once more.</summary>
+        SendEnterAgain,
+
+        /// <summary>Could not be shown either way, or still there after the extra Enter. Logged; no more keys.</summary>
+        NotVerified,
+    }
+
+    /// <summary>
+    /// Checks that an agent-requested <c>/compact</c> was actually submitted (ticket 354f1efa). The Owner
+    /// found it sitting typed but unsent in the input line about five times in a week. MT writes the text,
+    /// then sends one Enter, and the Enter's acknowledgment only says the cursor moved, which a CR taken as a
+    /// newline also does (debug log 2026-11-13: Grace's ack came 59 ms after the Enter and the compaction
+    /// never ran).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The evidence, in order: the plugin's PreCompact hook reported a compaction starting after the inject
+    /// (proof); otherwise the screen rows from a few above the cursor down to the cursor row, read from
+    /// xterm.js. When the start of the typed text is no longer there, the line was submitted. A prompt typed
+    /// while the agent works is QUEUED and runs when the turn ends, so the hook can come minutes later; the
+    /// cleared line is what shows it went in.
+    /// </para>
+    /// <para>
+    /// The one extra Enter is safe by construction: it is sent only when nobody has typed in the pane since
+    /// the inject, so the line holds only MT's own text, or nothing (an Enter on an empty line does nothing).
+    /// A screen that still shows the text for another reason (a queued message drawn near the input) costs
+    /// at most that harmless Enter and a "not verified" log line. Never a third Enter, and the continue
+    /// request stays armed either way: a compaction the Owner submits by hand is still followed up.
+    /// </para>
+    /// </remarks>
+    internal static class CompactSubmitCheck
+    {
+        /// <summary>
+        /// Pause between writing the text and pressing Enter. Was 50 ms for every inject; an Enter that close
+        /// behind a burst of text can be taken as part of a paste (a newline) rather than a submit.
+        /// </summary>
+        internal const int EnterSettleMs = 300;
+
+        /// <summary>How long after an Enter the line is checked.</summary>
+        internal static readonly TimeSpan CheckDelay = TimeSpan.FromMilliseconds(1500);
+
+        /// <summary>Screen rows read above the cursor row: a 450-byte /compact wraps over a few rows.</summary>
+        internal const int RowsAbove = 12;
+
+        /// <summary>How many leading characters of the typed text (whitespace removed) identify it on screen.</summary>
+        internal const int NeedleLength = 24;
+
+        /// <summary>The next step, from what was observed since the inject.</summary>
+        /// <param name="compactionStarted">The PreCompact hook reported a compaction in this pane after the inject.</param>
+        /// <param name="textStillInLine">The typed text is still on screen at the input line; null when the screen could not be read.</param>
+        /// <param name="someoneTypedSince">Someone typed in the pane since the inject, or the line holds typed text.</param>
+        /// <param name="enterResent">The one extra Enter has already been sent.</param>
+        public static CompactSubmitStep Decide(bool compactionStarted, bool? textStillInLine, bool someoneTypedSince, bool enterResent)
+        {
+            if (compactionStarted || textStillInLine == false)
+            {
+                return CompactSubmitStep.Verified;
+            }
+
+            if (textStillInLine == null || enterResent || someoneTypedSince)
+            {
+                return CompactSubmitStep.NotVerified;
+            }
+
+            return CompactSubmitStep.SendEnterAgain;
+        }
+
+        /// <summary>
+        /// Whether <paramref name="screen"/> (the rows up to the cursor row) still shows the start of
+        /// <paramref name="typed"/>. Whitespace and box-drawing characters are ignored, so text wrapped over
+        /// several rows, or drawn inside a bordered input box, still matches.
+        /// </summary>
+        public static bool LineStillHolds(string screen, string typed)
+        {
+            string needle = Normalize(typed);
+            if (needle.Length == 0 || string.IsNullOrEmpty(screen))
+            {
+                return false;
+            }
+
+            if (needle.Length > NeedleLength)
+            {
+                needle = needle.Substring(0, NeedleLength);
+            }
+
+            return Normalize(screen).Contains(needle, StringComparison.Ordinal);
+        }
+
+        private static string Normalize(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return string.Empty;
+            }
+
+            var sb = new System.Text.StringBuilder(text.Length);
+            foreach (char c in text)
+            {
+                // U+2500..U+257F: box drawing (input box borders).
+                if (char.IsWhiteSpace(c) || (c >= '\u2500' && c <= '\u257F'))
+                {
+                    continue;
+                }
+
+                sb.Append(c);
+            }
+
+            return sb.ToString();
+        }
+    }
 }
