@@ -229,19 +229,35 @@ namespace MultiTerminal.Services
                     } finally { $fs.Dispose() }
                 } catch { return '' }
             }
-            # The session's owner as the text gives it: the LAST agent-name record, else (only when the text has no
-            # agent-name record at all) the last custom-title. Candidate lines are parsed as JSON and read by property
-            # name, so field order and spacing do not matter (pipeline Run 1, Codex). $null when the text has neither.
-            function Get-Owner([string]$text) {
-                $agent = $null; $title = $null; $sawAgent = $false
+            # What one stretch of a transcript says about its owner: the LAST agent-name record, the LAST custom-title, and
+            # whether any agent-name record was seen (even one that would not parse). Candidate lines are parsed as JSON
+            # and read by property name, so field order and spacing do not matter (pipeline Run 1, Codex).
+            function Read-NameRecords([string]$text) {
+                $r = [pscustomobject]@{ Agent = $null; Title = $null; SawAgent = $false }
                 foreach ($line in ($text -split "`n")) {
                     if ($line -notmatch 'agent-name|custom-title') { continue }
-                    if ($line -match 'agent-name') { $sawAgent = $true }
+                    if ($line -match 'agent-name') { $r.SawAgent = $true }
                     try { $o = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
-                    if ($o.type -eq 'agent-name' -and $o.agentName) { $agent = [string]$o.agentName }
-                    elseif ($o.type -eq 'custom-title' -and $o.customTitle) { $title = [string]$o.customTitle }
+                    if ($o.type -eq 'agent-name' -and $o.agentName) { $r.Agent = [string]$o.agentName }
+                    elseif ($o.type -eq 'custom-title' -and $o.customTitle) { $r.Title = [string]$o.customTitle }
                 }
-                if ($agent) { return $agent }
+                return $r
+            }
+            # The session's owner. Every stretch is searched for an agent-name record before any title counts: the last
+            # 256 KB, then the last 4 MB, then the first 256 KB, newest first, and the first agent-name found is the
+            # newest. A title decides only when NO stretch has any agent-name record (pipeline Run 2, Codex: Ezra's old
+            # agent-name must beat a recent "Vela" title in the tail).
+            function Get-SessionOwner($file) {
+                $ranges = @(,@(-262144, 262144)) # the leading comma keeps it an array of pairs, not one flat array
+                if ($file.Length -gt 262144) { $ranges += ,@(-4194304, 4194304) }
+                if ($file.Length -gt 4194304) { $ranges += ,@(0, 262144) }
+                $title = $null; $sawAgent = $false
+                foreach ($range in $ranges) {
+                    $r = Read-NameRecords (Read-Range $file.FullName $range[0] $range[1])
+                    if ($r.Agent) { return $r.Agent }
+                    if ($r.SawAgent) { $sawAgent = $true }
+                    if (-not $title -and $r.Title) { $title = $r.Title }
+                }
                 if ($sawAgent) { return $null } # an agent-name record we could not read: never decide by title
                 return $title
             }
@@ -251,11 +267,7 @@ namespace MultiTerminal.Services
                 if (-not (Test-Path -LiteralPath $dir)) { return $null }
                 $files = Get-ChildItem -LiteralPath $dir -Filter '*.jsonl' -File | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 200
                 foreach ($file in $files) {
-                    # The name is written at launch and repeated as the session runs: the last 256 KB, then the last 4 MB,
-                    # then the first 256 KB (pipeline Run 1, Codex: a long stretch without a name record).
-                    $owner = Get-Owner (Read-Range $file.FullName -262144 262144)
-                    if (-not $owner -and $file.Length -gt 262144) { $owner = Get-Owner (Read-Range $file.FullName -4194304 4194304) }
-                    if (-not $owner -and $file.Length -gt 4194304) { $owner = Get-Owner (Read-Range $file.FullName 0 262144) }
+                    $owner = Get-SessionOwner $file
                     if ($owner -and $owner -ieq $name) { return $file.BaseName }
                 }
                 return $null

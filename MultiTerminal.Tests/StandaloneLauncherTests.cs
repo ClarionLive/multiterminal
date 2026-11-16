@@ -328,5 +328,21 @@ namespace MultiTerminal.Tests
             Assert.DoesNotContain("ARG --resume", lines);
             Assert.Equal(new[] { "ARG " + before, "ARG " + c }, lines[8..10]);
         }
+
+        // Pipeline Run 2 (Codex): Ezra's agent-name far from the end still beats a recent "Vela" title in the tail.
+        [Fact]
+        public void An_old_agent_name_beats_a_recent_title_in_a_long_transcript()
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append("{\"type\":\"agent-name\",\"agentName\":\"Ezra\",\"sessionId\":\"hhhh-ezra\"}\n");
+            string filler = "{\"type\":\"assistant\",\"message\":\"" + new string('x', 1000) + "\"}\n";
+            for (int i = 0; i < 400; i++) sb.Append(filler); // ~400 KB: the agent-name is outside the last 256 KB
+            sb.Append("{\"type\":\"custom-title\",\"customTitle\":\"Vela\",\"sessionId\":\"hhhh-ezra\"}\n");
+            RawTranscript("hhhh-ezra", sb.ToString(), DateTime.UtcNow.AddMinutes(-1));
+
+            Run("Vela", "-c");
+
+            Assert.DoesNotContain("hhhh-ezra", File.ReadAllText(_record));
+        }
     }
 }
