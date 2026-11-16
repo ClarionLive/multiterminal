@@ -38,7 +38,8 @@ namespace MultiTerminal.Services
     /// them (pipeline Run 1, Codex). So: a missing or unreadable file, or a field in an unexpected shape,
     /// reads as "nothing known" (an unknown age is never idle), and the work is bounded: at most
     /// <see cref="MaxDirectories"/> folders per level, files over <see cref="MaxConfigBytes"/> /
-    /// <see cref="MaxMetaBytes"/> are skipped unread, and at most <see cref="MaxMembers"/> members per session.
+    /// <see cref="MaxMetaBytes"/> are skipped unread, at most <see cref="MaxMembers"/> members per session, and at
+    /// most <see cref="MaxMetaFiles"/> meta files per sweep in all.
     /// </para>
     /// </remarks>
     internal static class OpenSubagentReader
@@ -55,7 +56,7 @@ namespace MultiTerminal.Services
         /// <summary>At most this many members are counted per session.</summary>
         internal const int MaxMembers = 200;
 
-        /// <summary>At most this many meta files are read per session folder.</summary>
+        /// <summary>At most this many meta files are read in one sweep, across every session and project folder (pipeline Run 2, Codex).</summary>
         internal const int MaxMetaFiles = 1000;
 
         // A join time outside this range is treated as unknown.
@@ -72,7 +73,11 @@ namespace MultiTerminal.Services
         /// folder once for all of them (pipeline Run 1: one pass per root per sweep, not one per pane). Sessions
         /// with nothing open are absent from the result.
         /// </summary>
-        public static IReadOnlyDictionary<string, IReadOnlyList<OpenSubagent>> ReadMany(string configRoot, IEnumerable<string> sessionIds, DateTime nowUtc)
+        public static IReadOnlyDictionary<string, IReadOnlyList<OpenSubagent>> ReadMany(string configRoot, IEnumerable<string> sessionIds, DateTime nowUtc) =>
+            ReadMany(configRoot, sessionIds, nowUtc, MaxMetaFiles);
+
+        /// <summary>As <see cref="ReadMany(string, IEnumerable{string}, DateTime)"/>, reading at most <paramref name="metaBudget"/> meta files in all.</summary>
+        internal static IReadOnlyDictionary<string, IReadOnlyList<OpenSubagent>> ReadMany(string configRoot, IEnumerable<string> sessionIds, DateTime nowUtc, int metaBudget)
         {
             var result = new Dictionary<string, IReadOnlyList<OpenSubagent>>(StringComparer.OrdinalIgnoreCase);
             var wanted = new HashSet<string>((sessionIds ?? Enumerable.Empty<string>()).Where(s => !string.IsNullOrWhiteSpace(s)), StringComparer.OrdinalIgnoreCase);
@@ -88,9 +93,10 @@ namespace MultiTerminal.Services
             }
 
             var projectDirs = SafeDirectories(Path.Combine(configRoot, "projects"));
+            var budget = new MetaBudget(metaBudget);
             foreach (var (sessionId, members) in membersBySession)
             {
-                var lastActivity = ReadLastActivityByName(projectDirs, sessionId);
+                var lastActivity = ReadLastActivityByName(projectDirs, sessionId, budget);
                 result[sessionId] = members
                     .Select(m =>
                     {
@@ -182,11 +188,25 @@ namespace MultiTerminal.Services
             }
         }
 
-        private static Dictionary<string, DateTime> ReadLastActivityByName(IReadOnlyList<string> projectDirs, string sessionId)
+        // One shared count of meta files still allowed in this sweep. A subagent whose meta is past the budget
+        // falls back to its join time.
+        private sealed class MetaBudget
+        {
+            public MetaBudget(int remaining) => Remaining = Math.Max(0, remaining);
+
+            public int Remaining { get; set; }
+        }
+
+        private static Dictionary<string, DateTime> ReadLastActivityByName(IReadOnlyList<string> projectDirs, string sessionId, MetaBudget budget)
         {
             var result = new Dictionary<string, DateTime>(StringComparer.Ordinal);
             foreach (string projectDir in projectDirs)
             {
+                if (budget.Remaining <= 0)
+                {
+                    break;
+                }
+
                 string subagentsDir = Path.Combine(projectDir, sessionId, "subagents");
                 List<string> metas;
                 try
@@ -196,7 +216,8 @@ namespace MultiTerminal.Services
                         continue;
                     }
 
-                    metas = Directory.EnumerateFiles(subagentsDir, "*.meta.json").Take(MaxMetaFiles).ToList();
+                    metas = Directory.EnumerateFiles(subagentsDir, "*.meta.json").Take(budget.Remaining).ToList();
+                    budget.Remaining -= metas.Count;
                 }
                 catch (Exception ex) when (IsReadFailure(ex))
                 {

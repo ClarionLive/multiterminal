@@ -209,5 +209,25 @@ namespace MultiTerminal.Tests
             Assert.Equal("Debugger", Assert.Single(bySession[OtherSession]).Name);
             Assert.False(bySession.ContainsKey("no-such-session"));
         }
+
+        // Pipeline Run 2 (Codex): the meta-file cap is one budget for the whole sweep, across project folders
+        // and sessions, not a cap per folder.
+        [Fact]
+        public void The_meta_budget_covers_every_folder_and_session_together()
+        {
+            Team("session-8a8114ac", Session, ("A", "verifier", Now.AddHours(-5)), ("B", "verifier", Now.AddHours(-5)), ("C", "verifier", Now.AddHours(-5)));
+            Team("session-bd9db2dc", OtherSession, ("D", "verifier", Now.AddHours(-5)), ("E", "verifier", Now.AddHours(-5)));
+            Transcript("H--one", Session, "agent-aA", "A", Now.AddMinutes(-1));
+            Transcript("H--two", Session, "agent-aB", "B", Now.AddMinutes(-1));
+            Transcript("H--three", Session, "agent-aC", "C", Now.AddMinutes(-1));
+            Transcript("H--one", OtherSession, "agent-aD", "D", Now.AddMinutes(-1));
+            Transcript("H--two", OtherSession, "agent-aE", "E", Now.AddMinutes(-1));
+
+            var bySession = OpenSubagentReader.ReadMany(_root, new[] { Session, OtherSession }, Now, metaBudget: 2);
+
+            int fromTranscripts = bySession.Values.SelectMany(v => v).Count(s => s.LastActivityUtc > Now.AddMinutes(-10));
+            Assert.Equal(2, fromTranscripts);
+            Assert.Equal(5, bySession.Values.Sum(v => v.Count)); // the rest are still counted, at their join time
+        }
     }
 }
