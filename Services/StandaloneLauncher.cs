@@ -50,13 +50,17 @@ namespace MultiTerminal.Services
         /// when <paramref name="addToUserPath"/>, adds the folder to the user PATH if it is not there. Returns
         /// true when the files are in place. Never throws.
         /// </summary>
-        public static bool EnsureInstalled(string binDirectory, bool addToUserPath, Action<string> log = null)
+        /// <param name="pluginDirectory">
+        /// MT's plugin folder, the one every MT pane gets with <c>--plugin-dir</c> (<c>LaunchCommandBuilder.GetMtPluginPath</c>).
+        /// It is written into the script, which MT rewrites at each startup, so it follows a moved plugin. Null: none.
+        /// </param>
+        public static bool EnsureInstalled(string binDirectory, bool addToUserPath, Action<string> log = null, string pluginDirectory = null)
         {
             try
             {
                 Directory.CreateDirectory(binDirectory);
                 AgentGitIdentityWiring.WriteLauncherIfChanged(Path.Combine(binDirectory, CommandFileName), BuildCommandContents(), log);
-                AgentGitIdentityWiring.WriteLauncherIfChanged(Path.Combine(binDirectory, ScriptFileName), BuildScriptContents(), log);
+                AgentGitIdentityWiring.WriteLauncherIfChanged(Path.Combine(binDirectory, ScriptFileName), BuildScriptContents(pluginDirectory), log);
                 AgentGitIdentityWiring.WriteLauncherIfChanged(Path.Combine(binDirectory, SettingsFileName), SettingsContents, log);
             }
             catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
@@ -154,7 +158,11 @@ namespace MultiTerminal.Services
             "exit /b %ERRORLEVEL%\r\n";
 
         /// <summary>The PowerShell script behind <c>mtclaude</c>.</summary>
-        internal static string BuildScriptContents() => """
+        /// <param name="pluginDirectory">MT's plugin folder, baked in as a single-quoted PowerShell literal; null or blank for none.</param>
+        internal static string BuildScriptContents(string pluginDirectory = null) => ScriptTemplate
+            .Replace("__MT_PLUGIN_DIR__", (pluginDirectory ?? string.Empty).Replace("'", "''"), StringComparison.Ordinal);
+
+        private static string ScriptTemplate => """
             # mtclaude <Name> [claude arguments]: written by MultiTerminal (ticket 6c688883); MT rewrites it, do not edit.
             # Starts Claude Code so it messages like a terminal MultiTerminal launched: answers to <Name>, has MT's
             # MCP server, registers with MT by name, and takes cross-session messages without the approval prompt.
@@ -202,6 +210,10 @@ namespace MultiTerminal.Services
             $env:MULTITERMINAL_STANDALONE = '1'
 
             $launch = @('-n', $Name)
+            # MT's plugin (agent rules, hooks, skills): MT panes get it with --plugin-dir; it is not enabled globally.
+            $pluginDir = if ($env:MTCLAUDE_PLUGIN_DIR) { $env:MTCLAUDE_PLUGIN_DIR } else { '__MT_PLUGIN_DIR__' }
+            if ($pluginDir -and (Test-Path -LiteralPath $pluginDir)) { $launch += @('--plugin-dir', $pluginDir) }
+            else { Write-Host "MultiTerminal's plugin folder was not found; starting without its agent rules, hooks and skills." }
             $mcp = if ($env:MTCLAUDE_MCP_CONFIG) { $env:MTCLAUDE_MCP_CONFIG } else { Join-Path $env:APPDATA 'multiterminal\.mcp.json' }
             if (Test-Path -LiteralPath $mcp) { $launch += @('--mcp-config', $mcp) }
             else { Write-Host "MultiTerminal's MCP config was not found at $mcp; starting without MultiTerminal's tools." }
