@@ -298,3 +298,14 @@ test("a failed deploy sync leaves no stamp, so the next deploy repairs instead o
     const again = check(staged, live);
     assert.equal(again.code, 0, "the files match but the install never completed, so deploy must sync again: " + again.out);
   }));
+
+test("-Force never installs an unstamped or altered staged copy (Codex re-verify)", { skip }, () =>
+  withTemp((root) => {
+    const unstamped = check(serverCopy(path.join(root, "unstamped")), path.join(root, "live-missing"), ["-Force"]);
+    assert.equal(unstamped.code, 1, unstamped.out);
+    assert.match(unstamped.out, /not overridable/);
+    const altered = stagedCopy(path.join(root, "altered"));
+    writeFileSync(path.join(altered, "index.js"), readFileSync(path.join(altered, "index.js"), "utf8") + "\n// altered\n");
+    const r = check(altered, serverCopy(path.join(root, "live")), ["-Force"]);
+    assert.equal(r.code, 1, r.out);
+  }));

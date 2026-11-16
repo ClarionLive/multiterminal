@@ -37,7 +37,16 @@ $ErrorActionPreference = "Continue"
 if ([string]::IsNullOrWhiteSpace($RepoDir)) { $RepoDir = Split-Path -Parent $PSScriptRoot }
 . (Join-Path $PSScriptRoot "mcp-server-info.ps1")
 
-# Never returns: exits 1, or 0 under -Force.
+# An incomplete or altered staged copy. Never returns, and -Force does not
+# apply: -ForceMcp overrides a downgrade decision, it is not a way to install
+# files the build did not stage (Codex, 9ce606e0). A rebuild always cures it.
+function Stop-Unverified([string[]]$Lines) {
+    foreach ($l in $Lines) { Write-Host "MCP: $l" -ForegroundColor Red }
+    Write-Host "MCP: refusing (not overridable by -ForceMcp). Nothing has been changed. Rebuild, then deploy again; or use -SkipMcpSync to deploy the binaries only." -ForegroundColor Yellow
+    exit 1
+}
+
+# A downgrade or unprovable provenance. Never returns: exits 1, or 0 under -Force.
 function Refuse([string[]]$Lines) {
     foreach ($l in $Lines) { Write-Host "MCP: $l" -ForegroundColor Red }
     if ($Force) {
@@ -58,7 +67,7 @@ if (-not (Test-Path -LiteralPath $stagedIndex)) {
 
 $stagedNames = Get-McpToolNames $stagedIndex
 if ($null -eq $stagedNames) {
-    Refuse @("cannot read the tool list from the staged index.js ($stagedIndex).")
+    Stop-Unverified @("cannot read the tool list from the staged index.js ($stagedIndex).")
 }
 
 # Integrity first, ahead of every early exit (fresh install included): what is
@@ -68,12 +77,10 @@ $liveStamp = Read-McpStamp $LiveDir
 $stagedPayload = Get-McpPayloadHash $StagedDir
 $recorded = if ($stagedStamp) { [string]$stagedStamp.payloadSha256 } else { "" }
 if (-not $recorded) {
-    Refuse @("the staged MCP server has no payload hash in its stamp, so it cannot be checked for completeness.",
-             "Rebuild so the build stages it again, then deploy.")
+    Stop-Unverified @("the staged MCP server has no payload hash in its stamp, so it cannot be checked for completeness.")
 }
 if ($recorded -ne $stagedPayload) {
-    Refuse @("the staged MCP server does not match its own stamp (files changed or incomplete since the build staged them).",
-             "Rebuild, or wait for a running build to finish, then deploy again.")
+    Stop-Unverified @("the staged MCP server does not match its own stamp (files changed or incomplete since the build staged them; a build may still be running).")
 }
 
 if (-not (Test-Path -LiteralPath $liveIndex)) {
