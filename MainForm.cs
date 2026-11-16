@@ -1520,6 +1520,9 @@ namespace MultiTerminal
                         // Checks projects' GitHub repos for new issues and PRs (task 92eeeb47).
                         StartGitHubWatch();
 
+                        // Shows each session's open subagents and reminds it about idle ones (ticket b3590495).
+                        StartIdleSubagentSweep();
+
                         // Once a day, asks GitHub whether a newer MultiTerminal plugin exists (task 4dc459e4).
                         StartPluginUpdateCheck();
 
@@ -11268,6 +11271,8 @@ namespace MultiTerminal
             {
                 _oracleDigestTimer?.Stop();
                 _oracleDigestTimer?.Dispose();
+                _idleSubagentTimer?.Stop();
+                _idleSubagentTimer?.Dispose();
                 _oracleService?.Dispose();
                 _webhookService?.Dispose();
                 _projectService?.Dispose();

@@ -294,6 +294,7 @@ namespace MultiTerminal.Controls
                         SendMessage($"projectSettings:{(_lastProjectSettingsAvailable ? "true" : "false")}");
                         SendMessage($"attention:{_lastAttention}");
                         SendMessage($"claudeProfile:{_lastClaudeProfileJson}");
+                        SendMessage($"subagents:{_lastSubagentsJson}");
                         SendMessage($"github:{_lastGitHubJson}");
 
                         Ready?.Invoke(this, EventArgs.Empty);
@@ -586,6 +587,23 @@ namespace MultiTerminal.Controls
             _lastClaudeProfileJson = Services.PaneProfileBadge.ToWire(badge);
             if (_isInitialized)
                 SendMessage($"claudeProfile:{_lastClaudeProfileJson}");
+        }
+
+        // Ticket b3590495: the open-subagents pill as wire JSON ("null" = hidden). Last-known and replayed on 'ready'.
+        private string _lastSubagentsJson = "null";
+
+        /// <summary>
+        /// Shows how many subagents the pane's session still has open, and how many are idle
+        /// (<see cref="Services.IdleSubagents.ToWire"/>); "null" hides the pill.
+        /// </summary>
+        internal void SetSubagents(string wireJson)
+        {
+            wireJson = string.IsNullOrEmpty(wireJson) ? "null" : wireJson;
+            if (string.Equals(wireJson, _lastSubagentsJson, StringComparison.Ordinal))
+                return;
+            _lastSubagentsJson = wireJson;
+            if (_isInitialized)
+                SendMessage($"subagents:{_lastSubagentsJson}");
         }
 
         private string _lastAttention = "none";

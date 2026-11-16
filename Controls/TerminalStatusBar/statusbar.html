@@ -449,6 +449,27 @@
 
         .profile-pill.hidden { display: none; }
 
+        /* Ticket b3590495: subagents the session still has open; amber when any has been idle 30+ min. */
+        .subagents-pill {
+            flex: 0 1 auto;
+            min-width: 0;
+            white-space: nowrap;
+            padding: 2px 7px;
+            font-size: 11px;
+            font-weight: 600;
+            border-radius: 3px;
+            border: 1px solid var(--text-muted);
+            background: var(--model-bg);
+            color: var(--text-secondary);
+        }
+
+        .subagents-pill.idle {
+            border-color: var(--ctx-yellow);
+            color: var(--ctx-yellow);
+        }
+
+        .subagents-pill.hidden { display: none; }
+
         .context-label {
             color: var(--text-muted);
             font-size: var(--font-size-xs);
@@ -661,6 +682,7 @@
                 </div>
             </div>
             <span class="profile-pill hidden" id="sl-profile"></span>
+            <span class="subagents-pill hidden" id="subagents-pill"></span>
             <div class="input-pill" id="input-pill" title="Input source (Local = desktop, Remote = phone)">
                 <span class="input-label">Input:</span>
                 <span class="input-value" id="input-value">Local</span>
@@ -762,6 +784,16 @@
             var shown = !!(badge && badge.text);
             el.textContent = shown ? badge.text : '';
             el.title = shown ? (badge.tooltip || '') : '';
+            el.classList.toggle('hidden', !shown);
+        }
+
+        // Ticket b3590495: open subagents of this pane's session. Names are free text: textContent/title only.
+        function setSubagents(info) {
+            var el = document.getElementById('subagents-pill');
+            var shown = !!(info && info.text);
+            el.textContent = shown ? info.text : '';
+            el.title = shown ? (info.tooltip || '') : '';
+            el.classList.toggle('idle', shown && !!info.idle);
             el.classList.toggle('hidden', !shown);
         }
 
@@ -1175,6 +1207,8 @@
                         document.body.setAttribute('data-attention', data.substring(10));
                     } else if (data.startsWith('claudeProfile:')) {
                         setClaudeProfile(JSON.parse(data.substring(14)));
+                    } else if (data.startsWith('subagents:')) {
+                        setSubagents(JSON.parse(data.substring(10)));
                     } else if (data.startsWith('github:')) {
                         setGitHub(JSON.parse(data.substring(7)));
                     }

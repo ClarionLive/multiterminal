@@ -438,6 +438,9 @@ namespace MultiTerminal.Docking
         /// <summary>Shows or hides the header's GitHub band (task e4924065). A null band or repo hides it.</summary>
         public void SetGitHubBand(Services.GitHubBand band) => _statusBar?.SetGitHub(band);
 
+        /// <summary>Ticket b3590495: shows the session's open subagents in the header ("null" hides them).</summary>
+        internal void SetSubagentsInHeader(string wireJson) => _statusBar?.SetSubagents(wireJson);
+
         /// <summary>
         /// Ticket 37edc158: pushes the pane's launch profile to the header, which shows it only when it is
         /// not Default. The renderer remembers the value and replays it when its page loads, so a launch
