@@ -22,12 +22,13 @@ function Get-McpToolNames([string]$IndexPath) {
     if ($listIdx -lt 0 -or $callIdx -le $listIdx) { return $null }
     $region = $src.Substring($listIdx, $callIdx - $listIdx)
     $names = foreach ($m in [regex]::Matches($region, '\bname:\s*"([^"]+)"')) { $m.Groups[1].Value }
+    $names = @($names | Where-Object { $_ })
     # The leading comma keeps an empty or one-name list an array: PowerShell
     # would otherwise unroll it to $null or a bare string on return.
     return ,@($names | Sort-Object -Unique)
 }
 
-# SHA-256 of index.js with line endings normalized, so a CRLF checkout and an
+# SHA-256 of one file (index.js or any payload file) with line endings normalized, so a CRLF checkout and an
 # LF copy of the same source compare equal.
 function Get-McpIndexHash([string]$IndexPath) {
     if (-not (Test-Path -LiteralPath $IndexPath)) { return "" }
@@ -35,6 +36,43 @@ function Get-McpIndexHash([string]$IndexPath) {
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
         $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($text))
+        return ([System.BitConverter]::ToString($bytes)).Replace("-", "").ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
+# The files a server copy runs from: exactly what sync-mcp-server.ps1 delivers
+# (index.js, package.json, package-lock.json, everything under lib/). README,
+# node_modules, the stamp and any *.db at a live dest are not code and are left
+# out, so a live copy and a staged copy of the same source hash the same.
+function Get-McpPayloadFiles([string]$Dir) {
+    $files = @()
+    foreach ($name in @("index.js", "package.json", "package-lock.json")) {
+        $p = Join-Path $Dir $name
+        if (Test-Path -LiteralPath $p) { $files += [PSCustomObject]@{ Rel = $name; Path = $p } }
+    }
+    $lib = Join-Path $Dir "lib"
+    if (Test-Path -LiteralPath $lib) {
+        $root = (Get-Item -LiteralPath $Dir).FullName.TrimEnd('\') + '\'
+        foreach ($f in Get-ChildItem -LiteralPath $lib -Recurse -File) {
+            # FullName on both sides, so an 8.3 short $Dir cannot skew the prefix.
+            $rel = $f.FullName
+            if ($rel.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) { $rel = $rel.Substring($root.Length) }
+            $files += [PSCustomObject]@{ Rel = $rel.Replace('\', '/'); Path = $f.FullName }
+        }
+    }
+    return ,@($files | Sort-Object Rel)
+}
+
+# One SHA-256 over the whole payload (each file's relative path and its
+# line-ending-normalized content hash). Two copies are the same server only
+# when this matches; index.js alone says nothing about lib/ or dependencies.
+function Get-McpPayloadHash([string]$Dir) {
+    if (-not (Test-Path -LiteralPath (Join-Path $Dir "index.js"))) { return "" }
+    $lines = foreach ($f in (Get-McpPayloadFiles $Dir)) { "$($f.Rel)`n$(Get-McpIndexHash $f.Path)" }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes(($lines -join "`n")))
         return ([System.BitConverter]::ToString($bytes)).Replace("-", "").ToLowerInvariant()
     }
     finally { $sha.Dispose() }
@@ -74,6 +112,7 @@ function New-McpStamp([string]$SourceDir) {
         toolCount   = $toolCount
         toolNames   = $toolNames
         indexSha256 = Get-McpIndexHash $index
+        payloadSha256 = Get-McpPayloadHash $SourceDir
         createdAt   = (Get-Date).ToUniversalTime().ToString("o")
     }
 }

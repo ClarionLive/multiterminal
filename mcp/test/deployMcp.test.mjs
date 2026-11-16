@@ -176,3 +176,71 @@ test("deploy mode installs the staged server and passes its stamp through", { sk
     const stamp = JSON.parse(readFileSync(path.join(live, ".mcp-stamp.json"), "utf8").replace(/^﻿/, ""));
     assert.equal(stamp.commit, "abc123");
   }));
+
+test("preflight: a lib-only change is not 'already current' (Codex Run 1)", { skip }, () =>
+  withTemp((root) => {
+    const staged = serverCopy(path.join(root, "staged"));
+    const live = serverCopy(path.join(root, "live"));
+    writeFileSync(path.join(live, "lib", "task-formatters.mjs"), "// an older library\n");
+    const r = check(staged, live);
+    assert.equal(r.code, 0, r.out);
+    const lockOnly = serverCopy(path.join(root, "live2"));
+    writeFileSync(path.join(lockOnly, "package-lock.json"), "{}\n");
+    assert.equal(check(staged, lockOnly).code, 0, "a lockfile-only difference must sync too");
+  }));
+
+test("preflight: refuses a staged copy that no longer matches its own stamp (Codex Run 1)", { skip }, () =>
+  withTemp((root) => {
+    const source = serverCopy(path.join(root, "src"));
+    const staged = path.join(root, "staged");
+    const r = ps(syncScript, [], cleanEnv({ SMS_SOURCE_DIR: source, SMS_DEST_DIR: staged, SMS_STAGE_ONLY: "true" }));
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const live = serverCopy(path.join(root, "live"), { edit: touch });
+    assert.equal(check(staged, live).code, 0, "an intact staged copy is accepted");
+    writeFileSync(path.join(staged, "lib", "context-formatters.mjs"), "// half-written by a concurrent build\n");
+    const refused = check(staged, live);
+    assert.equal(refused.code, 1, refused.out);
+    assert.match(refused.out, /does not match its own stamp/);
+  }));
+
+test("preflight: refuses when both stamps name a commit git cannot place (Codex Run 1)", { skip }, () =>
+  withTemp((root) => {
+    const repo = path.join(root, "repo");
+    mkdirSync(repo);
+    execFileSync("git", ["-C", repo, "init", "-q"]);
+    const live = serverCopy(path.join(root, "live"), { stamp: { commit: "1".repeat(40) } });
+    const staged = serverCopy(path.join(root, "staged"), { edit: touch, stamp: { commit: "2".repeat(40) } });
+    const r = check(staged, live, ["-RepoDir", repo]);
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /cannot check/);
+  }));
+
+test("the PowerShell tool count matches the server's own matcher", { skip }, () =>
+  withTemp((root) => {
+    const src = readFileSync(path.join(repoRoot, "mcp", "index.js"), "utf8");
+    const region = src.slice(
+      src.indexOf("server.setRequestHandler(ListToolsRequestSchema"),
+      src.indexOf("server.setRequestHandler(CallToolRequestSchema"),
+    );
+    const nodeNames = [...new Set([...region.matchAll(/\bname:\s*"([^"]+)"/g)].map((m) => m[1]))].sort();
+    const staged = path.join(root, "staged");
+    const r = ps(syncScript, [], cleanEnv({ SMS_SOURCE_DIR: serverCopy(path.join(root, "src")), SMS_DEST_DIR: staged, SMS_STAGE_ONLY: "true" }));
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const stamp = JSON.parse(readFileSync(path.join(staged, ".mcp-stamp.json"), "utf8").replace(/^\uFEFF/, ""));
+    assert.deepEqual([...stamp.toolNames].sort(), nodeNames);
+  }));
+
+test("deploy mode removes a live lib/ module the source no longer has (debugger Run 1)", { skip }, () =>
+  withTemp((root) => {
+    const staged = serverCopy(path.join(root, "staged"));
+    const live = serverCopy(path.join(root, "live"));
+    mkdirSync(path.join(live, "node_modules"), { recursive: true });
+    writeFileSync(path.join(live, "lib", "retired.mjs"), "export {};\n");
+    writeFileSync(path.join(live, "tasks.db"), "data");
+    const r = ps(syncScript, ["-SourceDir", staged, "-DestDir", live, "-DeployMode"]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(existsSync(path.join(live, "lib", "retired.mjs")), false);
+    assert.equal(existsSync(path.join(live, "lib", "task-formatters.mjs")), true);
+    assert.equal(existsSync(path.join(live, "tasks.db")), true, "live data must survive");
+    assert.equal(existsSync(path.join(live, "node_modules")), true);
+  }));

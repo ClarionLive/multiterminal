@@ -6,15 +6,23 @@
 # Exit codes (deploy.ps1 keys on them):
 #   0  sync: the staged server is an upgrade, a fresh install, or -Force was given
 #   1  refuse: the staged server would be a downgrade
-#   2  nothing to do: the live index.js already equals the staged one
+#   2  nothing to do: the live server's payload (index.js, lib/, package files)
+#      already equals the staged one
 #   3  no staged server: the build predates MCP staging; deploy binaries only
+#
+# Before anything else, the staged copy must be whole: when its stamp records a
+# payload hash, the files on disk must still hash to it. deploy.ps1 runs this on
+# a private snapshot of staged\mcp-server, so a build rewriting the shared
+# staged folder mid-copy shows up here as a mismatch instead of being installed.
 #
 # A downgrade is either of:
 #   * the live server offers a tool the staged one does not (agents would lose it)
 #   * both copies carry a stamp, and the live commit is not an ancestor of the
 #     staged commit (the staged build does not contain what is live now)
-# Provenance that cannot be checked (no stamp, commit unknown to this repo) is a
-# warning, not a refusal: the tool check still applies.
+# A missing stamp on either side is a warning, not a refusal (a live server
+# synced before stamps existed has none; the tool check still applies). When
+# both stamps name a commit but git cannot settle ancestry (object missing, no
+# git), that is a refusal: the check was possible and could not be passed.
 
 param(
     [Parameter(Mandatory = $true)][string]$StagedDir,
@@ -29,6 +37,7 @@ $ErrorActionPreference = "Continue"
 if ([string]::IsNullOrWhiteSpace($RepoDir)) { $RepoDir = Split-Path -Parent $PSScriptRoot }
 . (Join-Path $PSScriptRoot "mcp-server-info.ps1")
 
+# Never returns: exits 1, or 0 under -Force.
 function Refuse([string[]]$Lines) {
     foreach ($l in $Lines) { Write-Host "MCP: $l" -ForegroundColor Red }
     if ($Force) {
@@ -57,7 +66,19 @@ if (-not (Test-Path -LiteralPath $liveIndex)) {
     exit 0
 }
 
-if ((Get-McpIndexHash $stagedIndex) -eq (Get-McpIndexHash $liveIndex)) {
+$stagedStamp = Read-McpStamp $StagedDir
+$liveStamp = Read-McpStamp $LiveDir
+$stagedPayload = Get-McpPayloadHash $StagedDir
+$recorded = if ($stagedStamp) { [string]$stagedStamp.payloadSha256 } else { "" }
+if ($recorded -and $recorded -ne $stagedPayload) {
+    Refuse @("the staged MCP server does not match its own stamp (files changed or incomplete since the build staged them).",
+             "Rebuild, or wait for a running build to finish, then deploy again.")
+}
+if (-not $recorded) {
+    Write-Host "MCP: WARNING: the staged stamp has no payload hash, so the staged copy cannot be checked for completeness." -ForegroundColor Yellow
+}
+
+if ($stagedPayload -eq (Get-McpPayloadHash $LiveDir)) {
     Write-Host "MCP: the live MCP server already matches the staged one; nothing to sync."
     exit 2
 }
@@ -75,8 +96,6 @@ else {
     }
 }
 
-$stagedStamp = Read-McpStamp $StagedDir
-$liveStamp = Read-McpStamp $LiveDir
 $stagedCommit = if ($stagedStamp) { [string]$stagedStamp.commit } else { "" }
 $liveCommit = if ($liveStamp) { [string]$liveStamp.commit } else { "" }
 
@@ -84,15 +103,21 @@ if ([string]::IsNullOrEmpty($stagedCommit) -or [string]::IsNullOrEmpty($liveComm
     Write-Host "MCP: WARNING: provenance unknown (staged commit '$stagedCommit', live commit '$liveCommit'); only the tool check applied." -ForegroundColor Yellow
 }
 elseif ($stagedCommit -ne $liveCommit) {
-    & git -C $RepoDir merge-base --is-ancestor $liveCommit $stagedCommit 2>$null
-    $code = $LASTEXITCODE
+    # git missing throws rather than setting $LASTEXITCODE, which would still
+    # hold an earlier command's result.
+    $code = -1
+    try {
+        & git -C $RepoDir merge-base --is-ancestor $liveCommit $stagedCommit 2>$null
+        $code = $LASTEXITCODE
+    }
+    catch { $code = -1 }
     if ($code -eq 1) {
         Refuse @(
             "the live MCP server came from $liveCommit, which the staged build ($stagedCommit) does not contain.",
             "Installing it would undo whatever $liveCommit added.")
     }
     elseif ($code -ne 0) {
-        Write-Host "MCP: WARNING: cannot check commit ancestry in $RepoDir (live $liveCommit, staged $stagedCommit); only the tool check applied." -ForegroundColor Yellow
+        Refuse @("cannot check that the staged build ($stagedCommit) contains the live server's commit ($liveCommit) in $RepoDir (git exit $code).")
     }
 }
 

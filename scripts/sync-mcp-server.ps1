@@ -261,6 +261,26 @@ try {
         }
     }
 
+    # Deploy mode: a module deleted from the source must not stay behind in the
+    # live lib/ (debugger, 9ce606e0 Run 1). Only lib/ is pruned; node_modules
+    # and the *.db files at the dest are never touched. New files have already
+    # landed above, so a running import never sees a gap.
+    if ($DeployMode -and (Test-Path -LiteralPath $destLib)) {
+        $keep = @{}
+        foreach ($file in $libraryFiles) { $keep[$file.RelativePath.ToLowerInvariant()] = $true }
+        foreach ($existing in @(Get-LibraryFileList $destLib)) {
+            if (-not $keep.ContainsKey($existing.RelativePath.ToLowerInvariant())) {
+                try {
+                    Remove-Item -LiteralPath $existing.SourcePath -Force -ErrorAction Stop
+                    Write-Host "SyncMcpServer: removed lib/$($existing.RelativePath) (no longer in the source)."
+                }
+                catch {
+                    Report-SyncFailure "could not remove stale lib/$($existing.RelativePath) at $DestDir : $_"
+                }
+            }
+        }
+    }
+
     # package-lock.json is included so `npm ci` can run reproducibly at the dest.
     # index.js is deliberately last, after every module it imports.
     $trackedFiles = @("package.json", "package-lock.json", "README.md", "index.js")
@@ -319,8 +339,12 @@ try {
     # downgrade. A source that already carries a stamp (the staged copy) passes
     # it on unchanged; otherwise the stamp is computed from the source checkout.
     try {
-        $sourceStamp = Read-McpStamp $SourceDir
-        if ($null -ne $sourceStamp) { Write-McpStamp $DestDir $sourceStamp }
+        # Copied as bytes, not re-serialized: ConvertFrom-Json in PowerShell 5.1
+        # turns createdAt into a DateTime that would be written back in another form.
+        $sourceStampPath = Join-Path $SourceDir $script:McpStampFileName
+        if (Test-Path -LiteralPath $sourceStampPath) {
+            Copy-Item -LiteralPath $sourceStampPath -Destination (Join-Path $DestDir $script:McpStampFileName) -Force -ErrorAction Stop
+        }
         else { Write-McpStamp $DestDir (New-McpStamp $SourceDir) }
     }
     catch {
