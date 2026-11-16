@@ -1470,7 +1470,8 @@ namespace MultiTerminal
                 // Run 1, Codex). Nothing needs it before REST; it only has to happen at every startup.
                 _ = Task.Run(() => StandaloneLauncher.EnsureInstalled(
                     StandaloneLauncher.ResolveBinDirectory(), addToUserPath: true,
-                    message => _debugLogService?.Info("StandaloneLauncher", message)));
+                    message => _debugLogService?.Info("StandaloneLauncher", message),
+                    LaunchCommandBuilder.GetMtPluginPath()));
 
                 // Start MCP server in background
                 Task.Run(async () =>

@@ -22,6 +22,8 @@ namespace MultiTerminal.Tests
         private readonly string _record;
         private readonly string _mcpConfig;
         private string _mcpOverride;
+        private readonly string _pluginDir;
+        private string _pluginOverride;
 
         public StandaloneLauncherTests()
         {
@@ -32,6 +34,9 @@ namespace MultiTerminal.Tests
             _mcpConfig = Path.Combine(_root, "mcp.json");
             File.WriteAllText(_mcpConfig, "{}");
             _mcpOverride = _mcpConfig; // never the developer's real %APPDATA% file
+            _pluginDir = Path.Combine(_root, "plugin");
+            Directory.CreateDirectory(_pluginDir);
+            _pluginOverride = _pluginDir;
 
             // A claude.cmd that writes what it was given: each argument on its own line, then the env it saw. The values
             // are bracketed: "echo X 1>> file" would read "1>>" as a redirect of handle 1 and drop the value.
@@ -70,6 +75,7 @@ namespace MultiTerminal.Tests
             psi.Environment["MULTITERMINAL_LAUNCH_NONCE"] = "inherited-nonce";
             psi.Environment["MULTITERMINAL_NAME"] = "SomeonesPane";
             psi.Environment["MTCLAUDE_MCP_CONFIG"] = _mcpOverride;
+            psi.Environment["MTCLAUDE_PLUGIN_DIR"] = _pluginOverride;
 
             using var p = Process.Start(psi);
             p.StandardOutput.ReadToEnd();
@@ -87,7 +93,7 @@ namespace MultiTerminal.Tests
             string[] lines = File.ReadAllLines(_record);
             var expected = new[]
             {
-                "ARG -n", "ARG Filbert", "ARG --mcp-config", "ARG " + _mcpConfig,
+                "ARG -n", "ARG Filbert", "ARG --plugin-dir", "ARG " + _pluginDir, "ARG --mcp-config", "ARG " + _mcpConfig,
                 "ARG --settings", "ARG " + Path.Combine(_bin, StandaloneLauncher.SettingsFileName), "ARG --resume", "ARG abc",
             };
             Assert.Equal(expected, lines[..expected.Length]);
@@ -101,8 +107,30 @@ namespace MultiTerminal.Tests
             Run("Filbert", "-c", "-p", "hi", "-v", "-n", "x");
 
             string[] lines = File.ReadAllLines(_record);
-            Assert.Equal(new[] { "ARG -c", "ARG -p", "ARG hi", "ARG -v", "ARG -n", "ARG x" }, lines[6..12]);
+            Assert.Equal(new[] { "ARG -c", "ARG -p", "ARG hi", "ARG -v", "ARG -n", "ARG x" }, lines[8..14]);
             Assert.Contains("NAME [Filbert]", lines); // "-n x" after the name is claude's, not the session name
+        }
+
+        // MT panes get the MT plugin with --plugin-dir (it is not enabled globally); a standalone session must too.
+        [Fact]
+        public void Without_the_plugin_folder_claude_starts_without_it()
+        {
+            _pluginOverride = Path.Combine(_root, "no-such-plugin");
+
+            Run("Filbert");
+
+            string record = File.ReadAllText(_record);
+            Assert.DoesNotContain("--plugin-dir", record);
+            Assert.Contains("ARG --mcp-config", record);
+        }
+
+        [Fact]
+        public void The_plugin_folder_is_baked_in_as_a_quoted_literal()
+        {
+            string script = StandaloneLauncher.BuildScriptContents(@"C:\Users\O'Brien\plugins\multiterminal");
+
+            Assert.Contains(@"else { 'C:\Users\O''Brien\plugins\multiterminal' }", script);
+            Assert.DoesNotContain("__MT_PLUGIN_DIR__", script);
         }
 
         [Fact]
