@@ -1523,6 +1523,11 @@ namespace MultiTerminal
                         // Once a day, asks GitHub whether a newer MultiTerminal plugin exists (task 4dc459e4).
                         StartPluginUpdateCheck();
 
+                        // Writes the mtclaude command and puts its folder on the user PATH once (ticket 6c688883).
+                        _ = Task.Run(() => StandaloneLauncher.EnsureInstalled(
+                            StandaloneLauncher.ResolveBinDirectory(), addToUserPath: true,
+                            message => _debugLogService?.Info("StandaloneLauncher", message)));
+
                         // Wire terminal stream resolver: resolves any terminal identifier
                         // (terminal ID, DocId, or agent name) to its ConPtyTerminal instance
                         _mcpServer.TerminalStreamService?.SetTerminalResolver(idOrNameOrDocId =>

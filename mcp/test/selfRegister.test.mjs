@@ -118,7 +118,7 @@ function load({ execFile, timers } = {}) {
   const mod = new Function(
     "API_BASE", "console", "fetch", "execFile", "setTimeout", "clearTimeout",
     `${builderSrc}\n${BLOCK}\nreturn { buildRegisterPayload, selfRegisterTerminal, getProcessImageName,
-       postClaimedCredentials, isClarionEmbedded, getClaimed: () => claimedTerminalName,
+       postClaimedCredentials, isClarionEmbedded, isStandaloneSession, getClaimed: () => claimedTerminalName,
        MT_HEALTH_SERVICE_MARKER, CA_HEALTH_RETRY_DELAYS_MS };`,
   )(REAL_API_BASE, fakeConsole, tripFetch, execFile || tripExecFile,
     timers ? timers.setTimeout : setTimeout, timers ? timers.clearTimeout : clearTimeout);
@@ -654,4 +654,72 @@ test("getProcessImageName: the default runner goes through execFile (never a she
   assert.equal(seen.length, 1);
   assert.equal(seen[0].file, "tasklist");
   assert.equal(seen[0].opts.windowsHide, true);
+});
+
+
+// ── Standalone session branch (ticket 6c688883: `mtclaude <Name>`) ─────────────────────────────────
+
+const SA_ENV = {
+  MULTITERMINAL_STANDALONE: "1",
+  MULTITERMINAL_NAME: "Filbert",
+  CLAUDE_CODE_SESSION_ID: "sess-sa",
+  CLAUDE_CODE_MESSAGING_SOCKET: GOOD_SOCKET,
+  CLAUDE_CODE_MESSAGING_TOKEN: SENTINEL_TOKEN,
+};
+
+test("standalone: registers name-only with ownerPid on the CA conditions, THEN posts credentials, and records the claim", async () => {
+  const { mod, logged } = load();
+  const h = harness();
+  assert.equal(await within(mod.selfRegisterTerminal(SA_ENV, 4242, h.post, h.deps)), "registered");
+  assert.deepEqual(h.seq, [
+    "get /api/health",
+    "image 4242",
+    "post /api/messaging/register",
+    "fetch http://localhost:5050/api/messaging/credentials",
+  ]);
+  assert.deepEqual(h.bodies.register, { name: "Filbert", ownerPid: 4242 });
+  assert.deepEqual(h.bodies.credentials, {
+    name: "Filbert", sessionId: "sess-sa", socket: GOOD_SOCKET, token: SENTINEL_TOKEN, ownerPid: 4242,
+  });
+  assert.equal(mod.getClaimed(), "Filbert");
+  assert.ok(logged.some((l) => l.includes("Standalone session 'Filbert'")), logged.join("\n"));
+});
+
+test("standalone: without the marker, a name and no docId is still skipped (an ordinary session is not registered)", async () => {
+  const { mod } = load();
+  const h = harness();
+  const { MULTITERMINAL_STANDALONE: _drop, ...plain } = SA_ENV;
+  assert.equal(await within(mod.selfRegisterTerminal(plain, 4242, h.post, h.deps)), "skipped");
+  assert.deepEqual(h.seq, []);
+});
+
+test("standalone: with a docId (the marker leaked into an MT pane) it makes no call at all", async () => {
+  const { mod } = load();
+  const h = harness();
+  assert.equal(await within(mod.selfRegisterTerminal({ ...SA_ENV, MULTITERMINAL_DOC_ID: "doc-pane" }, 4242, h.post, h.deps)), "skipped");
+  assert.deepEqual(h.seq, []);
+  assert.equal(mod.getClaimed(), null);
+});
+
+test("standalone: an inherited launch nonce is sent neither to register nor with credentials", async () => {
+  const { mod } = load();
+  const h = harness();
+  assert.equal(await within(mod.selfRegisterTerminal({ ...SA_ENV, MULTITERMINAL_LAUNCH_NONCE: "inherited" }, 4242, h.post, h.deps)), "registered");
+  assert.ok(!("nonce" in h.bodies.register), JSON.stringify(h.bodies.register));
+  assert.ok(!("nonce" in h.bodies.credentials), JSON.stringify(h.bodies.credentials));
+});
+
+test("standalone: a name held by another live terminal is refused and posts no credentials", async () => {
+  const { mod } = load();
+  const h = harness({ register: async () => { const e = new Error("held"); e.status = 400; throw e; } });
+  assert.equal(await within(mod.selfRegisterTerminal(SA_ENV, 4242, h.post, h.deps)), "refused");
+  assert.ok(!h.seq.some((x) => x.startsWith("fetch")), JSON.stringify(h.seq));
+  assert.equal(mod.getClaimed(), null);
+});
+
+test("isStandaloneSession: same truth table as isClarionEmbedded", () => {
+  const { mod } = load();
+  for (const v of ["1", "true", "yes", " TRUE "]) assert.equal(mod.isStandaloneSession({ MULTITERMINAL_STANDALONE: v }), true, v);
+  for (const v of [undefined, "", " ", "0", "false", "FALSE"]) assert.equal(mod.isStandaloneSession({ MULTITERMINAL_STANDALONE: v }), false, String(v));
+  assert.equal(mod.isStandaloneSession(null), false);
 });
