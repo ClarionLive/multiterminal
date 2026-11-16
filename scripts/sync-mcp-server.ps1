@@ -184,6 +184,18 @@ try {
     $sourceLock = Join-Path $SourceDir "package-lock.json"
     $destLock   = Join-Path $DestDir "package-lock.json"
     $needsInstall = $false
+    # Deploy mode: a live copy with no stamp was never completed (an earlier
+    # sync failed, or it predates stamps), so its node_modules cannot be
+    # trusted; reinstall. Then drop the stamp until this run succeeds, so an
+    # interrupted or failed run is never mistaken for a current one.
+    $destStampPath = Join-Path $DestDir $script:McpStampFileName
+    if ($DeployMode) {
+        if (-not (Test-Path -LiteralPath $destStampPath)) {
+            $needsInstall = $true
+            Write-Host "SyncMcpServer: no completed-install stamp at the dest -- will reinstall dependencies."
+        }
+        Remove-Item -LiteralPath $destStampPath -Force -ErrorAction SilentlyContinue
+    }
     if ($StageOnly) {
         # A staging copy never installs (see below), so none of the checks apply.
     }
@@ -334,23 +346,6 @@ try {
         }
     }
 
-    # --- Provenance stamp (ticket 9ce606e0) -------------------------------------
-    # Every copy says where it came from, so deploy can tell an upgrade from a
-    # downgrade. A source that already carries a stamp (the staged copy) passes
-    # it on unchanged; otherwise the stamp is computed from the source checkout.
-    try {
-        # Copied as bytes, not re-serialized: ConvertFrom-Json in PowerShell 5.1
-        # turns createdAt into a DateTime that would be written back in another form.
-        $sourceStampPath = Join-Path $SourceDir $script:McpStampFileName
-        if (Test-Path -LiteralPath $sourceStampPath) {
-            Copy-Item -LiteralPath $sourceStampPath -Destination (Join-Path $DestDir $script:McpStampFileName) -Force -ErrorAction Stop
-        }
-        else { Write-McpStamp $DestDir (New-McpStamp $SourceDir) }
-    }
-    catch {
-        Report-SyncFailure "could not write $script:McpStampFileName at $DestDir : $_"
-    }
-
     # --- Conditional dependency install (production only) ----------------------
     # Prefer `npm ci` (reproducible, installs exactly the committed lockfile) when
     # a package-lock.json is present at the dest; fall back to `npm install` only
@@ -383,6 +378,26 @@ try {
             finally { Pop-Location }
         }
     }
+
+    # --- Provenance stamp (ticket 9ce606e0) -------------------------------------
+    # Every copy says where it came from, so deploy can tell an upgrade from a
+    # downgrade. A source that already carries a stamp (the staged copy) passes
+    # it on unchanged; otherwise the stamp is computed from the source checkout.
+    # Written LAST and only after a clean run, npm included: the stamp is the
+    # record that this copy is complete, and check-mcp-deploy.ps1 treats a live
+    # copy without one as needing a full sync (Codex, 9ce606e0 Run 2).
+    if (-not $script:hadError) { try {
+        # Copied as bytes, not re-serialized: ConvertFrom-Json in PowerShell 5.1
+        # turns createdAt into a DateTime that would be written back in another form.
+        $sourceStampPath = Join-Path $SourceDir $script:McpStampFileName
+        if (Test-Path -LiteralPath $sourceStampPath) {
+            Copy-Item -LiteralPath $sourceStampPath -Destination (Join-Path $DestDir $script:McpStampFileName) -Force -ErrorAction Stop
+        }
+        else { Write-McpStamp $DestDir (New-McpStamp $SourceDir) }
+    }
+    catch {
+        Report-SyncFailure "could not write $script:McpStampFileName at $DestDir : $_"
+    } }
 
     if ($script:hadError) {
         if ($FailOnError) {

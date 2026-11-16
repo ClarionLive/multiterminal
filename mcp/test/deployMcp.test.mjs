@@ -47,6 +47,22 @@ function serverCopy(dir, { edit, stamp } = {}) {
   return dir;
 }
 
+// A copy as the build stages it: through sync-mcp-server.ps1 stage mode, so it
+// carries a real stamp with a payload hash. `commit` then overrides the stamp's
+// commit (the payload hash stays true to the files).
+function stagedCopy(dir, { edit, commit } = {}) {
+  const source = serverCopy(dir + "-src", { edit });
+  const r = ps(syncScript, [], cleanEnv({ SMS_SOURCE_DIR: source, SMS_DEST_DIR: dir, SMS_STAGE_ONLY: "true" }));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  if (commit !== undefined) {
+    const p = path.join(dir, ".mcp-stamp.json");
+    const stamp = JSON.parse(readFileSync(p, "utf8").replace(/^\uFEFF/, ""));
+    stamp.commit = commit;
+    writeFileSync(p, JSON.stringify(stamp));
+  }
+  return dir;
+}
+
 function withTemp(fn) {
   const root = mkdtempSync(path.join(os.tmpdir(), "mt-mcp-deploy-"));
   try {
@@ -74,7 +90,7 @@ test("stage mode copies the server and a stamp from a worktree path, without npm
     assert.equal(existsSync(path.join(staged, "node_modules")), false, "staging must not run npm");
     assert.equal(existsSync(path.join(staged, "lib", "deleted-upstream.mjs")), false, "a stale lib file must not survive staging");
 
-    const stamp = JSON.parse(readFileSync(path.join(staged, ".mcp-stamp.json"), "utf8").replace(/^﻿/, ""));
+    const stamp = JSON.parse(readFileSync(path.join(staged, ".mcp-stamp.json"), "utf8").replace(/^\uFEFF/, ""));
     assert.ok(stamp.toolCount > 50, `toolCount ${stamp.toolCount}`);
     assert.equal(stamp.toolNames.length, stamp.toolCount);
     assert.ok(stamp.toolNames.includes("list_tasks"));
@@ -99,20 +115,20 @@ test("preflight: no staged server means deploy binaries only (exit 3)", { skip }
 
 test("preflight: no live server is a fresh install (exit 0)", { skip }, () =>
   withTemp((root) => {
-    const staged = serverCopy(path.join(root, "staged"));
+    const staged = stagedCopy(path.join(root, "staged"));
     assert.equal(check(staged, path.join(root, "live-missing")).code, 0);
   }));
 
-test("preflight: identical index.js has nothing to sync (exit 2)", { skip }, () =>
+test("preflight: an identical payload with a completed-install stamp has nothing to sync (exit 2)", { skip }, () =>
   withTemp((root) => {
-    const staged = serverCopy(path.join(root, "staged"));
-    const live = serverCopy(path.join(root, "live"));
+    const staged = stagedCopy(path.join(root, "staged"));
+    const live = stagedCopy(path.join(root, "live"));
     assert.equal(check(staged, live).code, 2);
   }));
 
 test("preflight: refuses when agents would lose a tool, and -Force overrides", { skip }, () =>
   withTemp((root) => {
-    const staged = serverCopy(path.join(root, "staged"));
+    const staged = stagedCopy(path.join(root, "staged"));
     const live = serverCopy(path.join(root, "live"), { edit: renameTool });
     const refused = check(staged, live);
     assert.equal(refused.code, 1, refused.out);
@@ -123,7 +139,7 @@ test("preflight: refuses when agents would lose a tool, and -Force overrides", {
 
 test("preflight: unknown provenance with the same tools is allowed with a warning", { skip }, () =>
   withTemp((root) => {
-    const staged = serverCopy(path.join(root, "staged"), { edit: touch });
+    const staged = stagedCopy(path.join(root, "staged"), { edit: touch });
     const live = serverCopy(path.join(root, "live"));
     const r = check(staged, live);
     assert.equal(r.code, 0, r.out);
@@ -150,8 +166,8 @@ test("preflight: refuses a staged commit that does not contain the live commit",
     const afterCommit = git("rev-parse", "HEAD");
 
     const live = serverCopy(path.join(root, "live"), { stamp: { commit: liveCommit } });
-    const diverged = serverCopy(path.join(root, "diverged"), { edit: touch, stamp: { commit: sideCommit } });
-    const descendant = serverCopy(path.join(root, "descendant"), { edit: touch, stamp: { commit: afterCommit } });
+    const diverged = stagedCopy(path.join(root, "diverged"), { edit: touch, commit: sideCommit });
+    const descendant = stagedCopy(path.join(root, "descendant"), { edit: touch, commit: afterCommit });
 
     const refused = check(diverged, live, ["-RepoDir", repo]);
     assert.equal(refused.code, 1, refused.out);
@@ -168,18 +184,19 @@ test("deploy mode installs the staged server and passes its stamp through", { sk
     mkdirSync(path.join(live, "node_modules"), { recursive: true });
     cpSync(path.join(staged, "package-lock.json"), path.join(live, "package-lock.json"));
     cpSync(path.join(staged, "package.json"), path.join(live, "package.json"));
+    writeFileSync(path.join(live, ".mcp-stamp.json"), JSON.stringify({ commit: "older" }));
 
     const r = ps(syncScript, ["-SourceDir", staged, "-DestDir", live, "-DeployMode"]);
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.doesNotMatch(r.stdout, /running npm/, "deploy mode must not force a reinstall when the lockfile is unchanged");
     assert.equal(readFileSync(path.join(live, "index.js"), "utf8"), readFileSync(path.join(staged, "index.js"), "utf8"));
-    const stamp = JSON.parse(readFileSync(path.join(live, ".mcp-stamp.json"), "utf8").replace(/^﻿/, ""));
+    const stamp = JSON.parse(readFileSync(path.join(live, ".mcp-stamp.json"), "utf8").replace(/^\uFEFF/, ""));
     assert.equal(stamp.commit, "abc123");
   }));
 
 test("preflight: a lib-only change is not 'already current' (Codex Run 1)", { skip }, () =>
   withTemp((root) => {
-    const staged = serverCopy(path.join(root, "staged"));
+    const staged = stagedCopy(path.join(root, "staged"));
     const live = serverCopy(path.join(root, "live"));
     writeFileSync(path.join(live, "lib", "task-formatters.mjs"), "// an older library\n");
     const r = check(staged, live);
@@ -209,7 +226,7 @@ test("preflight: refuses when both stamps name a commit git cannot place (Codex 
     mkdirSync(repo);
     execFileSync("git", ["-C", repo, "init", "-q"]);
     const live = serverCopy(path.join(root, "live"), { stamp: { commit: "1".repeat(40) } });
-    const staged = serverCopy(path.join(root, "staged"), { edit: touch, stamp: { commit: "2".repeat(40) } });
+    const staged = stagedCopy(path.join(root, "staged"), { edit: touch, commit: "2".repeat(40) });
     const r = check(staged, live, ["-RepoDir", repo]);
     assert.equal(r.code, 1, r.out);
     assert.match(r.out, /cannot check/);
@@ -237,10 +254,47 @@ test("deploy mode removes a live lib/ module the source no longer has (debugger 
     mkdirSync(path.join(live, "node_modules"), { recursive: true });
     writeFileSync(path.join(live, "lib", "retired.mjs"), "export {};\n");
     writeFileSync(path.join(live, "tasks.db"), "data");
+    writeFileSync(path.join(live, ".mcp-stamp.json"), JSON.stringify({ commit: "older" }));
     const r = ps(syncScript, ["-SourceDir", staged, "-DestDir", live, "-DeployMode"]);
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.equal(existsSync(path.join(live, "lib", "retired.mjs")), false);
     assert.equal(existsSync(path.join(live, "lib", "task-formatters.mjs")), true);
     assert.equal(existsSync(path.join(live, "tasks.db")), true, "live data must survive");
     assert.equal(existsSync(path.join(live, "node_modules")), true);
+  }));
+
+test("preflight: a fresh install still refuses a staged copy that does not match its stamp (Codex Run 2)", { skip }, () =>
+  withTemp((root) => {
+    const staged = stagedCopy(path.join(root, "staged"));
+    writeFileSync(path.join(staged, "lib", "context-formatters.mjs"), "// rewritten mid-copy\n");
+    const r = check(staged, path.join(root, "live-missing"));
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /does not match its own stamp/);
+  }));
+
+test("preflight: an unstamped staged copy is refused", { skip }, () =>
+  withTemp((root) => {
+    const r = check(serverCopy(path.join(root, "staged")), path.join(root, "live-missing"));
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /no payload hash/);
+  }));
+
+test("a failed deploy sync leaves no stamp, so the next deploy repairs instead of skipping (Codex Run 2)", { skip }, () =>
+  withTemp((root) => {
+    const staged = stagedCopy(path.join(root, "staged"));
+    const live = path.join(root, "live");
+    mkdirSync(path.join(live, "node_modules"), { recursive: true });
+    writeFileSync(path.join(live, ".mcp-stamp.json"), JSON.stringify({ commit: "older" }));
+    // The lockfile differs, so dependencies must install, and npm is off PATH: the run fails.
+    writeFileSync(path.join(live, "package-lock.json"), "{}\n");
+    const sysRoot = process.env.SystemRoot || "C:\\Windows";
+    const powershell = path.join(sysRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const env = { ...cleanEnv(), PATH: path.join(sysRoot, "System32") + ";" + path.dirname(powershell) };
+    const failed = spawnSync(powershell, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", syncScript,
+      "-SourceDir", staged, "-DestDir", live, "-DeployMode"], { env, encoding: "utf8" });
+    assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+    assert.match(failed.stdout, /npm not on PATH/);
+    assert.equal(existsSync(path.join(live, ".mcp-stamp.json")), false, "a failed run must not leave a completed-install stamp");
+    const again = check(staged, live);
+    assert.equal(again.code, 0, "the files match but the install never completed, so deploy must sync again: " + again.out);
   }));

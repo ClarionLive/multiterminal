@@ -7,11 +7,11 @@
 #   0  sync: the staged server is an upgrade, a fresh install, or -Force was given
 #   1  refuse: the staged server would be a downgrade
 #   2  nothing to do: the live server's payload (index.js, lib/, package files)
-#      already equals the staged one
+#      already equals the staged one and its stamp says that install completed
 #   3  no staged server: the build predates MCP staging; deploy binaries only
 #
-# Before anything else, the staged copy must be whole: when its stamp records a
-# payload hash, the files on disk must still hash to it. deploy.ps1 runs this on
+# Before any decision, the staged copy must be whole: its stamp must record a
+# payload hash and the files on disk must still hash to it. deploy.ps1 runs this on
 # a private snapshot of staged\mcp-server, so a build rewriting the shared
 # staged folder mid-copy shows up here as a mismatch instead of being installed.
 #
@@ -61,24 +61,31 @@ if ($null -eq $stagedNames) {
     Refuse @("cannot read the tool list from the staged index.js ($stagedIndex).")
 }
 
+# Integrity first, ahead of every early exit (fresh install included): what is
+# installed must be exactly what the build staged (Codex, 9ce606e0 Run 2).
+$stagedStamp = Read-McpStamp $StagedDir
+$liveStamp = Read-McpStamp $LiveDir
+$stagedPayload = Get-McpPayloadHash $StagedDir
+$recorded = if ($stagedStamp) { [string]$stagedStamp.payloadSha256 } else { "" }
+if (-not $recorded) {
+    Refuse @("the staged MCP server has no payload hash in its stamp, so it cannot be checked for completeness.",
+             "Rebuild so the build stages it again, then deploy.")
+}
+if ($recorded -ne $stagedPayload) {
+    Refuse @("the staged MCP server does not match its own stamp (files changed or incomplete since the build staged them).",
+             "Rebuild, or wait for a running build to finish, then deploy again.")
+}
+
 if (-not (Test-Path -LiteralPath $liveIndex)) {
     Write-Host "MCP: no live MCP server at $LiveDir; installing the staged one ($($stagedNames.Count) tools)."
     exit 0
 }
 
-$stagedStamp = Read-McpStamp $StagedDir
-$liveStamp = Read-McpStamp $LiveDir
-$stagedPayload = Get-McpPayloadHash $StagedDir
-$recorded = if ($stagedStamp) { [string]$stagedStamp.payloadSha256 } else { "" }
-if ($recorded -and $recorded -ne $stagedPayload) {
-    Refuse @("the staged MCP server does not match its own stamp (files changed or incomplete since the build staged them).",
-             "Rebuild, or wait for a running build to finish, then deploy again.")
-}
-if (-not $recorded) {
-    Write-Host "MCP: WARNING: the staged stamp has no payload hash, so the staged copy cannot be checked for completeness." -ForegroundColor Yellow
-}
-
-if ($stagedPayload -eq (Get-McpPayloadHash $LiveDir)) {
+# "Current" needs the live stamp as well as the files: sync writes the stamp
+# only after a complete run, so files without one mean a failed or partial
+# install that must be repaired, not skipped.
+$livePayloadRecorded = if ($liveStamp) { [string]$liveStamp.payloadSha256 } else { "" }
+if ($livePayloadRecorded -eq $stagedPayload -and $stagedPayload -eq (Get-McpPayloadHash $LiveDir)) {
     Write-Host "MCP: the live MCP server already matches the staged one; nothing to sync."
     exit 2
 }
