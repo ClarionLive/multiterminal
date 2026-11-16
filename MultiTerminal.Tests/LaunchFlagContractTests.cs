@@ -67,6 +67,8 @@ namespace MultiTerminal.Tests
         {
             new LaunchSiteKey(Path.Combine("Services", "LaunchCommandBuilder.cs"), "BuildFlags"),
             new LaunchSiteKey(Path.Combine("Services", "OracleService.cs"), "BuildAutoRunCommand"),
+            // mtclaude (ticket 6c688883): a standalone session, launched from the user's own shell, gets the plugin too.
+            new LaunchSiteKey(Path.Combine("Services", "StandaloneLauncher.cs"), "ScriptTemplate (property)"),
         };
 
         /// <summary>
