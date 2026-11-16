@@ -6421,6 +6421,15 @@ async function getProcessImageName(pid, run = runExecFile) {
 //    then given up with one stderr line. A definitive answer is never retried: the wrong service
 //    marker, a parent that is not claude.exe, or a refused registration.
 //
+// 3. A standalone session (ticket 6c688883): started outside MT with `mtclaude <Name>`, which sets
+//    MULTITERMINAL_NAME and MULTITERMINAL_STANDALONE=1 and clears MULTITERMINAL_DOC_ID. Same shape as a
+//    ClarionAssistant tab: MT did not launch it and holds no row for it, so it takes the same name-only
+//    path with the same conditions (MT's marker and the ca-embedded-v1 capability, a claude.exe parent,
+//    an accepted registration before any credentials). The capability is what makes this safe for any
+//    name-only session, not only a CA tab: MT advertises it only while reaping a dead owner clears its
+//    credentials, so a closed standalone window does not leave a row routing to a dead pipe.
+//    STANDALONE with a MULTITERMINAL_DOC_ID skips, as EMBEDDED does: the variable leaked into an MT pane.
+//
 // EMBEDDED together with MULTITERMINAL_DOC_ID skips entirely: that is the Clarion IDE having inherited
 // an MT shell's environment, and it must not claim that pane. The shared placeholder name "Unassigned"
 // is never self-registered in either case: many panes hold it, and binding an ownerPid to it would make
@@ -6439,6 +6448,19 @@ const CA_EMBEDDED_CAPABILITY = "ca-embedded-v1";
 const MT_HEALTH_SERVICE_MARKER = "multiterminal-rest-api";
 // Waits between health attempts: 6 attempts over 59s.
 const CA_HEALTH_RETRY_DELAYS_MS = [2000, 4000, 8000, 15000, 30000];
+
+/**
+ * Is this a standalone session started with `mtclaude <Name>` (ticket 6c688883)? True iff
+ * MULTITERMINAL_STANDALONE is a non-empty string whose trimmed, lower-cased value is not "0" or "false",
+ * the same truth table as isClarionEmbedded.
+ */
+function isStandaloneSession(env) {
+  if (!env || typeof env !== "object") return false;
+  const v = env.MULTITERMINAL_STANDALONE;
+  if (typeof v !== "string" || v === "") return false;
+  const norm = v.trim().toLowerCase();
+  return norm !== "" && norm !== "0" && norm !== "false";
+}
 
 /**
  * Is this session a ClarionAssistant tab? True iff CLARION_ASSISTANT_EMBEDDED is a non-empty string
@@ -6478,7 +6500,7 @@ async function selfRegisterTerminal(env, ppid, post, deps = {}) {
   if (!name) return "skipped";
   // A deny-only guard: trimming here can only skip more, never register a name the broker keys differently.
   if (String(name).trim().toUpperCase() === PLACEHOLDER_TERMINAL_NAME.toUpperCase()) return "skipped";
-  if (isClarionEmbedded(env)) {
+  if (isClarionEmbedded(env) || isStandaloneSession(env)) {
     if (env.MULTITERMINAL_DOC_ID) return "skipped";
     return registerEmbeddedTab(name, env, ppid, post, deps);
   }
@@ -6518,11 +6540,14 @@ async function probeCaHealth(deps, step) {
   return { kind: "ok" };
 }
 
-// Case 2 above. Never throws. Returns a status word; logs a reason, never a credential.
+// Cases 2 and 3 above: a ClarionAssistant tab or a standalone session (ticket 6c688883). The CA-specific
+// names here and in probeCaHealth / CA_HEALTH_RETRY_DELAYS_MS are historical; both kinds take this path.
+// Never throws. Returns a status word; logs a reason, never a credential.
 async function registerEmbeddedTab(name, env, ppid, post, deps) {
   const step = deps.stepTimeoutMs;
   const sleep = deps.sleep || unrefSleep;
-  const tag = `[self-register] ClarionAssistant tab '${name}'`;
+  const kind = isClarionEmbedded(env) ? "ClarionAssistant tab" : "Standalone session";
+  const tag = `[self-register] ${kind} '${name}'`;
   try {
     let probe;
     for (let attempt = 0; ; attempt++) {

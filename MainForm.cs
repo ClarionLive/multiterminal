@@ -1453,6 +1453,14 @@ namespace MultiTerminal
                 // Initialize and start Oracle advisory agent (always-on, dockable/floatable)
                 InitializeOracle();
 
+                // Writes the mtclaude command and puts its folder on the user PATH once (ticket 6c688883).
+                // Independent of the REST start, not ordered with it: it runs whether or not the REST host binds,
+                // so a port conflict or a declined retry cannot leave the command missing or stale (pipeline
+                // Run 1, Codex). Nothing needs it before REST; it only has to happen at every startup.
+                _ = Task.Run(() => StandaloneLauncher.EnsureInstalled(
+                    StandaloneLauncher.ResolveBinDirectory(), addToUserPath: true,
+                    message => _debugLogService?.Info("StandaloneLauncher", message)));
+
                 // Start MCP server in background
                 Task.Run(async () =>
                 {

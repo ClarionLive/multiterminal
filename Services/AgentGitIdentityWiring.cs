@@ -165,7 +165,7 @@ namespace MultiTerminal.Services
         /// same bytes instead of one of them losing its shim. The temp file is created in the SAME
         /// directory because <c>File.Move</c> across volumes is a copy, not an atomic rename.</para>
         /// </summary>
-        private static void WriteLauncherIfChanged(string launcherPath, string desired, Action<string> log)
+        internal static void WriteLauncherIfChanged(string launcherPath, string desired, Action<string> log)
         {
             // ⚠️ ATOMIC REPLACEMENT ALONE IS NOT ENOUGH, and a measured test says so: with temp-file +
             // File.Move(overwrite) and nothing else, 2 of 16 concurrent callers still ended up null.
@@ -192,7 +192,7 @@ namespace MultiTerminal.Services
                     // Move rather than write in place: a reader executing the launcher at this moment
                     // must never observe a half-written file.
                     File.Move(temp, launcherPath, overwrite: true);
-                    log?.Invoke($"Wrote the gh launcher to {launcherPath}");
+                    log?.Invoke($"Wrote {launcherPath}");
                     return;
                 }
                 catch (Exception ex) when ((ex is IOException || ex is UnauthorizedAccessException) && attempt < 3)
