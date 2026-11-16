@@ -524,21 +524,21 @@ namespace MultiTerminal
                     log: message => _debugLogService?.Info("GitHubWatch", message));
 #pragma warning restore CA2000
                 // Task e4924065. The service raises these on a pool thread; panes are UI objects.
-                _gitHubWatch.CountsChanged += projectId => PostGitHubUi(() => RefreshGitHubBands(projectId));
+                _gitHubWatch.CountsChanged += projectId => PostUi(() => RefreshGitHubBands(projectId));
                 // Task 81d0e597: a failed check shows (and the next good one clears) without waiting for a tick.
-                _gitHubWatch.CheckRecorded += projectId => PostGitHubUi(() => RefreshGitHubBands(projectId));
-                _gitHubWatch.NoticesQueued += projectId => PostGitHubUi(() => DeliverGitHubNotices(projectId));
+                _gitHubWatch.CheckRecorded += projectId => PostUi(() => RefreshGitHubBands(projectId));
+                _gitHubWatch.NoticesQueued += projectId => PostUi(() => DeliverGitHubNotices(projectId));
                 // Each tick also refreshes the bands: PATCH /api/projects/{id} and update_project change
                 // the Repository URL without any event MainForm hears (pipeline Run 1), so a REST or MCP
                 // edit shows within a minute.
-                _gitHubWatch.Ticked += () => PostGitHubUi(() =>
+                _gitHubWatch.Ticked += () => PostUi(() =>
                 {
                     DeliverAllGitHubNotices();
                     RefreshGitHubBands(null);
                 });
-                broker.ProjectsUpdated += (s, e) => PostGitHubUi(() => RefreshGitHubBands(null));
+                broker.ProjectsUpdated += (s, e) => PostUi(() => RefreshGitHubBands(null));
                 _gitHubWatch.Start();
-                PostGitHubUi(() => RefreshGitHubBands(null));
+                PostUi(() => RefreshGitHubBands(null));
             }
             catch (Exception ex)
             {
@@ -546,7 +546,8 @@ namespace MultiTerminal
             }
         }
 
-        private void PostGitHubUi(Action action)
+        /// <summary>Runs <paramref name="action"/> on the UI thread if the form is still alive; a closing form drops it.</summary>
+        private void PostUi(Action action)
         {
             try
             {
@@ -1507,6 +1508,9 @@ namespace MultiTerminal
 
                         // Checks projects' GitHub repos for new issues and PRs (task 92eeeb47).
                         StartGitHubWatch();
+
+                        // Shows each session's open subagents and reminds it about idle ones (ticket b3590495).
+                        StartIdleSubagentSweep();
 
                         // Once a day, asks GitHub whether a newer MultiTerminal plugin exists (task 4dc459e4).
                         StartPluginUpdateCheck();
@@ -8151,7 +8155,7 @@ namespace MultiTerminal
 
             // Task e4924065: the header's GitHub band follows the pane's project.
             doc.GitHubLinkRequested += OnPaneGitHubLinkRequested;
-            doc.SettingsProjectChanged += (s, projectId) => PostGitHubUi(() => RefreshGitHubBands(null));
+            doc.SettingsProjectChanged += (s, projectId) => PostUi(() => RefreshGitHubBands(null));
         }
 
         private void OnPanePromptSubmitted(TerminalDocument doc)
@@ -11465,6 +11469,8 @@ namespace MultiTerminal
             {
                 _oracleDigestTimer?.Stop();
                 _oracleDigestTimer?.Dispose();
+                _idleSubagentTimer?.Stop();
+                _idleSubagentTimer?.Dispose();
                 _oracleService?.Dispose();
                 _projectService?.Dispose();
 
