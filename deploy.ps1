@@ -22,7 +22,9 @@ param(
     [switch]$Build = $false,        # Build Release here first, then deploy (old behaviour)
     [switch]$IncludePdb = $false,   # Include debug symbols (.pdb files)
     [switch]$Force = $false,        # Bypass staleness guard / missing-stamp guard
-    [switch]$SkipBuild = $false     # Kept for backward compatibility -- now a no-op (skip is default)
+    [switch]$SkipBuild = $false,    # Kept for backward compatibility -- now a no-op (skip is default)
+    [switch]$SkipMcpSync = $false,  # Deploy the binaries only; leave the live MCP server alone
+    [switch]$ForceMcp = $false      # Install the staged MCP server even when it looks like a downgrade
 )
 
 $source = if ($env:MULTITERMINAL_STAGED_PATH) { $env:MULTITERMINAL_STAGED_PATH } else { "H:\DevLaptop\ClarionPowerShell\staged" }
@@ -142,6 +144,38 @@ if (Test-Path $dest) {
     }
 }
 
+# MCP server preflight (ticket 9ce606e0). The build stages the MCP server that
+# matches these binaries into staged\mcp-server; deploy installs it into the
+# live copy every agent's MCP server runs from. Checked HERE, before the wipe,
+# so a refusal leaves Deploy and the live server both untouched.
+$mcpStaged = Join-Path $source "mcp-server"
+$mcpLive = if ($env:APPDATA) { Join-Path $env:APPDATA "multiterminal\mcp" } else { "" }
+$mcpSync = $false
+$mcpNote = ""
+if ($SkipMcpSync) {
+    $mcpNote = "skipped (-SkipMcpSync); the live MCP server was not changed"
+    Write-Host "MCP: $mcpNote." -ForegroundColor Yellow
+} elseif (-not $mcpLive) {
+    $mcpNote = "skipped: APPDATA is not set"
+    Write-Host "MCP: WARNING: $mcpNote." -ForegroundColor Yellow
+} else {
+    $checkArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "scripts\check-mcp-deploy.ps1"),
+                   "-StagedDir", $mcpStaged, "-LiveDir", $mcpLive, "-RepoDir", $PSScriptRoot)
+    if ($ForceMcp) { $checkArgs += "-Force" }
+    & powershell @checkArgs
+    switch ($LASTEXITCODE) {
+        0 { $mcpSync = $true }
+        1 { exit 1 }
+        2 { $mcpNote = "already current" }
+        3 { $mcpNote = "NOT updated: the staged build has no MCP server" }
+        default {
+            Write-Host "ERROR: the MCP preflight failed (exit $LASTEXITCODE). Nothing has been changed. Re-run with -SkipMcpSync to deploy the binaries only." -ForegroundColor Red
+            exit 1
+        }
+    }
+}
+Write-Host ""
+
 # Remove old deployment (preserve .claude folder + the gitignored local config
 # override, plus installer-managed components that are NOT part of the staged
 # build output: mcp-gateway\, mcps\, docs\, tools\ and the uninstaller. Wiping
@@ -159,9 +193,23 @@ if (Test-Path $dest) {
 # Copy new files
 Write-Host "Copying files..." -ForegroundColor Green
 if ($IncludePdb) {
-    Copy-Item -Path "$source\*" -Destination $dest -Recurse -Force
+    Copy-Item -Path "$source\*" -Destination $dest -Recurse -Force -Exclude "mcp-server"
 } else {
-    Copy-Item -Path "$source\*" -Destination $dest -Recurse -Force -Exclude "*.pdb"
+    Copy-Item -Path "$source\*" -Destination $dest -Recurse -Force -Exclude "*.pdb", "mcp-server"
+}
+
+# Install the staged MCP server (cleared by the preflight above). Running MCP
+# servers keep the code they loaded; agents pick this one up when they restart.
+$mcpFailed = $false
+if ($mcpSync) {
+    Write-Host "Syncing MCP server: $mcpStaged -> $mcpLive" -ForegroundColor Green
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "scripts\sync-mcp-server.ps1") -SourceDir $mcpStaged -DestDir $mcpLive -DeployMode
+    if ($LASTEXITCODE -eq 0) {
+        $mcpNote = "updated"
+    } else {
+        $mcpFailed = $true
+        $mcpNote = "FAILED (exit $LASTEXITCODE); see the MCPSYNC WARNING lines above"
+    }
 }
 
 # Sync .claude\agents -- prefer the source worktree's agents (matches the binaries
@@ -202,7 +250,15 @@ if (Test-Path "$dest\MultiTerminal.exe") {
         Write-Host "Deployed: $($stamp.agentName) / $($stamp.branch) / $($stamp.commit)" -ForegroundColor Cyan
     }
     Write-Host ""
+    if ($mcpNote) {
+        $mcpColor = if ($mcpFailed -or $mcpNote.StartsWith("NOT")) { "Red" } else { "Cyan" }
+        Write-Host "MCP server: $mcpNote" -ForegroundColor $mcpColor
+    }
     Write-Host "You can now restart MultiTerminal from: $dest" -ForegroundColor Green
+    if ($mcpFailed) {
+        Write-Host "The binaries are deployed but the MCP server is not. Fix the cause and re-run deploy." -ForegroundColor Red
+        exit 1
+    }
 } else {
     Write-Host "ERROR: MultiTerminal.exe not found in deployment!" -ForegroundColor Red
     exit 1
