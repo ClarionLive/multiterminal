@@ -171,7 +171,9 @@ namespace MultiTerminal.Services
             # -PipelineVariable; pipeline Run 1). Everything after the name reaches claude as typed. Known limit:
             # Windows PowerShell 5.1 drops a double quote INSIDE an argument passed to claude.
             $Name = if ($args.Count -gt 0) { [string]$args[0] } else { '' }
-            $ClaudeArgs = if ($args.Count -gt 1) { @($args[1..($args.Count - 1)]) } else { @() }
+            # @() around the whole if: `$x = if (...) { @(...) }` unrolls a one-element array to a plain string, and
+            # indexing that string then yields its characters.
+            $ClaudeArgs = @(if ($args.Count -gt 1) { $args[1..($args.Count - 1)] })
 
             if ([string]::IsNullOrWhiteSpace($Name) -or $Name -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') {
                 Write-Host 'Usage: mtclaude <Name> [claude arguments]'
@@ -213,17 +215,35 @@ namespace MultiTerminal.Services
             # (ticket a34ee35f: `mtclaude Vela -c` beside Ezra picked up Ezra's). Claude Code writes the session's name into
             # its transcript as "agent-name" and "custom-title" lines, and the last one in the file is current. agent-name
             # decides: resuming a session under another -n retitles it, but its agent-name stays its owner's.
-            function Read-Tail([string]$path, [int]$bytes) {
+            function Read-Range([string]$path, [long]$offset, [int]$bytes) {
                 try {
                     $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
                     try {
-                        $start = [Math]::Max(0, $fs.Length - $bytes)
-                        [void]$fs.Seek($start, 'Begin')
-                        $buf = New-Object byte[] ([int]($fs.Length - $start))
-                        [void]$fs.Read($buf, 0, $buf.Length)
+                        if ($offset -lt 0) { $offset = [Math]::Max(0, $fs.Length + $offset) }
+                        $count = [int][Math]::Min([long]$bytes, $fs.Length - $offset)
+                        if ($count -le 0) { return '' }
+                        [void]$fs.Seek($offset, 'Begin')
+                        $buf = New-Object byte[] $count
+                        [void]$fs.Read($buf, 0, $count)
                         return [Text.Encoding]::UTF8.GetString($buf)
                     } finally { $fs.Dispose() }
                 } catch { return '' }
+            }
+            # The session's owner as the text gives it: the LAST agent-name record, else (only when the text has no
+            # agent-name record at all) the last custom-title. Candidate lines are parsed as JSON and read by property
+            # name, so field order and spacing do not matter (pipeline Run 1, Codex). $null when the text has neither.
+            function Get-Owner([string]$text) {
+                $agent = $null; $title = $null; $sawAgent = $false
+                foreach ($line in ($text -split "`n")) {
+                    if ($line -notmatch 'agent-name|custom-title') { continue }
+                    if ($line -match 'agent-name') { $sawAgent = $true }
+                    try { $o = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+                    if ($o.type -eq 'agent-name' -and $o.agentName) { $agent = [string]$o.agentName }
+                    elseif ($o.type -eq 'custom-title' -and $o.customTitle) { $title = [string]$o.customTitle }
+                }
+                if ($agent) { return $agent }
+                if ($sawAgent) { return $null } # an agent-name record we could not read: never decide by title
+                return $title
             }
             function Find-NamedSession([string]$name, [string]$folder) {
                 $root = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
@@ -231,20 +251,32 @@ namespace MultiTerminal.Services
                 if (-not (Test-Path -LiteralPath $dir)) { return $null }
                 $files = Get-ChildItem -LiteralPath $dir -Filter '*.jsonl' -File | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 200
                 foreach ($file in $files) {
-                    $text = Read-Tail $file.FullName 262144
-                    $agent = [regex]::Matches($text, '"type":"agent-name","agentName":"([^"]*)"')
-                    $owner = $null
-                    if ($agent.Count -gt 0) { $owner = $agent[$agent.Count - 1].Groups[1].Value }
-                    else {
-                        $title = [regex]::Matches($text, '"type":"custom-title","customTitle":"([^"]*)"')
-                        if ($title.Count -gt 0) { $owner = $title[$title.Count - 1].Groups[1].Value }
-                    }
+                    # The name is written at launch and repeated as the session runs: the last 256 KB, then the last 4 MB,
+                    # then the first 256 KB (pipeline Run 1, Codex: a long stretch without a name record).
+                    $owner = Get-Owner (Read-Range $file.FullName -262144 262144)
+                    if (-not $owner -and $file.Length -gt 262144) { $owner = Get-Owner (Read-Range $file.FullName -4194304 4194304) }
+                    if (-not $owner -and $file.Length -gt 4194304) { $owner = Get-Owner (Read-Range $file.FullName 0 262144) }
                     if ($owner -and $owner -ieq $name) { return $file.BaseName }
                 }
                 return $null
             }
-            if (@($ClaudeArgs | Where-Object { $_ -ceq '-c' -or $_ -eq '--continue' }).Count -gt 0) {
-                $ClaudeArgs = @($ClaudeArgs | Where-Object { -not ($_ -ceq '-c' -or $_ -eq '--continue') })
+            # Where -c / --continue is claude's continue flag: before any "--", and not the value of a flag that takes one
+            # (pipeline Run 1, Codex: `--model -c` must not resume anything).
+            $valueFlags = @('--model', '--fallback-model', '--settings', '--mcp-config', '--plugin-dir', '--permission-mode',
+                '--append-system-prompt', '--system-prompt', '--add-dir', '--allowedTools', '--allowed-tools', '--disallowedTools',
+                '--disallowed-tools', '--output-format', '--input-format', '--max-turns', '--agents', '--agent', '--session-id',
+                '-n', '--name', '--betas', '--debug-file')
+            $continueAt = @()
+            for ($i = 0; $i -lt $ClaudeArgs.Count; $i++) {
+                $a = $ClaudeArgs[$i]
+                if ($a -eq '--') { break }
+                $prev = if ($i -gt 0) { $ClaudeArgs[$i - 1] } else { $null }
+                if (($a -ceq '-c' -or $a -eq '--continue') -and -not ($prev -and $valueFlags -contains $prev)) { $continueAt += $i }
+            }
+            if ($continueAt.Count -gt 0) {
+                $kept = @()
+                for ($i = 0; $i -lt $ClaudeArgs.Count; $i++) { if ($continueAt -notcontains $i) { $kept += $ClaudeArgs[$i] } }
+                $ClaudeArgs = $kept
                 $sessionId = Find-NamedSession $Name (Get-Location).ProviderPath
                 if ($sessionId) {
                     Write-Host "Continuing $Name's last session in this folder ($sessionId)."

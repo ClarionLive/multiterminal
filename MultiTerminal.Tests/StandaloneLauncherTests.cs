@@ -274,5 +274,59 @@ namespace MultiTerminal.Tests
 
             Assert.Contains("ARG dddd-titled", File.ReadAllLines(_record));
         }
+
+        private void RawTranscript(string sessionId, string contents, DateTime lastWriteUtc)
+        {
+            string folder = Path.Combine(_config, "projects", System.Text.RegularExpressions.Regex.Replace(_work, "[^A-Za-z0-9]", "-"));
+            Directory.CreateDirectory(folder);
+            string path = Path.Combine(folder, sessionId + ".jsonl");
+            File.WriteAllText(path, contents);
+            File.SetLastWriteTimeUtc(path, lastWriteUtc);
+        }
+
+        // Pipeline Run 1 (Codex): the records are read as JSON, by property name. An agent-name record with other
+        // field order or spacing still decides; the retitled "Vela" custom-title of Ezra's session never does.
+        [Fact]
+        public void Field_order_and_spacing_do_not_let_a_title_override_the_agent_name()
+        {
+            RawTranscript("eeee-ezra",
+                "{ \"sessionId\": \"eeee-ezra\", \"agentName\": \"Ezra\",  \"type\": \"agent-name\" }\n" +
+                "{\"type\":\"custom-title\",\"customTitle\":\"Vela\",\"sessionId\":\"eeee-ezra\"}\n",
+                DateTime.UtcNow.AddMinutes(-1));
+
+            Run("Vela", "-c");
+
+            Assert.DoesNotContain("eeee-ezra", File.ReadAllText(_record));
+        }
+
+        // Pipeline Run 1 (Codex): a long stretch with no name record does not lose the session's owner.
+        [Fact]
+        public void A_name_record_far_from_the_end_is_still_found()
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append("{\"type\":\"agent-name\",\"agentName\":\"Vela\",\"sessionId\":\"ffff-long\"}\n");
+            string filler = "{\"type\":\"assistant\",\"message\":\"" + new string('x', 1000) + "\"}\n";
+            for (int i = 0; i < 400; i++) sb.Append(filler); // ~400 KB after the name
+            RawTranscript("ffff-long", sb.ToString(), DateTime.UtcNow.AddMinutes(-1));
+
+            Run("Vela", "-c");
+
+            Assert.Contains("ARG ffff-long", File.ReadAllLines(_record));
+        }
+
+        // Pipeline Run 1 (Codex): -c that is a flag's value, or after "--", is passed through, not taken as continue.
+        [Theory]
+        [InlineData("--model", "-c")]
+        [InlineData("--", "-c")]
+        public void A_c_that_is_not_the_continue_flag_reaches_claude_unchanged(string before, string c)
+        {
+            Transcript("gggg-vela", "Vela", "Vela", DateTime.UtcNow.AddMinutes(-1));
+
+            Run("Vela", before, c);
+
+            string[] lines = File.ReadAllLines(_record);
+            Assert.DoesNotContain("ARG --resume", lines);
+            Assert.Equal(new[] { "ARG " + before, "ARG " + c }, lines[8..10]);
+        }
     }
 }
