@@ -1464,6 +1464,13 @@ namespace MultiTerminal
                 // Initialize and start Oracle advisory agent (always-on, dockable/floatable)
                 InitializeOracle();
 
+                // Writes the mtclaude command and puts its folder on the user PATH once (ticket 6c688883).
+                // Before the REST start on purpose: a port conflict or a declined retry must not leave the
+                // command missing or stale (pipeline Run 1, Codex).
+                _ = Task.Run(() => StandaloneLauncher.EnsureInstalled(
+                    StandaloneLauncher.ResolveBinDirectory(), addToUserPath: true,
+                    message => _debugLogService?.Info("StandaloneLauncher", message)));
+
                 // Start MCP server in background
                 Task.Run(async () =>
                 {
@@ -1522,11 +1529,6 @@ namespace MultiTerminal
 
                         // Once a day, asks GitHub whether a newer MultiTerminal plugin exists (task 4dc459e4).
                         StartPluginUpdateCheck();
-
-                        // Writes the mtclaude command and puts its folder on the user PATH once (ticket 6c688883).
-                        _ = Task.Run(() => StandaloneLauncher.EnsureInstalled(
-                            StandaloneLauncher.ResolveBinDirectory(), addToUserPath: true,
-                            message => _debugLogService?.Info("StandaloneLauncher", message)));
 
                         // Wire terminal stream resolver: resolves any terminal identifier
                         // (terminal ID, DocId, or agent name) to its ConPtyTerminal instance

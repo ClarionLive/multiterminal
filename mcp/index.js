@@ -6496,7 +6496,9 @@ async function probeCaHealth(deps, step) {
   return { kind: "ok" };
 }
 
-// Case 2 above. Never throws. Returns a status word; logs a reason, never a credential.
+// Cases 2 and 3 above: a ClarionAssistant tab or a standalone session (ticket 6c688883). The CA-specific
+// names here and in probeCaHealth / CA_HEALTH_RETRY_DELAYS_MS are historical; both kinds take this path.
+// Never throws. Returns a status word; logs a reason, never a credential.
 async function registerEmbeddedTab(name, env, ppid, post, deps) {
   const step = deps.stepTimeoutMs;
   const sleep = deps.sleep || unrefSleep;

@@ -105,7 +105,8 @@ namespace MultiTerminal.Services
             return trimmed.Length == 0 ? directory : trimmed + ";" + directory;
         }
 
-        private static string Normalize(string entry) => entry.Trim().Trim('"').TrimEnd('\\');
+        // %VARIABLES% are expanded before comparing, so an entry written as %APPDATA%\multiterminal\bin counts.
+        private static string Normalize(string entry) => Environment.ExpandEnvironmentVariables(entry.Trim().Trim('"')).TrimEnd('\\');
 
         // HKCU\Environment\Path, read WITHOUT expanding %VARS% and written back with the same value kind, so a
         // PATH that uses %USERPROFILE% stays expandable (Environment.SetEnvironmentVariable would flatten it).
@@ -157,10 +158,12 @@ namespace MultiTerminal.Services
             # mtclaude <Name> [claude arguments]: written by MultiTerminal (ticket 6c688883); MT rewrites it, do not edit.
             # Starts Claude Code so it messages like a terminal MultiTerminal launched: answers to <Name>, has MT's
             # MCP server, registers with MT by name, and takes cross-session messages without the approval prompt.
-            param(
-                [Parameter(Position = 0)][string]$Name,
-                [Parameter(Position = 1, ValueFromRemainingArguments = $true)][string[]]$ClaudeArgs
-            )
+            # Plain $args, never a param() block: that would make this an advanced script, and PowerShell would bind
+            # claude's single-dash flags by prefix to its own parameters (-c to -ClaudeArgs, -v to -Verbose, -p to
+            # -PipelineVariable; pipeline Run 1). Everything after the name reaches claude as typed. Known limit:
+            # Windows PowerShell 5.1 drops a double quote INSIDE an argument passed to claude.
+            $Name = if ($args.Count -gt 0) { [string]$args[0] } else { '' }
+            $ClaudeArgs = if ($args.Count -gt 1) { @($args[1..($args.Count - 1)]) } else { @() }
 
             if ([string]::IsNullOrWhiteSpace($Name) -or $Name -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') {
                 Write-Host 'Usage: mtclaude <Name> [claude arguments]'
@@ -199,11 +202,11 @@ namespace MultiTerminal.Services
             $env:MULTITERMINAL_STANDALONE = '1'
 
             $launch = @('-n', $Name)
-            $mcp = Join-Path $env:APPDATA 'multiterminal\.mcp.json'
+            $mcp = if ($env:MTCLAUDE_MCP_CONFIG) { $env:MTCLAUDE_MCP_CONFIG } else { Join-Path $env:APPDATA 'multiterminal\.mcp.json' }
             if (Test-Path -LiteralPath $mcp) { $launch += @('--mcp-config', $mcp) }
             else { Write-Host "MultiTerminal's MCP config was not found at $mcp; starting without MultiTerminal's tools." }
             $launch += @('--settings', (Join-Path $PSScriptRoot 'mtclaude-settings.json'))
-            if ($ClaudeArgs) { $launch += $ClaudeArgs }
+            if ($ClaudeArgs.Count -gt 0) { $launch += $ClaudeArgs }
 
             & $claude.Source @launch
             exit $LASTEXITCODE

@@ -20,6 +20,8 @@ namespace MultiTerminal.Tests
         private readonly string _bin;
         private readonly string _fake;
         private readonly string _record;
+        private readonly string _mcpConfig;
+        private string _mcpOverride;
 
         public StandaloneLauncherTests()
         {
@@ -27,6 +29,9 @@ namespace MultiTerminal.Tests
             _fake = Path.Combine(_root, "fake");
             _record = Path.Combine(_root, "record.txt");
             Directory.CreateDirectory(_fake);
+            _mcpConfig = Path.Combine(_root, "mcp.json");
+            File.WriteAllText(_mcpConfig, "{}");
+            _mcpOverride = _mcpConfig; // never the developer's real %APPDATA% file
 
             // A claude.cmd that writes what it was given: each argument on its own line, then the env it saw. The values
             // are bracketed: "echo X 1>> file" would read "1>>" as a redirect of handle 1 and drop the value.
@@ -64,6 +69,7 @@ namespace MultiTerminal.Tests
             psi.Environment["MULTITERMINAL_DOC_ID"] = "pane-doc-inherited";
             psi.Environment["MULTITERMINAL_LAUNCH_NONCE"] = "inherited-nonce";
             psi.Environment["MULTITERMINAL_NAME"] = "SomeonesPane";
+            psi.Environment["MTCLAUDE_MCP_CONFIG"] = _mcpOverride;
 
             using var p = Process.Start(psi);
             p.StandardOutput.ReadToEnd();
@@ -79,11 +85,36 @@ namespace MultiTerminal.Tests
 
             Assert.Equal(7, exit); // claude's own exit code comes back
             string[] lines = File.ReadAllLines(_record);
-            string mcp = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "multiterminal", ".mcp.json");
-            var expected = new System.Collections.Generic.List<string> { "ARG -n", "ARG Filbert" };
-            if (File.Exists(mcp)) expected.AddRange(new[] { "ARG --mcp-config", "ARG " + mcp });
-            expected.AddRange(new[] { "ARG --settings", "ARG " + Path.Combine(_bin, StandaloneLauncher.SettingsFileName), "ARG --resume", "ARG abc" });
-            Assert.Equal(expected, lines[..expected.Count]);
+            var expected = new[]
+            {
+                "ARG -n", "ARG Filbert", "ARG --mcp-config", "ARG " + _mcpConfig,
+                "ARG --settings", "ARG " + Path.Combine(_bin, StandaloneLauncher.SettingsFileName), "ARG --resume", "ARG abc",
+            };
+            Assert.Equal(expected, lines[..expected.Length]);
+        }
+
+        // Pipeline Run 1 (code-reviewer + debugger): a param() block made PowerShell bind claude's single-dash
+        // flags to the script's own parameters (-c to -ClaudeArgs, -v to -Verbose, -p to -PipelineVariable).
+        [Fact]
+        public void Single_dash_claude_flags_reach_claude_unchanged()
+        {
+            Run("Filbert", "-c", "-p", "hi", "-v", "-n", "x");
+
+            string[] lines = File.ReadAllLines(_record);
+            Assert.Equal(new[] { "ARG -c", "ARG -p", "ARG hi", "ARG -v", "ARG -n", "ARG x" }, lines[6..12]);
+            Assert.Contains("NAME [Filbert]", lines); // "-n x" after the name is claude's, not the session name
+        }
+
+        [Fact]
+        public void Without_MT_MCP_config_claude_starts_without_it()
+        {
+            _mcpOverride = Path.Combine(_root, "no-such.json");
+
+            Run("Filbert");
+
+            string record = File.ReadAllText(_record);
+            Assert.DoesNotContain("--mcp-config", record);
+            Assert.Contains("ARG --settings", record);
         }
 
         [Fact]
@@ -146,6 +177,14 @@ namespace MultiTerminal.Tests
         public void A_folder_already_on_the_path_is_not_added_again(string current)
         {
             Assert.Null(StandaloneLauncher.PathWithEntry(current, @"C:\mt\bin"));
+        }
+
+        // Pipeline Run 1 (debugger): an entry written with a variable is the same folder.
+        [Fact]
+        public void An_entry_written_with_a_variable_counts()
+        {
+            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            Assert.Null(StandaloneLauncher.PathWithEntry(@"C:\a;%APPDATA%\multiterminal\bin", Path.Combine(appData, "multiterminal", "bin")));
         }
     }
 }
