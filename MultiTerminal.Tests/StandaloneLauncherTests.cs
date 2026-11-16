@@ -20,6 +20,8 @@ namespace MultiTerminal.Tests
         private readonly string _bin;
         private readonly string _fake;
         private readonly string _record;
+        private readonly string _config;
+        private readonly string _work;
         private readonly string _mcpConfig;
         private string _mcpOverride;
         private readonly string _pluginDir;
@@ -30,6 +32,9 @@ namespace MultiTerminal.Tests
             _bin = Path.Combine(_root, "bin");
             _fake = Path.Combine(_root, "fake");
             _record = Path.Combine(_root, "record.txt");
+            _config = Path.Combine(_root, "claude-config");
+            _work = Path.Combine(_root, "Projects", "mrtStudio");
+            Directory.CreateDirectory(_work);
             Directory.CreateDirectory(_fake);
             _mcpConfig = Path.Combine(_root, "mcp.json");
             File.WriteAllText(_mcpConfig, "{}");
@@ -76,6 +81,8 @@ namespace MultiTerminal.Tests
             psi.Environment["MULTITERMINAL_NAME"] = "SomeonesPane";
             psi.Environment["MTCLAUDE_MCP_CONFIG"] = _mcpOverride;
             psi.Environment["MTCLAUDE_PLUGIN_DIR"] = _pluginOverride;
+            psi.Environment["CLAUDE_CONFIG_DIR"] = _config; // transcripts for -c are looked up here, never in the real ~/.claude
+            psi.WorkingDirectory = _work;
 
             using var p = Process.Start(psi);
             p.StandardOutput.ReadToEnd();
@@ -104,10 +111,10 @@ namespace MultiTerminal.Tests
         [Fact]
         public void Single_dash_claude_flags_reach_claude_unchanged()
         {
-            Run("Filbert", "-c", "-p", "hi", "-v", "-n", "x");
+            Run("Filbert", "-p", "hi", "-v", "-n", "x", "-r");
 
             string[] lines = File.ReadAllLines(_record);
-            Assert.Equal(new[] { "ARG -c", "ARG -p", "ARG hi", "ARG -v", "ARG -n", "ARG x" }, lines[8..14]);
+            Assert.Equal(new[] { "ARG -p", "ARG hi", "ARG -v", "ARG -n", "ARG x", "ARG -r" }, lines[8..14]);
             Assert.Contains("NAME [Filbert]", lines); // "-n x" after the name is claude's, not the session name
         }
 
@@ -213,6 +220,59 @@ namespace MultiTerminal.Tests
         {
             string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             Assert.Null(StandaloneLauncher.PathWithEntry(@"C:\a;%APPDATA%\multiterminal\bin", Path.Combine(appData, "multiterminal", "bin")));
+        }
+
+        // A transcript in this folder's Claude project folder, written with the name lines Claude Code writes.
+        private void Transcript(string sessionId, string agentName, string title, DateTime lastWriteUtc)
+        {
+            string folder = Path.Combine(_config, "projects", System.Text.RegularExpressions.Regex.Replace(_work, "[^A-Za-z0-9]", "-"));
+            Directory.CreateDirectory(folder);
+            var sb = new System.Text.StringBuilder();
+            sb.Append("{\"type\":\"user\",\"message\":{\"content\":\"hi\"}}\n");
+            if (title != null) sb.Append("{\"type\":\"custom-title\",\"customTitle\":\"").Append(title).Append("\",\"sessionId\":\"").Append(sessionId).Append("\"}\n");
+            if (agentName != null) sb.Append("{\"type\":\"agent-name\",\"agentName\":\"").Append(agentName).Append("\",\"sessionId\":\"").Append(sessionId).Append("\"}\n");
+            string path = Path.Combine(folder, sessionId + ".jsonl");
+            File.WriteAllText(path, sb.ToString());
+            File.SetLastWriteTimeUtc(path, lastWriteUtc);
+        }
+
+        // Ticket a34ee35f: `mtclaude Vela -c` beside Ezra picked up Ezra's session (the folder's newest). It now
+        // continues Vela's own newest session. Ezra's session, retitled "Vela" by that mistake, is still Ezra's.
+        [Fact]
+        public void Continue_resumes_this_names_newest_session_in_the_folder_not_the_folders_newest()
+        {
+            Transcript("aaaa-ezra", "Ezra", "Vela", DateTime.UtcNow.AddMinutes(-1));
+            Transcript("bbbb-vela-new", "Vela", "Vela", DateTime.UtcNow.AddMinutes(-30));
+            Transcript("cccc-vela-old", "Vela", "Vela", DateTime.UtcNow.AddHours(-5));
+
+            Run("Vela", "-c", "-v");
+
+            string[] lines = File.ReadAllLines(_record);
+            Assert.Equal(new[] { "ARG --resume", "ARG bbbb-vela-new", "ARG -v" }, lines[8..11]);
+            Assert.DoesNotContain("ARG -c", lines);
+        }
+
+        [Fact]
+        public void Continue_with_no_session_of_that_name_starts_fresh_rather_than_taking_another_agents()
+        {
+            Transcript("aaaa-ezra", "Ezra", "Ezra", DateTime.UtcNow.AddMinutes(-1));
+
+            Run("Vela", "--continue");
+
+            string record = File.ReadAllText(_record);
+            Assert.DoesNotContain("--resume", record);
+            Assert.DoesNotContain("--continue", record);
+            Assert.DoesNotContain("aaaa-ezra", record);
+        }
+
+        [Fact]
+        public void A_transcript_without_an_agent_name_line_is_matched_by_its_title()
+        {
+            Transcript("dddd-titled", null, "Vela", DateTime.UtcNow.AddMinutes(-2));
+
+            Run("Vela", "-c");
+
+            Assert.Contains("ARG dddd-titled", File.ReadAllLines(_record));
         }
     }
 }

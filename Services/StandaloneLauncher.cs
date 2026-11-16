@@ -209,6 +209,51 @@ namespace MultiTerminal.Services
             $env:MULTITERMINAL_NAME = $Name
             $env:MULTITERMINAL_STANDALONE = '1'
 
+            # -c / --continue continue THIS name's newest session in this folder, not whichever session here is newest
+            # (ticket a34ee35f: `mtclaude Vela -c` beside Ezra picked up Ezra's). Claude Code writes the session's name into
+            # its transcript as "agent-name" and "custom-title" lines, and the last one in the file is current. agent-name
+            # decides: resuming a session under another -n retitles it, but its agent-name stays its owner's.
+            function Read-Tail([string]$path, [int]$bytes) {
+                try {
+                    $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+                    try {
+                        $start = [Math]::Max(0, $fs.Length - $bytes)
+                        [void]$fs.Seek($start, 'Begin')
+                        $buf = New-Object byte[] ([int]($fs.Length - $start))
+                        [void]$fs.Read($buf, 0, $buf.Length)
+                        return [Text.Encoding]::UTF8.GetString($buf)
+                    } finally { $fs.Dispose() }
+                } catch { return '' }
+            }
+            function Find-NamedSession([string]$name, [string]$folder) {
+                $root = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
+                $dir = Join-Path (Join-Path $root 'projects') ($folder -replace '[^A-Za-z0-9]', '-')
+                if (-not (Test-Path -LiteralPath $dir)) { return $null }
+                $files = Get-ChildItem -LiteralPath $dir -Filter '*.jsonl' -File | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 200
+                foreach ($file in $files) {
+                    $text = Read-Tail $file.FullName 262144
+                    $agent = [regex]::Matches($text, '"type":"agent-name","agentName":"([^"]*)"')
+                    $owner = $null
+                    if ($agent.Count -gt 0) { $owner = $agent[$agent.Count - 1].Groups[1].Value }
+                    else {
+                        $title = [regex]::Matches($text, '"type":"custom-title","customTitle":"([^"]*)"')
+                        if ($title.Count -gt 0) { $owner = $title[$title.Count - 1].Groups[1].Value }
+                    }
+                    if ($owner -and $owner -ieq $name) { return $file.BaseName }
+                }
+                return $null
+            }
+            if (@($ClaudeArgs | Where-Object { $_ -ceq '-c' -or $_ -eq '--continue' }).Count -gt 0) {
+                $ClaudeArgs = @($ClaudeArgs | Where-Object { -not ($_ -ceq '-c' -or $_ -eq '--continue') })
+                $sessionId = Find-NamedSession $Name (Get-Location).ProviderPath
+                if ($sessionId) {
+                    Write-Host "Continuing $Name's last session in this folder ($sessionId)."
+                    $ClaudeArgs = @('--resume', $sessionId) + $ClaudeArgs
+                } else {
+                    Write-Host "No earlier session named $Name in this folder; starting a new one."
+                }
+            }
+
             $launch = @('-n', $Name)
             # MT's plugin (agent rules, hooks, skills): MT panes get it with --plugin-dir; it is not enabled globally.
             $pluginDir = if ($env:MTCLAUDE_PLUGIN_DIR) { $env:MTCLAUDE_PLUGIN_DIR } else { '__MT_PLUGIN_DIR__' }
