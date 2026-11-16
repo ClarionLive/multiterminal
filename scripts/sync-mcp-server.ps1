@@ -36,12 +36,27 @@ param(
     # build rather than silently shipping stale bytes. Off by default so the
     # Debug live-APPDATA sync stays non-fatal — but even non-fatal failures now
     # emit a loud, greppable warning (ticket ec97c446 H2: non-fatal != silent).
-    [switch]$FailOnError
+    [switch]$FailOnError,
+    # Stage mode (or SMS_STAGE_ONLY=true; ticket 9ce606e0): copy the server and
+    # its stamp into a staging folder (the build's <staged>\mcp-server) for
+    # deploy.ps1 to install later. The dest is not a live install, so the
+    # worktree guard and the CI skip do not apply, no npm install runs, and an
+    # explicit -DestDir is required.
+    [switch]$StageOnly,
+    # Deploy mode (ticket 9ce606e0): deploy.ps1 installing the staged server
+    # into the live APPDATA copy. Fails loudly like -FailOnError, but installs
+    # dependencies only when the lockfile changed: the forced clean reinstall
+    # that installer staging does would make every deploy rebuild node_modules.
+    [switch]$DeployMode
 )
 
 $ErrorActionPreference = "Continue"
 
 if (-not $FailOnError -and $env:SMS_FAIL_ON_ERROR -eq "true") { $FailOnError = $true }
+if (-not $StageOnly -and $env:SMS_STAGE_ONLY -eq "true") { $StageOnly = $true }
+if ($DeployMode) { $FailOnError = $true }
+
+. (Join-Path $PSScriptRoot "mcp-server-info.ps1")
 
 # --- CI skip (ticket 9fec5c5f) ---------------------------------------------
 # On a CI runner (GitHub Actions sets CI=true) the AfterTargets=Build dev-live
@@ -51,7 +66,7 @@ if (-not $FailOnError -and $env:SMS_FAIL_ON_ERROR -eq "true") { $FailOnError = $
 # dev sync. The fatal installer-staging path (-FailOnError / SMS_FAIL_ON_ERROR,
 # used by the Release StageMcpForInstaller target) must still run everywhere so
 # a Release build on CI never ships an unstaged/stale server.
-if (-not $FailOnError -and $env:CI -eq "true") {
+if (-not $FailOnError -and -not $StageOnly -and $env:CI -eq "true") {
     Write-Host "SyncMcpServer: skipped on CI (no live %APPDATA% install to sync; installer staging path is unaffected)."
     exit 0
 }
@@ -112,13 +127,18 @@ if (-not (Test-Path -LiteralPath $sourceIndex)) {
 # deploy to the live install. The fatal installer-staging path (-FailOnError) is
 # intentionally exempt -- it stages into the repo-local installer\mcp-dist, is
 # worktree-irrelevant, and must always run for a correct Release/installer build.
-if (-not $FailOnError -and $SourceDir -match '\.claude[\\/]+worktrees[\\/]') {
+if (-not $FailOnError -and -not $StageOnly -and $SourceDir -match '\.claude[\\/]+worktrees[\\/]') {
     Write-Host "MCPSYNC SKIP: worktree build -- root/CI builds deploy the live %APPDATA% MCP server (source: $SourceDir)."
     exit 0
 }
 
 # --- Resolve dest (defaults to current user's APPDATA copy) -----------------
 if ([string]::IsNullOrWhiteSpace($DestDir) -and $env:SMS_DEST_DIR) { $DestDir = $env:SMS_DEST_DIR }
+if ($StageOnly -and [string]::IsNullOrWhiteSpace($DestDir)) {
+    # Never let stage mode fall through to the live APPDATA default.
+    Write-Host "MCPSYNC WARNING: stage mode needs an explicit dest (SMS_DEST_DIR or -DestDir); nothing staged." -ForegroundColor Red
+    exit 0
+}
 if ([string]::IsNullOrWhiteSpace($DestDir)) {
     if ([string]::IsNullOrWhiteSpace($env:APPDATA)) {
         Write-Host "SyncMcpServer: no dest dir and %APPDATA% is empty; skipping."
@@ -164,7 +184,22 @@ try {
     $sourceLock = Join-Path $SourceDir "package-lock.json"
     $destLock   = Join-Path $DestDir "package-lock.json"
     $needsInstall = $false
-    if (-not (Test-Path -LiteralPath $destModules)) {
+    # Deploy mode: a live copy with no stamp was never completed (an earlier
+    # sync failed, or it predates stamps), so its node_modules cannot be
+    # trusted; reinstall. Then drop the stamp until this run succeeds, so an
+    # interrupted or failed run is never mistaken for a current one.
+    $destStampPath = Join-Path $DestDir $script:McpStampFileName
+    if ($DeployMode) {
+        if (-not (Test-Path -LiteralPath $destStampPath)) {
+            $needsInstall = $true
+            Write-Host "SyncMcpServer: no completed-install stamp at the dest -- will reinstall dependencies."
+        }
+        Remove-Item -LiteralPath $destStampPath -Force -ErrorAction SilentlyContinue
+    }
+    if ($StageOnly) {
+        # A staging copy never installs (see below), so none of the checks apply.
+    }
+    elseif (-not (Test-Path -LiteralPath $destModules)) {
         $needsInstall = $true
         Write-Host "SyncMcpServer: dest node_modules missing -- will install."
     }
@@ -182,7 +217,7 @@ try {
             Write-Host "SyncMcpServer: package-lock.json changed -- will install."
         }
     }
-    if (-not $needsInstall -and (Test-Path -LiteralPath $sourcePkg) -and (Test-Path -LiteralPath $destPkg)) {
+    if (-not $StageOnly -and -not $needsInstall -and (Test-Path -LiteralPath $sourcePkg) -and (Test-Path -LiteralPath $destPkg)) {
         # No-lock fallback: compare package.json content when there is no lockfile
         # to key on (so the sync still detects a dep change in a lock-less setup).
         $srcText  = ([System.IO.File]::ReadAllText($sourcePkg)).Replace("`r`n", "`n").Trim()
@@ -196,7 +231,15 @@ try {
     # reinstall from the committed lock -- this guarantees the shipped deps are
     # exactly the lockfile even if a dest's node_modules drifted from a matching
     # lock (ticket ec97c446 F2, belt-and-braces). Cheap: installers build rarely.
-    if ($FailOnError -and -not $needsInstall) {
+    if ($StageOnly) {
+        # A staging copy carries no node_modules: deploy installs at the live
+        # dest from the staged lockfile. Remove the staged lib/ first so a file
+        # deleted from the source does not linger in the next deploy.
+        $needsInstall = $false
+        $staleLib = Join-Path $DestDir "lib"
+        if (Test-Path -LiteralPath $staleLib) { Remove-Item -LiteralPath $staleLib -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    elseif ($FailOnError -and -not $DeployMode -and -not $needsInstall) {
         $needsInstall = $true
         Write-Host "SyncMcpServer: installer staging (FailOnError) -- forcing reproducible reinstall from lock."
     }
@@ -226,6 +269,26 @@ try {
             }
             catch {
                 Report-SyncFailure "APPDATA/dest copy of lib/$relative failed ($DestDir) -- deployed server is now STALE: $_"
+            }
+        }
+    }
+
+    # Deploy mode: a module deleted from the source must not stay behind in the
+    # live lib/ (debugger, 9ce606e0 Run 1). Only lib/ is pruned; node_modules
+    # and the *.db files at the dest are never touched. New files have already
+    # landed above, so a running import never sees a gap.
+    if ($DeployMode -and (Test-Path -LiteralPath $destLib)) {
+        $keep = @{}
+        foreach ($file in $libraryFiles) { $keep[$file.RelativePath.ToLowerInvariant()] = $true }
+        foreach ($existing in @(Get-LibraryFileList $destLib)) {
+            if (-not $keep.ContainsKey($existing.RelativePath.ToLowerInvariant())) {
+                try {
+                    Remove-Item -LiteralPath $existing.SourcePath -Force -ErrorAction Stop
+                    Write-Host "SyncMcpServer: removed lib/$($existing.RelativePath) (no longer in the source)."
+                }
+                catch {
+                    Report-SyncFailure "could not remove stale lib/$($existing.RelativePath) at $DestDir : $_"
+                }
             }
         }
     }
@@ -315,6 +378,26 @@ try {
             finally { Pop-Location }
         }
     }
+
+    # --- Provenance stamp (ticket 9ce606e0) -------------------------------------
+    # Every copy says where it came from, so deploy can tell an upgrade from a
+    # downgrade. A source that already carries a stamp (the staged copy) passes
+    # it on unchanged; otherwise the stamp is computed from the source checkout.
+    # Written LAST and only after a clean run, npm included: the stamp is the
+    # record that this copy is complete, and check-mcp-deploy.ps1 treats a live
+    # copy without one as needing a full sync (Codex, 9ce606e0 Run 2).
+    if (-not $script:hadError) { try {
+        # Copied as bytes, not re-serialized: ConvertFrom-Json in PowerShell 5.1
+        # turns createdAt into a DateTime that would be written back in another form.
+        $sourceStampPath = Join-Path $SourceDir $script:McpStampFileName
+        if (Test-Path -LiteralPath $sourceStampPath) {
+            Copy-Item -LiteralPath $sourceStampPath -Destination (Join-Path $DestDir $script:McpStampFileName) -Force -ErrorAction Stop
+        }
+        else { Write-McpStamp $DestDir (New-McpStamp $SourceDir) }
+    }
+    catch {
+        Report-SyncFailure "could not write $script:McpStampFileName at $DestDir : $_"
+    } }
 
     if ($script:hadError) {
         if ($FailOnError) {
