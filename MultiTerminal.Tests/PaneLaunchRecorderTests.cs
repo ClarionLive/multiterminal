@@ -127,24 +127,26 @@ namespace MultiTerminal.Tests
         [Fact]
         public void Mt_exit_and_a_crash_both_count_as_open()
         {
+            // One PM launch (only the newest counts, task 688ad2f6): one helper ended by MT's exit, one never
+            // ended at all, which is what a crash leaves.
             using var db = new TaskDatabase();
             var rec = Recorder(db);
             var pm = Launch(rec, "Pat", Pm);
-            Launch(rec, "Exited", "h-exit", pm);
-            rec.EndAllForShutdown();
-
-            // A later run whose MT crashed: nothing ever ended its rows.
-            var crashed = Recorder(db, "run-2");
-            var pm2 = Launch(crashed, "Pat", Pm);
-            Launch(crashed, "Crashed", "h-crash", pm2);
+            var exited = Launch(rec, "Exited", "h-exit", pm);
+            Launch(rec, "Crashed", "h-crash", pm);
+            rec.End(exited, PaneLaunchEndReason.MtExit);
 
             Assert.Equal(PaneLaunchEndReason.MtExit, db.GetPaneLaunchesBySession("h-exit").Single().EndReason);
-            Assert.Equal(new[] { "h-crash", "h-exit" }, Sessions(crashed.GetOpenHelpers(Pm)));
+            Assert.Null(db.GetPaneLaunchesBySession("h-crash").Single().EndReason);
+            Assert.Equal(new[] { "h-crash", "h-exit" }, Sessions(rec.GetOpenHelpers(Pm)));
         }
 
         [Fact]
-        public void Helpers_spawned_under_either_launch_of_a_resumed_pm_session_are_merged()
+        public void A_helper_an_earlier_resume_left_behind_is_not_offered_again()
         {
+            // Task 688ad2f6, the Owner's case: Grace was resumed after a deploy and three helpers from older
+            // runs came back beside her four real ones. A helper of an EARLIER launch of the PM session that the
+            // later resume did not bring back (skipped, unticked, never offered) belongs to no launch since.
             using var db = new TaskDatabase();
             var run1 = Recorder(db, "run-1");
             var pmFirst = Launch(run1, "Pat", Pm);
@@ -154,8 +156,46 @@ namespace MultiTerminal.Tests
             var run2 = Recorder(db, "run-2");
             var pmResumed = Launch(run2, "Pat", Pm);
             Launch(run2, "Late", "h-late", pmResumed);
+            run2.EndAllForShutdown();
 
-            Assert.Equal(new[] { "h-late", "h-early" }, Sessions(run2.GetOpenHelpers(Pm)));
+            Assert.Equal(PaneLaunchEndReason.MtExit, db.GetPaneLaunchesBySession("h-early").Single().EndReason);
+            Assert.Equal(new[] { "h-late" }, Sessions(Recorder(db, "run-3").GetOpenHelpers(Pm)));
+        }
+
+        [Fact]
+        public void A_helper_that_came_back_with_each_resume_keeps_coming_back()
+        {
+            // The chain the rule relies on: a helper resumed with its PM is re-linked to the PM's new launch,
+            // so the newest PM launch holds every helper that is still part of the session.
+            using var db = new TaskDatabase();
+            for (int run = 1; run <= 3; run++)
+            {
+                var rec = Recorder(db, "run-" + run);
+                var pm = Launch(rec, "Pat", Pm);
+                Launch(rec, "Helper", "h1", pm);
+                rec.EndAllForShutdown();
+            }
+
+            var helper = Assert.Single(Recorder(db, "run-4").GetOpenHelpers(Pm));
+            Assert.Equal("h1", helper.SessionId);
+        }
+
+        [Fact]
+        public void A_pm_resumed_without_its_helpers_offers_none_next_time()
+        {
+            // The deliberate trade-off of task 688ad2f6: the newest PM launch decides, so a resume that brought
+            // no helper back leaves the next resume nothing to offer.
+            using var db = new TaskDatabase();
+            var run1 = Recorder(db, "run-1");
+            var pm1 = Launch(run1, "Pat", Pm);
+            Launch(run1, "Helper", "h1", pm1);
+            run1.EndAllForShutdown();
+
+            var run2 = Recorder(db, "run-2");
+            Launch(run2, "Pat", Pm);
+            run2.EndAllForShutdown();
+
+            Assert.Empty(Recorder(db, "run-3").GetOpenHelpers(Pm));
         }
 
         [Fact]

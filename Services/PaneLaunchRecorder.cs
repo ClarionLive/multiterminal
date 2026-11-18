@@ -428,10 +428,14 @@ namespace MultiTerminal.Services
         /// of 6 here used to drop the oldest silently). "Newest" and "later" are by
         /// <see cref="PaneLaunchRecord.Seq"/> (pipeline Run 1), never by start time, which can tie.
         /// <list type="number">
-        /// <item>Every launch of the PM session, including earlier resumes (a resume keeps the session id)
-        /// and launch rows ended <see cref="PaneLaunchEndReason.SessionChanged"/> (the pane later moved
-        /// to another session; the helpers it spawned while on this one are still this session's).</item>
-        /// <item>Their direct child launches only (no helpers of helpers) that carry a session id other than the PM's.</item>
+        /// <item>The PM session's NEWEST launch only (task 688ad2f6), whatever its state, including one ended
+        /// <see cref="PaneLaunchEndReason.SessionChanged"/> (the pane later moved to another session; the
+        /// helpers it spawned while on this one are still this session's). A helper that came back with an
+        /// earlier resume is re-linked to that resume's launch, so it carries forward; one that did not come
+        /// back (skipped, unticked, or not offered) was left behind and is not offered again. Every earlier
+        /// launch used to count, so helpers from runs weeks old kept coming back, and a PM resumed after a
+        /// deploy reopened three stale helpers beside its four real ones.</item>
+        /// <item>Its direct child launches only (no helpers of helpers) that carry a session id other than the PM's.</item>
         /// <item>Per helper session, the newest child launch.</item>
         /// <item>Kept only while resumable: not ended (a crash), or ended by <see cref="PaneLaunchEndReason.MtExit"/>
         /// or <see cref="PaneLaunchEndReason.ClosedWithPm"/> (item 8: closed together with its PM).
@@ -448,7 +452,15 @@ namespace MultiTerminal.Services
                 var pmLaunches = _db.GetPaneLaunchesBySession(pmSessionId);
                 if (pmLaunches.Count == 0) return Array.Empty<OpenHelper>();
 
-                var children = _db.GetChildLaunches(pmLaunches.Select(l => l.Id));
+                // A launch of this session spawned BY one of its own launches is not the PM's own launch (the
+                // session was reopened as its own helper), so it must not stand in as the newest one.
+                var pmIds = new HashSet<string>(pmLaunches.Select(l => l.Id), StringComparer.Ordinal);
+                var newestPmLaunch = pmLaunches
+                    .Where(l => string.IsNullOrEmpty(l.SpawnerLaunchId) || !pmIds.Contains(l.SpawnerLaunchId))
+                    .OrderByDescending(l => l.Seq)
+                    .FirstOrDefault();
+                if (newestPmLaunch == null) return Array.Empty<OpenHelper>();
+                var children = _db.GetChildLaunches(new[] { newestPmLaunch.Id });
                 var newestPerSession = children
                     .Where(c => !string.IsNullOrEmpty(c.SessionId)
                                 && !string.Equals(c.SessionId, pmSessionId, StringComparison.Ordinal))

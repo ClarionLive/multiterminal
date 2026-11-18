@@ -198,7 +198,13 @@ Sonnet for helpers, Sonnet for subagents; they are settings, because Anthropic's
 
 ## Helpers resume with their PM (task 7d20e94c)
 
-Resuming a PM session also reopens the helper panes it had open when it last ended. Owner decisions:
+Resuming a PM session also reopens the helper panes it had open when it last ended. "When it last ended"
+means the PM session's NEWEST launch only (task 688ad2f6): `GetOpenHelpers` reads that launch's children,
+skipping a launch of the session spawned by one of its own launches. A helper resumed with its PM is
+re-linked to the PM's new launch, so it carries forward; one an earlier resume did not bring back
+(skipped, unticked, not offered) is left behind for good. Every launch used to count, so a PM resumed after a
+deploy reopened helpers from runs weeks old beside its real ones (Grace, 2026-11-18: 3 stale helpers came
+back and 2 more were reported "not found"). Owner decisions:
 Continue mode (no dialog) resumes all of them and reports what it skipped; a helper whose Claude
 process exited while its pane stayed open counts as CLOSED; one level only (no helpers of helpers),
 at most 12 (task 592ade03; it was 6, and a PM with 8 silently lost its 2 oldest). The limit is
