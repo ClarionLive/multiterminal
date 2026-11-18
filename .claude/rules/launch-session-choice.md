@@ -216,7 +216,9 @@ Two decisions end it for good, writing `left_behind` on the helper's newest laun
 nothing usable recorded, not Claude, `SessionCatalog.TranscriptNotFoundReason`, a cwd outside the project, a
 folder that no longer exists). `left_behind` counts as closed. Only a resumable row changes (`mt_exit`,
 `closed_with_pm`, or open in an earlier, crashed run); a row open in this run is a live pane and is never
-touched. Unticked helpers are NOT left behind: the dialog remembers the untick and keeps showing them. Before
+touched. A run id alone does not prove a process gone, so `LeaveBehind` first asks `GetPriorLaunchState`
+and skips `OpenInCurrentRun` and `OpenElsewhere` (an earlier MT that cannot be shown to have exited; pipeline
+Run 2, Codex). Unticked helpers are NOT left behind: the dialog remembers the untick and keeps showing them. Before
 this, Grace (2026-11-18) got back three helpers the old limit of 6 had dropped weeks earlier, plus two
 reported "not found" at every resume. A first fix, "the newest PM launch only", was dropped in review: it lost
 helpers whenever a resume did not finish re-linking them. Closing a PM's tab can close its helpers with it,

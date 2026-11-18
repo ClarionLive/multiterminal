@@ -419,6 +419,16 @@ namespace MultiTerminal.Services
                 if (string.IsNullOrEmpty(helper?.LaunchId)) continue;
                 try
                 {
+                    // Pipeline Run 2 (Codex): a row's run id alone does not prove its process is gone. A helper
+                    // still running, here or under a previous MT that cannot be shown to have exited, is never
+                    // left behind; the same fail-closed probe as the "may be open elsewhere" rule decides.
+                    var state = GetPriorLaunchState(helper.SessionId);
+                    if (state == PriorLaunchState.OpenInCurrentRun || state == PriorLaunchState.OpenElsewhere)
+                    {
+                        Log($"Not left behind: helper '{helper.TerminalName}' session {helper.SessionId} may still be running ({state})");
+                        continue;
+                    }
+
                     if (_db.LeavePaneLaunchBehind(helper.LaunchId, MtRunId, _utcNow()))
                     {
                         marked++;
