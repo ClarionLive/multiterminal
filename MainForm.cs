@@ -6003,6 +6003,7 @@ namespace MultiTerminal
 
         private static OpenHelper ToOpenHelper(RestorablePane pane) => new OpenHelper
         {
+            LaunchId = pane.LaunchId, // so a restore can leave a helper behind too (task 688ad2f6, Run 2)
             SessionId = pane.SessionId,
             TerminalName = pane.TerminalName,
             Cwd = pane.Cwd,

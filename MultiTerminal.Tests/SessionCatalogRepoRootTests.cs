@@ -105,6 +105,27 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void A_missing_projects_root_is_not_reported_as_a_transcript_that_is_not_there()
+        {
+            // Task 688ad2f6 (pipeline Run 2): TranscriptNotFoundReason leaves a helper behind for good, so a
+            // search that could not run (the profile's projects folder missing or unreachable) must say so instead.
+            var id = WriteRepoWorktreeSession();
+            var catalog = new SessionCatalog(Path.Combine(_base, "no-such-projects"), null, null);
+
+            Assert.Null(catalog.TryGetEntry(_projectRoot, id, new HashSet<string>(), Now));
+            Assert.NotEqual(SessionCatalog.TranscriptNotFoundReason, catalog.LastMissReason);
+            Assert.Contains("could not be looked for", catalog.LastMissReason);
+        }
+
+        [Fact]
+        public void A_complete_search_that_finds_nothing_is_a_transcript_that_is_not_there()
+        {
+            var catalog = Catalog();
+            Assert.Null(catalog.TryGetEntry(_projectRoot, Guid.NewGuid().ToString("D"), new HashSet<string>(), Now));
+            Assert.Equal(SessionCatalog.TranscriptNotFoundReason, catalog.LastMissReason);
+        }
+
+        [Fact]
         public void The_validated_cwd_accepts_a_repo_root_worktree_only_with_that_repo_root()
         {
             Assert.Equal(_repoWorktree, SessionCatalog.ValidateResumeCwd(_projectRoot, _repoWorktree, _repoRoot), ignoreCase: true);

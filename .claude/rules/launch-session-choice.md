@@ -218,7 +218,13 @@ folder that no longer exists). `left_behind` counts as closed. Only a resumable 
 `closed_with_pm`, or open in an earlier, crashed run); a row open in this run is a live pane and is never
 touched. A run id alone does not prove a process gone, so `LeaveBehind` first asks `GetPriorLaunchState`
 and skips `OpenInCurrentRun` and `OpenElsewhere` (an earlier MT that cannot be shown to have exited; pipeline
-Run 2, Codex). Unticked helpers are NOT left behind: the dialog remembers the untick and keeps showing them. Before
+Run 2, Codex). `TranscriptNotFoundReason` is given only after a COMPLETE search (projects root present, every
+candidate folder listed, no file of that name); a search that could not run is "could not be looked for" and
+an unreadable file "could not be read", both passing skips. The startup restore's helpers carry `LaunchId`
+too (`MainForm.ToOpenHelper`). Known gaps: with more than `LookupLimit` (40) open helpers, the ones past it are
+not seen and so not left behind; a left-behind row reads `Ended` to `ClassifyPriorLaunch`, so a manual resume
+of it within ~2 minutes of its last write shows "may be open elsewhere"; marking a helper's newest row also
+drops it from another PM's offer (`closedLater`), which only matters for a helper re-linked under two PMs. Unticked helpers are NOT left behind: the dialog remembers the untick and keeps showing them. Before
 this, Grace (2026-11-18) got back three helpers the old limit of 6 had dropped weeks earlier, plus two
 reported "not found" at every resume. A first fix, "the newest PM launch only", was dropped in review: it lost
 helpers whenever a resume did not finish re-linking them. Closing a PM's tab can close its helpers with it,
