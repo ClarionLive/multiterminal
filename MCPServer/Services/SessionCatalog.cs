@@ -394,10 +394,17 @@ namespace MultiTerminal.MCPServer.Services
             }
 
             if (newestPath == null)
-                return Miss("its transcript was not found in this project's session folders (it may have run in another project's folder)");
+                return Miss(TranscriptNotFoundReason);
             var entry = TryBuildEntry(root, worktreeBase, ListWorktreeDirs(root, worktreeBase), newestPath, newestFolder, newestWriteUtc, utcNow, new ReadMeter(ReadByteBudget), out var why);
             return entry ?? Miss(why ?? "its transcript could not be read");
         }
+
+        /// <summary>
+        /// <see cref="LastMissReason"/> when no transcript of the session exists in this project's folders.
+        /// <see cref="HelperResume.Check"/> treats it as a skip for good (task 688ad2f6).
+        /// </summary>
+        public const string TranscriptNotFoundReason =
+            "its transcript was not found in this project's session folders (it may have run in another project's folder)";
 
         private SessionCatalogEntry Miss(string reason)
         {

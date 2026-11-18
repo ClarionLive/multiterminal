@@ -12,11 +12,12 @@ namespace MultiTerminal.Services
     /// </summary>
     public sealed class HelperResumeCheck
     {
-        private HelperResumeCheck(LaunchSessionCandidate candidate, string cwd, string skipReason)
+        private HelperResumeCheck(LaunchSessionCandidate candidate, string cwd, string skipReason, bool permanent = false)
         {
             Candidate = candidate;
             Cwd = cwd;
             SkipReason = skipReason;
+            IsPermanent = permanent;
         }
 
         public LaunchSessionCandidate Candidate { get; }
@@ -29,7 +30,18 @@ namespace MultiTerminal.Services
 
         public bool CanResume => SkipReason == null;
 
+        /// <summary>
+        /// The skip can never turn into a resume: nothing usable was recorded, the transcript is gone, or the
+        /// folder it ran in is not the project's or no longer exists (task 688ad2f6). Such a helper is left
+        /// behind (<see cref="PaneLaunchRecorder.LeaveBehind"/>), so it is not offered and reported again at
+        /// every later resume. A skip that may pass next time (already open, may be open elsewhere, a re-check
+        /// or a profile refusal) is not permanent, and the helper stays offered.
+        /// </summary>
+        public bool IsPermanent { get; }
+
         internal static HelperResumeCheck Skip(string reason) => new HelperResumeCheck(null, null, reason);
+
+        internal static HelperResumeCheck SkipForGood(string reason) => new HelperResumeCheck(null, null, reason, permanent: true);
 
         internal static HelperResumeCheck Ok(LaunchSessionCandidate candidate, string cwd) => new HelperResumeCheck(candidate, cwd, null);
     }
@@ -121,12 +133,19 @@ namespace MultiTerminal.Services
             PriorLaunchState prior = PriorLaunchState.NoRecord,
             string catalogMissReason = null)
         {
-            if (helper == null) return HelperResumeCheck.Skip("nothing was recorded for it");
-            if (string.IsNullOrWhiteSpace(helper.TerminalName)) return HelperResumeCheck.Skip("it has no recorded name");
+            if (helper == null) return HelperResumeCheck.SkipForGood("nothing was recorded for it");
+            if (string.IsNullOrWhiteSpace(helper.TerminalName)) return HelperResumeCheck.SkipForGood("it has no recorded name");
             if (!string.IsNullOrEmpty(helper.Kind) && !string.Equals(helper.Kind, "claude", StringComparison.OrdinalIgnoreCase))
-                return HelperResumeCheck.Skip("it is not a Claude session, and only Claude sessions can be resumed");
+                return HelperResumeCheck.SkipForGood("it is not a Claude session, and only Claude sessions can be resumed");
             if (entry == null)
-                return HelperResumeCheck.Skip("its session cannot be resumed: " + (catalogMissReason ?? "the session catalog did not find it"));
+            {
+                // Only a transcript that is not there is for good; any other catalog refusal (already open,
+                // a read that failed) may pass next time.
+                string why = "its session cannot be resumed: " + (catalogMissReason ?? "the session catalog did not find it");
+                return string.Equals(catalogMissReason, SessionCatalog.TranscriptNotFoundReason, StringComparison.Ordinal)
+                    ? HelperResumeCheck.SkipForGood(why)
+                    : HelperResumeCheck.Skip(why);
+            }
 
             var panes = (livePanes ?? Enumerable.Empty<PaneSessionState>()).ToList();
             var model = new LaunchSessionChoiceModel(new[] { entry }, panes, _ => prior);
@@ -148,9 +167,9 @@ namespace MultiTerminal.Services
 
             string cwd = SessionCatalog.ValidateResumeCwd(projectRoot, entry.Cwd, entry.WorktreeBase);
             if (cwd == null)
-                return HelperResumeCheck.Skip("it ran in a folder that is not this project's folder or one of its worktrees");
+                return HelperResumeCheck.SkipForGood("it ran in a folder that is not this project's folder or one of its worktrees");
             if (directoryExists == null || !directoryExists(cwd))
-                return HelperResumeCheck.Skip($"the folder it ran in no longer exists ({cwd})");
+                return HelperResumeCheck.SkipForGood($"the folder it ran in no longer exists ({cwd})");
 
             return HelperResumeCheck.Ok(candidate, cwd);
         }

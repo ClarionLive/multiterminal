@@ -8104,6 +8104,29 @@ namespace MultiTerminal.Services
             return cmd.ExecuteNonQuery() > 0;
         }
 
+        /// <summary>
+        /// Marks one launch <c>left_behind</c> (task 688ad2f6) when it is still resumable as a helper: ended
+        /// <c>mt_exit</c> or <c>closed_with_pm</c>, or open in ANOTHER run than <paramref name="currentRunId"/>
+        /// (a crashed run). A row open in the current run is a live pane and is left alone, as is any row that
+        /// ended closed. An open row gets <paramref name="utcNow"/> as its end; an ended one keeps its time.
+        /// </summary>
+        /// <returns>Whether the row was marked.</returns>
+        public bool LeavePaneLaunchBehind(string launchId, string currentRunId, DateTime utcNow)
+        {
+            if (string.IsNullOrEmpty(launchId)) return false;
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.LeavePaneLaunchBehind", launchId);
+            using var gate = LockConn();
+            using var cmd = new SQLiteCommand(
+                "UPDATE pane_launches SET end_reason = 'left_behind', ended_at = COALESCE(ended_at, @now) " +
+                "WHERE id = @id AND (" +
+                "(ended_at IS NOT NULL AND end_reason IN ('mt_exit', 'closed_with_pm')) " +
+                "OR (ended_at IS NULL AND mt_run_id <> @run))", _connection);
+            cmd.Parameters.AddWithValue("@id", launchId);
+            cmd.Parameters.AddWithValue("@run", currentRunId ?? string.Empty);
+            cmd.Parameters.AddWithValue("@now", FormatPaneLaunchTime(utcNow));
+            return cmd.ExecuteNonQuery() > 0;
+        }
+
         /// <summary>Ends every still-open launch of one MT run (used at MT exit). Rows of other runs and ended rows are untouched.</summary>
         /// <returns>The number of rows ended.</returns>
         public int EndOpenPaneLaunchesForRun(string mtRunId, string reason)

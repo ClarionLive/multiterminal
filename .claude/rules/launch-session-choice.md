@@ -198,13 +198,7 @@ Sonnet for helpers, Sonnet for subagents; they are settings, because Anthropic's
 
 ## Helpers resume with their PM (task 7d20e94c)
 
-Resuming a PM session also reopens the helper panes it had open when it last ended. "When it last ended"
-means the PM session's NEWEST launch only (task 688ad2f6): `GetOpenHelpers` reads that launch's children,
-skipping a launch of the session spawned by one of its own launches. A helper resumed with its PM is
-re-linked to the PM's new launch, so it carries forward; one an earlier resume did not bring back
-(skipped, unticked, not offered) is left behind for good. Every launch used to count, so a PM resumed after a
-deploy reopened helpers from runs weeks old beside its real ones (Grace, 2026-11-18: 3 stale helpers came
-back and 2 more were reported "not found"). Owner decisions:
+Resuming a PM session also reopens the helper panes it had open when it last ended. Owner decisions:
 Continue mode (no dialog) resumes all of them and reports what it skipped; a helper whose Claude
 process exited while its pane stayed open counts as CLOSED; one level only (no helpers of helpers),
 at most 12 (task 592ade03; it was 6, and a PM with 8 silently lost its 2 oldest). The limit is
@@ -212,7 +206,20 @@ at most 12 (task 592ade03; it was 6, and a PM with 8 silently lost its 2 oldest)
 path (dialog, Continue mode, startup restore) obeys it. It keeps the 12 NEWEST by `OpenHelper.Seq`, whatever
 order they arrive in (the startup restore passes them oldest first), and the summary names each one left out
 (10 by name, then a count). `PaneLaunchRecorder.GetOpenHelpers` looks up at most `HelperResume.LookupLimit` (40),
-a bound on its per-helper queries. A new session never resumes helpers. Closing a PM's tab can close its helpers with it,
+a bound on its per-helper queries. A new session never resumes helpers.
+
+**Left behind for good (task 688ad2f6).** A helper of ANY launch of the PM session stays offered until a
+resume decides about it, so a crash mid-resume, a transient skip or a helper still running loses nothing.
+Two decisions end it for good, writing `left_behind` on the helper's newest launch row
+(`PaneLaunchRecorder.LeaveBehind` → `TaskDatabase.LeavePaneLaunchBehind`): it was beyond the limit
+(`MainForm.ResumeHelpersFor`, after `ApplyLimit`), or its skip can never pass (`HelperResumeCheck.IsPermanent`:
+nothing usable recorded, not Claude, `SessionCatalog.TranscriptNotFoundReason`, a cwd outside the project, a
+folder that no longer exists). `left_behind` counts as closed. Only a resumable row changes (`mt_exit`,
+`closed_with_pm`, or open in an earlier, crashed run); a row open in this run is a live pane and is never
+touched. Unticked helpers are NOT left behind: the dialog remembers the untick and keeps showing them. Before
+this, Grace (2026-11-18) got back three helpers the old limit of 6 had dropped weeks earlier, plus two
+reported "not found" at every resume. A first fix, "the newest PM launch only", was dropped in review: it lost
+helpers whenever a resume did not finish re-linking them. Closing a PM's tab can close its helpers with it,
 and they come back when the PM is resumed (item 8, below).
 
 ### The launch record

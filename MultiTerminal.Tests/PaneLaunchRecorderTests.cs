@@ -127,26 +127,24 @@ namespace MultiTerminal.Tests
         [Fact]
         public void Mt_exit_and_a_crash_both_count_as_open()
         {
-            // One PM launch (only the newest counts, task 688ad2f6): one helper ended by MT's exit, one never
-            // ended at all, which is what a crash leaves.
             using var db = new TaskDatabase();
             var rec = Recorder(db);
             var pm = Launch(rec, "Pat", Pm);
-            var exited = Launch(rec, "Exited", "h-exit", pm);
-            Launch(rec, "Crashed", "h-crash", pm);
-            rec.End(exited, PaneLaunchEndReason.MtExit);
+            Launch(rec, "Exited", "h-exit", pm);
+            rec.EndAllForShutdown();
+
+            // A later run whose MT crashed: nothing ever ended its rows.
+            var crashed = Recorder(db, "run-2");
+            var pm2 = Launch(crashed, "Pat", Pm);
+            Launch(crashed, "Crashed", "h-crash", pm2);
 
             Assert.Equal(PaneLaunchEndReason.MtExit, db.GetPaneLaunchesBySession("h-exit").Single().EndReason);
-            Assert.Null(db.GetPaneLaunchesBySession("h-crash").Single().EndReason);
-            Assert.Equal(new[] { "h-crash", "h-exit" }, Sessions(rec.GetOpenHelpers(Pm)));
+            Assert.Equal(new[] { "h-crash", "h-exit" }, Sessions(crashed.GetOpenHelpers(Pm)));
         }
 
         [Fact]
-        public void A_helper_an_earlier_resume_left_behind_is_not_offered_again()
+        public void Helpers_spawned_under_either_launch_of_a_resumed_pm_session_are_merged()
         {
-            // Task 688ad2f6, the Owner's case: Grace was resumed after a deploy and three helpers from older
-            // runs came back beside her four real ones. A helper of an EARLIER launch of the PM session that the
-            // later resume did not bring back (skipped, unticked, never offered) belongs to no launch since.
             using var db = new TaskDatabase();
             var run1 = Recorder(db, "run-1");
             var pmFirst = Launch(run1, "Pat", Pm);
@@ -156,46 +154,8 @@ namespace MultiTerminal.Tests
             var run2 = Recorder(db, "run-2");
             var pmResumed = Launch(run2, "Pat", Pm);
             Launch(run2, "Late", "h-late", pmResumed);
-            run2.EndAllForShutdown();
 
-            Assert.Equal(PaneLaunchEndReason.MtExit, db.GetPaneLaunchesBySession("h-early").Single().EndReason);
-            Assert.Equal(new[] { "h-late" }, Sessions(Recorder(db, "run-3").GetOpenHelpers(Pm)));
-        }
-
-        [Fact]
-        public void A_helper_that_came_back_with_each_resume_keeps_coming_back()
-        {
-            // The chain the rule relies on: a helper resumed with its PM is re-linked to the PM's new launch,
-            // so the newest PM launch holds every helper that is still part of the session.
-            using var db = new TaskDatabase();
-            for (int run = 1; run <= 3; run++)
-            {
-                var rec = Recorder(db, "run-" + run);
-                var pm = Launch(rec, "Pat", Pm);
-                Launch(rec, "Helper", "h1", pm);
-                rec.EndAllForShutdown();
-            }
-
-            var helper = Assert.Single(Recorder(db, "run-4").GetOpenHelpers(Pm));
-            Assert.Equal("h1", helper.SessionId);
-        }
-
-        [Fact]
-        public void A_pm_resumed_without_its_helpers_offers_none_next_time()
-        {
-            // The deliberate trade-off of task 688ad2f6: the newest PM launch decides, so a resume that brought
-            // no helper back leaves the next resume nothing to offer.
-            using var db = new TaskDatabase();
-            var run1 = Recorder(db, "run-1");
-            var pm1 = Launch(run1, "Pat", Pm);
-            Launch(run1, "Helper", "h1", pm1);
-            run1.EndAllForShutdown();
-
-            var run2 = Recorder(db, "run-2");
-            Launch(run2, "Pat", Pm);
-            run2.EndAllForShutdown();
-
-            Assert.Empty(Recorder(db, "run-3").GetOpenHelpers(Pm));
+            Assert.Equal(new[] { "h-late", "h-early" }, Sessions(run2.GetOpenHelpers(Pm)));
         }
 
         [Fact]
@@ -333,5 +293,78 @@ namespace MultiTerminal.Tests
 
             Assert.Equal(6, errors.Count);
         }
+
+        // ---- Task 688ad2f6: helpers left behind for good ----
+
+        [Fact]
+        public void An_open_helper_carries_the_launch_id_of_its_newest_launch()
+        {
+            using var db = new TaskDatabase();
+            var rec = Recorder(db);
+            var pm = Launch(rec, "Pat", Pm);
+            var h = Launch(rec, "Helper1", "h1", pm);
+
+            Assert.Equal(h, Assert.Single(rec.GetOpenHelpers(Pm)).LaunchId);
+        }
+
+        [Fact]
+        public void A_helper_left_behind_is_not_offered_again_and_the_others_still_are()
+        {
+            // The Owner's case: Grace's resume found helpers from weeks back that the old limit of 6 had
+            // dropped. Left behind once, a helper stays gone; a helper the resume did not decide about (a
+            // crash mid-resume, a transient skip, a live pane) is still offered, from any launch of the PM.
+            using var db = new TaskDatabase();
+            var run1 = Recorder(db, "run-1");
+            var pm1 = Launch(run1, "Pat", Pm);
+            Launch(run1, "Stale", "h-stale", pm1);
+            Launch(run1, "Kept", "h-kept", pm1);
+            run1.EndAllForShutdown();
+
+            var run2 = Recorder(db, "run-2");
+            var offered = run2.GetOpenHelpers(Pm);
+            Assert.Equal(1, run2.LeaveBehind(offered.Where(h => h.SessionId == "h-stale")));
+            Launch(run2, "Pat", Pm); // the PM resumed; h-kept was not re-linked (say MT crashed first)
+            run2.EndAllForShutdown();
+
+            Assert.Equal(PaneLaunchEndReason.LeftBehind, db.GetPaneLaunchesBySession("h-stale").Single().EndReason);
+            Assert.Equal(new[] { "h-kept" }, Sessions(Recorder(db, "run-3").GetOpenHelpers(Pm)));
+        }
+
+        [Fact]
+        public void Leave_behind_marks_only_resumable_rows_and_never_a_live_pane()
+        {
+            using var db = new TaskDatabase();
+            var crashed = Recorder(db, "run-1");
+            var pmCrashed = Launch(crashed, "Pat", Pm);
+            var crashedHelper = Launch(crashed, "Crashed", "h-crash", pmCrashed); // never ended: a crash
+
+            var rec = Recorder(db, "run-2");
+            var pm = Launch(rec, "Pat", Pm);
+            var withPm = Launch(rec, "WithPm", "h-withpm", pm);
+            rec.End(withPm, PaneLaunchEndReason.ClosedWithPm);
+            var closed = Launch(rec, "Closed", "h-closed", pm);
+            rec.End(closed, PaneLaunchEndReason.PaneClosed);
+            var live = Launch(rec, "Live", "h-live", pm); // open in this run: a live pane
+
+            var all = new[] { crashedHelper, withPm, closed, live }
+                .Select(id => new OpenHelper { LaunchId = id, TerminalName = id }).ToList();
+            Assert.Equal(2, rec.LeaveBehind(all));
+
+            Assert.Equal(PaneLaunchEndReason.LeftBehind, db.GetPaneLaunchesBySession("h-crash").Single().EndReason);
+            Assert.NotNull(db.GetPaneLaunchesBySession("h-crash").Single().EndedAt);
+            Assert.Equal(PaneLaunchEndReason.LeftBehind, db.GetPaneLaunchesBySession("h-withpm").Single().EndReason);
+            Assert.Equal(PaneLaunchEndReason.PaneClosed, db.GetPaneLaunchesBySession("h-closed").Single().EndReason);
+            Assert.Null(db.GetPaneLaunchesBySession("h-live").Single().EndReason);
+        }
+
+        [Fact]
+        public void Leave_behind_ignores_a_helper_with_no_launch_id_and_never_throws()
+        {
+            using var db = new TaskDatabase();
+            var rec = Recorder(db);
+            Assert.Equal(0, rec.LeaveBehind(new[] { new OpenHelper(), null }));
+            Assert.Equal(0, rec.LeaveBehind(null));
+        }
+
     }
 }
