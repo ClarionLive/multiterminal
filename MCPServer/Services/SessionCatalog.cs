@@ -368,9 +368,10 @@ namespace MultiTerminal.MCPServer.Services
             // helper behind), so it is given only after a complete search: the projects root exists, every
             // candidate folder was listed, and no file of that name was there. A search that could not run
             // or a file that could not be read is a different, passing reason.
-            bool searchIncomplete = !Directory.Exists(_claudeProjectsRoot);
             bool sawUnreadableFile = false;
-            foreach (var folder in GetCandidateFolders(root, worktreeBase))
+            var candidateFolders = GetCandidateFolders(root, worktreeBase, out bool listedAll);
+            bool searchIncomplete = !listedAll;
+            foreach (var folder in candidateFolders)
             {
                 List<string> files;
                 try
@@ -540,7 +541,16 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         private IEnumerable<string> GetCandidateFolders(string root, string worktreeBase)
+            => GetCandidateFolders(root, worktreeBase, out _);
+
+        /// <param name="listedAll">
+        /// False when the projects root is missing or could not be listed, so an empty result does not mean
+        /// "no such folder" (task 688ad2f6, Codex re-verify: <see cref="TranscriptNotFoundReason"/> is a verdict
+        /// for good and needs a complete search).
+        /// </param>
+        private IEnumerable<string> GetCandidateFolders(string root, string worktreeBase, out bool listedAll)
         {
+            listedAll = false;
             if (!Directory.Exists(_claudeProjectsRoot))
                 return Array.Empty<string>();
 
@@ -561,7 +571,7 @@ namespace MultiTerminal.MCPServer.Services
 
             try
             {
-                return Directory.EnumerateDirectories(_claudeProjectsRoot)
+                var folders = Directory.EnumerateDirectories(_claudeProjectsRoot)
                     .Where(d =>
                     {
                         var name = Path.GetFileName(d);
@@ -571,6 +581,8 @@ namespace MultiTerminal.MCPServer.Services
                         return match.Prefix != null && WorktreeMayExist(match.Base, name.Substring(match.Prefix.Length));
                     })
                     .ToList();
+                listedAll = true;
+                return folders;
             }
             catch (Exception ex)
             {
