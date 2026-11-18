@@ -206,7 +206,28 @@ at most 12 (task 592ade03; it was 6, and a PM with 8 silently lost its 2 oldest)
 path (dialog, Continue mode, startup restore) obeys it. It keeps the 12 NEWEST by `OpenHelper.Seq`, whatever
 order they arrive in (the startup restore passes them oldest first), and the summary names each one left out
 (10 by name, then a count). `PaneLaunchRecorder.GetOpenHelpers` looks up at most `HelperResume.LookupLimit` (40),
-a bound on its per-helper queries. A new session never resumes helpers. Closing a PM's tab can close its helpers with it,
+a bound on its per-helper queries. A new session never resumes helpers.
+
+**Left behind for good (task 688ad2f6).** A helper of ANY launch of the PM session stays offered until a
+resume decides about it, so a crash mid-resume, a transient skip or a helper still running loses nothing.
+Two decisions end it for good, writing `left_behind` on the helper's newest launch row
+(`PaneLaunchRecorder.LeaveBehind` → `TaskDatabase.LeavePaneLaunchBehind`): it was beyond the limit
+(`MainForm.ResumeHelpersFor`, after `ApplyLimit`), or its skip can never pass (`HelperResumeCheck.IsPermanent`:
+nothing usable recorded, not Claude, `SessionCatalog.TranscriptNotFoundReason`, a cwd outside the project, a
+folder that no longer exists). `left_behind` counts as closed. Only a resumable row changes (`mt_exit`,
+`closed_with_pm`, or open in an earlier, crashed run); a row open in this run is a live pane and is never
+touched. A run id alone does not prove a process gone, so `LeaveBehind` first asks `GetPriorLaunchState`
+and skips `OpenInCurrentRun` and `OpenElsewhere` (an earlier MT that cannot be shown to have exited; pipeline
+Run 2, Codex). `TranscriptNotFoundReason` is given only after a COMPLETE search (projects root present, every
+candidate folder listed, no file of that name); a search that could not run is "could not be looked for" and
+an unreadable file "could not be read", both passing skips. The startup restore's helpers carry `LaunchId`
+too (`MainForm.ToOpenHelper`). Known gaps: with more than `LookupLimit` (40) open helpers, the ones past it are
+not seen and so not left behind; a left-behind row reads `Ended` to `ClassifyPriorLaunch`, so a manual resume
+of it within ~2 minutes of its last write shows "may be open elsewhere"; marking a helper's newest row also
+drops it from another PM's offer (`closedLater`), which only matters for a helper re-linked under two PMs. Unticked helpers are NOT left behind: the dialog remembers the untick and keeps showing them. Before
+this, Grace (2026-11-18) got back three helpers the old limit of 6 had dropped weeks earlier, plus two
+reported "not found" at every resume. A first fix, "the newest PM launch only", was dropped in review: it lost
+helpers whenever a resume did not finish re-linking them. Closing a PM's tab can close its helpers with it,
 and they come back when the PM is resumed (item 8, below).
 
 ### The launch record

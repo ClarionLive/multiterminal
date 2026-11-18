@@ -41,6 +41,14 @@ namespace MultiTerminal.Tests
         private PaneLaunchRecorder Recorder(TaskDatabase db, string runId = "run-1", List<string> errors = null)
             => new PaneLaunchRecorder(db, m => errors?.Add(m), runId, () => _now);
 
+        /// <summary>
+        /// A recorder that records a (fake) MT process for its run and answers every previous run's process with
+        /// <paramref name="previousRuns"/>, for the facts that depend on whether a previous run is provably gone.
+        /// </summary>
+        private PaneLaunchRecorder RunWithProcess(TaskDatabase db, string runId, MtProcessLiveness previousRuns = MtProcessLiveness.Gone)
+            => new PaneLaunchRecorder(db, null, runId, () => _now,
+                new MtProcessIdentity(4242, T0), _ => previousRuns);
+
         /// <summary>Starts a launch one minute after the previous one, so launch order is unambiguous.</summary>
         private string Launch(PaneLaunchRecorder rec, string name, string sessionId, string spawnerLaunchId = null)
         {
@@ -293,5 +301,103 @@ namespace MultiTerminal.Tests
 
             Assert.Equal(6, errors.Count);
         }
+
+        // ---- Task 688ad2f6: helpers left behind for good ----
+
+        [Fact]
+        public void An_open_helper_carries_the_launch_id_of_its_newest_launch()
+        {
+            using var db = new TaskDatabase();
+            var rec = Recorder(db);
+            var pm = Launch(rec, "Pat", Pm);
+            var h = Launch(rec, "Helper1", "h1", pm);
+
+            Assert.Equal(h, Assert.Single(rec.GetOpenHelpers(Pm)).LaunchId);
+        }
+
+        [Fact]
+        public void A_helper_left_behind_is_not_offered_again_and_the_others_still_are()
+        {
+            // The Owner's case: Grace's resume found helpers from weeks back that the old limit of 6 had
+            // dropped. Left behind once, a helper stays gone; a helper the resume did not decide about (a
+            // crash mid-resume, a transient skip, a live pane) is still offered, from any launch of the PM.
+            using var db = new TaskDatabase();
+            var run1 = RunWithProcess(db, "run-1");
+            var pm1 = Launch(run1, "Pat", Pm);
+            Launch(run1, "Stale", "h-stale", pm1);
+            Launch(run1, "Kept", "h-kept", pm1);
+            run1.EndAllForShutdown();
+
+            var run2 = RunWithProcess(db, "run-2");
+            var offered = run2.GetOpenHelpers(Pm);
+            Assert.Equal(1, run2.LeaveBehind(offered.Where(h => h.SessionId == "h-stale")));
+            Launch(run2, "Pat", Pm); // the PM resumed; h-kept was not re-linked (say MT crashed first)
+            run2.EndAllForShutdown();
+
+            Assert.Equal(PaneLaunchEndReason.LeftBehind, db.GetPaneLaunchesBySession("h-stale").Single().EndReason);
+            Assert.Equal(new[] { "h-kept" }, Sessions(Recorder(db, "run-3").GetOpenHelpers(Pm)));
+        }
+
+        [Fact]
+        public void Leave_behind_marks_only_resumable_rows_and_never_a_live_pane()
+        {
+            using var db = new TaskDatabase();
+            var crashed = RunWithProcess(db, "run-1");
+            var pmCrashed = Launch(crashed, "Pat", Pm);
+            var crashedHelper = Launch(crashed, "Crashed", "h-crash", pmCrashed); // never ended, and its MT is gone: a crash
+
+            var rec = RunWithProcess(db, "run-2");
+            var pm = Launch(rec, "Pat", Pm);
+            var withPm = Launch(rec, "WithPm", "h-withpm", pm);
+            rec.End(withPm, PaneLaunchEndReason.ClosedWithPm);
+            var closed = Launch(rec, "Closed", "h-closed", pm);
+            rec.End(closed, PaneLaunchEndReason.PaneClosed);
+            var live = Launch(rec, "Live", "h-live", pm); // open in this run: a live pane
+
+            var all = new[] { ("h-crash", crashedHelper), ("h-withpm", withPm), ("h-closed", closed), ("h-live", live) }
+                .Select(x => new OpenHelper { SessionId = x.Item1, LaunchId = x.Item2, TerminalName = x.Item1 }).ToList();
+            Assert.Equal(2, rec.LeaveBehind(all));
+
+            Assert.Equal(PaneLaunchEndReason.LeftBehind, db.GetPaneLaunchesBySession("h-crash").Single().EndReason);
+            Assert.NotNull(db.GetPaneLaunchesBySession("h-crash").Single().EndedAt);
+            Assert.Equal(PaneLaunchEndReason.LeftBehind, db.GetPaneLaunchesBySession("h-withpm").Single().EndReason);
+            Assert.Equal(PaneLaunchEndReason.PaneClosed, db.GetPaneLaunchesBySession("h-closed").Single().EndReason);
+            Assert.Null(db.GetPaneLaunchesBySession("h-live").Single().EndReason);
+        }
+
+        [Theory]
+        [InlineData(MtProcessLiveness.Alive)]
+        [InlineData(MtProcessLiveness.Unknown)]
+        public void A_helper_whose_previous_mt_may_still_run_is_never_left_behind(MtProcessLiveness previousRun)
+        {
+            // Pipeline Run 2 (Codex): another MT that cannot be shown to have exited may still run the helper.
+            // Its row is open (or mt_exit) in another run, which the SQL alone would take for a crash.
+            using var db = new TaskDatabase();
+            var other = RunWithProcess(db, "run-1");
+            var pm = Launch(other, "Pat", Pm);
+            var openThere = Launch(other, "Open", "h-open", pm);
+            var exitedThere = Launch(other, "Exited", "h-exited", pm);
+            other.End(exitedThere, PaneLaunchEndReason.MtExit);
+
+            var here = RunWithProcess(db, "run-2", previousRun);
+            var offered = new[]
+            {
+                new OpenHelper { SessionId = "h-open", LaunchId = openThere, TerminalName = "Open" },
+                new OpenHelper { SessionId = "h-exited", LaunchId = exitedThere, TerminalName = "Exited" },
+            };
+            Assert.Equal(0, here.LeaveBehind(offered));
+            Assert.Null(db.GetPaneLaunchesBySession("h-open").Single().EndReason);
+            Assert.Equal(PaneLaunchEndReason.MtExit, db.GetPaneLaunchesBySession("h-exited").Single().EndReason);
+        }
+
+        [Fact]
+        public void Leave_behind_ignores_a_helper_with_no_launch_id_and_never_throws()
+        {
+            using var db = new TaskDatabase();
+            var rec = Recorder(db);
+            Assert.Equal(0, rec.LeaveBehind(new[] { new OpenHelper(), null }));
+            Assert.Equal(0, rec.LeaveBehind(null));
+        }
+
     }
 }

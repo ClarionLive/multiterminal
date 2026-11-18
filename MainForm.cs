@@ -5776,7 +5776,12 @@ namespace MultiTerminal
                     return report;
                 // The one limit on how many helpers come back with their PM, for every resume path (dialog,
                 // Continue mode, startup restore); the ones beyond it are named in the summary (task 592ade03).
-                ResumeHelpersInto(pmDoc, project, HelperResume.ApplyLimit(helpers, report), placement, report);
+                var kept = HelperResume.ApplyLimit(helpers, report);
+                // Task 688ad2f6: the ones beyond the limit are left behind for good, so they do not come back
+                // at a later resume (Grace, 2026-11-18: helpers the old limit of 6 dropped returned weeks on).
+                if (kept.Count < helpers.Count)
+                    _paneLaunchRecorder?.LeaveBehind(helpers.Where(h => !kept.Contains(h)).ToList());
+                ResumeHelpersInto(pmDoc, project, kept, placement, report);
                 return report;
             }
             finally
@@ -5826,8 +5831,10 @@ namespace MultiTerminal
                         catalog.LastMissReason);
                     if (!check.CanResume)
                     {
-                        _debugLogService?.Info("LaunchSession", $"Helper resume: '{helperName}' ({helper?.SessionId}) skipped: {check.SkipReason}");
+                        _debugLogService?.Info("LaunchSession", $"Helper resume: '{helperName}' ({helper?.SessionId}) skipped{(check.IsPermanent ? " for good" : "")}: {check.SkipReason}");
                         report.AddSkipped(helperName, check.SkipReason);
+                        if (check.IsPermanent && helper != null)
+                            _paneLaunchRecorder?.LeaveBehind(new[] { helper });
                         continue;
                     }
 
@@ -6201,6 +6208,7 @@ namespace MultiTerminal
 
         private static OpenHelper ToOpenHelper(RestorablePane pane) => new OpenHelper
         {
+            LaunchId = pane.LaunchId, // so a restore can leave a helper behind too (task 688ad2f6, Run 2)
             SessionId = pane.SessionId,
             TerminalName = pane.TerminalName,
             Cwd = pane.Cwd,

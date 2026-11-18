@@ -374,7 +374,14 @@ namespace MultiTerminal.MCPServer.Services
             string newestPath = null;
             string newestFolder = null;
             var newestWriteUtc = DateTime.MinValue;
-            foreach (var folder in GetCandidateFolders(root, worktreeBase))
+            // TranscriptNotFoundReason is a verdict for good (task 688ad2f6: the helper resume leaves such a
+            // helper behind), so it is given only after a complete search: the projects root exists, every
+            // candidate folder was listed, and no file of that name was there. A search that could not run
+            // or a file that could not be read is a different, passing reason.
+            bool sawUnreadableFile = false;
+            var candidateFolders = GetCandidateFolders(root, worktreeBase, out bool listedAll);
+            bool searchIncomplete = !listedAll;
+            foreach (var folder in candidateFolders)
             {
                 List<string> files;
                 try
@@ -387,6 +394,7 @@ namespace MultiTerminal.MCPServer.Services
                 catch (Exception ex)
                 {
                     Debug.WriteLine($"[SessionCatalog] cannot enumerate {folder}: {ex.Message}");
+                    searchIncomplete = true;
                     continue;
                 }
 
@@ -394,7 +402,12 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     if (!string.Equals(Path.GetFileNameWithoutExtension(file), sessionId, StringComparison.OrdinalIgnoreCase))
                         continue;
-                    if (TryGetCandidate(file, live, out var lastWriteUtc) && (newestPath == null || lastWriteUtc > newestWriteUtc))
+                    if (!TryGetCandidate(file, live, out var lastWriteUtc))
+                    {
+                        sawUnreadableFile = true;
+                        continue;
+                    }
+                    if (newestPath == null || lastWriteUtc > newestWriteUtc)
                     {
                         newestPath = file;
                         newestFolder = Path.GetFileName(folder);
@@ -404,10 +417,23 @@ namespace MultiTerminal.MCPServer.Services
             }
 
             if (newestPath == null)
-                return Miss("its transcript was not found in this project's session folders (it may have run in another project's folder)");
+            {
+                if (sawUnreadableFile)
+                    return Miss("its transcript could not be read");
+                if (searchIncomplete)
+                    return Miss("its transcript could not be looked for (the session folders could not all be listed)");
+                return Miss(TranscriptNotFoundReason);
+            }
             var entry = TryBuildEntry(root, worktreeBase, ListWorktreeDirs(root, worktreeBase), newestPath, newestFolder, newestWriteUtc, utcNow, new ReadMeter(ReadByteBudget), out var why);
             return entry ?? Miss(why ?? "its transcript could not be read");
         }
+
+        /// <summary>
+        /// <see cref="LastMissReason"/> when no transcript of the session exists in this project's folders.
+        /// <see cref="HelperResume.Check"/> treats it as a skip for good (task 688ad2f6).
+        /// </summary>
+        public const string TranscriptNotFoundReason =
+            "its transcript was not found in this project's session folders (it may have run in another project's folder)";
 
         private SessionCatalogEntry Miss(string reason)
         {
@@ -525,7 +551,16 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         private IEnumerable<string> GetCandidateFolders(string root, string worktreeBase)
+            => GetCandidateFolders(root, worktreeBase, out _);
+
+        /// <param name="listedAll">
+        /// False when the projects root is missing or could not be listed, so an empty result does not mean
+        /// "no such folder" (task 688ad2f6, Codex re-verify: <see cref="TranscriptNotFoundReason"/> is a verdict
+        /// for good and needs a complete search).
+        /// </param>
+        private IEnumerable<string> GetCandidateFolders(string root, string worktreeBase, out bool listedAll)
         {
+            listedAll = false;
             if (!Directory.Exists(_claudeProjectsRoot))
                 return Array.Empty<string>();
 
@@ -546,7 +581,7 @@ namespace MultiTerminal.MCPServer.Services
 
             try
             {
-                return Directory.EnumerateDirectories(_claudeProjectsRoot)
+                var folders = Directory.EnumerateDirectories(_claudeProjectsRoot)
                     .Where(d =>
                     {
                         var name = Path.GetFileName(d);
@@ -556,6 +591,8 @@ namespace MultiTerminal.MCPServer.Services
                         return match.Prefix != null && WorktreeMayExist(match.Base, name.Substring(match.Prefix.Length));
                     })
                     .ToList();
+                listedAll = true;
+                return folders;
             }
             catch (Exception ex)
             {

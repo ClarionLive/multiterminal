@@ -203,5 +203,49 @@ namespace MultiTerminal.Tests
             Assert.Empty(HelperResume.ApplyLimit(null, new HelperResumeReport()));
             Assert.Equal(12, HelperResume.ApplyLimit(Helpers(14), null).Count);
         }
+
+        // ---- Task 688ad2f6: which skips are for good ----
+
+        [Fact]
+        public void A_transcript_that_is_not_there_is_a_skip_for_good()
+        {
+            var check = HelperResume.Check(Helper(), null, Array.Empty<PaneSessionState>(), Root,
+                _ => Written, _ => true, catalogMissReason: SessionCatalog.TranscriptNotFoundReason);
+            Assert.False(check.CanResume);
+            Assert.True(check.IsPermanent);
+        }
+
+        [Fact]
+        public void Any_other_catalog_refusal_may_pass_next_time()
+        {
+            var check = HelperResume.Check(Helper(), null, Array.Empty<PaneSessionState>(), Root,
+                _ => Written, _ => true, catalogMissReason: "it is already open in this MultiTerminal");
+            Assert.False(check.CanResume);
+            Assert.False(check.IsPermanent);
+        }
+
+        [Fact]
+        public void A_gone_or_foreign_folder_and_a_missing_name_are_skips_for_good()
+        {
+            Assert.True(Run(Helper(), Entry(), dirExists: false).IsPermanent);
+            Assert.True(Run(Helper(), Entry(@"D:\elsewhere")).IsPermanent);
+            Assert.True(Run(Helper(name: " "), Entry()).IsPermanent);
+            Assert.True(Run(Helper(kind: "codex"), Entry()).IsPermanent);
+        }
+
+        [Fact]
+        public void A_live_or_possibly_open_session_is_not_a_skip_for_good()
+        {
+            var panes = new[] { new PaneSessionState(true, Sid, Written.AddHours(-1)) };
+            var live = Run(Helper(), Entry(), panes);
+            Assert.False(live.CanResume);
+            Assert.False(live.IsPermanent);
+
+            var elsewhere = HelperResume.Check(Helper(), Entry(), Array.Empty<PaneSessionState>(), Root,
+                _ => Written, _ => true, PriorLaunchState.OpenElsewhere);
+            Assert.False(elsewhere.CanResume);
+            Assert.False(elsewhere.IsPermanent);
+        }
+
     }
 }
