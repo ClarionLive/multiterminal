@@ -33,9 +33,21 @@ namespace MultiTerminal.Services
         private bool _disposed;
         private bool _pendingStop;
 
+        // 925c8cff: one read pass at a time. The file watcher's thread, the quiet timer and a catch-up
+        // read (AddTranscriptFile) can all start a read; under this lock they run one after another,
+        // so a file position, the turn state and the line ids are never updated by two at once. Events
+        // are not raised under it: a read queues them (_pendingEvents) and they are raised after the
+        // lock is released (DrainEvents), in the order they were queued.
+        private readonly object _readLock = new object();
+        private readonly ConcurrentQueue<Action> _pendingEvents = new ConcurrentQueue<Action>();
+        private int _draining;
+
         // GH #89: which file first delivered each transcript line (by its uuid), so a line repeated
-        // in the agent's continuation file is shown once.
-        private readonly ConcurrentDictionary<string, string> _lineOrigins = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
+        // in the agent's continuation file is shown once. Guarded by _readLock. Capped at
+        // MaxTrackedLineIds (925c8cff), oldest id evicted first: a repeat of a line older than that is
+        // shown again rather than the set growing for as long as the tailer lives.
+        private readonly Dictionary<string, string> _lineOrigins = new Dictionary<string, string>(StringComparer.Ordinal);
+        private readonly Queue<string> _lineOriginOrder = new Queue<string>();
 
         // GH #89 fallback completion: the SubagentStop hook is the normal finish signal, but it does
         // not always arrive. A non-team agent whose last turn ended (end_turn) and whose transcript
@@ -50,6 +62,22 @@ namespace MultiTerminal.Services
         internal TimeSpan QuietCompletionWindow { get; set; } = TimeSpan.FromSeconds(60);
 
         private static readonly TimeSpan QuietCheckInterval = TimeSpan.FromSeconds(15);
+
+        /// <summary>
+        /// How many messages <see cref="Messages"/> keeps; past it the oldest are dropped (925c8cff). An
+        /// implicit-team member's tailer lives until the team config removes the member, which may be
+        /// never, so what it holds is bounded rather than tied to its lifetime.
+        /// </summary>
+        internal int MaxRetainedMessages { get; set; } = 2000;
+
+        /// <summary>How many line ids the repeat check remembers (see <c>_lineOrigins</c>).</summary>
+        internal int MaxTrackedLineIds { get; set; } = 10000;
+
+        /// <summary>Test seam: how many line ids the repeat check holds now.</summary>
+        internal int TrackedLineIdCount
+        {
+            get { lock (_readLock) { return _lineOrigins.Count; } }
+        }
 
         // Track the last user message we sent, to deduplicate echo(es) from the transcript.
         // Uses a time window instead of one-shot because the transcript may produce multiple
@@ -149,8 +177,12 @@ namespace MultiTerminal.Services
         /// </summary>
         public Task StartAsync()
         {
-            if (IsActive || _completed) return Task.CompletedTask;
-            IsActive = true;
+            lock (_completionLock)
+            {
+                // _shutDown: a member removed (and its tailer disposed) before its start ran stays stopped.
+                if (IsActive || _completed || _shutDown) return Task.CompletedTask;
+                IsActive = true;
+            }
 
             System.Diagnostics.Debug.WriteLine($"[TranscriptTailer:{_agentName}] StartAsync called, file={_initialTranscriptPath}");
 
@@ -164,7 +196,10 @@ namespace MultiTerminal.Services
                 // transcript found already ended and quiet (an agent that finished before MT started)
                 // completes now, before anyone is told about it, instead of a minute after its card opens.
                 var written = File.GetLastWriteTimeUtc(_initialTranscriptPath);
-                if (written < _lastGrowthUtc) _lastGrowthUtc = written;
+                lock (_readLock)
+                {
+                    if (written < _lastGrowthUtc) _lastGrowthUtc = written;
+                }
                 CheckQuietCompletion(DateTime.UtcNow);
             }
             else
@@ -187,16 +222,101 @@ namespace MultiTerminal.Services
         /// </summary>
         public void Complete()
         {
+            bool completed;
+            lock (_readLock)
+            {
+                completed = MarkCompleted();
+            }
+            if (completed) AfterCompleted();
+        }
+
+        /// <summary>
+        /// The state half of <see cref="Complete"/>: marks the agent finished and queues Stopped(0).
+        /// Caller holds <c>_readLock</c>, so the finish is ordered with the read passes: messages a
+        /// pass queued are raised before the Stopped, and a later pass sees it completed.
+        /// </summary>
+        private bool MarkCompleted()
+        {
             lock (_completionLock)
             {
-                if (!IsActive || _completed) return;
+                if (!IsActive || _completed) return false;
                 IsActive = false;
                 _completed = true;
             }
 
+            QueueEvent(Stopped, h => h(this, 0));
+            return true;
+        }
+
+        /// <summary>After <see cref="MarkCompleted"/> did it, outside <c>_readLock</c>: drop the watchers unless a wake can still come, then raise.</summary>
+        private void AfterCompleted()
+        {
             if (!KeepsWatchingWhenComplete)
                 DisposeWatchers();
-            Stopped?.Invoke(this, 0);
+            DrainEvents();
+        }
+
+        /// <summary>
+        /// Queue an event for <see cref="DrainEvents"/>. The handler list is read now, when the thing
+        /// it reports happened, so a subscriber added later (TeamWatcherService subscribes
+        /// TeamMessageSent only after the catch-up read) is not sent what happened before it subscribed.
+        /// </summary>
+        private void QueueEvent<THandler>(THandler handlers, Action<THandler> raise)
+            where THandler : Delegate
+        {
+            if (handlers == null) return;
+            _pendingEvents.Enqueue(() => raise(handlers));
+        }
+
+        /// <summary>
+        /// Raise queued events, oldest first, on this thread, holding no lock of this tailer. One
+        /// thread drains at a time: a thread that finds another draining leaves its events to it (the
+        /// drainer re-checks the queue after it stops, so none is left behind). A handler that throws
+        /// is logged and the rest still run.
+        /// </summary>
+        private void DrainEvents()
+        {
+            while (!_pendingEvents.IsEmpty)
+            {
+                if (Interlocked.CompareExchange(ref _draining, 1, 0) != 0) return;
+                try
+                {
+                    while (_pendingEvents.TryDequeue(out var raise))
+                    {
+                        try
+                        {
+                            raise();
+                        }
+#pragma warning disable CA1031 // A subscriber's failure must not stop the events queued after it.
+                        catch (Exception ex)
+#pragma warning restore CA1031
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[TranscriptTailer:{_agentName}] Event handler failed: {ex.Message}");
+                        }
+                    }
+                }
+                finally
+                {
+                    Volatile.Write(ref _draining, 0);
+                }
+            }
+        }
+
+        private int _wakeCount;
+
+        /// <summary>
+        /// How many times this tailer has been woken (<see cref="Reactivated"/> is queued once per
+        /// wake). Read with <see cref="IsCompleted"/> it says which wakes an announcement already covers.
+        /// </summary>
+        public int WakeCount
+        {
+            get { lock (_completionLock) { return _wakeCount; } }
+        }
+
+        /// <summary><see cref="IsCompleted"/> and <see cref="WakeCount"/> read together, so neither can change between the two reads.</summary>
+        public (bool Completed, int Wakes) ReadCompletion()
+        {
+            lock (_completionLock) { return (_completed, _wakeCount); }
         }
 
         /// <summary>A completed implicit-team member that can still be woken.</summary>
@@ -210,6 +330,7 @@ namespace MultiTerminal.Services
                 if (!IsDormant) return false;
                 _completed = false;
                 IsActive = true;
+                _wakeCount++;
             }
 
             System.Diagnostics.Debug.WriteLine($"[TranscriptTailer:{_agentName}] Completed member has new work - active again");
@@ -224,11 +345,16 @@ namespace MultiTerminal.Services
         /// </summary>
         internal void CheckQuietCompletion(DateTime nowUtc)
         {
-            if (!IsActive || WaitsForExplicitStop || !_turnEnded) return;
-            if (nowUtc - _lastGrowthUtc < QuietCompletionWindow) return;
+            bool completed;
+            lock (_readLock) // checked and acted on under it, so a read that un-ends the turn cannot land in between
+            {
+                if (!IsActive || WaitsForExplicitStop || !_turnEnded) return;
+                if (nowUtc - _lastGrowthUtc < QuietCompletionWindow) return;
 
-            System.Diagnostics.Debug.WriteLine($"[TranscriptTailer:{_agentName}] Turn ended and transcript quiet - agent completed");
-            Complete();
+                System.Diagnostics.Debug.WriteLine($"[TranscriptTailer:{_agentName}] Turn ended and transcript quiet - agent completed");
+                completed = MarkCompleted();
+            }
+            if (completed) AfterCompleted();
         }
 
         /// <summary>
@@ -312,17 +438,32 @@ namespace MultiTerminal.Services
 
             lock (_trackedFilesLock)
             {
+                // Checked again under the lock: two callers adding the same file at once add it once.
+                foreach (var tf in _trackedFiles)
+                {
+                    if (string.Equals(tf.Path, transcriptPath, StringComparison.OrdinalIgnoreCase))
+                        return;
+                }
                 _trackedFiles.Add(tracked);
             }
+
+            // Watch for appends FIRST, then read what is there (925c8cff). The other way round, a line
+            // appended after the catch-up read reached the end of the file and before the watcher was
+            // live raised no event and stayed unread until the next append. Reads are serialized
+            // (_readLock) and each starts at the file's tracked position, so a watcher read that runs
+            // during or after the catch-up reads only what the catch-up did not.
+            StartFileWatcherForTracked(tracked);
 
             // Read existing content
             ReadNewLinesFromFile(tracked);
 
-            // The catch-up read itself can reach the finish (the SubagentStop line).
-            if (_completed && !IsDormant) return;
-
-            // Start watching for appends
-            StartFileWatcherForTracked(tracked);
+            // The catch-up read itself can reach the finish (the SubagentStop line): its Complete
+            // dropped the watchers already; this drops one a concurrent DisposeWatchers may have missed.
+            if (_completed && !IsDormant)
+            {
+                DisposeWatchers();
+                return;
+            }
 
             // Shut down while this file was being added: drop the watcher just started, and stay inactive.
             if (_shutDown)
@@ -341,17 +482,24 @@ namespace MultiTerminal.Services
         /// </summary>
         public Task StopAsync()
         {
-            _shutDown = true;
-            if (!IsActive)
+            bool wasActive;
+            lock (_completionLock)
+            {
+                _shutDown = true;
+                wasActive = IsActive;
+                IsActive = false;
+            }
+
+            if (!wasActive)
             {
                 // A dormant member (completed, still watching) has no stop to report, only watchers to drop.
                 if (_completed) DisposeWatchers();
                 return Task.CompletedTask;
             }
-            IsActive = false;
 
             DisposeWatchers();
-            Stopped?.Invoke(this, -1);
+            QueueEvent(Stopped, h => h(this, -1));
+            DrainEvents();
 
             return Task.CompletedTask;
         }
@@ -370,10 +518,7 @@ namespace MultiTerminal.Services
                 Content = content,
                 SessionId = SessionId
             };
-            lock (_messagesLock)
-            {
-                _messages.Add(userMsg);
-            }
+            AddMessage(userMsg);
             // Track for dedup when the echo arrives in the transcript
             _lastSentUserContent = content;
             _lastSentUserTime = DateTime.UtcNow;
@@ -444,6 +589,34 @@ namespace MultiTerminal.Services
             }
 
             return Task.CompletedTask;
+        }
+
+        /// <summary>Keep a message, dropping the oldest past <see cref="MaxRetainedMessages"/>.</summary>
+        private void AddMessage(AgentMessage msg)
+        {
+            lock (_messagesLock)
+            {
+                _messages.Add(msg);
+                int excess = _messages.Count - Math.Max(1, MaxRetainedMessages);
+                if (excess > 0) _messages.RemoveRange(0, excess);
+            }
+        }
+
+        /// <summary>
+        /// The GH #89 repeat check: true when <paramref name="uuid"/> was first delivered by another
+        /// file. Records the id for <paramref name="path"/> otherwise, evicting the oldest id past
+        /// <see cref="MaxTrackedLineIds"/>. Caller holds <c>_readLock</c>.
+        /// </summary>
+        private bool IsRepeatFromAnotherFile(string uuid, string path)
+        {
+            if (_lineOrigins.TryGetValue(uuid, out var origin))
+                return !string.Equals(origin, path, StringComparison.OrdinalIgnoreCase);
+
+            _lineOrigins[uuid] = path;
+            _lineOriginOrder.Enqueue(uuid);
+            while (_lineOriginOrder.Count > Math.Max(1, MaxTrackedLineIds))
+                _lineOrigins.Remove(_lineOriginOrder.Dequeue());
+            return false;
         }
 
         public Task InterruptAsync()
@@ -558,14 +731,44 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Read new lines from a specific transcript file starting at its tracked position.
         /// Parses each line with AgentMessage.ParseLine and fires MessageReceived.
+        /// <para>One pass at a time per tailer (<c>_readLock</c>, 925c8cff); the events a pass queues are
+        /// raised after the lock is released.</para>
         /// </summary>
         private void ReadNewLinesFromFile(TrackedFile tracked)
         {
+            bool completed;
+            lock (_readLock)
+            {
+                completed = ReadNewLinesLocked(tracked);
+            }
+
+            if (completed)
+                AfterCompleted();
+            else
+                DrainEvents();
+        }
+
+        /// <summary>
+        /// Test seam (InternalsVisibleTo), null in production: called at the end of every read pass
+        /// that got past its checks, after the file position was updated and before the lock is released.
+        /// </summary>
+        internal Action ReadPassHook { get; set; }
+
+        /// <summary>Test seam: whether the calling thread holds this tailer's read lock.</summary>
+        internal bool ReadLockHeldByCurrentThread => Monitor.IsEntered(_readLock);
+
+        /// <summary>The body of <see cref="ReadNewLinesFromFile"/>. Caller holds <c>_readLock</c>. True when this pass completed the agent.</summary>
+        private bool ReadNewLinesLocked(TrackedFile tracked)
+        {
             bool woke = false;
+            bool completed = false;
             try
             {
+                // A tailer stopped for good reads nothing more.
+                if (_shutDown) return false;
+
                 var fileInfo = new FileInfo(tracked.Path);
-                if (!fileInfo.Exists) return;
+                if (!fileInfo.Exists) return false;
 
                 if (fileInfo.Length <= tracked.LastPosition)
                 {
@@ -575,7 +778,7 @@ namespace MultiTerminal.Services
                     }
                     else
                     {
-                        return;
+                        return false;
                     }
                 }
 
@@ -594,7 +797,7 @@ namespace MultiTerminal.Services
                             // GH #89: when the parent session changes worktree, the agent goes on in a
                             // new file that repeats some lines of the old one. A line already shown from
                             // another file is skipped; repeats inside one file are left alone.
-                            if (uuid != null && !string.Equals(_lineOrigins.GetOrAdd(uuid, tracked.Path), tracked.Path, StringComparison.OrdinalIgnoreCase))
+                            if (uuid != null && IsRepeatFromAnotherFile(uuid, tracked.Path))
                                 continue;
 
                             // A dormant member wakes on real work only: a user or assistant line, not the
@@ -638,19 +841,16 @@ namespace MultiTerminal.Services
                                     _lastSentUserContent = null;
                                 }
 
-                                lock (_messagesLock)
-                                {
-                                    _messages.Add(msg);
-                                }
+                                AddMessage(msg);
 
-                                MessageReceived?.Invoke(this, msg);
+                                QueueEvent(MessageReceived, h => h(this, msg));
 
                                 // Detect team agent SendMessage calls for ChatPanel bridge
                                 if (msg.Type == AgentMessageType.ToolUse &&
                                     msg.ToolName == "SendMessage" &&
                                     !string.IsNullOrEmpty(msg.Content))
                                 {
-                                    TeamMessageSent?.Invoke(this, msg);
+                                    QueueEvent(TeamMessageSent, h => h(this, msg));
                                 }
 
                                 // Detect agent completion: a Result message means the turn is done.
@@ -682,14 +882,16 @@ namespace MultiTerminal.Services
 
                 // Not for a tailer shut down meanwhile (its member removed): nobody should build a card for it.
                 if (woke && !_shutDown)
-                    Reactivated?.Invoke(this, EventArgs.Empty);
+                    QueueEvent(Reactivated, h => h(this, EventArgs.Empty));
 
                 // Fire Stopped after finishing the read pass so all messages are delivered first
                 if (_pendingStop && IsActive)
                 {
                     _pendingStop = false;
-                    Complete();
+                    completed = MarkCompleted();
                 }
+
+                ReadPassHook?.Invoke();
             }
             catch (IOException ex)
             {
@@ -699,6 +901,7 @@ namespace MultiTerminal.Services
             {
                 System.Diagnostics.Debug.WriteLine($"[TranscriptTailer:{_agentName}] Error reading {tracked.Path}: {ex.Message}");
             }
+            return completed;
         }
 
         /// <summary>
@@ -789,7 +992,8 @@ namespace MultiTerminal.Services
                 // After Complete() has announced the finish, a later dispose (a root or team teardown)
                 // must not send a second, failing exit that would close a panel kept open (GH #89).
                 if (!alreadyFinished)
-                    Stopped?.Invoke(this, -1);
+                    QueueEvent(Stopped, h => h(this, -1));
+                DrainEvents();
             }
             _disposed = true;
         }
