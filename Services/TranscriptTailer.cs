@@ -81,6 +81,42 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool IsTeamAgent { get; set; }
 
+        /// <summary>
+        /// A member of the team Claude Code gives every session on its own (<c>session-&lt;id prefix&gt;</c>,
+        /// see <see cref="TeamWatcherService.IsImplicitSessionTeam"/>), not of one somebody created. Every
+        /// named Agent call lands in that team, and nothing removes the member when it is done (268acc24),
+        /// so it finishes the way a subagent does: the SubagentStop line, or an ended turn followed by
+        /// quiet. It stays a team agent otherwise (it has an inbox and can be sent messages).
+        /// <para>Completing does not shut such a tailer down: it raises <see cref="Stopped"/> with 0 (the
+        /// card shows completed, or closes) and keeps watching its files. A message the lead sends
+        /// within <see cref="QuietCompletionWindow"/> of the turn ending (the usual "your report was cut
+        /// off, send the rest") arrives as a user line, which un-ends the turn, so that case never
+        /// completes. One sent later wakes a completed member: its next user or assistant line, in the
+        /// same file or a new one, makes it active again and raises <see cref="Reactivated"/>.</para>
+        /// </summary>
+        public bool IsImplicitTeamMember { get; set; }
+
+        /// <summary>Waits for an explicit stop: a member of a team somebody created, which idles between turns by design.</summary>
+        private bool WaitsForExplicitStop => IsTeamAgent && !IsImplicitTeamMember;
+
+        /// <summary>Keeps watching after completing, so a later wake is seen (see <see cref="IsImplicitTeamMember"/>).</summary>
+        private bool KeepsWatchingWhenComplete => IsImplicitTeamMember;
+
+        /// <summary>Set by <see cref="StopAsync"/> and Dispose: nothing can make the tailer active again.</summary>
+        private volatile bool _shutDown;
+
+        /// <summary>Stopped for good (<see cref="StopAsync"/> or Dispose): no card should be built for it.</summary>
+        public bool IsShutDown => _shutDown;
+
+        /// <summary>The agent has finished (exit 0 was raised) and has not been woken since.</summary>
+        public bool IsCompleted => _completed;
+
+        /// <summary>
+        /// A completed implicit-team member got new work and is active again. Raised after the read
+        /// pass that woke it, so <see cref="Messages"/> already holds the new lines.
+        /// </summary>
+        public event EventHandler Reactivated;
+
         public IReadOnlyList<AgentMessage> Messages
         {
             get
@@ -123,6 +159,13 @@ namespace MultiTerminal.Services
                 System.Diagnostics.Debug.WriteLine($"[TranscriptTailer:{_agentName}] File exists, reading existing content...");
                 AddTranscriptFile(_initialTranscriptPath);
                 System.Diagnostics.Debug.WriteLine($"[TranscriptTailer:{_agentName}] After initial read: {_messages.Count} messages buffered");
+
+                // The catch-up read is not growth: the file last grew when it was last written. A
+                // transcript found already ended and quiet (an agent that finished before MT started)
+                // completes now, before anyone is told about it, instead of a minute after its card opens.
+                var written = File.GetLastWriteTimeUtc(_initialTranscriptPath);
+                if (written < _lastGrowthUtc) _lastGrowthUtc = written;
+                CheckQuietCompletion(DateTime.UtcNow);
             }
             else
             {
@@ -130,7 +173,8 @@ namespace MultiTerminal.Services
                 StartDirectoryWatcher();
             }
 
-            _quietTimer ??= new Timer(_ => CheckQuietCompletion(DateTime.UtcNow), null, QuietCheckInterval, QuietCheckInterval);
+            if (!_completed || KeepsWatchingWhenComplete)
+                _quietTimer ??= new Timer(_ => CheckQuietCompletion(DateTime.UtcNow), null, QuietCheckInterval, QuietCheckInterval);
 
             return Task.CompletedTask;
         }
@@ -138,7 +182,8 @@ namespace MultiTerminal.Services
         /// <summary>
         /// The agent has finished: stop tailing and raise <see cref="Stopped"/> with exit code 0.
         /// Called for the SubagentStop hook, the hook's line in the transcript, and the quiet fallback.
-        /// Raises at most once; does nothing once the tailer has stopped.
+        /// Raises at most once per piece of work; does nothing once the tailer has stopped. An
+        /// implicit-team member keeps its watchers, so it can be woken (<see cref="IsImplicitTeamMember"/>).
         /// </summary>
         public void Complete()
         {
@@ -149,18 +194,37 @@ namespace MultiTerminal.Services
                 _completed = true;
             }
 
-            DisposeWatchers();
+            if (!KeepsWatchingWhenComplete)
+                DisposeWatchers();
             Stopped?.Invoke(this, 0);
+        }
+
+        /// <summary>A completed implicit-team member that can still be woken.</summary>
+        private bool IsDormant => _completed && KeepsWatchingWhenComplete && !_shutDown;
+
+        /// <summary>Make a dormant member active again. True when this call did it.</summary>
+        private bool TryReactivate()
+        {
+            lock (_completionLock)
+            {
+                if (!IsDormant) return false;
+                _completed = false;
+                IsActive = true;
+            }
+
+            System.Diagnostics.Debug.WriteLine($"[TranscriptTailer:{_agentName}] Completed member has new work - active again");
+            return true;
         }
 
         /// <summary>
         /// The quiet fallback (GH #89): a non-team agent whose last turn ended and whose transcript has
-        /// not grown for <see cref="QuietCompletionWindow"/> is complete. Team agents are exempt: they
-        /// idle between turns by design.
+        /// not grown for <see cref="QuietCompletionWindow"/> is complete. Members of a created team are
+        /// exempt: they idle between turns by design. Members of a session's implicit team are not
+        /// (<see cref="IsImplicitTeamMember"/>).
         /// </summary>
         internal void CheckQuietCompletion(DateTime nowUtc)
         {
-            if (!IsActive || IsTeamAgent || !_turnEnded) return;
+            if (!IsActive || WaitsForExplicitStop || !_turnEnded) return;
             if (nowUtc - _lastGrowthUtc < QuietCompletionWindow) return;
 
             System.Diagnostics.Debug.WriteLine($"[TranscriptTailer:{_agentName}] Turn ended and transcript quiet - agent completed");
@@ -228,8 +292,9 @@ namespace MultiTerminal.Services
         public void AddTranscriptFile(string transcriptPath)
         {
             // A completed agent stays completed (GH #89): a continuation file found after the finish
-            // must not restart a tailer that nothing could then stop.
-            if (string.IsNullOrEmpty(transcriptPath) || _completed) return;
+            // must not restart a tailer that nothing could then stop. A dormant implicit-team member is
+            // the exception: a new file is how a wake can arrive, and its lines reactivate it (268acc24).
+            if (string.IsNullOrEmpty(transcriptPath) || _shutDown || (_completed && !IsDormant)) return;
 
             lock (_trackedFilesLock)
             {
@@ -254,13 +319,21 @@ namespace MultiTerminal.Services
             ReadNewLinesFromFile(tracked);
 
             // The catch-up read itself can reach the finish (the SubagentStop line).
-            if (_completed) return;
+            if (_completed && !IsDormant) return;
 
             // Start watching for appends
             StartFileWatcherForTracked(tracked);
 
-            // Re-activate if was marked inactive
-            IsActive = true;
+            // Shut down while this file was being added: drop the watcher just started, and stay inactive.
+            if (_shutDown)
+            {
+                DisposeWatchers();
+                return;
+            }
+
+            // Re-activate if was marked inactive (a dormant member is reactivated only by new work)
+            if (!_completed)
+                IsActive = true;
         }
 
         /// <summary>
@@ -268,7 +341,13 @@ namespace MultiTerminal.Services
         /// </summary>
         public Task StopAsync()
         {
-            if (!IsActive) return Task.CompletedTask;
+            _shutDown = true;
+            if (!IsActive)
+            {
+                // A dormant member (completed, still watching) has no stop to report, only watchers to drop.
+                if (_completed) DisposeWatchers();
+                return Task.CompletedTask;
+            }
             IsActive = false;
 
             DisposeWatchers();
@@ -463,7 +542,7 @@ namespace MultiTerminal.Services
         /// </summary>
         private void OnTrackedFileChanged(TrackedFile tracked)
         {
-            if (!IsActive) return;
+            if (!IsActive && !IsDormant) return;
 
             try
             {
@@ -482,6 +561,7 @@ namespace MultiTerminal.Services
         /// </summary>
         private void ReadNewLinesFromFile(TrackedFile tracked)
         {
+            bool woke = false;
             try
             {
                 var fileInfo = new FileInfo(tracked.Path);
@@ -517,7 +597,18 @@ namespace MultiTerminal.Services
                             if (uuid != null && !string.Equals(_lineOrigins.GetOrAdd(uuid, tracked.Path), tracked.Path, StringComparison.OrdinalIgnoreCase))
                                 continue;
 
+                            // A dormant member wakes on real work only: a user or assistant line, not the
+                            // bookkeeping records Claude Code may append to an idle transcript.
+                            if (_completed && (lineType == "user" || lineType == "assistant") && TryReactivate())
+                                woke = true;
+
                             NoteTurnState(lineType, stopReason);
+
+                            // A finish seen earlier in this pass is overtaken by later work (268acc24): the
+                            // SubagentStop line, then a new prompt and the agent working on it, all in one
+                            // read (a catch-up read at start-up, or a burst of appends) is a working agent.
+                            if (_pendingStop && (lineType == "user" || lineType == "assistant"))
+                                _pendingStop = false;
 
                             var parsedMessages = AgentMessage.ParseLine(line);
                             foreach (var msg in parsedMessages)
@@ -563,8 +654,8 @@ namespace MultiTerminal.Services
                                 }
 
                                 // Detect agent completion: a Result message means the turn is done.
-                                // For team agents, don't auto-stop — they stay alive between turns.
-                                if (msg.Type == AgentMessageType.Result && IsActive && !IsTeamAgent)
+                                // For members of a created team, don't auto-stop — they stay alive between turns.
+                                if (msg.Type == AgentMessageType.Result && IsActive && !WaitsForExplicitStop)
                                 {
                                     System.Diagnostics.Debug.WriteLine($"[TranscriptTailer:{_agentName}] Result message detected - agent completed");
                                     _pendingStop = true;
@@ -576,7 +667,7 @@ namespace MultiTerminal.Services
                             // message object. This is the actual last line written — the type:"result"
                             // check above never fires because transcripts never contain type:"result".
                             // Parse this raw line directly to avoid changing AgentMessage filtering logic.
-                            if (!IsTeamAgent && IsActive && IsSubagentStopLine(line))
+                            if (!WaitsForExplicitStop && IsActive && IsSubagentStopLine(line))
                             {
                                 System.Diagnostics.Debug.WriteLine($"[TranscriptTailer:{_agentName}] SubagentStop progress event detected - agent completed");
                                 _pendingStop = true;
@@ -588,6 +679,10 @@ namespace MultiTerminal.Services
                         tracked.LastPosition = stream.Position;
                     }
                 }
+
+                // Not for a tailer shut down meanwhile (its member removed): nobody should build a card for it.
+                if (woke && !_shutDown)
+                    Reactivated?.Invoke(this, EventArgs.Empty);
 
                 // Fire Stopped after finishing the read pass so all messages are delivered first
                 if (_pendingStop && IsActive)
@@ -684,6 +779,7 @@ namespace MultiTerminal.Services
                 bool alreadyFinished;
                 lock (_completionLock)
                 {
+                    _shutDown = true;
                     IsActive = false;
                     alreadyFinished = _completed;
                 }
