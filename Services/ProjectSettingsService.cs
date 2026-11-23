@@ -216,7 +216,7 @@ namespace MultiTerminal.Services
                 foreach (var agent in update.Agents.Where(a => !string.IsNullOrWhiteSpace(a.AgentName) && !string.IsNullOrWhiteSpace(a.ExtraArgs)))
                 {
                     var stored = storedAgents.FirstOrDefault(s => string.Equals(s.AgentName, agent.AgentName, StringComparison.Ordinal));
-                    if (stored != null && string.Equals(stored.ExtraArgs?.Trim(), agent.ExtraArgs.Trim(), StringComparison.Ordinal))
+                    if (stored != null && string.Equals(NormalizeExtraArgs(stored.ExtraArgs), NormalizeExtraArgs(agent.ExtraArgs), StringComparison.Ordinal))
                         continue;
                     string agentError = ClaudeExtraArgsPolicy.Validate(agent.ExtraArgs);
                     if (agentError != null)
@@ -382,7 +382,10 @@ namespace MultiTerminal.Services
         private static string Row(params object[] cells) => string.Join("\u001f", cells.Select(c => c?.ToString() ?? string.Empty));
 
         internal static string AgentsKey(IEnumerable<ProjectAgent> rows) =>
-            JoinRows(rows.Where(r => !string.IsNullOrWhiteSpace(r.AgentName)).Select(r => Row(r.AgentName, r.Role, r.PreferredModel, string.IsNullOrWhiteSpace(r.ExtraArgs) ? null : r.ExtraArgs.Trim())));
+            JoinRows(rows.Where(r => !string.IsNullOrWhiteSpace(r.AgentName)).Select(r => Row(r.AgentName, r.Role, r.PreferredModel, NormalizeExtraArgs(r.ExtraArgs))));
+
+        /// <summary>Extra Claude flags as stored (ticket 5380b6fb): trimmed, blank as null. The one rule for every compare.</summary>
+        internal static string NormalizeExtraArgs(string value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
         internal static string SpecialistsKey(IEnumerable<ProjectSpecialistAgent> rows) =>
             JoinRows(rows.Where(r => !string.IsNullOrWhiteSpace(r.AgentType)).Select(r => Row(r.AgentType, r.IsEnabled, r.CustomPrompt)));
         internal static string McpServersKey(IEnumerable<ProjectMcpServer> rows) =>
@@ -416,7 +419,7 @@ namespace MultiTerminal.Services
                     // Blank means "use the global setting" and is stored as NULL (ticket b0d2f090).
                     return ClaudeModelLaunchPolicy.Normalize(value);
                 case "claudeExtraArgs":
-                    return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+                    return NormalizeExtraArgs(value);
                 case "launchMode":
                     // Unknown or blank reads as ask, the same rule as the stored value (task ec2ed636).
                     return Project.LaunchModeToStorage(Project.ParseLaunchMode(value));
@@ -461,7 +464,7 @@ namespace MultiTerminal.Services
                 case "launchMode": return Project.LaunchModeToStorage(p.LaunchMode);
                 case "claudeModel": return ClaudeModelLaunchPolicy.Normalize(p.ClaudeModel);
                 case "claudeHelperModel": return ClaudeModelLaunchPolicy.Normalize(p.ClaudeHelperModel);
-                case "claudeExtraArgs": return string.IsNullOrWhiteSpace(p.ClaudeExtraArgs) ? null : p.ClaudeExtraArgs.Trim();
+                case "claudeExtraArgs": return NormalizeExtraArgs(p.ClaudeExtraArgs);
                 case "defaultTerminal": return TerminalKindHelper.Normalize(p.DefaultTerminal);
                 case "quietStart": return p.IsQuietStart ? "true" : "false";
                 case "teamLead": return p.TeamLead;
@@ -553,8 +556,8 @@ namespace MultiTerminal.Services
             var keepNames = new HashSet<string>(keep.Select(r => r.AgentName), StringComparer.Ordinal);
             var storedRows = _db.GetProjectAgents(projectId);
             static string ExtraOf(IEnumerable<ProjectAgent> list) => JoinRows(list
-                .Where(a => !string.IsNullOrWhiteSpace(a.AgentName) && !string.IsNullOrWhiteSpace(a.ExtraArgs))
-                .Select(a => Row(a.AgentName, a.ExtraArgs.Trim())));
+                .Where(a => !string.IsNullOrWhiteSpace(a.AgentName) && NormalizeExtraArgs(a.ExtraArgs) != null)
+                .Select(a => Row(a.AgentName, NormalizeExtraArgs(a.ExtraArgs))));
             bool extraChanged = !string.Equals(ExtraOf(storedRows), ExtraOf(keep), StringComparison.Ordinal);
             foreach (var stored in storedRows.Where(s => !keepNames.Contains(s.AgentName)))
                 _db.DeleteProjectAgent(projectId, stored.AgentName);

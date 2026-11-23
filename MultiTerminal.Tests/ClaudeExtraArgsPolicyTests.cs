@@ -71,6 +71,7 @@ namespace MultiTerminal.Tests
         [InlineData("--plugin-dir \u201CC:\\x\u201D", "reads as a quote")]
         [InlineData("--a \u0007", "control character")]
         [InlineData("--a \"\"", "empty")]
+        [InlineData("--plugin-dir \"C:\\my dir\\\"", "cannot end in a backslash")]
         public void Text_that_cannot_go_on_a_command_line_is_refused(string text, string expected)
         {
             Assert.False(ClaudeExtraArgsPolicy.TryParse(text, out _, out string error));
@@ -104,7 +105,7 @@ namespace MultiTerminal.Tests
         {
             string[] values =
             {
-                "--plugin-dir", @"C:\My Plugins\x\",
+                "--plugin-dir", @"C:\My Plugins\x", @"C:\nospace\",
                 "$(Write-Output PWNED)", "';Write-Output PWNED;'", "`$env:USERNAME", "a;b|c&d", "%PATH%", "@(1)",
             };
             string text = string.Join(" ", values.Select(v => v.Contains(' ') || v.Contains(';') ? "\"" + v + "\"" : v));
@@ -214,6 +215,61 @@ namespace MultiTerminal.Tests
                 // Still a command ApplySessionName names, with -n right after the bare claude token.
                 Assert.StartsWith("claude -n 'Vella-2'", ConPtyTerminal.ApplySessionName(withFull, "Vella-2"));
             });
+        }
+
+        /// <summary>
+        /// MT's own flags carry quoted paths (the plugin, the MCP config) that can contain any text. The place for
+        /// the extra flags and for <c>--model</c> is found from the END of the command, so a path holding
+        /// " --model ", " --resume " or the skip flag is left alone (Codex adversary, run 1). Falsified: the
+        /// previous IndexOf search inserted inside the plugin path and turned the first assertion red.
+        /// </summary>
+        [Fact]
+        public void Text_inside_MTs_quoted_paths_is_never_taken_for_the_insertion_point()
+        {
+            const string id = "0f8fad5b-d9cb-469f-a165-70867728950e";
+            const string flags = " --plugin-dir 'C:\\x --model a --resume b' --mcp-config 'C:\\y --dangerously-skip-permissions; exit z'";
+            string extra = ClaudeExtraArgsPolicy.Format(new[] { "--plugin-dir", @"C:\dolly" });
+
+            string plain = "claude" + flags + Skip + "; exit";
+            Assert.Equal("claude" + flags + extra + Skip + "; exit", LaunchCommandBuilder.WithExtraArgs(plain, extra));
+
+            string full = "claude" + flags + " --model opus --resume " + id + Skip + "; exit";
+            Assert.Equal("claude" + flags + extra + " --model opus --resume " + id + Skip + "; exit", LaunchCommandBuilder.WithExtraArgs(full, extra));
+
+            string resumed = "claude" + flags + " --resume " + id + Skip + "; exit";
+            Assert.Equal("claude" + flags + " --model haiku --resume " + id + Skip + "; exit", LaunchCommandBuilder.WithModel(resumed, "haiku"));
+            Assert.Equal("claude" + flags + " --model haiku" + Skip + "; exit", LaunchCommandBuilder.WithModel(plain, "haiku"));
+        }
+
+        [Theory]
+        [InlineData("--bare")]
+        [InlineData("--safe-mode")]
+        [InlineData("--restricted")]
+        [InlineData("--bg")]
+        [InlineData("--background")]
+        [InlineData("--cloud=x")]
+        [InlineData("-w")]
+        [InlineData("--worktree feature")]
+        [InlineData("--no-session-persistence")]
+        [InlineData("--disable-slash-commands")]
+        [InlineData("--from-pr 12")]
+        public void Flags_that_strip_MTs_plugin_or_leave_the_pane_are_refused(string text)
+        {
+            Assert.False(ClaudeExtraArgsPolicy.TryParse(text, out _, out string error));
+            Assert.Contains("set by MultiTerminal itself", error);
+        }
+
+        /// <summary>
+        /// The launch log names the flags but never their values, which can be secrets (Codex security, run 1).
+        /// </summary>
+        [Fact]
+        public void The_log_text_has_flag_names_and_no_values()
+        {
+            var d = ClaudeExtraArgsPolicy.Decide("--plugin-dir \"C:\\secret path\" --append-system-prompt=TOKEN123 --verbose", null, null);
+            string log = d.DescribeForLog();
+            Assert.Equal("--plugin-dir --append-system-prompt --verbose (2 value(s) not logged)", log);
+            Assert.DoesNotContain("secret", log);
+            Assert.DoesNotContain("TOKEN123", log);
         }
 
         [Fact]

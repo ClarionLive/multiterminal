@@ -207,8 +207,10 @@ per-agent one.
   (`project_agents.extra_args`), that agent only, added AFTER the project's. Both apply at the next launch.
 - **One decision.** `ClaudeExtraArgsPolicy.Decide` (pure), reached through `MainForm.DecideLaunchExtraArgs`
   (reads the row and the agent rows fresh; never throws) and `WithLaunchExtraArgs` (Claude kind only).
-  Sites: spawn_helper, project launch (new and resume; the name is the chosen one, else the launch
-  identity), a helper resumed with its PM, Just Claude, New Project, Launch as. A project is found by id,
+  Sites: spawn_helper (the requested name), project launch (new and resume), a helper resumed with its
+  PM (its original name), Just Claude, New Project (no agent row), Launch as. The project launch and Launch
+  as decide right before `StartTerminal`, by the name the broker REGISTERED (a held name comes back
+  suffixed), so a `Vella-2` row is found for a pane that became Vella-2. A project is found by id,
   else discovered from the folder. Which agent row: an exact name match (ignore case), else the name
   without a trailing `-<number>` (Vella-2 uses Vella's row when there is no Vella-2 row).
 - **The text is untrusted for the command line.** It ends up inside `-Command "..."` of `CreateProcess`
@@ -216,11 +218,17 @@ per-agent one.
   double quotes group and are removed) and each token is written as a PowerShell single-quoted literal
   (`'` doubled): nothing in it is evaluated. Refused: a `"` left open, a control character, the
   typographic quotes PowerShell also treats as quotes (U+2018 to U+201F), an empty `""`, over 2000
-  characters, and flags MT sets itself or that change what MT expects (`ClaudeExtraArgsPolicy.ReservedFlags`:
+  characters, a value with a space that ends in a backslash (Windows PowerShell 5.1, a pane's fallback
+  shell, would pass it as `"...\"` and the backslash would escape the quote), and flags MT sets itself or that change what MT expects (`ClaudeExtraArgsPolicy.ReservedFlags`:
   --resume/-r, --continue/-c, --session-id, --fork-session, --mcp-config, --strict-mcp-config, --settings,
   --setting-sources, --dangerously-skip-permissions, --allow-dangerously-skip-permissions, --permission-mode,
-  --model, -n/--name, -p/--print, --output-format, --input-format, and the print-and-exit -h/--help and
-  -v/--version (`ClaudeStartupDetector`'s list); a `--flag=value` form counts). A bare word is not
+  --model, -n/--name, -p/--print, --output-format, --input-format, the print-and-exit -h/--help and
+  -v/--version (`ClaudeStartupDetector`'s list), flags that start the session elsewhere or end it at once
+  (--bg/--background, --cloud, --desktop, --environment, --teleport, --tmux), flags that strip what MT
+  installs (--bare, --safe-mode, --restricted, --disable-slash-commands) and flags that change the
+  session or folder MT tracks (--from-pr, -w/--worktree, --no-session-persistence); a `--flag=value` form
+  counts). It is a deny list taken from `claude --help` (2026-11-23): a flag a later Claude Code adds is
+  accepted until it is listed. A bare word is not
   refused: after MT's flags Claude Code reads it as the opening prompt, which is the Owner's choice.
 - **Owner-only.** The settings form refuses invalid text with the reason (nothing saved). An invalid
   STORED level is skipped at launch with a warning in the "ClaudeExtraArgs" debug log; the launch is
@@ -230,10 +238,15 @@ per-agent one.
   `--plugin-dir` loads hooks into every matching terminal, which is why.
 - **Placement.** `LaunchCommandBuilder.WithExtraArgs` inserts after MT's flags and before `--model`,
   `--resume` and `--dangerously-skip-permissions`, so the command still starts with bare `claude` for
-  `ApplySessionName`. Claude Code accepts `--plugin-dir` more than once, so MT's plugin still loads.
+  `ApplySessionName`. The place is found by a pattern anchored at the END of the command (the builder's
+  own tail), never by searching MT's flags, whose quoted paths could contain the same text; `WithModel`
+  uses the same anchor. A command it cannot place them in is launched without them (logged), through the
+  one MainForm helper every site uses. Claude Code accepts `--plugin-dir` more than once, so MT's plugin still loads.
 - **Not covered.** Headless agents (`AgentProcess`), the gloss writer, Oracle, Codex and PowerShell panes,
-  ClarionAssistant IDE tabs. The flags are logged (Info, "ClaudeExtraArgs") and appear in the pane's
-  command line in the debug log, so do not put a secret in them.
+  ClarionAssistant IDE tabs. The launch log ("ClaudeExtraArgs") names the flags only, never their values
+  (`ClaudeExtraArgsDecision.DescribeForLog`), but the pane's full command line is still traced by
+  `ConPtyTerminal`, values included, so do not put a secret in them. A skipped level or a failed lookup is
+  only logged; nothing in the pane says the flags are missing.
 - **Not executed live.** Tests cover the parse, the refusals, a real PowerShell round trip of hostile
   values through the same `-Command "..."` layer, placement, the save path and both REST refusals. That
   each MainForm site applies the decision, and that Claude Code loads a second `--plugin-dir`, were not run.

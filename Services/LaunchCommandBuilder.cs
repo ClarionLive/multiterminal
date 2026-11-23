@@ -92,13 +92,25 @@ namespace MultiTerminal.Services
             if (modelFlag.Length == 0 || string.IsNullOrEmpty(autoRunCommand))
                 return autoRunCommand;
 
-            int at = autoRunCommand.IndexOf(" --resume ", StringComparison.Ordinal);
-            if (at < 0)
-                at = autoRunCommand.LastIndexOf(" --dangerously-skip-permissions", StringComparison.Ordinal);
-            if (at < 0)
+            // Anchored at the END of the command (ticket 5380b6fb, Codex review): a search for " --resume "
+            // anywhere would also hit that text inside a quoted plugin or MCP path among MT's flags.
+            var tail = ResumeTail.Match(autoRunCommand);
+            if (!tail.Success)
                 throw new ArgumentException("The command is not a Claude launch built by LaunchCommandBuilder.", nameof(autoRunCommand));
-            return autoRunCommand.Insert(at, modelFlag);
+            return autoRunCommand.Insert(tail.Index, modelFlag);
         }
+
+        // The tail every BuildClaudeCommand command ends with: [ --model <name>][ --resume <guid>] --dangerously-skip-permissions; exit.
+        // The model name has passed IsValidModelName (no whitespace or quote) and the id is a lowercase GUID, so
+        // the match can begin only in the builder's own tail, never inside a quoted value before it: from any
+        // position inside a quoted value the rest of the command holds that value's closing quote, which the
+        // pattern cannot match.
+        private const string SkipTail = @" --dangerously-skip-permissions; exit\z";
+        private const string ResumePart = @"(?: --resume [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?";
+        private static readonly System.Text.RegularExpressions.Regex ResumeTail =
+            new System.Text.RegularExpressions.Regex(ResumePart + SkipTail, System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        private static readonly System.Text.RegularExpressions.Regex ModelResumeTail =
+            new System.Text.RegularExpressions.Regex(@"(?: --model [^\s'""]+)?" + ResumePart + SkipTail, System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
         /// <summary>
         /// Adds the extra Claude Code flags a <see cref="ClaudeExtraArgsPolicy"/> decision formatted (ticket
@@ -106,21 +118,19 @@ namespace MultiTerminal.Services
         /// <c>--resume</c> and <c>--dangerously-skip-permissions</c>, so the command still starts with the bare
         /// <c>claude</c> token <c>ConPtyTerminal.ApplySessionName</c> needs. Empty returns the command unchanged.
         /// <paramref name="formatted"/> must come from <see cref="ClaudeExtraArgsPolicy.Format"/>: every token a
-        /// PowerShell single-quoted literal. Throws for a command this builder did not make.
+        /// PowerShell single-quoted literal. The place is found from the END of the command (the builder's own
+        /// tail), never by searching the flags, whose quoted paths could contain the same text. Throws for a
+        /// command this builder did not make; the launch sites catch that and launch without the flags.
         /// </summary>
         internal static string WithExtraArgs(string autoRunCommand, string formatted)
         {
             if (string.IsNullOrEmpty(formatted) || string.IsNullOrEmpty(autoRunCommand))
                 return autoRunCommand;
 
-            int at = autoRunCommand.IndexOf(" --model ", StringComparison.Ordinal);
-            if (at < 0)
-                at = autoRunCommand.IndexOf(" --resume ", StringComparison.Ordinal);
-            if (at < 0)
-                at = autoRunCommand.LastIndexOf(" --dangerously-skip-permissions", StringComparison.Ordinal);
-            if (at < 0 || !autoRunCommand.StartsWith("claude", StringComparison.Ordinal))
+            var tail = ModelResumeTail.Match(autoRunCommand);
+            if (!tail.Success || !autoRunCommand.StartsWith("claude", StringComparison.Ordinal))
                 throw new ArgumentException("The command is not a Claude launch built by LaunchCommandBuilder.", nameof(autoRunCommand));
-            return autoRunCommand.Insert(at, formatted);
+            return autoRunCommand.Insert(tail.Index, formatted);
         }
 
         /// <summary>

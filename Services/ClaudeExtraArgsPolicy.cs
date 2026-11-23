@@ -34,6 +34,17 @@ namespace MultiTerminal.Services
 
         /// <summary>Stored levels that were skipped because their text was not valid, one sentence each.</summary>
         public IReadOnlyList<string> Problems { get; }
+
+        /// <summary>
+        /// The flags for a log line: flag names only (the part before any <c>=</c>), and how many values were
+        /// left out. A value can be a secret, and the debug log is readable by agents (Codex security review).
+        /// </summary>
+        public string DescribeForLog()
+        {
+            var names = Tokens.Where(t => t.Length > 1 && t[0] == '-').Select(t => { int eq = t.IndexOf('='); return eq > 0 ? t.Substring(0, eq) : t; }).ToList();
+            int values = Tokens.Count(t => !(t.Length > 1 && t[0] == '-')) + Tokens.Count(t => t.Length > 1 && t[0] == '-' && t.IndexOf('=') > 0);
+            return (names.Count == 0 ? "(no flag names)" : string.Join(" ", names)) + (values > 0 ? $" ({values} value(s) not logged)" : "");
+        }
     }
 
     /// <summary>
@@ -73,6 +84,12 @@ namespace MultiTerminal.Services
             // Print and exit instead of opening a session (the same list as ClaudeStartupDetector's
             // NonSessionFlags): saved once, every terminal of the project would end at once.
             "-h", "--help", "-v", "--version",
+            // Start somewhere other than this pane, or end at once (Codex review; from `claude --help`).
+            "--bg", "--background", "--cloud", "--desktop", "--environment", "--teleport", "--tmux",
+            // Strip what MT installs: its plugin's hooks and skills, the slash commands MT types (/compact).
+            "--bare", "--safe-mode", "--restricted", "--disable-slash-commands",
+            // Change the session or folder MT tracks: another session, another worktree, no transcript to resume.
+            "--from-pr", "-w", "--worktree", "--no-session-persistence",
         };
 
         private static readonly Regex TrailingNumber = new Regex(@"-\d+\z", RegexOptions.CultureInvariant);
@@ -145,6 +162,14 @@ namespace MultiTerminal.Services
                 if (token.Length == 0)
                 {
                     error = "The flags contain an empty \"\" value.";
+                    return false;
+                }
+
+                // Windows PowerShell 5.1 (a pane's fallback shell) passes a value with a space as "...", and a
+                // trailing backslash then escapes that closing quote for the program reading it (pipeline Run 1).
+                if (token.EndsWith('\\') && token.Any(char.IsWhiteSpace))
+                {
+                    error = "A value with a space cannot end in a backslash. Leave the trailing \\ off the folder.";
                     return false;
                 }
 
@@ -257,6 +282,8 @@ namespace MultiTerminal.Services
             return eq > 0 ? token.Substring(0, eq) : token;
         }
 
+        // U+2018 to U+201F: wider than the set PowerShell treats as quotes (U+2018 to U+201E), on purpose;
+        // refusing one more typographic quote costs nothing.
         private static bool IsTypographicQuote(char ch) => ch >= '\u2018' && ch <= '\u201F';
     }
 }
