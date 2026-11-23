@@ -54,6 +54,11 @@ namespace MultiTerminal.Tests
         [InlineData("--dangerously-skip-permissions")]
         [InlineData("-p hello")]
         [InlineData("--plugin-dir C:\\x --session-id abc")]
+        [InlineData("--help")]
+        [InlineData("-H")]
+        [InlineData("--VERSION")]
+        [InlineData("-v")]
+        [InlineData("--help=x")]
         public void Flags_MT_sets_itself_are_refused(string text)
         {
             Assert.False(ClaudeExtraArgsPolicy.TryParse(text, out _, out string error));

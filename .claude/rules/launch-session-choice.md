@@ -219,7 +219,9 @@ per-agent one.
   characters, and flags MT sets itself or that change what MT expects (`ClaudeExtraArgsPolicy.ReservedFlags`:
   --resume/-r, --continue/-c, --session-id, --fork-session, --mcp-config, --strict-mcp-config, --settings,
   --setting-sources, --dangerously-skip-permissions, --allow-dangerously-skip-permissions, --permission-mode,
-  --model, -n/--name, -p/--print, --output-format, --input-format; a `--flag=value` form counts).
+  --model, -n/--name, -p/--print, --output-format, --input-format, and the print-and-exit -h/--help and
+  -v/--version (`ClaudeStartupDetector`'s list); a `--flag=value` form counts). A bare word is not
+  refused: after MT's flags Claude Code reads it as the opening prompt, which is the Owner's choice.
 - **Owner-only.** The settings form refuses invalid text with the reason (nothing saved). An invalid
   STORED level is skipped at launch with a warning in the "ClaudeExtraArgs" debug log; the launch is
   not refused. Agents cannot set either field: `PATCH /api/projects/{id}` (`update_project`) refuses

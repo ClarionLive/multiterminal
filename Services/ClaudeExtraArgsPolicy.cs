@@ -70,6 +70,9 @@ namespace MultiTerminal.Services
             "--model",
             "-n", "--name",
             "-p", "--print", "--output-format", "--input-format",
+            // Print and exit instead of opening a session (the same list as ClaudeStartupDetector's
+            // NonSessionFlags): saved once, every terminal of the project would end at once.
+            "-h", "--help", "-v", "--version",
         };
 
         private static readonly Regex TrailingNumber = new Regex(@"-\d+\z", RegexOptions.CultureInvariant);
