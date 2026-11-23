@@ -9877,6 +9877,14 @@ namespace MultiTerminal
             if (layout == "DoNotShow")
                 return;
 
+            // A tailer stopped for good (its member was removed, or the team or root went away while
+            // this card waited for the UI thread) has nothing more to show (268acc24).
+            if (source is TranscriptTailer { IsShutDown: true })
+            {
+                _debugLogService?.Info("CreateAgentPanel", $"Skipping '{agentName}': its tailer has already been shut down");
+                return;
+            }
+
             // Always embed in a terminal's EmbeddedAgentPanel.
             // Priority: caller's document → exact name lookup → fuzzy name → identity scan → last active → first available.
             TerminalDocument targetTerminal = null;
@@ -10012,13 +10020,7 @@ namespace MultiTerminal
                     }
 
                     if (_embeddedAgentMap.Remove(panelKey, out var info))
-                    {
-                        info.Control?.DetachAgent();
-                        info.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(info.Slot);
-                        info.Control?.Dispose();
-                        if (info.Terminal?.EmbeddedAgentPanel?.AgentSlotCount == 0)
-                            info.Terminal.ForceCollapseAgentPanel();
-                    }
+                        TearDownAgentCard(info, collapseIfEmpty: true);
                 }
 
                 try
@@ -10035,22 +10037,24 @@ namespace MultiTerminal
             // Agent Panel > On Complete is "Keep open" (GH #89): then the panel stays, showing
             // "completed", until the Owner closes it with its X. Any other stop (a team reclaiming
             // the transcript, the watcher shutting down, an error) still removes it.
-            source.Stopped += (s, exitCode) =>
+            void OnSourceStopped(int exitCode)
             {
                 void HandleEmbeddedStopped()
                 {
+                    // Only this card: after a wake (268acc24) the key can belong to a newer card.
+                    if (!_embeddedAgentMap.TryGetValue(panelKey, out var current) || !ReferenceEquals(current.Control, control))
+                        return;
+
                     if (exitCode == 0 && _settings?.GetAgentPanelCloseMode() == "ManualClose")
                         return;
 
+                    // Complete() raises Stopped outside its lock, so a wake on another thread can get in
+                    // first: a member that is working again keeps its card.
+                    if (exitCode == 0 && source.IsActive)
+                        return;
+
                     if (_embeddedAgentMap.Remove(panelKey, out var info))
-                    {
-                        info.Control?.DetachAgent();
-                        info.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(info.Slot);
-                        info.Control?.Dispose();
-                        // Force-collapse if no remaining slots
-                        if (info.Terminal?.EmbeddedAgentPanel?.AgentSlotCount == 0)
-                            info.Terminal.ForceCollapseAgentPanel();
-                    }
+                        TearDownAgentCard(info, collapseIfEmpty: true);
                 }
 
                 try
@@ -10061,8 +10065,72 @@ namespace MultiTerminal
                         HandleEmbeddedStopped();
                 }
                 catch (ObjectDisposedException) { }
-            };
+            }
 
+            // Unsubscribed when the card goes, whichever path removes it (they all dispose the control):
+            // a woken member gets a new card, and the old card's handler must not outlive it (268acc24).
+            EventHandler<int> stoppedHandler = (s, exitCode) => OnSourceStopped(exitCode);
+            source.Stopped += stoppedHandler;
+            control.Disposed += (s, e) => source.Stopped -= stoppedHandler;
+
+            // The agent may have finished between being announced and this card being built (the
+            // announcement is queued to the UI thread): its Stopped(0) went to nobody, so apply it now.
+            if (source is TranscriptTailer { IsCompleted: true })
+                OnSourceStopped(0);
+        }
+
+        /// <summary>
+        /// Take down one embedded agent card that the caller has already removed from
+        /// <c>_embeddedAgentMap</c> (925c8cff: the one teardown every card-removal path uses). Detaches
+        /// the agent first, so its Stopped cannot reach the card again; then removes the slot, disposes
+        /// the control and, when <paramref name="collapseIfEmpty"/>, collapses the pane's agent panel
+        /// once it holds no card.
+        /// <para>A stale entry is allowed for: a card whose pane or control was already disposed (its
+        /// terminal closed) skips the parts that need it, rather than touching a disposed object.</para>
+        /// <para>Does not stop the agent. The removal paths used to call <c>StopAgentAsync</c> after
+        /// <c>DetachAgent</c>, which did nothing: <c>StopAgentAsync</c> acts on the attached agent, and
+        /// <c>DetachAgent</c> has just cleared it. Team and subagent tailers are stopped by the watcher
+        /// that removed them.</para>
+        /// </summary>
+        private static void TearDownAgentCard((AgentPanelControl Control, Panel Slot, TerminalDocument Terminal) card, bool collapseIfEmpty)
+        {
+            bool controlLive = card.Control != null && !card.Control.IsDisposed;
+            bool terminalLive = card.Terminal != null && !card.Terminal.IsDisposed;
+
+            if (controlLive)
+                card.Control.DetachAgent();
+            if (terminalLive)
+                card.Terminal.EmbeddedAgentPanel?.RemoveAgentSlot(card.Slot);
+            if (controlLive)
+                card.Control.Dispose();
+            if (collapseIfEmpty && terminalLive && card.Terminal.EmbeddedAgentPanel?.AgentSlotCount == 0)
+                card.Terminal.ForceCollapseAgentPanel();
+        }
+
+        /// <summary>What to do with a team member's card when the member is announced.</summary>
+        internal enum TeamCardAction
+        {
+            /// <summary>No card for this key yet: build one.</summary>
+            Create,
+            /// <summary>This agent already has its card: leave it.</summary>
+            Keep,
+            /// <summary>This agent's card is still showing after it completed, and it woke: re-attach it.</summary>
+            Reattach,
+            /// <summary>The card is stale (its pane closed) or holds another agent: remove it, build a new one.</summary>
+            Replace
+        }
+
+        /// <summary>
+        /// The card decision for an announced team member (268acc24). <paramref name="sameAgent"/>: the
+        /// existing, live card is attached to the announced tailer. A card left from a closed pane, or
+        /// a card kept open (On Complete = Keep open) for an earlier agent of the same name, gives way
+        /// whatever <paramref name="isWake"/> says; before, it blocked the new member's card for good.
+        /// </summary>
+        internal static TeamCardAction DecideTeamCard(bool hasEntry, bool stale, bool sameAgent, bool isWake)
+        {
+            if (!hasEntry) return TeamCardAction.Create;
+            if (stale || !sameAgent) return TeamCardAction.Replace;
+            return isWake ? TeamCardAction.Reattach : TeamCardAction.Keep;
         }
 
         /// <summary>
@@ -10120,8 +10188,38 @@ namespace MultiTerminal
 
                     void DoCreate()
                     {
-                        if (!_embeddedAgentMap.ContainsKey(panelKey))
-                            CreateAgentPanel(e.Tailer, $"{e.MemberName} ({e.TeamName})", panelKey, resolvedSpawner, e.TaskDescription, e.SubagentType, isTeamAgent: true, preferredTarget: spawnerDoc);
+                        // A late announcement from a tailer already stopped for good (a member removed and
+                        // replaced while its wake was on the way) must not touch the map: Replace would
+                        // dispose the replacement's card, and CreateAgentPanel would then refuse this one.
+                        if (e.Tailer is TranscriptTailer { IsShutDown: true })
+                            return;
+
+                        string cardName = $"{e.MemberName} ({e.TeamName})";
+                        bool hasEntry = _embeddedAgentMap.TryGetValue(panelKey, out var existing);
+                        bool stale = hasEntry && (existing.Control == null || existing.Control.IsDisposed
+                            || existing.Terminal == null || existing.Terminal.IsDisposed);
+                        bool sameAgent = hasEntry && !stale && ReferenceEquals(existing.Control.AttachedAgent, e.Tailer);
+
+                        var action = DecideTeamCard(hasEntry, stale, sameAgent, e.IsWake);
+                        if (action == TeamCardAction.Keep)
+                        {
+                            _debugLogService?.Trace("MainForm", $"{e.MemberName} ({e.TeamName}) already has its card; announcement ignored");
+                            return;
+                        }
+                        if (action == TeamCardAction.Reattach)
+                        {
+                            existing.Control.AttachAgent(e.Tailer, cardName, e.TaskDescription, e.SubagentType, isTeamAgent: true);
+                            return;
+                        }
+                        if (action == TeamCardAction.Replace)
+                        {
+                            _embeddedAgentMap.Remove(panelKey);
+                            // No collapse: the new card is added next, possibly to the same pane.
+                            TearDownAgentCard(existing, collapseIfEmpty: false);
+                            _debugLogService?.Info("MainForm", $"Replacing the {(stale ? "stale" : "earlier")} card of {e.MemberName} with the new agent's card");
+                        }
+
+                        CreateAgentPanel(e.Tailer, cardName, panelKey, resolvedSpawner, e.TaskDescription, e.SubagentType, isTeamAgent: true, preferredTarget: spawnerDoc);
                     }
 
                     // Asynchronous (not wait) to prevent deadlocks when multiple terminals discover
@@ -10148,17 +10246,18 @@ namespace MultiTerminal
 
                     void CloseAgentPanel()
                     {
-                        if (_embeddedAgentMap.Remove(panelKey, out var embedded))
+                        // A member that finished cleanly keeps its card under On Complete = Keep open,
+                        // even when the lead then stops it: the removal is not a failure (268acc24).
+                        if (_settings?.GetAgentPanelCloseMode() == "ManualClose"
+                            && _embeddedAgentMap.TryGetValue(panelKey, out var kept)
+                            && kept.Control?.AttachedAgent is TranscriptTailer { IsCompleted: true })
                         {
-                            embedded.Control?.DetachAgent();
-                            if (embedded.Control != null)
-                                _ = embedded.Control.StopAgentAsync();
-                            embedded.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(embedded.Slot);
-                            embedded.Control?.Dispose();
-                            // Force-collapse if no remaining slots
-                            if (embedded.Terminal?.EmbeddedAgentPanel?.AgentSlotCount == 0)
-                                embedded.Terminal.ForceCollapseAgentPanel();
+                            _debugLogService?.Info("MainForm", $"Keeping the finished card of {e.MemberName} open (On Complete = Keep open)");
+                            return;
                         }
+
+                        if (_embeddedAgentMap.Remove(panelKey, out var embedded))
+                            TearDownAgentCard(embedded, collapseIfEmpty: true);
                     }
 
                     // Queued behind any pending creation of this panel, as for TeamRemoved above.
@@ -10195,9 +10294,8 @@ namespace MultiTerminal
                         if (_embeddedAgentMap.TryGetValue(panelKey, out var held) && held.Control?.HasActiveAgent != true
                             && _embeddedAgentMap.Remove(panelKey, out var finished))
                         {
-                            finished.Control?.DetachAgent();
-                            finished.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(finished.Slot);
-                            finished.Control?.Dispose();
+                            // No collapse: the new agent's card is added next.
+                            TearDownAgentCard(finished, collapseIfEmpty: false);
                         }
 
                         if (!_embeddedAgentMap.ContainsKey(panelKey))
@@ -10409,13 +10507,8 @@ namespace MultiTerminal
                 {
                     if (info.Terminal != null)
                         affectedTerminals.Add(info.Terminal);
-                    // Detach before stopping to prevent the Stopped event from
-                    // trying to remove an already-removed key (race condition)
-                    info.Control?.DetachAgent();
-                    if (info.Control != null)
-                        _ = info.Control.StopAgentAsync();
-                    info.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(info.Slot);
-                    info.Control?.Dispose();
+                    // Collapsed below, once per terminal, after all of the team's cards are gone.
+                    TearDownAgentCard(info, collapseIfEmpty: false);
                 }
             }
 

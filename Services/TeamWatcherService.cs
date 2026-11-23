@@ -51,6 +51,12 @@ namespace MultiTerminal.Services
         /// for a team member.
         /// </summary>
         public string SubagentPanelKey { get; set; }
+        /// <summary>
+        /// True when a member that had completed got new work (268acc24): a message woke it, in the
+        /// same transcript or a new one. Its card may still be on screen (On Complete = Keep open), and
+        /// then it is re-attached rather than duplicated; otherwise a new card is made.
+        /// </summary>
+        public bool IsWake { get; set; }
     }
 
     /// <summary>
@@ -127,8 +133,8 @@ namespace MultiTerminal.Services
         // called "review", and they must never share a TeamState. Concurrent because each root's
         // watchers call in on their own threads: two roots can add a team at the same instant.
         // That covers THIS MAP ONLY (adding, finding and removing a TeamState). The collections inside
-        // a TeamState are plain ones, read and changed from watcher callbacks, timers and cleanup with
-        // no lock of their own.
+        // a TeamState are plain ones, read and changed only under that team's ConfigReadLock (925c8cff;
+        // see "A team's state and its lock" near WithTeamLock).
         private readonly ConcurrentDictionary<string, TeamState> _activeTeams = new ConcurrentDictionary<string, TeamState>();
 
         private volatile bool _disposed;
@@ -164,9 +170,64 @@ namespace MultiTerminal.Services
             DebugLogService?.Info("TeamWatcher", msg);
         }
 
+        private void LogWarning(string msg)
+        {
+            DebugLogService?.Warning("TeamWatcher", msg);
+        }
+
         private void LogError(string msg)
         {
             DebugLogService?.Error("TeamWatcher", msg);
+        }
+
+        // ── A team's state and its lock ───────────────────────────────────────
+        //
+        // 925c8cff: every read and change of a TeamState's member collections (TrackedMembers,
+        // MemberTailers, MatchedTranscripts, KnownMembers, Watchers, WatchedSubagentDirs, ConfigWatcher)
+        // happens under that team's ConfigReadLock. Nothing that raises an event or runs a tailer's
+        // read (a tailer's start, AddTranscriptFile, Dispose) runs under it: those go into a "deferred"
+        // list that the holder runs after releasing the lock (RunDeferred).
+        //
+        // Lock order: a thread holds at most ONE team's ConfigReadLock, and takes it holding no lock of
+        // a tailer. Under it, these may be taken: _trackedSubagentFiles, the orphan registry's lock,
+        // _watchedProjectDirs, root.ProjectWatchers. None of those is held while a ConfigReadLock is
+        // taken. root.Sync and _rootsLock may be held when one is taken (StartRoot reaches
+        // IsFileClaimedByTeam; StopRoot reaches CleanupTeam), and are never taken under one.
+        // IsFileClaimedByTeam takes each team's lock in turn, which is why the orphan-subagent watching
+        // that a config read starts is deferred rather than run under the reading team's lock.
+
+        /// <summary>
+        /// Run <paramref name="body"/> under the team's lock if the state is still the team's current
+        /// one, then run what it deferred with the lock released. False when the state was not current.
+        /// </summary>
+        private bool WithTeamLock(TeamState state, Action<List<Action>> body)
+        {
+            var deferred = new List<Action>();
+            lock (state.ConfigReadLock)
+            {
+                if (!IsCurrentTeamState(state)) return false;
+                body(deferred);
+            }
+            RunDeferred(deferred);
+            return true;
+        }
+
+        /// <summary>Run work deferred out of a team's lock, in order; one failure does not stop the rest.</summary>
+        private void RunDeferred(List<Action> deferred)
+        {
+            foreach (var work in deferred)
+            {
+                try
+                {
+                    work();
+                }
+#pragma warning disable CA1031 // Runs on watcher and pool threads: log, as the code it was deferred from did.
+                catch (Exception ex)
+#pragma warning restore CA1031
+                {
+                    LogError($"Deferred team work failed: {ex.Message}");
+                }
+            }
         }
 
         public TeamWatcherService(string projectSlug)
@@ -624,12 +685,6 @@ namespace MultiTerminal.Services
             }
         }
 
-        /// <summary>How long the one-off scan waits before processing what it found: longer than the
-        /// 200 ms a Created event waits, so a folder that got BOTH (it appeared in the instant between
-        /// the watcher going live and the listing below) has its state from the event by then and is
-        /// skipped here.</summary>
-        private static readonly TimeSpan TeamScanDelay = TimeSpan.FromMilliseconds(600);
-
         /// <summary>
         /// Pure: whether a team folder found in a teams folder that has just appeared was made while
         /// that folder was missing, going by its creation time. A team folder created before
@@ -654,8 +709,13 @@ namespace MultiTerminal.Services
         /// Process the team folders that are in <paramref name="teamsDir"/> at the moment its watcher
         /// goes live and that were created since <paramref name="seenMissingUtc"/>
         /// (<see cref="IsTeamFolderFromThisAbsence"/>). The listing is taken NOW, on the caller's thread
-        /// (anything created later gets a Created event); the processing happens off it, after
-        /// <see cref="TeamScanDelay"/>.
+        /// (anything created later gets a Created event); the processing happens off it, at once, in a
+        /// task the service keeps until it ends (<see cref="WhenTeamScansDoneAsync"/>).
+        /// <para>A folder that appeared in the instant between the watcher going live and the listing
+        /// is processed twice, by this scan and by its Created event, in either order. That is safe:
+        /// processing a team twice is idempotent (one config watcher, members tracked once, both under
+        /// the team's lock; 925c8cff). The earlier version instead waited 600 ms and skipped a team
+        /// whose state existed, betting that the event's 200 ms wait had run by then.</para>
         /// </summary>
         private void ScanTeamsCreatedBeforeWatching(RootState root, string teamsDir, DateTime seenMissingUtc)
         {
@@ -680,27 +740,21 @@ namespace MultiTerminal.Services
 
             if (present.Length == 0) return;
 
-            Task.Run(async () =>
+            RunTrackedTeamScan(() =>
             {
                 try
                 {
-                    await Task.Delay(TeamScanDelay);
-
                     foreach (string teamDir in present)
                     {
                         if (Gone(root)) return;
                         string teamName = Path.GetFileName(teamDir);
-                        if (!Directory.Exists(teamDir) ||
-                            _activeTeams.ContainsKey(BuildTeamKey(root.Plan.Root, teamName, root.Plan.IsDefault)))
-                        {
-                            continue;
-                        }
+                        if (!Directory.Exists(teamDir)) continue;
 
                         LogInfo($"Team directory found in a teams folder that appeared this session: {teamName} ({root.Plan.Root})");
                         ProcessTeamDirectory(root, teamName);
                     }
                 }
-#pragma warning disable CA1031 // Unobserved task: log, as ProcessTeamDirectory does for a single team.
+#pragma warning disable CA1031 // Pool thread: log, as ProcessTeamDirectory does for a single team.
                 catch (Exception ex)
 #pragma warning restore CA1031
                 {
@@ -708,6 +762,35 @@ namespace MultiTerminal.Services
                 }
             });
         }
+
+        /// <summary>The one-off team scans that have not ended yet (<see cref="ScanTeamsCreatedBeforeWatching"/>).</summary>
+        private readonly ConcurrentDictionary<Task, byte> _teamScans = new ConcurrentDictionary<Task, byte>();
+
+        /// <summary>Run a scan on the pool, tracked from before it starts until it has ended.</summary>
+        private void RunTrackedTeamScan(Action scan)
+        {
+            var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _teamScans[done.Task] = 0;
+            Task.Run(() =>
+            {
+                try
+                {
+                    scan();
+                }
+                finally
+                {
+                    _teamScans.TryRemove(done.Task, out _);
+                    done.TrySetResult(true);
+                }
+            });
+        }
+
+        /// <summary>
+        /// Test seam (InternalsVisibleTo): completes when every one-off team scan started so far has
+        /// ended. A scan processes its teams synchronously, so a team it found has been read, and
+        /// its members announced, by then.
+        /// </summary>
+        internal Task WhenTeamScansDoneAsync() => Task.WhenAll(_teamScans.Keys.ToArray());
 
         /// <summary>
         /// Stop everything under one root: its watchers, its teams (TeamRemoved is raised for each, so
@@ -802,8 +885,10 @@ namespace MultiTerminal.Services
         /// flag is checked again AFTER the add (StopRoot sets it before it sweeps, so one of the two
         /// always sees the other), and an entry that belongs to another RootState than the live one
         /// asking is replaced.</para>
-        /// <para>What this does not cover: a caller that got its state just before the sweep goes on
-        /// using it after the sweep cleaned it up. See the note on <c>_activeTeams</c>.</para>
+        /// <para>A caller that got its state just before the sweep can still hold it after the sweep
+        /// cleaned it up. Since 925c8cff that caller changes nothing in it: every change to a team's
+        /// collections is made under the team's lock after checking the state is still current
+        /// (<see cref="IsCurrentTeamState"/>), and the cleanup takes the same lock.</para>
         /// </summary>
         private TeamState GetOrAddTeam(RootState root, string teamName)
         {
@@ -859,13 +944,18 @@ namespace MultiTerminal.Services
                     return;
                 }
 
-                ReadAndProcessConfig(root, teamName, configPath);
+                var firstRead = ReadAndProcessConfig(root, teamName, configPath, wait: true);
 
                 // Watch config.json for changes (new members added)
                 var state = GetOrAddTeam(root, teamName);
                 if (state == null) return; // the root stopped being watched meanwhile
-                if (state.ConfigWatcher == null)
+
+                // Under the team's lock: two passes over one team (its Created event and the one-off
+                // scan of a teams folder that appeared) set up one config watcher, and a team removed
+                // meanwhile (its cleanup takes the lock) gets none.
+                bool current = WithTeamLock(state, _ =>
                 {
+                    if (state.ConfigWatcher != null) return;
                     string teamDir = Path.Combine(root.Plan.TeamsDir, teamName);
                     state.ConfigWatcher = new FileSystemWatcher(teamDir)
                     {
@@ -873,29 +963,13 @@ namespace MultiTerminal.Services
                         NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size,
                         EnableRaisingEvents = true
                     };
-                    state.ConfigWatcher.Changed += (s, e) =>
-                    {
-                        // Debounce
-                        var now = DateTime.Now;
-                        if ((now - state.LastConfigChange).TotalMilliseconds < 500) return;
-                        state.LastConfigChange = now;
+                    state.ConfigWatcher.Changed += (s, e) => RequestConfigRead(root, teamName, configPath, state);
+                });
+                if (!current) return;
 
-                        Task.Run(async () =>
-                        {
-                            await Task.Delay(100);
-                            if (Gone(root)) return;
-                            ReadAndProcessConfig(root, teamName, configPath);
-                        });
-                    };
-
-                    // The root may have been stopped, and this state swept, after GetOrAddTeam handed
-                    // it over: nothing would dispose a watcher attached to it now.
-                    if (Gone(root))
-                    {
-                        try { state.ConfigWatcher?.Dispose(); } catch { }
-                        state.ConfigWatcher = null;
-                    }
-                }
+                // The first read caught config.json mid-write: read it again once it settles.
+                if (firstRead == ConfigReadResult.Retry)
+                    RequestConfigRead(root, teamName, configPath, state);
             }
             catch (Exception ex)
             {
@@ -906,6 +980,93 @@ namespace MultiTerminal.Services
                 ProcessTeamHook?.Invoke("end", teamName);
             }
         }
+
+        /// <summary>What one read of a team's config.json came to.</summary>
+        private enum ConfigReadResult
+        {
+            /// <summary>Read and acted on, or nothing to act on that another read would change.</summary>
+            Done,
+            /// <summary>Empty, unparseable or locked: probably caught mid-write, worth reading again.</summary>
+            Retry,
+            /// <summary>Another read of this team was running (only when not waiting for it).</summary>
+            Busy
+        }
+
+        /// <summary>
+        /// config.json changed: read it once it has gone <see cref="ConfigDebounceMs"/> without changing.
+        /// <para>Each change bumps a counter and the one waiting reader starts its wait again, so a
+        /// burst of writes (a lead stopping three agents at once) is read once, after its last write.
+        /// The old handler read 100 ms after the first change and dropped the rest of the burst, and
+        /// only the first of three removals was ever seen (268acc24).</para>
+        /// <para>At most one reader waits per team. It stops waiting just before it reads, so a change
+        /// during the read gets a new reader. A read that finds the file empty, invalid or incomplete
+        /// (<see cref="TryParseTeamConfig"/>), or the team's lock held, waits and reads again instead of
+        /// dropping the change: such content is retried at most <see cref="MaxConfigRetries"/> times,
+        /// a held lock at most <see cref="MaxConfigBusyRetries"/> times, so a reader always ends.</para>
+        /// </summary>
+        private void RequestConfigRead(RootState root, string teamName, string configPath, TeamState state)
+        {
+            Interlocked.Increment(ref state.ConfigChangeCount);
+            if (Interlocked.Exchange(ref state.ConfigReaderWaiting, 1) != 0) return;
+            Task.Run(() => RunConfigReaderAsync(root, teamName, configPath, state));
+        }
+
+        /// <summary>How long config.json must go without changing before a debounced read of it.</summary>
+        private const int ConfigDebounceMs = 500;
+
+        /// <summary>How many times a debounced read re-reads a config.json it found empty or invalid.</summary>
+        private const int MaxConfigRetries = 3;
+
+        /// <summary>How many times a debounced read tries again when the team's lock was held (Busy), at <see cref="ConfigDebounceMs"/> apart.</summary>
+        private const int MaxConfigBusyRetries = 40;
+
+        private async Task RunConfigReaderAsync(RootState root, string teamName, string configPath, TeamState state)
+        {
+            int retries = 0;
+            int busy = 0;
+            while (true)
+            {
+                int seen;
+                do
+                {
+                    seen = Volatile.Read(ref state.ConfigChangeCount);
+                    await Task.Delay(ConfigDebounceMs).ConfigureAwait(false);
+                }
+                while (Volatile.Read(ref state.ConfigChangeCount) != seen && !Gone(root));
+
+                Interlocked.Exchange(ref state.ConfigReaderWaiting, 0);
+                if (Gone(root)) return;
+
+                // Reads only into the state it was started for: a team deleted while it waited stays deleted.
+                var result = ReadAndProcessConfig(root, teamName, configPath, wait: false, expected: state);
+                ConfigReadHook?.Invoke(teamName);
+                if (result == ConfigReadResult.Done) return;
+                if (result == ConfigReadResult.Retry && ++retries > MaxConfigRetries)
+                {
+                    LogError($"Gave up re-reading config for team '{teamName}' after {MaxConfigRetries} retries; the next change will read it again");
+                    return;
+                }
+
+                // Busy: another holder of the team's lock (a first read, a transcript match, a cleanup)
+                // was running. Each holds it for one bounded pass, so this normally ends at the next
+                // try; the count stops a lock that never comes free from keeping a reader looping.
+                if (result == ConfigReadResult.Busy && ++busy > MaxConfigBusyRetries)
+                {
+                    LogError($"Gave up waiting to read config for team '{teamName}': its lock stayed busy for {MaxConfigBusyRetries} tries; the next change will read it again");
+                    return;
+                }
+
+                // Wait and read again, unless a change meanwhile already started a reader that will.
+                if (Interlocked.Exchange(ref state.ConfigReaderWaiting, 1) != 0) return;
+            }
+        }
+
+        /// <summary>
+        /// Test seam (InternalsVisibleTo), null in production: called with the team name after each
+        /// debounced config.json read, whatever it found. Lets a test change the file only once a read
+        /// has really happened, which no fixed delay can promise.
+        /// </summary>
+        internal Action<string> ConfigReadHook { get; set; }
 
         /// <summary>
         /// Test seam (InternalsVisibleTo), null in production: called with "start" when a team folder
@@ -933,13 +1094,20 @@ namespace MultiTerminal.Services
             // any event can fire. This closes the construct-to-subscribe race
             // where an event could be raised and lost between construction and
             // `watcher.Created += handler`.
+#pragma warning disable CA2000 // Owned by state.Watchers once added under the team's lock (CleanupTeam disposes it); disposed below when the add is refused.
             var watcher = new FileSystemWatcher(teamDir)
             {
                 Filter = "config.json",
                 NotifyFilter = NotifyFilters.FileName | NotifyFilters.CreationTime,
                 EnableRaisingEvents = false
             };
-            state.Watchers.Add(watcher);
+#pragma warning restore CA2000
+            if (!WithTeamLock(state, _ => state.Watchers.Add(watcher)))
+            {
+                // Removed meanwhile: its cleanup has run, and would not see this watcher.
+                watcher.Dispose();
+                return;
+            }
 
             // Interlocked guard: FileSystemWatcher can raise Created multiple times
             // for one file, and we must not Dispose() twice or re-enqueue processing.
@@ -990,8 +1158,142 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Read config.json and discover new team members.
         /// For each new member, watch for their transcript JSONL file and create a TranscriptTailer.
+        /// Every caller goes through here, so every read holds the team's
+        /// <see cref="TeamState.ConfigReadLock"/>: two reads of one team never run at once. With
+        /// <paramref name="wait"/> false a read already running makes this return
+        /// <see cref="ConfigReadResult.Busy"/> instead of blocking.
+        /// <para>With <paramref name="expected"/> (a debounced read) the read is into that state only,
+        /// and only while it is still the team's current one: no <c>GetOrAddTeam</c>, which would bring
+        /// back a team deleted while the read waited. Without it, the team's state is got or made.</para>
         /// </summary>
-        private void ReadAndProcessConfig(RootState root, string teamName, string configPath)
+        private ConfigReadResult ReadAndProcessConfig(RootState root, string teamName, string configPath, bool wait, TeamState expected = null)
+        {
+            var state = expected ?? GetOrAddTeam(root, teamName);
+            if (state == null) return ConfigReadResult.Done; // the root stopped being watched meanwhile
+
+            if (!Monitor.TryEnter(state.ConfigReadLock, wait ? Timeout.Infinite : 0))
+                return ConfigReadResult.Busy;
+            var deferred = new List<Action>();
+            ConfigReadResult result;
+            try
+            {
+                // Checked under the lock, so a removal that lands first is always seen. Also for a
+                // read that got its state from GetOrAddTeam just now: a team removed since then is not
+                // filled in again (925c8cff).
+                if (!IsCurrentTeamState(state))
+                {
+                    Log($" Skipping config read for team '{teamName}': the team was removed while the read waited");
+                    return ConfigReadResult.Done;
+                }
+
+                result = ReadAndProcessConfigLocked(root, teamName, configPath, state, deferred);
+            }
+            finally
+            {
+                Monitor.Exit(state.ConfigReadLock);
+            }
+
+            // Events, tailer starts and tailer disposals the read decided on, now that the lock is free.
+            RunDeferred(deferred);
+            return result;
+        }
+
+        /// <summary>One member entry of a team's config.json, as <see cref="TryParseTeamConfig"/> read it.</summary>
+        internal readonly record struct TeamConfigMember(string Name, string AgentType, string Cwd, long JoinedAt);
+
+        /// <summary>A config.json that passed every check of <see cref="TryParseTeamConfig"/>.</summary>
+        internal sealed record TeamConfigSnapshot(string LeadSessionId, IReadOnlyList<TeamConfigMember> Members);
+
+        /// <summary>
+        /// Pure: read a team's config.json text into a snapshot, or null with the reason when it is
+        /// not a complete config (925c8cff). Complete means: JSON whose root is an object, with a
+        /// non-empty string <c>leadSessionId</c> and a <c>members</c> array whose every element is an
+        /// object, with <c>name</c>, <c>agentType</c> and <c>cwd</c> each absent, null or a string and
+        /// <c>joinedAt</c> absent, null or an integer. A member with no name is kept here and skipped
+        /// by the caller, as before.
+        /// <para>Claude Code rewrites the file in place, so a read can catch it empty, cut off, or
+        /// cut off at a point that still parses (<c>{}</c>). Every one of those comes back null, and
+        /// the caller reads again (<see cref="ConfigReadResult.Retry"/>) instead of acting on part of
+        /// a file: an empty member list taken at face value would remove every member.</para>
+        /// </summary>
+        internal static TeamConfigSnapshot TryParseTeamConfig(string json, out string problem)
+        {
+            problem = null;
+            if (string.IsNullOrWhiteSpace(json)) { problem = "empty"; return null; }
+
+            JsonDocument doc;
+            try
+            {
+                doc = JsonDocument.Parse(json);
+            }
+            catch (JsonException ex)
+            {
+                problem = "not valid JSON: " + ex.Message;
+                return null;
+            }
+
+            using (doc)
+            {
+                var config = doc.RootElement;
+                if (config.ValueKind != JsonValueKind.Object) { problem = "root is not an object"; return null; }
+
+                if (!config.TryGetProperty("leadSessionId", out var ls) || ls.ValueKind != JsonValueKind.String || string.IsNullOrEmpty(ls.GetString()))
+                {
+                    problem = "leadSessionId missing or not a non-empty string";
+                    return null;
+                }
+
+                if (!config.TryGetProperty("members", out var arr) || arr.ValueKind != JsonValueKind.Array)
+                {
+                    problem = "members missing or not an array";
+                    return null;
+                }
+
+                var members = new List<TeamConfigMember>();
+                foreach (var m in arr.EnumerateArray())
+                {
+                    if (m.ValueKind != JsonValueKind.Object) { problem = "a member is not an object"; return null; }
+                    if (!TryOptionalString(m, "name", out var name) || !TryOptionalString(m, "agentType", out var type) || !TryOptionalString(m, "cwd", out var cwd))
+                    {
+                        problem = "a member's name, agentType or cwd is not a string";
+                        return null;
+                    }
+
+                    long joinedAt = 0;
+                    if (m.TryGetProperty("joinedAt", out var j) && j.ValueKind != JsonValueKind.Null && !(j.ValueKind == JsonValueKind.Number && j.TryGetInt64(out joinedAt)))
+                    {
+                        problem = "a member's joinedAt is not an integer";
+                        return null;
+                    }
+
+                    members.Add(new TeamConfigMember(name, type, cwd, joinedAt));
+                }
+
+                return new TeamConfigSnapshot(ls.GetString(), members);
+            }
+        }
+
+        private static bool TryOptionalString(JsonElement obj, string property, out string value)
+        {
+            value = null;
+            if (!obj.TryGetProperty(property, out var p) || p.ValueKind == JsonValueKind.Null) return true;
+            if (p.ValueKind != JsonValueKind.String) return false;
+            value = p.GetString();
+            return true;
+        }
+
+        /// <summary>The team <paramref name="state"/> is for is being watched, and this is still its state.</summary>
+        private bool IsCurrentTeamState(TeamState state) =>
+            !state.Root.Stopped && _activeTeams.TryGetValue(state.TeamKey, out var current) && ReferenceEquals(current, state);
+
+        /// <summary>
+        /// The body of a config read. Caller holds <see cref="TeamState.ConfigReadLock"/>. Changes the
+        /// team's state only from a snapshot that passed <see cref="TryParseTeamConfig"/>. Anything
+        /// that raises an event or runs a tailer's read (member announcements, removals, tailer starts
+        /// and disposals, the orphan-subagent watching) is added to <paramref name="deferred"/> for the
+        /// caller to run once the lock is released.
+        /// </summary>
+        private ConfigReadResult ReadAndProcessConfigLocked(RootState root, string teamName, string configPath, TeamState state, List<Action> deferred)
         {
             try
             {
@@ -1002,33 +1304,25 @@ namespace MultiTerminal.Services
                     json = reader.ReadToEnd();
                 }
 
-                if (string.IsNullOrWhiteSpace(json)) return;
-
-                using var doc = JsonDocument.Parse(json);
-                var config = doc.RootElement;
-
-                string leadSessionId = config.TryGetProperty("leadSessionId", out var lsProp) ? lsProp.GetString() : null;
-                if (string.IsNullOrEmpty(leadSessionId))
+                var config = TryParseTeamConfig(json, out string problem);
+                if (config == null)
                 {
-                    LogError($"No leadSessionId in config for team '{teamName}'");
-                    return;
+                    // Expected while Claude Code is part-way through rewriting the file: read it again.
+                    LogWarning($"Config for team '{teamName}' is not complete yet ({problem}); it will be read again");
+                    return ConfigReadResult.Retry;
                 }
 
-                var state = GetOrAddTeam(root, teamName);
-                if (state == null) return; // the root stopped being watched meanwhile
+                string leadSessionId = config.LeadSessionId;
                 state.LeadSessionId = leadSessionId;
-
-                if (!config.TryGetProperty("members", out var membersArr)) return;
 
                 // Derive the correct project directory from the lead member's cwd
                 // (MultiTerminal's own CWD may differ from the Claude Code project path)
                 string projectDir = root.Plan.AppProjectDir;
-                foreach (var member in membersArr.EnumerateArray())
+                foreach (var member in config.Members)
                 {
-                    string agentType = member.TryGetProperty("agentType", out var tp) ? tp.GetString() : null;
-                    if (agentType == "team-lead")
+                    if (member.AgentType == "team-lead")
                     {
-                        string leadCwd = member.TryGetProperty("cwd", out var cwdProp) ? cwdProp.GetString() : null;
+                        string leadCwd = member.Cwd;
                         if (!string.IsNullOrEmpty(leadCwd))
                         {
                             state.LeadCwd = leadCwd;
@@ -1038,8 +1332,11 @@ namespace MultiTerminal.Services
                             Log($" Derived project dir from lead cwd: {projectDir}");
 
                             // Also start orphan subagent watching on this project dir
-                            // (the app's CWD may differ from where terminals are running)
-                            StartProjectSubagentWatchingForDir(root, projectDir);
+                            // (the app's CWD may differ from where terminals are running). Deferred:
+                            // its scan asks every team's state whether a file is claimed, under that
+                            // team's lock, and must not do so while this one is held.
+                            string dirToWatch = projectDir;
+                            deferred.Add(() => StartProjectSubagentWatchingForDir(root, dirToWatch));
                         }
                         break;
                     }
@@ -1058,19 +1355,15 @@ namespace MultiTerminal.Services
                 // and identify which are new (not yet tracked)
                 var allMembers = new List<(string name, long joinedAt)>();
                 var newMembers = new List<(string name, long joinedAt)>();
-                foreach (var member in membersArr.EnumerateArray())
+                foreach (var member in config.Members)
                 {
-                    string memberName = member.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null;
-                    string agentType = member.TryGetProperty("agentType", out var typeProp) ? typeProp.GetString() : null;
+                    if (string.IsNullOrEmpty(member.Name)) continue;
+                    if (member.AgentType == "team-lead") continue;
 
-                    if (string.IsNullOrEmpty(memberName)) continue;
-                    if (agentType == "team-lead") continue;
+                    allMembers.Add((member.Name, member.JoinedAt));
 
-                    long joinedAt = member.TryGetProperty("joinedAt", out var jProp) ? jProp.GetInt64() : 0;
-                    allMembers.Add((memberName, joinedAt));
-
-                    if (!state.TrackedMembers.Contains(memberName))
-                        newMembers.Add((memberName, joinedAt));
+                    if (!state.TrackedMembers.Contains(member.Name))
+                        newMembers.Add((member.Name, member.JoinedAt));
                 }
                 state.KnownMembers = allMembers;
 
@@ -1081,12 +1374,21 @@ namespace MultiTerminal.Services
                 {
                     LogInfo($"Member '{removed}' removed from team '{teamName}' config — cleaning up");
                     state.TrackedMembers.Remove(removed);
-                    if (state.MemberTailers.TryGetValue(removed, out var tailer))
+                    state.MemberTailers.TryGetValue(removed, out var removedTailer);
+                    state.MemberTailers.Remove(removed);
+
+                    // Out of the state now, so a wake on its way announces nothing (CreateTailerForMember).
+                    // Disposed before MemberRemoved is raised: a late announcement of this tailer that
+                    // reaches MainForm after the removal finds it shut down and makes no card.
+                    string removedName = removed;
+                    deferred.Add(() =>
                     {
-                        try { tailer.Dispose(); } catch { }
-                        state.MemberTailers.Remove(removed);
-                    }
-                    MemberRemoved?.Invoke(this, (teamName, removed, state.TeamKey));
+                        if (removedTailer != null)
+                        {
+                            try { removedTailer.Dispose(); } catch { }
+                        }
+                        MemberRemoved?.Invoke(this, (teamName, removedName, state.TeamKey));
+                    });
                 }
 
                 // Build subagents directory path (needed for watching even if no new members).
@@ -1095,7 +1397,7 @@ namespace MultiTerminal.Services
                 if (!string.Equals(sessionProjectDir, projectDir, StringComparison.OrdinalIgnoreCase))
                 {
                     LogInfo($"Team '{teamName}': lead session lives under {sessionProjectDir}, not its starting folder {projectDir}");
-                    StartProjectSubagentWatchingForDir(root, sessionProjectDir);
+                    deferred.Add(() => StartProjectSubagentWatchingForDir(root, sessionProjectDir));
                 }
                 string subagentsDir = Path.Combine(sessionProjectDir, leadSessionId, "subagents");
 
@@ -1137,7 +1439,7 @@ namespace MultiTerminal.Services
                         }
 
                         // Try to match existing files to new members
-                        MatchExistingTranscripts(teamName, subagentsDir, newMembers, state);
+                        MatchExistingTranscripts(teamName, subagentsDir, newMembers, state, deferred);
                     }
 
                     // Release pre-claimed files that weren't matched to any team member,
@@ -1155,19 +1457,33 @@ namespace MultiTerminal.Services
                 // Always ensure the subagents directory watcher is running.
                 // This picks up new JSONL files created when agents wake up for subsequent turns,
                 // even after all members have been initially matched.
-                WatchForNewTranscripts(teamName, subagentsDir, newMembers, state);
+                WatchForNewTranscripts(teamName, subagentsDir, newMembers, state, deferred);
+                return ConfigReadResult.Done;
+            }
+            catch (Exception ex) when (ex is FileNotFoundException || ex is DirectoryNotFoundException)
+            {
+                // The team was deleted: nothing to read again. Its folder watcher reports the removal.
+                Log($" Config for team '{teamName}' is gone: {ex.Message}");
+                return ConfigReadResult.Done;
+            }
+            catch (IOException ex)
+            {
+                // Locked (Claude Code is writing it): worth another read.
+                LogWarning($"Config for team '{teamName}' not readable yet: {ex.Message}");
+                return ConfigReadResult.Retry;
             }
             catch (Exception ex)
             {
                 LogError($"Error reading config for team '{teamName}': {ex.Message}");
+                return ConfigReadResult.Done;
             }
         }
 
         /// <summary>
-        /// Match existing transcript files to new members by creation time.
+        /// Match existing transcript files to new members by creation time. Caller holds the team's lock.
         /// </summary>
         private void MatchExistingTranscripts(string teamName, string subagentsDir,
-            List<(string name, long joinedAt)> newMembers, TeamState state)
+            List<(string name, long joinedAt)> newMembers, TeamState state, List<Action> deferred)
         {
             var files = Directory.GetFiles(subagentsDir, "agent-*.jsonl")
                 .Select(f => new FileInfo(f))
@@ -1194,7 +1510,7 @@ namespace MultiTerminal.Services
                 {
                     LogInfo($"MATCHED '{member.name}' -> {matchingFile.Name} (created={matchingFile.CreationTimeUtc:HH:mm:ss.fff}, delta={Math.Abs((matchingFile.CreationTimeUtc - memberJoinedUtc).TotalSeconds):F1}s)");
                     state.MatchedTranscripts.Add(matchingFile.FullName);
-                    CreateTailerForMember(teamName, member.name, matchingFile.FullName, state);
+                    CreateTailerForMember(teamName, member.name, matchingFile.FullName, state, deferred);
                 }
                 else
                 {
@@ -1212,9 +1528,10 @@ namespace MultiTerminal.Services
         /// Watch the subagents directory for new transcript files.
         /// Initially matches files to untracked members by timing, then continues watching
         /// permanently to pick up new JSONL files created when agents wake up for subsequent turns.
+        /// Caller holds the team's lock; the watchers' callbacks take it themselves.
         /// </summary>
         private void WatchForNewTranscripts(string teamName, string subagentsDir,
-            List<(string name, long joinedAt)> newMembers, TeamState state)
+            List<(string name, long joinedAt)> newMembers, TeamState state, List<Action> deferred)
         {
             // Ensure directory exists
             if (!Directory.Exists(subagentsDir))
@@ -1246,7 +1563,7 @@ namespace MultiTerminal.Services
                                 await Task.Delay(100);
                                 if (Gone(state.Root)) return;
                                 LogInfo($"Session dir appeared: {e.FullPath} — chaining to subagents watcher");
-                                WatchForNewTranscripts(teamName, subagentsDir, newMembers, state);
+                                WithTeamLock(state, later => WatchForNewTranscripts(teamName, subagentsDir, newMembers, state, later));
                             });
                         };
                     }
@@ -1272,7 +1589,7 @@ namespace MultiTerminal.Services
                         {
                             await Task.Delay(100);
                             if (Gone(state.Root)) return;
-                            WatchForNewTranscripts(teamName, subagentsDir, newMembers, state);
+                            WithTeamLock(state, later => WatchForNewTranscripts(teamName, subagentsDir, newMembers, state, later));
                         });
                     };
                     return;
@@ -1294,7 +1611,7 @@ namespace MultiTerminal.Services
                 if (untrackedMembers.Count > 0)
                 {
                     LogInfo($"Re-scanning for {untrackedMembers.Count} untracked member(s) in team '{teamName}'");
-                    MatchExistingTranscripts(teamName, subagentsDir, untrackedMembers, state);
+                    MatchExistingTranscripts(teamName, subagentsDir, untrackedMembers, state, deferred);
                 }
                 return;
             }
@@ -1316,82 +1633,23 @@ namespace MultiTerminal.Services
                 // can't race us and create a duplicate panel.
                 lock (_trackedSubagentFiles) { _trackedSubagentFiles.Add(fullPath); }
 
-                // Async delay to let file be initialized, without blocking FSW thread
+                // Async delay to let file be initialized, without blocking FSW thread. The matching
+                // reads and changes the team's state, so it runs under the team's lock (925c8cff).
                 Task.Run(async () =>
                 {
                     await Task.Delay(500);
                     if (Gone(state.Root)) return;
-
-                if (state.MatchedTranscripts.Contains(fullPath))
-                    return;
-
-                // First: try to match to an untracked member from the latest config
-                // (use state.KnownMembers which is updated on each config read, not the captured newMembers list)
-                // Validate timing to avoid greedily claiming non-team subagent files (Explore, Plan)
-                var nextMember = state.KnownMembers.FirstOrDefault(m => !state.TrackedMembers.Contains(m.name));
-                if (nextMember.name != null)
-                {
-                    var memberJoinedUtc = DateTimeOffset.FromUnixTimeMilliseconds(nextMember.joinedAt).UtcDateTime;
-                    var fileCreatedUtc = new FileInfo(fullPath).CreationTimeUtc;
-                    var timingDelta = Math.Abs((fileCreatedUtc - memberJoinedUtc).TotalSeconds);
-
-                    if (timingDelta < 30)
+                    try
                     {
-                        LogInfo($"Watcher matched new file to untracked member '{nextMember.name}': {Path.GetFileName(fullPath)} (delta={timingDelta:F1}s)");
-                        state.MatchedTranscripts.Add(fullPath);
-                        CreateTailerForMember(teamName, nextMember.name, fullPath, state);
-                        return;
+                        WithTeamLock(state, deferred => OnTeamTranscriptCreated(teamName, fullPath, state, deferred));
                     }
-                    else
+#pragma warning disable CA1031 // Pool thread: an escape would be an unobserved task exception.
+                    catch (Exception ex)
+#pragma warning restore CA1031
                     {
-                        Log($"Timing mismatch for untracked member '{nextMember.name}': delta={timingDelta:F1}s, skipping greedy match for {Path.GetFileName(fullPath)}");
+                        LogError($"Error matching new transcript {Path.GetFileName(fullPath)} in team '{teamName}': {ex.Message}");
                     }
-                }
-
-                // All members already tracked (or timing didn't match) — check if this
-                // is actually a team agent transcript before trying heuristic matching.
-                // Non-team subagents (Explore, Plan) won't have teammate-message markers.
-                if (!LooksLikeTeamTranscript(fullPath))
-                {
-                    // Not a team transcript — release our early claim so orphan watcher can adopt it
-                    lock (_trackedSubagentFiles) { _trackedSubagentFiles.Remove(fullPath); }
-                    Log($"Non-team subagent transcript (no team markers), released claim: {Path.GetFileName(fullPath)}");
-                    return;
-                }
-
-                // This is a subsequent wake-up file for a team agent.
-                // Identify which member it belongs to and add to their existing tailer.
-                string ownerName = IdentifyFileOwner(fullPath, state);
-
-                // Fallback: if content matching failed, try inbox-based matching.
-                // The agent that just woke up is the one whose inbox was most recently modified.
-                if (ownerName == null)
-                {
-                    ownerName = IdentifyByInboxTiming(fullPath, teamName, state);
-                }
-
-                // Fallback: if only one member recently sent a message via Agent Panel,
-                // the wake-up file likely belongs to them.
-                if (ownerName == null)
-                {
-                    ownerName = IdentifyByRecentSend(state);
-                }
-
-                if (ownerName != null && state.MemberTailers.TryGetValue(ownerName, out var existingTailer))
-                {
-                    state.MatchedTranscripts.Add(fullPath);
-                    // _trackedSubagentFiles already added synchronously before Task.Run
-                    existingTailer.AddTranscriptFile(fullPath);
-                    LogInfo($"Added subsequent transcript to {ownerName}: {Path.GetFileName(fullPath)}");
-                }
-                else
-                {
-                    // Has team markers but couldn't identify owner — log for debugging.
-                    // File already claimed in _trackedSubagentFiles (pre-Task.Run), so orphan watcher is blocked.
-                    state.MatchedTranscripts.Add(fullPath);
-                    Log($"Unmatched team transcript (blocked orphan adoption): {Path.GetFileName(fullPath)}");
-                }
-                }); // end Task.Run
+                });
             };
 
             Log($" Watching for new transcripts in: {subagentsDir}");
@@ -1404,7 +1662,90 @@ namespace MultiTerminal.Services
                 .ToList();
             if (untrackedAfterSetup.Count > 0)
             {
-                MatchExistingTranscripts(teamName, subagentsDir, untrackedAfterSetup, state);
+                MatchExistingTranscripts(teamName, subagentsDir, untrackedAfterSetup, state, deferred);
+            }
+        }
+
+        /// <summary>
+        /// A new transcript appeared in a team's subagents folder: give it to an untracked member,
+        /// or to the member it is a wake-up file of, or keep it from the orphan watcher. Caller holds
+        /// the team's lock; the tailer work goes into <paramref name="deferred"/>.
+        /// </summary>
+        private void OnTeamTranscriptCreated(string teamName, string fullPath, TeamState state, List<Action> deferred)
+        {
+            if (state.MatchedTranscripts.Contains(fullPath))
+                return;
+
+            // First: try to match to an untracked member from the latest config
+            // (use state.KnownMembers which is updated on each config read, not the captured newMembers list)
+            // Validate timing to avoid greedily claiming non-team subagent files (Explore, Plan)
+            var nextMember = state.KnownMembers.FirstOrDefault(m => !state.TrackedMembers.Contains(m.name));
+            if (nextMember.name != null)
+            {
+                var memberJoinedUtc = DateTimeOffset.FromUnixTimeMilliseconds(nextMember.joinedAt).UtcDateTime;
+                var fileCreatedUtc = new FileInfo(fullPath).CreationTimeUtc;
+                var timingDelta = Math.Abs((fileCreatedUtc - memberJoinedUtc).TotalSeconds);
+
+                if (timingDelta < 30)
+                {
+                    LogInfo($"Watcher matched new file to untracked member '{nextMember.name}': {Path.GetFileName(fullPath)} (delta={timingDelta:F1}s)");
+                    state.MatchedTranscripts.Add(fullPath);
+                    CreateTailerForMember(teamName, nextMember.name, fullPath, state, deferred);
+                    return;
+                }
+                else
+                {
+                    Log($"Timing mismatch for untracked member '{nextMember.name}': delta={timingDelta:F1}s, skipping greedy match for {Path.GetFileName(fullPath)}");
+                }
+            }
+
+            // All members already tracked (or timing didn't match) — check if this
+            // is actually a team agent transcript before trying heuristic matching.
+            // Non-team subagents (Explore, Plan) won't have teammate-message markers.
+            if (!LooksLikeTeamTranscript(fullPath))
+            {
+                // Not a team transcript — release our early claim so orphan watcher can adopt it
+                lock (_trackedSubagentFiles) { _trackedSubagentFiles.Remove(fullPath); }
+                Log($"Non-team subagent transcript (no team markers), released claim: {Path.GetFileName(fullPath)}");
+                return;
+            }
+
+            // This is a subsequent wake-up file for a team agent.
+            // Identify which member it belongs to and add to their existing tailer.
+            string ownerName = IdentifyFileOwner(fullPath, state);
+
+            // Fallback: if content matching failed, try inbox-based matching.
+            // The agent that just woke up is the one whose inbox was most recently modified.
+            if (ownerName == null)
+            {
+                ownerName = IdentifyByInboxTiming(fullPath, teamName, state);
+            }
+
+            // Fallback: if only one member recently sent a message via Agent Panel,
+            // the wake-up file likely belongs to them.
+            if (ownerName == null)
+            {
+                ownerName = IdentifyByRecentSend(state);
+            }
+
+            if (ownerName != null && state.MemberTailers.TryGetValue(ownerName, out var existingTailer))
+            {
+                state.MatchedTranscripts.Add(fullPath);
+                // _trackedSubagentFiles already added synchronously before Task.Run.
+                // Deferred: the tailer's catch-up read raises events (a wake announces the card).
+                string owner = ownerName;
+                deferred.Add(() =>
+                {
+                    existingTailer.AddTranscriptFile(fullPath);
+                    LogInfo($"Added subsequent transcript to {owner}: {Path.GetFileName(fullPath)}");
+                });
+            }
+            else
+            {
+                // Has team markers but couldn't identify owner — log for debugging.
+                // File already claimed in _trackedSubagentFiles (pre-Task.Run), so orphan watcher is blocked.
+                state.MatchedTranscripts.Add(fullPath);
+                Log($"Unmatched team transcript (blocked orphan adoption): {Path.GetFileName(fullPath)}");
             }
         }
 
@@ -1711,16 +2052,42 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Create a TranscriptTailer for a team member and fire the TeammateDiscovered event.
+        /// True for the team Claude Code gives every session on its own: named <c>session-</c> plus the
+        /// first 8 characters of its lead session id (<c>session-554a88f1</c> for lead session
+        /// <c>554a88f1-9a09-…</c>). Every named Agent call joins it as an in-process member, and Claude
+        /// Code leaves the member in config.json after it has finished (it is removed only when the lead
+        /// stops it), so its card cannot wait for a removal to close (268acc24).
+        /// <para>The name is the test, not <c>backendType: "in-process"</c>: a team somebody creates
+        /// can run in-process too, and its members are meant to idle until told to stop. A created team
+        /// would have to be named after its own lead's session id to be mistaken for this one.</para>
         /// </summary>
-        private void CreateTailerForMember(string teamName, string memberName, string transcriptPath, TeamState state)
+        internal static bool IsImplicitSessionTeam(string teamName, string leadSessionId)
+        {
+            const int IdLength = 8;
+            if (string.IsNullOrEmpty(teamName) || string.IsNullOrEmpty(leadSessionId) || leadSessionId.Length < IdLength)
+                return false;
+            return string.Equals(teamName, ImplicitSessionTeamPrefix + leadSessionId.Substring(0, IdLength), StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>The start of the name of the team Claude Code makes for each session (see <see cref="IsImplicitSessionTeam"/>).</summary>
+        internal const string ImplicitSessionTeamPrefix = "session-";
+
+        /// <summary>
+        /// Create a TranscriptTailer for a team member and fire the TeammateDiscovered event.
+        /// <para>Caller holds the team's lock (925c8cff). The member is registered in the state here;
+        /// the orphan tailer it replaces is disposed, the tailer started and the member announced from
+        /// <paramref name="deferred"/>, once the lock is released.</para>
+        /// </summary>
+        private void CreateTailerForMember(string teamName, string memberName, string transcriptPath, TeamState state, List<Action> deferred)
         {
             try
             {
                 // Reclaim from orphan watcher: if an orphan tailer already exists for this
                 // transcript file, dispose it so the orphan panel is auto-removed from MainForm.
                 // This happens when the orphan watcher's sync scan beats the team watcher.
-                ReclaimFromOrphan(transcriptPath);
+                var orphan = _orphanRegistry.TakeByPath(transcriptPath);
+                if (orphan != null)
+                    deferred.Add(() => DisposeReclaimedOrphan(orphan, transcriptPath));
 
                 // Claude Code uses dashes in inbox filenames (e.g. "Agent-Alpha.json" not "Agent Alpha.json")
                 string inboxFileName = memberName.Replace(" ", "-") + ".json";
@@ -1728,22 +2095,15 @@ namespace MultiTerminal.Services
 
                 var tailer = new TranscriptTailer(transcriptPath, inboxPath, memberName);
                 tailer.IsTeamAgent = true; // Don't auto-stop on Result — team agents stay alive between turns
+
+                // A member of the team Claude Code made for the session itself finishes like a subagent (268acc24).
+                tailer.IsImplicitTeamMember = IsImplicitSessionTeam(teamName, state.LeadSessionId);
                 state.TrackedMembers.Add(memberName);
                 state.MemberTailers[memberName] = tailer;
+                MemberRegisteredHook?.Invoke(state.TeamKey, memberName);
 
                 // Mark as claimed so project-level watcher skips it
                 lock (_trackedSubagentFiles) { _trackedSubagentFiles.Add(transcriptPath); }
-
-                // Start tailing (catches up on existing content)
-                tailer.StartAsync();
-
-                LogInfo($"Created tailer for '{memberName}' in team '{teamName}': {Path.GetFileName(transcriptPath)}");
-
-                // Bridge team agent SendMessage calls to ChatPanel
-                tailer.TeamMessageSent += (s, msg) =>
-                {
-                    TeamMessageSent?.Invoke(this, (teamName, memberName, msg, state.SpawnerName));
-                };
 
                 // Look up spawner and task metadata from the office hook tracking file
                 var tracking = LookupFromTrackingByPath(transcriptPath);
@@ -1765,7 +2125,7 @@ namespace MultiTerminal.Services
                     }
                 }
 
-                TeammateDiscovered?.Invoke(this, new TeammateDiscoveredEventArgs
+                TeammateDiscoveredEventArgs Args(bool isWake) => new TeammateDiscoveredEventArgs
                 {
                     TeamName = teamName,
                     MemberName = memberName,
@@ -1775,7 +2135,77 @@ namespace MultiTerminal.Services
                     SubagentType = tracking.SubagentType,
                     LeadCwd = state.LeadCwd,
                     ConfigRoot = state.Root.Plan.Root,
-                    TeamKey = state.TeamKey
+                    TeamKey = state.TeamKey,
+                    IsWake = isWake
+                };
+
+                // This tailer is still the member's: the team is current and nobody removed or
+                // replaced the member. Caller holds the team's lock.
+                bool IsStillMember() =>
+                    IsCurrentTeamState(state) && state.MemberTailers.TryGetValue(memberName, out var current) && ReferenceEquals(current, tailer);
+
+                // How many of the tailer's wakes an announcement already covers (925c8cff). -1 until the
+                // first decision below; guarded by the team's lock. A wake between the start and that
+                // decision leaves the tailer active, so the decision announces it; its Reactivated,
+                // raised before or after, finds it covered: one announcement, not two.
+                int announcedWakes = -1;
+
+                // A completed implicit-team member that gets new work is announced again, so it has a
+                // card while it works (268acc24). Subscribed before StartAsync starts the file watchers,
+                // so no wake can come before it. Only while this tailer is still the member's: a wake
+                // racing the member's removal (or a newer tailer for the name) announces nothing.
+                tailer.Reactivated += (s, e) =>
+                {
+                    bool announce;
+                    lock (state.ConfigReadLock) // a member's removal (a config read) changes MemberTailers under it
+                    {
+                        var (_, wakes) = tailer.ReadCompletion();
+                        announce = announcedWakes >= 0 && wakes > announcedWakes && IsStillMember();
+                        if (announce) announcedWakes = wakes;
+                    }
+                    if (!announce || Gone(state.Root) || tailer.IsShutDown) return;
+                    LogInfo($"Completed member '{memberName}' of team '{teamName}' has new work: showing its card again");
+                    TeammateDiscovered?.Invoke(this, Args(isWake: true));
+                };
+
+                deferred.Add(() =>
+                {
+                    // Start tailing (catches up on existing content). StartAsync does nothing for a
+                    // tailer disposed meanwhile (its member removed before this ran).
+                    tailer.StartAsync();
+
+                    LogInfo($"Created tailer for '{memberName}' in team '{teamName}': {Path.GetFileName(transcriptPath)}");
+
+                    // Bridge team agent SendMessage calls to ChatPanel. Deliberately after the catch-up read:
+                    // subscribing first would re-send every SendMessage already in the transcript to the
+                    // chat each time MT restarts.
+                    tailer.TeamMessageSent += (s, msg) =>
+                    {
+                        TeamMessageSent?.Invoke(this, (teamName, memberName, msg, state.SpawnerName));
+                    };
+
+                    MemberStartedHook?.Invoke(memberName, tailer);
+
+                    bool completedAtStart, stillMember;
+                    lock (state.ConfigReadLock)
+                    {
+                        var (completed, wakes) = tailer.ReadCompletion();
+                        completedAtStart = completed;
+                        announcedWakes = wakes;
+                        stillMember = IsStillMember();
+                    }
+                    if (!stillMember || tailer.IsShutDown) return;
+
+                    // A member whose work was already finished when it was found (after an MT restart, a
+                    // session-* team keeps every member it ever had) gets no card for that old work. It
+                    // stays watched, and a wake announces it above.
+                    if (completedAtStart)
+                    {
+                        LogInfo($"Member '{memberName}' of team '{teamName}' had already finished: no card unless it gets new work");
+                        return;
+                    }
+
+                    TeammateDiscovered?.Invoke(this, Args(isWake: false));
                 });
             }
             catch (Exception ex)
@@ -1783,6 +2213,24 @@ namespace MultiTerminal.Services
                 LogError($"Error creating tailer for '{memberName}': {ex.Message}");
             }
         }
+
+        /// <summary>
+        /// Test seam (InternalsVisibleTo), null in production: called with the member name and its new
+        /// tailer after the tailer has started and before the watcher decides whether to announce it,
+        /// holding no lock. Lets a test wake the member in exactly that window.
+        /// </summary>
+        internal Action<string, TranscriptTailer> MemberStartedHook { get; set; }
+
+        /// <summary>
+        /// Test seam (InternalsVisibleTo), null in production: called with the team key and member
+        /// name on the thread that has just added the member to its team's state, before it releases
+        /// whatever it holds. With <see cref="TeamLockFor"/> a test can see whether that was the team's lock.
+        /// </summary>
+        internal Action<string, string> MemberRegisteredHook { get; set; }
+
+        /// <summary>Test seam (InternalsVisibleTo): the lock of the team with this key, or null when there is no such team.</summary>
+        internal object TeamLockFor(string teamKey) =>
+            _activeTeams.TryGetValue(teamKey, out var state) ? state.ConfigReadLock : null;
 
         /// <summary>
         /// Watch one root's session directories for non-team subagent JSONL files.
@@ -2132,18 +2580,24 @@ namespace MultiTerminal.Services
         {
             foreach (var state in _activeTeams.Values)
             {
-                if (state.MatchedTranscripts.Contains(filePath))
-                    return true;
+                // Each team's state under its own lock, one team at a time (see the lock order note
+                // near WithTeamLock): the caller holds no team's lock.
+                List<(string name, long joinedAt)> untrackedMembers;
+                lock (state.ConfigReadLock)
+                {
+                    if (state.MatchedTranscripts.Contains(filePath))
+                        return true;
 
-                if (!ReferenceEquals(state.Root, root))
-                    continue;
+                    if (!ReferenceEquals(state.Root, root))
+                        continue;
 
-                // Also check if any active team has unmatched members whose joinedAt
-                // timing matches this file. This prevents the orphan watcher from racing
-                // the team watcher when the session dir appears after the team config.
-                var untrackedMembers = state.KnownMembers
-                    .Where(m => !state.TrackedMembers.Contains(m.name))
-                    .ToList();
+                    // Also check if any active team has unmatched members whose joinedAt
+                    // timing matches this file. This prevents the orphan watcher from racing
+                    // the team watcher when the session dir appears after the team config.
+                    untrackedMembers = state.KnownMembers
+                        .Where(m => !state.TrackedMembers.Contains(m.name))
+                        .ToList();
+                }
                 if (untrackedMembers.Count > 0)
                 {
                     try
@@ -2310,7 +2764,7 @@ namespace MultiTerminal.Services
 
                 // No inbox path — read-only panel.
                 // CA2000: ownership passes to _orphanRegistry on a New claim and is disposed here otherwise;
-                // the registry's takers (StopRoot, CleanupTeam, ReclaimFromOrphan, StopWatching) dispose it.
+                // the registry's takers (StopRoot, CleanupTeam, CreateTailerForMember, StopWatching) dispose it.
 #pragma warning disable CA2000
                 var tailer = new TranscriptTailer(transcriptPath, null, displayName);
 #pragma warning restore CA2000
@@ -2332,6 +2786,14 @@ namespace MultiTerminal.Services
                 tailer.Stopped += (s, exitCode) => _orphanRegistry.Remove(tailer, finished: exitCode == 0, DateTime.UtcNow);
 
                 tailer.StartAsync();
+
+                // Finished before it was found (the catch-up read reached its finish, e.g. after an MT
+                // restart): its Stopped(0) went to no card, so open none (268acc24).
+                if (tailer.IsCompleted)
+                {
+                    LogInfo($"Orphan subagent had already finished, no panel: {displayName} ({Path.GetFileName(transcriptPath)})");
+                    return;
+                }
 
                 LogInfo($"Orphan subagent detected: {displayName} ({Path.GetFileName(transcriptPath)}), spawner: {tracking.SpawnerName ?? "(unknown)"}, desc: \"{tracking.TaskDescription ?? ""}\"");
 
@@ -2532,22 +2994,17 @@ namespace MultiTerminal.Services
                 && string.Equals(other.TeamName, team.TeamName, StringComparison.OrdinalIgnoreCase));
 
         /// <summary>
-        /// Reclaim a transcript file from the orphan watcher. If an orphan tailer already owns
-        /// this file, dispose it so the orphan panel is auto-removed from MainForm (via the
-        /// Stopped event → HandleEmbeddedStopped closure). The team watcher then creates its
-        /// own tailer and panel with the correct team-keyed name.
-        /// This fixes the race where the orphan watcher's sync scan claims a team agent's
-        /// transcript before the team watcher can match it to a member.
+        /// Finish reclaiming a transcript file from the orphan watcher: CreateTailerForMember took the
+        /// orphan tailer out of the registry under the team's lock; this disposes it, with the lock
+        /// released, so the orphan panel is auto-removed from MainForm (via the Stopped event →
+        /// HandleEmbeddedStopped closure). The team watcher then creates its own tailer and panel with
+        /// the correct team-keyed name. This fixes the race where the orphan watcher's sync scan claims
+        /// a team agent's transcript before the team watcher can match it to a member.
         /// </summary>
-        private void ReclaimFromOrphan(string transcriptPath)
+        private void DisposeReclaimedOrphan(TranscriptTailer orphanTailer, string transcriptPath)
         {
-            TranscriptTailer orphanTailer = _orphanRegistry.TakeByPath(transcriptPath);
-
-            if (orphanTailer != null)
-            {
-                LogInfo($"Reclaiming orphan tailer for team: {orphanTailer.AgentName} ({Path.GetFileName(transcriptPath)})");
-                try { orphanTailer.Dispose(); } catch { }
-            }
+            LogInfo($"Reclaiming orphan tailer for team: {orphanTailer.AgentName} ({Path.GetFileName(transcriptPath)})");
+            try { orphanTailer.Dispose(); } catch { }
         }
 
         /// <summary>
@@ -2648,13 +3105,32 @@ namespace MultiTerminal.Services
         /// raised: the caller holds <c>_rootsLock</c> and raises it after releasing the lock.</param>
         private void CleanupTeam(string teamName, TeamState state, List<TeamRemovedEventArgs> deferred = null)
         {
-            // Collect member names before disposal for panel cleanup and orphan prevention
-            var memberNames = state.KnownMembers.Select(m => m.name).ToList();
+            // The state is already out of _activeTeams. Its collections are taken under its lock
+            // (925c8cff), so a config read or transcript match still running on it finishes first and
+            // anything it added is cleaned up here; one that gets the lock after this finds the state
+            // no longer current and adds nothing. The tailers and watchers are disposed after release.
+            List<string> memberNames;
+            List<string> matchedTranscripts;
+            List<TranscriptTailer> tailers;
+            List<FileSystemWatcher> watchers;
+            FileSystemWatcher configWatcher;
+            lock (state.ConfigReadLock)
+            {
+                // Collect member names before disposal for panel cleanup and orphan prevention
+                memberNames = state.KnownMembers.Select(m => m.name).ToList();
+                matchedTranscripts = state.MatchedTranscripts.ToList();
+                tailers = state.MemberTailers.Values.ToList();
+                state.MemberTailers.Clear();
+                watchers = state.Watchers.ToList();
+                state.Watchers.Clear();
+                configWatcher = state.ConfigWatcher;
+                state.ConfigWatcher = null;
+            }
 
             // Add transcript paths to tracked set so orphan watchers skip them
             lock (_trackedSubagentFiles)
             {
-                foreach (var path in state.MatchedTranscripts)
+                foreach (var path in matchedTranscripts)
                     _trackedSubagentFiles.Add(path);
             }
 
@@ -2663,17 +3139,16 @@ namespace MultiTerminal.Services
             foreach (var name in memberNames)
                 _retiredTeamAgentNames[RetiredKey(state.Root, name)] = now;
 
-            foreach (var tailer in state.MemberTailers.Values)
+            foreach (var tailer in tailers)
             {
                 try { tailer.Dispose(); } catch { }
             }
-            state.MemberTailers.Clear();
 
             // Also stop any orphan tailers that share this team's transcript paths
             // (catches orphan panels created before the team watcher claimed the file),
             // or carry a member's name under this team's own root (name-based duplicates; a same-named
             // subagent of another profile is not this team's).
-            var matchedPaths = new HashSet<string>(state.MatchedTranscripts.Select(NormalizeTranscriptPath), StringComparer.OrdinalIgnoreCase);
+            var matchedPaths = new HashSet<string>(matchedTranscripts.Select(NormalizeTranscriptPath), StringComparer.OrdinalIgnoreCase);
             var teamOrphans = _orphanRegistry.TakeWhere((path, orphan) =>
                 matchedPaths.Contains(path)
                 || (IsUnder(state.Root, path)
@@ -2684,20 +3159,18 @@ namespace MultiTerminal.Services
                 try { orphanTailer.Dispose(); } catch { }
             }
 
-            try { state.ConfigWatcher?.Dispose(); } catch { }
-            state.ConfigWatcher = null;
+            try { configWatcher?.Dispose(); } catch { }
 
-            foreach (var watcher in state.Watchers)
+            foreach (var watcher in watchers)
             {
                 try { watcher.Dispose(); } catch { }
             }
-            state.Watchers.Clear();
 
             var removedArgs = new TeamRemovedEventArgs
             {
                 TeamName = teamName,
                 MemberNames = memberNames,
-                TranscriptPaths = state.MatchedTranscripts.ToList(),
+                TranscriptPaths = matchedTranscripts,
                 ConfigRoot = state.Root.Plan.Root,
                 IsDefaultRoot = state.Root.Plan.IsDefault,
                 TeamKey = state.TeamKey
@@ -2784,7 +3257,12 @@ namespace MultiTerminal.Services
             public Dictionary<string, TranscriptTailer> MemberTailers = new Dictionary<string, TranscriptTailer>();
             public FileSystemWatcher ConfigWatcher;
             public List<FileSystemWatcher> Watchers = new List<FileSystemWatcher>();
-            public DateTime LastConfigChange;
+            /// <summary>Bumped on every config.json change; a waiting reader starts its wait again when it moves.</summary>
+            public int ConfigChangeCount;
+            /// <summary>1 while a reader is waiting to read config.json (at most one per team).</summary>
+            public int ConfigReaderWaiting;
+            /// <summary>Held for every read of this team's config.json, whoever starts it.</summary>
+            public readonly object ConfigReadLock = new object();
             /// <summary>
             /// The subagents folders a transcript watcher is running on. More than one when the lead
             /// session moved into another worktree's project folder after the team started (GH #89):

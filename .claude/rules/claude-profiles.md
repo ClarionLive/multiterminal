@@ -220,9 +220,11 @@ unchanged. The model decision itself is `ClaudeModelLaunchPolicy`; see `launch-s
 - **Session data for an agent that is not a live MT terminal is decided by folder.** A headless
   agent spawned into a folder no project owns runs under its spawner's profile, but it has no pane,
   so its session data is looked for under Default (invariant 8's last paragraph).
-- **A team's state has no lock.** `TeamWatcherService._activeTeams` is a concurrent map; the
-  collections inside each `TeamState` are not synchronised. A callback that fetched its state just
-  before the root was stopped can go on adding to a state that was already cleaned up.
+- **A team's state has one lock (closed by task 925c8cff).** The collections inside each
+  `TeamState` are read and changed only under its `ConfigReadLock`, after checking the state is
+  still the team's current one; `CleanupTeam` takes the same lock, so a callback holding a swept
+  state adds nothing to it. Events and tailer starts/disposals run after the lock is released. The
+  lock order is written above `TeamWatcherService.WithTeamLock`.
 - **"Launch as" asks about a predicted folder.** The broker can register another name than the one
   asked for, whose work is in another folder. A pick that the real folder's project contradicts is
   refused then (the pane goes to its start screen), which is after the old session was unregistered.
