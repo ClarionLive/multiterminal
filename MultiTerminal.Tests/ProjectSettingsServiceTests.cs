@@ -636,6 +636,105 @@ namespace MultiTerminal.Tests
             Assert.Equal(normalized, ProjectSettingsService.NormalizeValue("launchMode", sent));
         }
 
+        // ── Extra Claude flags (ticket 5380b6fb) ─────────────────────────────
+
+        [Fact]
+        public void Extra_Claude_flags_save_to_the_row_and_apply_at_next_launch()
+        {
+            var p = Seed();
+            var result = _service.Save(UpdateFor(p, ("claudeExtraArgs", "  --plugin-dir \"C:\\dolly\"  ")));
+
+            Assert.True(result.Success, result.Error);
+            Assert.True(result.AppliesAtNextLaunch);
+            Assert.Equal("--plugin-dir \"C:\\dolly\"", _db.GetRichProject(p.Id).ClaudeExtraArgs);
+
+            var cleared = _service.Save(UpdateFor(p, ("claudeExtraArgs", "")));
+            Assert.True(cleared.Success, cleared.Error);
+            Assert.Null(_db.GetRichProject(p.Id).ClaudeExtraArgs);
+        }
+
+        [Fact]
+        public void An_invalid_extra_flag_refuses_the_whole_save_with_the_reason()
+        {
+            var p = Seed();
+            var result = _service.Save(UpdateFor(p, ("buildCommand", "dotnet build"), ("claudeExtraArgs", "--resume x")));
+
+            Assert.False(result.Success);
+            Assert.Contains("--resume", result.Error);
+            Assert.Null(_db.GetRichProject(p.Id).BuildCommand);
+            Assert.Null(_db.GetRichProject(p.Id).ClaudeExtraArgs);
+        }
+
+        [Fact]
+        public void An_agents_extra_flags_round_trip_and_an_invalid_one_refuses_the_save()
+        {
+            var p = Seed();
+            var u = UpdateFor(p);
+            u.Agents = new List<ProjectAgent> { new ProjectAgent { AgentName = "Vella-2", Role = "dev", ExtraArgs = "--plugin-dir \"C:\\dolly\"" } };
+            var saved = _service.Save(u);
+
+            Assert.True(saved.Success, saved.Error);
+            Assert.True(saved.AgentExtraArgsChanged);
+            Assert.True(saved.AppliesAtNextLaunch);
+            Assert.Equal("--plugin-dir \"C:\\dolly\"", _db.GetProjectAgents(p.Id).Single().ExtraArgs);
+
+            var bad = UpdateFor(p);
+            bad.Agents = new List<ProjectAgent> { new ProjectAgent { AgentName = "Vella-2", Role = "dev", ExtraArgs = "--model fable" } };
+            var refused = _service.Save(bad);
+            Assert.False(refused.Success);
+            Assert.Contains("Vella-2", refused.Error);
+            Assert.Equal("--plugin-dir \"C:\\dolly\"", _db.GetProjectAgents(p.Id).Single().ExtraArgs);
+
+            var roleOnly = UpdateFor(p);
+            roleOnly.Agents = new List<ProjectAgent> { new ProjectAgent { AgentName = "Vella-2", Role = "lead", ExtraArgs = "--plugin-dir \"C:\\dolly\"" } };
+            var roleSaved = _service.Save(roleOnly);
+            Assert.True(roleSaved.Success, roleSaved.Error);
+            Assert.False(roleSaved.AgentExtraArgsChanged);
+        }
+
+        /// <summary>
+        /// The REST agent endpoint (what agents reach through add_project_agent) must not clear or set an
+        /// agent's extra flags: <c>SaveProjectAgent(..., writeExtraArgs: false)</c>. Falsified: passing true
+        /// clears the Owner's flags and turns the first assertion red.
+        /// </summary>
+        [Fact]
+        public void The_agent_upsert_agents_reach_keeps_the_owners_extra_flags()
+        {
+            var p = Seed();
+            _db.SaveProjectAgent(new ProjectAgent { ProjectId = p.Id, AgentName = "Vella", ExtraArgs = "--plugin-dir C:\\dolly" });
+            _db.SaveProjectAgent(new ProjectAgent { ProjectId = p.Id, AgentName = "Vella", Role = "dev", ExtraArgs = "--evil" }, writeExtraArgs: false);
+            _db.SaveProjectAgent(new ProjectAgent { ProjectId = p.Id, AgentName = "Quinn", ExtraArgs = "--evil" }, writeExtraArgs: false);
+
+            var rows = _db.GetProjectAgents(p.Id);
+            Assert.Equal("--plugin-dir C:\\dolly", rows.Single(r => r.AgentName == "Vella").ExtraArgs);
+            Assert.Equal("dev", rows.Single(r => r.AgentName == "Vella").Role);
+            Assert.Null(rows.Single(r => r.AgentName == "Quinn").ExtraArgs);
+        }
+
+        /// <summary>
+        /// PATCH /api/projects/{id} (what agents reach through update_project) refuses the extra flags in
+        /// both spellings and still writes the other fields. Falsified: removing the refusal in
+        /// UpdateProject writes the row and turns the null assertions red.
+        /// </summary>
+        [Theory]
+        [InlineData("claudeExtraArgs")]
+        [InlineData("CLAUDE_EXTRA_ARGS")]
+        public void The_PATCH_endpoint_agents_reach_refuses_the_extra_flags(string field)
+        {
+            var p = Seed();
+            var controller = new MultiTerminal.API.Controllers.ProjectContextController(null, _db, null);
+            var request = new MultiTerminal.API.Controllers.ProjectContextController.UpdateProjectRequest
+            {
+                Fields = new Dictionary<string, string> { [field] = "--plugin-dir C:\\evil", ["buildCommand"] = "dotnet build" },
+            };
+
+            controller.UpdateProject(p.Id, request);
+
+            var row = _db.GetRichProject(p.Id);
+            Assert.Null(row.ClaudeExtraArgs);
+            Assert.Equal("dotnet build", row.BuildCommand);
+        }
+
         private sealed class StubHost : IProjectSettingsHost
         {
             public List<(string Id, string PreviousName)> Renames { get; } = new List<(string, string)>();

@@ -2656,7 +2656,9 @@ namespace MultiTerminal
                         // hooks/deny silently stripped (the fail-closed case BuildForcedStatuslineFlag
                         // documents).
                         var spawnModel = DecideLaunchClaudeModel(ClaudeModelRole.Helper, project?.Id, workingDir, requestedModel, $"helper '{agentName}'");
-                        var launchCmd = Services.LaunchCommandBuilder.BuildCommand(kind, project, workingDirectory: workingDir, model: spawnModel.Model);
+                        var launchCmd = WithLaunchExtraArgs(
+                            Services.LaunchCommandBuilder.BuildCommand(kind, project, workingDirectory: workingDir, model: spawnModel.Model),
+                            kind, project?.Id, workingDir, agentName, $"helper '{agentName}'");
                         if (!string.IsNullOrEmpty(launchCmd.BootstrapError))
                         {
                             // Not HandleBootstrapErrorIfAny: that shows a modal MessageBox, which
@@ -5038,6 +5040,9 @@ namespace MultiTerminal
                 var launchCmd = resumeSession == null
                     ? Services.LaunchCommandBuilder.BuildCommand(kind, project, model: projectModel.Model)
                     : Services.LaunchCommandBuilder.BuildCommand(kind, project, resumeCwd, resumeSession.Entry.SessionId, projectModel.Model);
+                // Extra Claude flags (ticket 5380b6fb): the name this launch asks for; a held name comes back
+                // suffixed (Vella-2), which the policy matches to its base name's row too.
+                launchCmd = WithLaunchExtraArgs(launchCmd, kind, project.Id, null, chosenName ?? launchIdentity.Name, $"project '{project.Name}'");
 
                 // Bootstrap gate — see HandleBootstrapErrorIfAny for rationale.
                 if (HandleBootstrapErrorIfAny(launchCmd, onBeforeDialog: () => doc.ShowStartScreen()))
@@ -5626,7 +5631,9 @@ namespace MultiTerminal
 
                     // A helper resumed with its PM is a helper: the helper branch of the decision, not the PM's.
                     var resumeModel = DecideLaunchClaudeModel(ClaudeModelRole.Helper, project.Id, null, null, $"resumed helper '{helperName}'");
-                    var launchCmd = Services.LaunchCommandBuilder.BuildCommand(TerminalKind.ClaudeCode, project, check.Cwd, entry.SessionId, resumeModel.Model);
+                    var launchCmd = WithLaunchExtraArgs(
+                        Services.LaunchCommandBuilder.BuildCommand(TerminalKind.ClaudeCode, project, check.Cwd, entry.SessionId, resumeModel.Model),
+                        TerminalKind.ClaudeCode, project.Id, null, helperName, $"resumed helper '{helperName}'");
                     if (!string.IsNullOrEmpty(launchCmd.BootstrapError))
                     {
                         report.AddSkipped(helperName, $"its launch command could not be built ({launchCmd.BootstrapError.TrimEnd('.')})");
@@ -6294,7 +6301,10 @@ namespace MultiTerminal
                 // The command was built before the folder was known, so the model (a project's own, when the folder
                 // belongs to one) is added now, in the place the builder would have put it.
                 var justClaudeModel = DecideLaunchClaudeModel(ClaudeModelRole.ProjectPane, null, workingDir, null, $"Claude in '{workingDir}'");
-                doc.StartTerminal(workingDir, terminalName, Services.LaunchCommandBuilder.WithModel(launch.AutoRunCommand, justClaudeModel.Model), isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath, claudeProfile: claudeProfile,
+                var justClaudeExtra = DecideLaunchExtraArgs(null, workingDir, terminalName, $"Claude in '{workingDir}'");
+                string justClaudeCommand = Services.LaunchCommandBuilder.WithExtraArgs(
+                    Services.LaunchCommandBuilder.WithModel(launch.AutoRunCommand, justClaudeModel.Model), justClaudeExtra.Formatted);
+                doc.StartTerminal(workingDir, terminalName, justClaudeCommand, isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath, claudeProfile: claudeProfile,
                     launchKind: Services.PaneLaunchKind.Claude, launchQuietStart: true, subagentModel: justClaudeModel.SubagentModel);
 
                 doc.Activate();
@@ -6393,7 +6403,9 @@ namespace MultiTerminal
                 // Build launch command for the project's default terminal (Claude Code or Codex)
                 var terminalKind = Models.TerminalKindHelper.ParseOrDefault(project.DefaultTerminal);
                 var newProjectModel = DecideLaunchClaudeModel(ClaudeModelRole.ProjectPane, project.Id, null, null, $"new project '{project.Name}'");
-                var launchCmd = Services.LaunchCommandBuilder.BuildCommand(terminalKind, project, model: newProjectModel.Model);
+                var launchCmd = WithLaunchExtraArgs(
+                    Services.LaunchCommandBuilder.BuildCommand(terminalKind, project, model: newProjectModel.Model),
+                    terminalKind, project.Id, null, null, $"new project '{project.Name}'");
 
                 // Bootstrap gate — tail message tweaked because the project was created
                 // but no terminal started, so the user can retry from the project card.
@@ -6938,6 +6950,53 @@ namespace MultiTerminal
                 _debugLogService?.Warning("ClaudeModel", $"{launchLabel}: {decision.Problem}");
             _debugLogService?.Info("ClaudeModel", $"{launchLabel}: {role} model '{decision.Model ?? "(Claude Code default)"}' (from {decision.Source}), subagent model '{decision.SubagentModel ?? "(none)"}'.");
             return decision;
+        }
+
+        /// <summary>
+        /// THE decision of which extra Claude Code flags a launch gets (ticket 5380b6fb): the project's
+        /// <c>claude_extra_args</c>, then the <c>extra_args</c> of the project's agent row for
+        /// <paramref name="agentName"/>. Rules in <see cref="ClaudeExtraArgsPolicy"/>. The rows are read fresh,
+        /// so a settings change applies at the next launch. Never throws: a failed lookup is logged and gives
+        /// no extra flags; a stored level whose text is invalid is skipped with a warning.
+        /// </summary>
+        private ClaudeExtraArgsDecision DecideLaunchExtraArgs(string projectId, string folder, string agentName, string launchLabel)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(projectId) && !string.IsNullOrWhiteSpace(folder))
+                    projectId = _projectService?.DiscoverProject(folder)?.Id;
+                if (string.IsNullOrWhiteSpace(projectId) || _sharedProjectDatabase == null)
+                    return ClaudeExtraArgsDecision.None;
+
+                var row = _sharedProjectDatabase.GetRichProject(projectId);
+                var agents = _sharedProjectDatabase.GetProjectAgents(projectId);
+                var decision = ClaudeExtraArgsPolicy.Decide(row?.ClaudeExtraArgs, agents, agentName);
+                foreach (string problem in decision.Problems)
+                    _debugLogService?.Warning("ClaudeExtraArgs", $"{launchLabel}: {problem}");
+                if (decision.Tokens.Count > 0)
+                    _debugLogService?.Info("ClaudeExtraArgs", $"{launchLabel}: extra Claude flags from {decision.Source}:{decision.Formatted}");
+                return decision;
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Warning("ClaudeExtraArgs", $"{launchLabel}: extra Claude flags lookup failed, launching without them: {ex.Message}");
+                return ClaudeExtraArgsDecision.None;
+            }
+        }
+
+        /// <summary>
+        /// <paramref name="launch"/> with the decided extra Claude flags added (ticket 5380b6fb). Only a Claude
+        /// launch that built a command gets them; Codex and PowerShell are returned as they are.
+        /// </summary>
+        private Services.LaunchCommand WithLaunchExtraArgs(Services.LaunchCommand launch, Models.TerminalKind kind, string projectId, string folder, string agentName, string launchLabel)
+        {
+            if (launch == null || kind != Models.TerminalKind.ClaudeCode || string.IsNullOrEmpty(launch.AutoRunCommand) || !string.IsNullOrEmpty(launch.BootstrapError))
+                return launch;
+            var extra = DecideLaunchExtraArgs(projectId, folder, agentName, launchLabel);
+            if (extra.Formatted.Length == 0)
+                return launch;
+            launch.AutoRunCommand = Services.LaunchCommandBuilder.WithExtraArgs(launch.AutoRunCommand, extra.Formatted);
+            return launch;
         }
 
         /// <summary>What a "Claude profile" picker may offer for <paramref name="folder"/> (item 8): a
@@ -8398,6 +8457,7 @@ namespace MultiTerminal
             // A project pane when the folder belongs to a project, else the global project model.
             var launchAsModel = DecideLaunchClaudeModel(ClaudeModelRole.ProjectPane, null, workingDirectory, null, launchAsLabel);
             string autoRunCommand = LaunchCommandBuilder.BuildClaudeCommand(null, workingDirectory, model: launchAsModel.Model).AutoRunCommand;
+            autoRunCommand = LaunchCommandBuilder.WithExtraArgs(autoRunCommand, DecideLaunchExtraArgs(null, workingDirectory, identityName, launchAsLabel).Formatted);
 
             // Quiet start (GitHub #34, pipeline run 1): "Launch as..." is not a project launch, so it passes
             // no projectId (that would also set MULTITERMINAL_PROJECT_PM and the "(PM)" badge, which this

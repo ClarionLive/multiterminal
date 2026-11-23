@@ -196,6 +196,46 @@ Sonnet for helpers, Sonnet for subagents; they are settings, because Anthropic's
   `--resume`, were not run. Check by resuming a session last run on another model and reading the model
   of its new turns in the transcript.
 
+## Extra Claude flags per project and per agent (ticket 5380b6fb)
+
+Owner request 2026-11-23: one agent working on mrtStudio needs `--plugin-dir "C:\scratch\cc-plugin-1123"`
+(a plugin for the new Clarion IDE) on its command line only. Owner decision: a project-wide field AND a
+per-agent one.
+
+- **Where.** Project settings form, Launch section: "Extra Claude flags" (`projects.claude_extra_args`),
+  every Claude terminal of the project, helpers included. Agents table: "Extra Claude flags"
+  (`project_agents.extra_args`), that agent only, added AFTER the project's. Both apply at the next launch.
+- **One decision.** `ClaudeExtraArgsPolicy.Decide` (pure), reached through `MainForm.DecideLaunchExtraArgs`
+  (reads the row and the agent rows fresh; never throws) and `WithLaunchExtraArgs` (Claude kind only).
+  Sites: spawn_helper, project launch (new and resume; the name is the chosen one, else the launch
+  identity), a helper resumed with its PM, Just Claude, New Project, Launch as. A project is found by id,
+  else discovered from the folder. Which agent row: an exact name match (ignore case), else the name
+  without a trailing `-<number>` (Vella-2 uses Vella's row when there is no Vella-2 row).
+- **The text is untrusted for the command line.** It ends up inside `-Command "..."` of `CreateProcess`
+  (`ConPtyTerminal.StartProcess`) and then PowerShell. So it is split into tokens (whitespace separates,
+  double quotes group and are removed) and each token is written as a PowerShell single-quoted literal
+  (`'` doubled): nothing in it is evaluated. Refused: a `"` left open, a control character, the
+  typographic quotes PowerShell also treats as quotes (U+2018 to U+201F), an empty `""`, over 2000
+  characters, and flags MT sets itself or that change what MT expects (`ClaudeExtraArgsPolicy.ReservedFlags`:
+  --resume/-r, --continue/-c, --session-id, --fork-session, --mcp-config, --strict-mcp-config, --settings,
+  --setting-sources, --dangerously-skip-permissions, --allow-dangerously-skip-permissions, --permission-mode,
+  --model, -n/--name, -p/--print, --output-format, --input-format; a `--flag=value` form counts).
+- **Owner-only.** The settings form refuses invalid text with the reason (nothing saved). An invalid
+  STORED level is skipped at launch with a warning in the "ClaudeExtraArgs" debug log; the launch is
+  not refused. Agents cannot set either field: `PATCH /api/projects/{id}` (`update_project`) refuses
+  `claudeExtraArgs` / `claude_extra_args`, and `POST /api/projects/{id}/agents` (`add_project_agent`)
+  saves with `writeExtraArgs: false`, so an existing row keeps its flags and a new one gets none. A
+  `--plugin-dir` loads hooks into every matching terminal, which is why.
+- **Placement.** `LaunchCommandBuilder.WithExtraArgs` inserts after MT's flags and before `--model`,
+  `--resume` and `--dangerously-skip-permissions`, so the command still starts with bare `claude` for
+  `ApplySessionName`. Claude Code accepts `--plugin-dir` more than once, so MT's plugin still loads.
+- **Not covered.** Headless agents (`AgentProcess`), the gloss writer, Oracle, Codex and PowerShell panes,
+  ClarionAssistant IDE tabs. The flags are logged (Info, "ClaudeExtraArgs") and appear in the pane's
+  command line in the debug log, so do not put a secret in them.
+- **Not executed live.** Tests cover the parse, the refusals, a real PowerShell round trip of hostile
+  values through the same `-Command "..."` layer, placement, the save path and both REST refusals. That
+  each MainForm site applies the decision, and that Claude Code loads a second `--plugin-dir`, were not run.
+
 ## Helpers resume with their PM (task 7d20e94c)
 
 Resuming a PM session also reopens the helper panes it had open when it last ended. Owner decisions:

@@ -101,6 +101,29 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Adds the extra Claude Code flags a <see cref="ClaudeExtraArgsPolicy"/> decision formatted (ticket
+        /// 5380b6fb) to a Claude command this builder made: after MT's own flags and before <c>--model</c>,
+        /// <c>--resume</c> and <c>--dangerously-skip-permissions</c>, so the command still starts with the bare
+        /// <c>claude</c> token <c>ConPtyTerminal.ApplySessionName</c> needs. Empty returns the command unchanged.
+        /// <paramref name="formatted"/> must come from <see cref="ClaudeExtraArgsPolicy.Format"/>: every token a
+        /// PowerShell single-quoted literal. Throws for a command this builder did not make.
+        /// </summary>
+        internal static string WithExtraArgs(string autoRunCommand, string formatted)
+        {
+            if (string.IsNullOrEmpty(formatted) || string.IsNullOrEmpty(autoRunCommand))
+                return autoRunCommand;
+
+            int at = autoRunCommand.IndexOf(" --model ", StringComparison.Ordinal);
+            if (at < 0)
+                at = autoRunCommand.IndexOf(" --resume ", StringComparison.Ordinal);
+            if (at < 0)
+                at = autoRunCommand.LastIndexOf(" --dangerously-skip-permissions", StringComparison.Ordinal);
+            if (at < 0 || !autoRunCommand.StartsWith("claude", StringComparison.Ordinal))
+                throw new ArgumentException("The command is not a Claude launch built by LaunchCommandBuilder.", nameof(autoRunCommand));
+            return autoRunCommand.Insert(at, formatted);
+        }
+
+        /// <summary>
         /// Builds the Codex CLI launch command for the given project.
         /// Refreshes ~/.codex/config.toml so Codex picks up MultiTerminal's MCP servers
         /// (asymmetric with BuildClaudeCommand because Codex has no --mcp-config flag —
