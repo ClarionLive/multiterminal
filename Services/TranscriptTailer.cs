@@ -483,6 +483,10 @@ namespace MultiTerminal.Services
         public Task StopAsync()
         {
             bool wasActive;
+            // _readLock first (the order every read pass takes: _readLock, then _completionLock): a pass
+            // already admitted finishes and queues its events before Stopped, and every later pass sees
+            // _shutDown and reads nothing (pipeline Run 2, Codex).
+            lock (_readLock)
             lock (_completionLock)
             {
                 _shutDown = true;
@@ -754,6 +758,12 @@ namespace MultiTerminal.Services
         /// </summary>
         internal Action ReadPassHook { get; set; }
 
+        /// <summary>
+        /// Test seam (InternalsVisibleTo), null in production: called at the start of a read pass, right
+        /// after its shutdown check and before anything is read or queued, with the read lock held.
+        /// </summary>
+        internal Action ReadPassStartHook { get; set; }
+
         /// <summary>Test seam: whether the calling thread holds this tailer's read lock.</summary>
         internal bool ReadLockHeldByCurrentThread => Monitor.IsEntered(_readLock);
 
@@ -766,6 +776,7 @@ namespace MultiTerminal.Services
             {
                 // A tailer stopped for good reads nothing more.
                 if (_shutDown) return false;
+                ReadPassStartHook?.Invoke();
 
                 var fileInfo = new FileInfo(tracked.Path);
                 if (!fileInfo.Exists) return false;
@@ -980,6 +991,8 @@ namespace MultiTerminal.Services
             if (disposing)
             {
                 bool alreadyFinished;
+                // Same order and reason as StopAsync: no admitted read can queue events after Stopped.
+                lock (_readLock)
                 lock (_completionLock)
                 {
                     _shutDown = true;

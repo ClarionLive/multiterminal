@@ -122,6 +122,51 @@ namespace MultiTerminal.Tests
             Assert.Equal(new[] { "first", "late" }, Texts(tailer).ToArray());
         }
 
+        /// <summary>
+        /// A stop that arrives while a read pass is under way waits for that pass, so the pass's
+        /// messages come before Stopped and nothing comes after it (pipeline Run 2, Codex). The second
+        /// pass (the watcher's, for an appended line) is held at its start, past its shutdown check and
+        /// before it has read or queued anything; the stop is started on another thread and given 500 ms
+        /// before the pass is let go. Without the stop taking the read lock, Stopped is raised during
+        /// those 500 ms and the held pass's message arrives after it.
+        /// </summary>
+        [Fact]
+        public async Task A_stop_during_a_read_pass_raises_that_pass_messages_before_Stopped()
+        {
+            string path = NewTranscript(Assistant("u1", "first"));
+            using var tailer = new TranscriptTailer(path, null, "reader");
+
+            var order = new ConcurrentQueue<string>();
+            tailer.MessageReceived += (s, m) => order.Enqueue("message:" + m.Content);
+            tailer.Stopped += (s, code) => order.Enqueue("stopped");
+
+            var inSecondPass = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var release = new ManualResetEventSlim(false);
+            int passes = 0;
+            tailer.ReadPassStartHook = () =>
+            {
+                if (Interlocked.Increment(ref passes) == 2)
+                {
+                    inSecondPass.TrySetResult(true);
+                    release.Wait(Wait);
+                }
+            };
+
+            await tailer.StartAsync();
+            File.AppendAllText(path, Assistant("u2", "second") + Environment.NewLine);
+            Assert.True(await Task.WhenAny(inSecondPass.Task, Task.Delay(Wait)) == inSecondPass.Task, "the watcher never started a pass for the appended line");
+
+            var stop = Task.Run(() => tailer.StopAsync());
+            await Task.WhenAny(stop, Task.Delay(500));
+            release.Set();
+            Assert.True(await Task.WhenAny(stop, Task.Delay(Wait)) == stop, "the stop never finished");
+
+            var seen = order.ToArray();
+            Assert.Contains("message:second", seen);
+            Assert.Equal("stopped", seen.Last());
+            Assert.Single(seen, e => e == "stopped");
+        }
+
         /// <summary>Events a read pass produces are raised once its lock is released, never inside it.</summary>
         [Fact]
         public async Task Messages_are_raised_outside_the_read_lock()
