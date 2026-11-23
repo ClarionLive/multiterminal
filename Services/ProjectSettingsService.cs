@@ -97,11 +97,14 @@ namespace MultiTerminal.Services
         public static readonly IReadOnlyCollection<string> LaunchTimeFields = new HashSet<string>(StringComparer.Ordinal)
         {
             "claudeProfile", "launchMode", "defaultTerminal", "quietStart", "launchCommand",
-            "claudeModel", "claudeHelperModel",
+            "claudeModel", "claudeHelperModel", "claudeExtraArgs",
         };
 
         /// <summary>True when this save changed something running terminals will not pick up until they restart.</summary>
-        public bool AppliesAtNextLaunch => McpServersChanged || ChangedFields.Exists(LaunchTimeFields.Contains);
+        public bool AppliesAtNextLaunch => McpServersChanged || AgentExtraArgsChanged || ChangedFields.Exists(LaunchTimeFields.Contains);
+
+        /// <summary>True when an agent row's extra Claude flags changed (ticket 5380b6fb); read at launch only.</summary>
+        public bool AgentExtraArgsChanged { get; set; }
 
         internal static ProjectSettingsSaveResult Fail(string error) => new ProjectSettingsSaveResult { Success = false, Error = error };
     }
@@ -143,7 +146,7 @@ namespace MultiTerminal.Services
             "launchCommand", "sourcePath", "deployPath", "buildOutputPath", "buildCommand", "deployCommand",
             "gitRepoUrl", "gitDefaultBranch", "gitAutoCommit", "sourceControlAccountId", "changeLog",
             "gitHubWatchMode", "gitHubCheckOnStart", "gitHubCheckInterval", "gitHubExtraRepos",
-            "claudeModel", "claudeHelperModel",
+            "claudeModel", "claudeHelperModel", "claudeExtraArgs",
         };
 
         private static readonly HashSet<string> BooleanFields = new HashSet<string>(StringComparer.Ordinal)
@@ -201,6 +204,30 @@ namespace MultiTerminal.Services
             if (watchListError != null)
                 return ProjectSettingsSaveResult.Fail(watchListError);
 
+            // Extra Claude flags (ticket 5380b6fb): refused with the reason, nothing written. Only text the user
+            // changed is checked, as for the model names above.
+            if (normalized.TryGetValue("claudeExtraArgs", out var extraArgs) && extraArgs != null
+                && !SameValue("claudeExtraArgs", ReadField(current, "claudeExtraArgs"), extraArgs))
+            {
+                string extraError = ClaudeExtraArgsPolicy.Validate(extraArgs);
+                if (extraError != null)
+                    return ProjectSettingsSaveResult.Fail($"Extra Claude flags: {extraError} Nothing was saved.");
+            }
+
+            if (update.Agents != null)
+            {
+                var storedAgents = _db.GetProjectAgents(update.ProjectId);
+                foreach (var agent in update.Agents.Where(a => !string.IsNullOrWhiteSpace(a.AgentName) && !string.IsNullOrWhiteSpace(a.ExtraArgs)))
+                {
+                    var stored = storedAgents.FirstOrDefault(s => string.Equals(s.AgentName, agent.AgentName, StringComparison.Ordinal));
+                    if (stored != null && string.Equals(NormalizeExtraArgs(stored.ExtraArgs), NormalizeExtraArgs(agent.ExtraArgs), StringComparison.Ordinal))
+                        continue;
+                    string agentError = ClaudeExtraArgsPolicy.Validate(agent.ExtraArgs);
+                    if (agentError != null)
+                        return ProjectSettingsSaveResult.Fail($"Extra flags for agent '{agent.AgentName}': {agentError} Nothing was saved.");
+                }
+            }
+
             string listError = ValidateLists(update);
             if (listError != null)
                 return ProjectSettingsSaveResult.Fail(listError);
@@ -256,7 +283,7 @@ namespace MultiTerminal.Services
                     if (watchListBefore != null)
                         _db.PruneGitHubWatchList(update.ProjectId, watchListBefore);
 
-                    SaveAgents(update.ProjectId, update.Agents);
+                    result.AgentExtraArgsChanged = SaveAgents(update.ProjectId, update.Agents);
                     SaveSpecialists(update.ProjectId, update.SpecialistAgents);
                     result.McpServersChanged = SaveMcpServers(update.ProjectId, update.McpServers);
                     SaveSkills(update.ProjectId, update.Skills);
@@ -368,7 +395,10 @@ namespace MultiTerminal.Services
         private static string Row(params object[] cells) => string.Join("\u001f", cells.Select(c => c?.ToString() ?? string.Empty));
 
         internal static string AgentsKey(IEnumerable<ProjectAgent> rows) =>
-            JoinRows(rows.Where(r => !string.IsNullOrWhiteSpace(r.AgentName)).Select(r => Row(r.AgentName, r.Role, r.PreferredModel)));
+            JoinRows(rows.Where(r => !string.IsNullOrWhiteSpace(r.AgentName)).Select(r => Row(r.AgentName, r.Role, r.PreferredModel, NormalizeExtraArgs(r.ExtraArgs))));
+
+        /// <summary>Extra Claude flags as stored (ticket 5380b6fb): trimmed, blank as null. The one rule for every compare.</summary>
+        internal static string NormalizeExtraArgs(string value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
         internal static string SpecialistsKey(IEnumerable<ProjectSpecialistAgent> rows) =>
             JoinRows(rows.Where(r => !string.IsNullOrWhiteSpace(r.AgentType)).Select(r => Row(r.AgentType, r.IsEnabled, r.CustomPrompt)));
         internal static string McpServersKey(IEnumerable<ProjectMcpServer> rows) =>
@@ -401,6 +431,8 @@ namespace MultiTerminal.Services
                 case "claudeHelperModel":
                     // Blank means "use the global setting" and is stored as NULL (ticket b0d2f090).
                     return ClaudeModelLaunchPolicy.Normalize(value);
+                case "claudeExtraArgs":
+                    return NormalizeExtraArgs(value);
                 case "launchMode":
                     // Unknown or blank reads as ask, the same rule as the stored value (task ec2ed636).
                     return Project.LaunchModeToStorage(Project.ParseLaunchMode(value));
@@ -475,6 +507,7 @@ namespace MultiTerminal.Services
                 case "launchMode": return Project.LaunchModeToStorage(p.LaunchMode);
                 case "claudeModel": return ClaudeModelLaunchPolicy.Normalize(p.ClaudeModel);
                 case "claudeHelperModel": return ClaudeModelLaunchPolicy.Normalize(p.ClaudeHelperModel);
+                case "claudeExtraArgs": return NormalizeExtraArgs(p.ClaudeExtraArgs);
                 case "defaultTerminal": return TerminalKindHelper.Normalize(p.DefaultTerminal);
                 case "quietStart": return p.IsQuietStart ? "true" : "false";
                 case "teamLead": return p.TeamLead;
@@ -559,15 +592,22 @@ namespace MultiTerminal.Services
             return null;
         }
 
-        private void SaveAgents(string projectId, List<ProjectAgent> rows)
+        /// <summary>Diff-saves the agent rows; true when any agent's extra Claude flags changed (ticket 5380b6fb).</summary>
+        private bool SaveAgents(string projectId, List<ProjectAgent> rows)
         {
-            if (rows == null) return;
+            if (rows == null) return false;
             var keep = rows.Where(r => !string.IsNullOrWhiteSpace(r.AgentName)).ToList();
             var keepNames = new HashSet<string>(keep.Select(r => r.AgentName), StringComparer.Ordinal);
-            foreach (var stored in _db.GetProjectAgents(projectId).Where(s => !keepNames.Contains(s.AgentName)))
+            var storedRows = _db.GetProjectAgents(projectId);
+            static string ExtraOf(IEnumerable<ProjectAgent> list) => JoinRows(list
+                .Where(a => !string.IsNullOrWhiteSpace(a.AgentName) && NormalizeExtraArgs(a.ExtraArgs) != null)
+                .Select(a => Row(a.AgentName, NormalizeExtraArgs(a.ExtraArgs))));
+            bool extraChanged = !string.Equals(ExtraOf(storedRows), ExtraOf(keep), StringComparison.Ordinal);
+            foreach (var stored in storedRows.Where(s => !keepNames.Contains(s.AgentName)))
                 _db.DeleteProjectAgent(projectId, stored.AgentName);
             foreach (var r in keep)
-                _db.SaveProjectAgent(new ProjectAgent { ProjectId = projectId, AgentName = r.AgentName, Role = r.Role, PreferredModel = r.PreferredModel });
+                _db.SaveProjectAgent(new ProjectAgent { ProjectId = projectId, AgentName = r.AgentName, Role = r.Role, PreferredModel = r.PreferredModel, ExtraArgs = r.ExtraArgs });
+            return extraChanged;
         }
 
         private void SaveSpecialists(string projectId, List<ProjectSpecialistAgent> rows)

@@ -206,6 +206,13 @@ namespace MultiTerminal.Models
         public string ClaudeHelperModel { get; set; }
 
         /// <summary>
+        /// Extra Claude Code flags for every Claude terminal of this project (ticket 5380b6fb), or null for
+        /// none. SQLite-only (<c>projects.claude_extra_args</c>) like <see cref="ClaudeModel"/>; written through
+        /// UpdateProjectField and read only by <see cref="MultiTerminal.Services.ClaudeExtraArgsPolicy"/>.
+        /// </summary>
+        public string ClaudeExtraArgs { get; set; }
+
+        /// <summary>
         /// Parses a stored <c>launch_mode</c> value, case-insensitively and ignoring surrounding
         /// whitespace. Null, blank and unrecognized values read as <see cref="ProjectLaunchMode.Ask"/>,
         /// so a bad DB value can never make a launch skip the prompt.

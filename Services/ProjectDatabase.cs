@@ -61,6 +61,7 @@ namespace MultiTerminal.Services
             // Run migrations for schema changes (additive, non-destructive)
             MigrateAddNewProjectColumns();
             MigrateAddAssociationTables();
+            MigrateAddProjectAgentExtraArgs();
 
             // Drop the mcp_registry table — gateway is now the source of truth for server catalog
             MigrateDropMcpRegistry();
@@ -222,7 +223,9 @@ namespace MultiTerminal.Services
                 // Folders the project lived in before a Move Project (ticket 6f879683), newline-separated,
                 // oldest first. Written only by ProjectRelocationStore; read so old Claude sessions stay
                 // resumable. SQLite-only, not in project.json or the SaveRichProject UPSERT.
-                ("previous_paths",        "TEXT")
+                ("previous_paths",        "TEXT"),
+                // Extra Claude Code flags (ticket 5380b6fb). NULL = none.
+                ("claude_extra_args",     "TEXT")
             };
 
             foreach (var (colName, colDef) in newColumns)
@@ -236,6 +239,30 @@ namespace MultiTerminal.Services
                     #pragma warning restore CA2100
                     alterCommand.ExecuteNonQuery();
                 }
+            }
+        }
+
+        /// <summary>
+        /// Adds <c>project_agents.extra_args</c> (ticket 5380b6fb): extra Claude Code flags for one agent's
+        /// terminals. Nullable, no DEFAULT: NULL = none, so every existing agent row launches as before.
+        /// </summary>
+        private void MigrateAddProjectAgentExtraArgs()
+        {
+            bool has = false;
+            using (var info = new SQLiteCommand("PRAGMA table_info(project_agents)", _connection))
+            using (var reader = info.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    if (string.Equals(reader.GetString(1), "extra_args", StringComparison.OrdinalIgnoreCase))
+                        has = true;
+                }
+            }
+
+            if (!has)
+            {
+                using var alter = new SQLiteCommand("ALTER TABLE project_agents ADD COLUMN extra_args TEXT", _connection);
+                alter.ExecuteNonQuery();
             }
         }
 
@@ -730,7 +757,7 @@ namespace MultiTerminal.Services
             "is_pinned", "status", "created_by", "last_opened_at", "team_lead", "default_terminal",
             "source_control_account_id", "quiet_start", "claude_profile",
             "github_watch_mode", "github_check_on_start", "github_check_interval",
-            "claude_model", "claude_helper_model", "github_extra_repos"
+            "claude_model", "claude_helper_model", "github_extra_repos", "claude_extra_args"
         };
 
         // Map camelCase JS field names to snake_case SQLite column names.
@@ -756,6 +783,7 @@ namespace MultiTerminal.Services
             ["claudeModel"] = "claude_model",
             ["claudeHelperModel"] = "claude_helper_model",
             ["gitHubExtraRepos"] = "github_extra_repos",
+            ["claudeExtraArgs"] = "claude_extra_args",
         };
 
         // Fields that map to INTEGER 0/1 booleans in the database.
@@ -1111,7 +1139,7 @@ namespace MultiTerminal.Services
                            team_lead, default_terminal, source_control_account_id, status, quiet_start,
                            claude_profile, launch_mode,
                            github_watch_mode, github_check_on_start, github_check_interval,
-                           claude_model, claude_helper_model, github_extra_repos
+                           claude_model, claude_helper_model, github_extra_repos, claude_extra_args
                     FROM projects
                     WHERE id = @id
                 ";
@@ -1146,7 +1174,7 @@ namespace MultiTerminal.Services
                            team_lead, default_terminal, source_control_account_id, status, quiet_start,
                            claude_profile, launch_mode,
                            github_watch_mode, github_check_on_start, github_check_interval,
-                           claude_model, claude_helper_model, github_extra_repos
+                           claude_model, claude_helper_model, github_extra_repos, claude_extra_args
                     FROM projects
                     ORDER BY is_pinned DESC, created_at DESC
                 ";
@@ -1789,7 +1817,8 @@ namespace MultiTerminal.Services
                     reader.IsDBNull(32) ? null : reader.GetString(32)),
                 ClaudeModel = reader.IsDBNull(33) ? null : reader.GetString(33),
                 ClaudeHelperModel = reader.IsDBNull(34) ? null : reader.GetString(34),
-                GitHubExtraRepos = reader.IsDBNull(35) ? null : reader.GetString(35)
+                GitHubExtraRepos = reader.IsDBNull(35) ? null : reader.GetString(35),
+                ClaudeExtraArgs = reader.IsDBNull(36) ? null : reader.GetString(36)
             };
         }
 
@@ -1874,7 +1903,7 @@ namespace MultiTerminal.Services
             lock (_dbLock)
             {
                 const string sql = @"
-                    SELECT id, project_id, agent_name, role, preferred_model
+                    SELECT id, project_id, agent_name, role, preferred_model, extra_args
                     FROM project_agents
                     WHERE project_id = @projectId
                     ORDER BY agent_name
@@ -1892,7 +1921,8 @@ namespace MultiTerminal.Services
                         ProjectId = reader.GetString(1),
                         AgentName = reader.GetString(2),
                         Role = reader.IsDBNull(3) ? null : reader.GetString(3),
-                        PreferredModel = reader.IsDBNull(4) ? null : reader.GetString(4)
+                        PreferredModel = reader.IsDBNull(4) ? null : reader.GetString(4),
+                        ExtraArgs = reader.IsDBNull(5) ? null : reader.GetString(5)
                     });
                 }
             }
@@ -1902,12 +1932,24 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Save (upsert) a project agent. Updates role and preferred_model if already present.
+        /// <paramref name="writeExtraArgs"/> false (the REST endpoint agents reach) leaves an existing row's
+        /// <c>extra_args</c> as it is and gives a new row none: only the Owner's settings form sets them
+        /// (ticket 5380b6fb).
         /// </summary>
-        public void SaveProjectAgent(MultiTerminal.Models.ProjectAgent agent)
+        public void SaveProjectAgent(MultiTerminal.Models.ProjectAgent agent, bool writeExtraArgs = true)
         {
             lock (_dbLock)
             {
-                const string sql = @"
+                string sql = writeExtraArgs
+                    ? @"
+                    INSERT INTO project_agents (project_id, agent_name, role, preferred_model, extra_args)
+                    VALUES (@projectId, @agentName, @role, @preferredModel, @extraArgs)
+                    ON CONFLICT(project_id, agent_name) DO UPDATE SET
+                        role = @role,
+                        preferred_model = @preferredModel,
+                        extra_args = @extraArgs
+                "
+                    : @"
                     INSERT INTO project_agents (project_id, agent_name, role, preferred_model)
                     VALUES (@projectId, @agentName, @role, @preferredModel)
                     ON CONFLICT(project_id, agent_name) DO UPDATE SET
@@ -1920,6 +1962,8 @@ namespace MultiTerminal.Services
                 command.Parameters.AddWithValue("@agentName", agent.AgentName);
                 command.Parameters.AddWithValue("@role", (object)agent.Role ?? DBNull.Value);
                 command.Parameters.AddWithValue("@preferredModel", (object)agent.PreferredModel ?? DBNull.Value);
+                if (writeExtraArgs)
+                    command.Parameters.AddWithValue("@extraArgs", string.IsNullOrWhiteSpace(agent.ExtraArgs) ? (object)DBNull.Value : agent.ExtraArgs.Trim());
                 command.ExecuteNonQuery();
             }
         }

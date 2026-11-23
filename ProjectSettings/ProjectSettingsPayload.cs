@@ -66,7 +66,7 @@ namespace MultiTerminal.ProjectSettings
                 },
                 lists = new
                 {
-                    agents = (lists?.Agents ?? new List<ProjectAgent>()).Select(a => new { agentName = a.AgentName, role = a.Role ?? "", preferredModel = a.PreferredModel ?? "" }),
+                    agents = (lists?.Agents ?? new List<ProjectAgent>()).Select(a => new { agentName = a.AgentName, role = a.Role ?? "", preferredModel = a.PreferredModel ?? "", extraArgs = a.ExtraArgs ?? "" }),
                     specialistAgents = (lists?.SpecialistAgents ?? new List<ProjectSpecialistAgent>()).Select(s => new { agentType = s.AgentType, isEnabled = s.IsEnabled, customPrompt = s.CustomPrompt ?? "" }),
                     mcpServers = (lists?.McpServers ?? new List<ProjectMcpServer>()).Select(m => new { serverName = m.ServerName, isEnabled = m.IsEnabled }),
                     skills = (lists?.Skills ?? new List<ProjectSkill>()).Select(s => new { skillName = s.SkillName, isEnabled = s.IsEnabled }),
@@ -142,7 +142,7 @@ namespace MultiTerminal.ProjectSettings
                 }
             }
 
-            update.Agents = ReadList(root, "agents", e => new ProjectAgent { AgentName = Str(e, "agentName"), Role = Str(e, "role"), PreferredModel = Str(e, "preferredModel") });
+            update.Agents = ReadList(root, "agents", e => new ProjectAgent { AgentName = Str(e, "agentName"), Role = Str(e, "role"), PreferredModel = Str(e, "preferredModel"), ExtraArgs = Str(e, "extraArgs") });
             update.SpecialistAgents = ReadList(root, "specialistAgents", e => new ProjectSpecialistAgent { AgentType = Str(e, "agentType"), IsEnabled = Bool(e, "isEnabled", true), CustomPrompt = Str(e, "customPrompt") });
             update.McpServers = ReadList(root, "mcpServers", e => new ProjectMcpServer { ServerName = Str(e, "serverName"), IsEnabled = Bool(e, "isEnabled", true) });
             update.Skills = ReadList(root, "skills", e => new ProjectSkill { SkillName = Str(e, "skillName"), IsEnabled = Bool(e, "isEnabled", true) });

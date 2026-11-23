@@ -200,7 +200,7 @@
         <section id="launch">
             <h2>Launch</h2>
             <p class="lead">How new terminals for this project start.</p>
-            <div class="note">Claude profile, model, helper model, launch mode, default terminal, quiet start and launch command apply the next time a terminal for this project starts. Terminals already running keep what they started with.</div>
+            <div class="note">Claude profile, model, helper model, launch mode, default terminal, quiet start, launch command and extra Claude flags apply the next time a terminal for this project starts. Terminals already running keep what they started with.</div>
             <div class="field"><label for="f-claudeProfile">Claude profile</label><select id="f-claudeProfile" data-field="claudeProfile" data-options="claudeProfiles"></select>
                 <div class="hint" id="profile-hint">Which Claude configuration folder (account, settings, sessions) the project's terminals use.</div></div>
             <div class="field"><label for="f-launchMode">Launch mode</label><select id="f-launchMode" data-field="launchMode" data-options="launchModes"></select>
@@ -214,6 +214,8 @@
                 <div class="hint">Claude Code terminals only; Codex terminals still get their startup prompt. Helpers never start quietly.</div></div>
             <div class="field"><label for="f-teamLead">Team lead</label><select id="f-teamLead" data-field="teamLead" data-options="teamLeads" data-none="(none)"></select></div>
             <div class="field"><label for="f-launchCommand">Launch command</label><input type="text" id="f-launchCommand" data-field="launchCommand"></div>
+            <div class="field"><label for="f-claudeExtraArgs">Extra Claude flags</label><input type="text" id="f-claudeExtraArgs" data-field="claudeExtraArgs" spellcheck="false" placeholder='--plugin-dir "C:\folder"'>
+                <div class="hint">Added to the Claude Code command line of every Claude terminal of this project, helpers included. Quote a value with spaces in double quotes. For one agent only, use Extra Claude flags in Agents (added after these). Flags MultiTerminal sets itself (--resume, --model, --mcp-config, --settings and the like) are refused. Applies at the next launch.</div></div>
         </section>
 
         <section id="paths">
@@ -327,9 +329,10 @@
             columns: [ { key: 'pathType', label: 'Type', kind: 'text', placeholder: 'docs' },
                        { key: 'pathValue', label: 'Path', kind: 'text' },
                        { key: 'description', label: 'Description', kind: 'text' } ] },
-        agents: { add: 'Add agent', empty: 'No agents assigned.', blank: { agentName: '', role: '', preferredModel: '' },
+        agents: { add: 'Add agent', empty: 'No agents assigned.', blank: { agentName: '', role: '', preferredModel: '', extraArgs: '' },
             columns: [ { key: 'agentName', label: 'Name', kind: 'text', suggest: 'availableAgents' },
-                       { key: 'role', label: 'Role', kind: 'text' } ] },
+                       { key: 'role', label: 'Role', kind: 'text' },
+                       { key: 'extraArgs', label: 'Extra Claude flags', kind: 'text', placeholder: '--plugin-dir "C:\\folder"' } ] },
         specialistAgents: { add: 'Add specialist', empty: 'No specialist agents.', blank: { agentType: '', isEnabled: true, customPrompt: '' },
             columns: [ { key: 'agentType', label: 'Agent', kind: 'text', suggest: 'availableSpecialists' },
                        { key: 'isEnabled', label: 'On', kind: 'check' },

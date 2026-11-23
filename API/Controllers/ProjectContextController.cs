@@ -125,6 +125,15 @@ namespace MultiTerminal.API.Controllers
             bool claudeProfileWritten = false;
             foreach (var kvp in request.Fields)
             {
+                // Extra Claude flags (ticket 5380b6fb) go onto other terminals' command lines (a --plugin-dir
+                // loads hooks into every terminal of the project), so only the Owner sets them, in the project
+                // settings form. This endpoint is what agents reach through update_project.
+                if (IsClaudeExtraArgsField(kvp.Key))
+                {
+                    rejected.Add(kvp.Key);
+                    continue;
+                }
+
                 if (_projectDb.UpdateProjectField(projectId, kvp.Key, kvp.Value))
                 {
                     updated.Add(kvp.Key);
@@ -148,6 +157,10 @@ namespace MultiTerminal.API.Controllers
         private static bool IsClaudeProfileField(string field) =>
             string.Equals(field, "claudeProfile", System.StringComparison.OrdinalIgnoreCase)
             || string.Equals(field, "claude_profile", System.StringComparison.OrdinalIgnoreCase);
+
+        internal static bool IsClaudeExtraArgsField(string field) =>
+            string.Equals(field, "claudeExtraArgs", System.StringComparison.OrdinalIgnoreCase)
+            || string.Equals(field, "claude_extra_args", System.StringComparison.OrdinalIgnoreCase);
 
         private void SyncProjectJsonClaudeProfile(string projectId)
         {
@@ -231,7 +244,7 @@ namespace MultiTerminal.API.Controllers
                 AgentName = request.AgentName,
                 Role = request.Role,
                 PreferredModel = request.PreferredModel
-            });
+            }, writeExtraArgs: false); // Owner-only (ticket 5380b6fb): an existing row keeps its extra flags.
             return Ok();
         }
 
