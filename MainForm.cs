@@ -1436,8 +1436,10 @@ namespace MultiTerminal
                 _mcpServer.SpawnService.OnCloseRequested = OnSpawnedPaneCloseRequested;
                 _mcpServer.SpawnService.Jobs.Collected += OnSpawnJobCollected;
                 if (_mcpServer.ProjectOpenService != null)
+                {
                     _mcpServer.ProjectOpenService.OnOpenRequested = OnProjectOpenRequested;
                     _mcpServer.ProjectOpenService.OnOpenStateRequested = OnProjectOpenStateRequested;
+                }
 
                 // The launch record (task 7d20e94c): one recorder per MT process, on the broker's
                 // database, which is open from here on. Panes are created after this (session restore
@@ -5356,13 +5358,7 @@ namespace MultiTerminal
             IReadOnlyList<ProjectOpenState> state = null;
             await Task.Run(() =>
             {
-                Invoke(new Action(() =>
-                {
-                    var panes = _dockPanel.Contents.OfType<TerminalDocument>().Where(d => !d.IsDisposed).ToList();
-                    var facts = panes.Select(d => new OpenPaneFacts(
-                        d.DocId, d.LaunchProjectId, d.LaunchRole, d.Terminal?.IsRunning == true, d.IsStartScreenVisible, d.TabText)).ToList();
-                    state = ProjectAlreadyOpen.OpenState(facts);
-                }));
+                Invoke(new Action(() => state = ProjectAlreadyOpen.OpenState(SnapshotOpenPaneFacts(out _))));
             }).ConfigureAwait(false);
             return state;
         }
@@ -5371,11 +5367,15 @@ namespace MultiTerminal
         /// (<see cref="ProjectAlreadyOpen.FindOpenPanes"/>), and every live pane they were picked from.
         /// <c>DockPanel.Contents</c> includes floating, auto-hidden and hidden panes.</summary>
         private IReadOnlyList<OpenPaneFacts> FindPanesWithProjectOpen(string projectId, string launchingDocId, out List<TerminalDocument> panes)
+            => ProjectAlreadyOpen.FindOpenPanes(projectId, launchingDocId, SnapshotOpenPaneFacts(out panes));
+
+        /// <summary>Every live pane and its <see cref="OpenPaneFacts"/>: the one snapshot the open, the
+        /// open-state and the "already open" question all read, so they cannot disagree.</summary>
+        private List<OpenPaneFacts> SnapshotOpenPaneFacts(out List<TerminalDocument> panes)
         {
             panes = _dockPanel.Contents.OfType<TerminalDocument>().Where(d => !d.IsDisposed).ToList();
-            var facts = panes.Select(d => new OpenPaneFacts(
-                d.DocId, d.LaunchProjectId, d.LaunchRole, d.Terminal?.IsRunning == true, d.IsStartScreenVisible, d.TabText));
-            return ProjectAlreadyOpen.FindOpenPanes(projectId, launchingDocId, facts);
+            return panes.Select(d => new OpenPaneFacts(
+                d.DocId, d.LaunchProjectId, d.LaunchRole, d.Terminal?.IsRunning == true, d.IsStartScreenVisible, d.TabText)).ToList();
         }
 
         /// <summary>
