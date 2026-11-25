@@ -76,6 +76,29 @@ namespace MultiTerminal.Tests
             Assert.Equal(0, runs);
         }
 
+        /// <summary>
+        /// Work that starts and then blocks still answers at the deadline (Codex, pipeline Run 2). The work is
+        /// run on a separate thread that blocks until released, standing in for a UI thread that stalls inside
+        /// it. Falsified: waiting for started work after the timeout (the Run 1 code) makes the call not
+        /// return within the deadline, and the first assertion red.
+        /// </summary>
+        [Fact]
+        public async Task A_ui_call_whose_work_started_and_blocks_still_answers_at_the_deadline()
+        {
+            using var release = new System.Threading.ManualResetEventSlim(false);
+            using var started = new System.Threading.ManualResetEventSlim(false);
+            var call = UiThreadCall.RunAsync(
+                work => Task.Run(work),
+                () => { started.Set(); release.Wait(TimeSpan.FromSeconds(30)); return 1; },
+                TimeSpan.FromMilliseconds(200));
+
+            var finished = await Task.WhenAny(call, Task.Delay(TimeSpan.FromSeconds(5)));
+            release.Set();
+            Assert.True(finished == call, "the call did not answer at its deadline");
+            Assert.True(started.IsSet);
+            Assert.False((await call).Ran);
+        }
+
         [Fact]
         public async Task A_ui_call_that_cannot_be_posted_is_not_run_and_an_exception_from_the_work_is_rethrown()
         {

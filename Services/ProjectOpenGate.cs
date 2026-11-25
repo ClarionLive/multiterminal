@@ -51,9 +51,10 @@ namespace MultiTerminal.Services
     /// <summary>
     /// Runs work on the UI thread for a REST caller, with a time limit (review of PR #103, task ba0f0ee0). The
     /// open and open-state callbacks used <c>Task.Run(() =&gt; Invoke(...))</c>, so a stalled UI thread left the
-    /// HTTP request hanging and a thread-pool thread blocked. Here the work is posted, the caller waits at most
-    /// <c>timeout</c>, and work that had not started by then is abandoned: it never runs late, so a caller told
-    /// "busy" cannot have the open happen after all.
+    /// HTTP request hanging and a thread-pool thread blocked. Here the work is posted and the caller waits at
+    /// most <c>timeout</c>, always. Work that had not started by then is abandoned and never runs late. Work that
+    /// had started (a UI thread that stalls inside it) may still finish after the caller was told "busy"; the
+    /// open's own work is a database read and a pane snapshot, so that needs a UI thread hung mid-call.
     /// </summary>
     public static class UiThreadCall
     {
@@ -97,10 +98,15 @@ namespace MultiTerminal.Services
             }
 
             var winner = await Task.WhenAny(done.Task, Task.Delay(timeout)).ConfigureAwait(false);
-            if (winner != done.Task && Interlocked.CompareExchange(ref state, 2, 0) == 0)
+            if (winner != done.Task)
+            {
+                // The deadline holds whether or not the work has started (pipeline Run 2): work not started yet
+                // is abandoned and never runs; work already running on a stalled UI thread may still finish
+                // later, but the caller is not held for it.
+                Interlocked.CompareExchange(ref state, 2, 0);
                 return (false, default);
+            }
 
-            // Started (in time, or in the instant the timer fired): wait for it to finish.
             return (true, await done.Task.ConfigureAwait(false));
         }
     }
