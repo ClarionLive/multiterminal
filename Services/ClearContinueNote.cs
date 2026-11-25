@@ -29,6 +29,7 @@ namespace MultiTerminal.Services
 
         private string _note;
         private DateTime _armedAtUtc;
+        private DateTime? _clearTypedAtUtc;
 
         /// <summary>
         /// Holds <paramref name="text"/> (after <see cref="Sanitize"/>) for the pane's next clear. Blank text
@@ -38,14 +39,31 @@ namespace MultiTerminal.Services
         {
             _note = Sanitize(text);
             _armedAtUtc = nowUtc;
+            _clearTypedAtUtc = null;
+        }
+
+        /// <summary>
+        /// The note's <c>/clear</c> has been typed (pipeline Run 2). Until then no trigger may take the note:
+        /// MT types into the pane's live process, so a trigger before the clear (a late hook from an earlier
+        /// clear) would put the note into the OLD session.
+        /// </summary>
+        public void NoteClearTyped(DateTime nowUtc)
+        {
+            if (_note != null && _clearTypedAtUtc == null)
+                _clearTypedAtUtc = nowUtc;
         }
 
         /// <summary>The held note, once; null when there is none or it has expired.</summary>
         public string TryTake(DateTime nowUtc)
         {
             string note = _note;
+            if (note == null)
+                return null;
+            // Not typed yet: leave it for the trigger of its own clear (a stale earlier one must not take it).
+            if (_clearTypedAtUtc == null || nowUtc < _clearTypedAtUtc.Value)
+                return null;
             _note = null;
-            if (note == null || nowUtc - _armedAtUtc > Expiry || nowUtc < _armedAtUtc)
+            if (nowUtc - _armedAtUtc > Expiry || nowUtc < _armedAtUtc)
                 return null;
             return note;
         }

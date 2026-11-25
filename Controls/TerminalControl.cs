@@ -859,6 +859,15 @@ namespace MultiTerminal.Controls
             }
         }
 
+        /// <summary>The held continue note's <c>/clear</c> was typed; only from now may a trigger take it (ticket cc2e51ff).</summary>
+        public void NoteClearContinueTyped()
+        {
+            lock (_clearInjectLock)
+            {
+                _clearContinue.NoteClearTyped(DateTime.UtcNow);
+            }
+        }
+
         /// <summary>Drops a held continue note: its <c>/clear</c> could not be typed (ticket cc2e51ff).</summary>
         public void DisarmClearContinue()
         {

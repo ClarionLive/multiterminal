@@ -19,6 +19,7 @@ namespace MultiTerminal.Tests
         {
             var n = new ClearContinueNote();
             n.Arm("Claim card 9b57140c and code it through.", T0);
+            n.NoteClearTyped(T0.AddSeconds(1));
 
             Assert.Equal("Claim card 9b57140c and code it through.", n.TryTake(T0.AddSeconds(5)));
             Assert.Null(n.TryTake(T0.AddSeconds(6)));
@@ -33,7 +34,24 @@ namespace MultiTerminal.Tests
         {
             var n = new ClearContinueNote();
             n.Arm("old", T0);
+            n.NoteClearTyped(T0);
             Assert.Null(n.TryTake(T0 + ClearContinueNote.Expiry + TimeSpan.FromSeconds(1)));
+        }
+
+        /// <summary>
+        /// A trigger that arrives before the note's /clear was typed (a late hook from an earlier clear) must not
+        /// take it, and must leave it for the trigger of its own clear (Codex, pipeline Run 2). Falsified: dropping
+        /// the typed check in TryTake turns the first assertion red.
+        /// </summary>
+        [Fact]
+        public void A_trigger_before_the_clear_was_typed_does_not_take_the_note()
+        {
+            var n = new ClearContinueNote();
+            n.Arm("Claim card X.", T0);
+            Assert.Null(n.TryTake(T0.AddSeconds(1)));
+
+            n.NoteClearTyped(T0.AddSeconds(2));
+            Assert.Equal("Claim card X.", n.TryTake(T0.AddSeconds(6)));
         }
 
         /// <summary>A clock that went backwards (taken "before" it was armed) is not trusted either.</summary>
@@ -42,6 +60,7 @@ namespace MultiTerminal.Tests
         {
             var n = new ClearContinueNote();
             n.Arm("note", T0);
+            n.NoteClearTyped(T0);
             Assert.Null(n.TryTake(T0.AddSeconds(-1)));
         }
 
@@ -79,6 +98,7 @@ namespace MultiTerminal.Tests
             var n = new ClearContinueNote();
             n.Arm("first", T0);
             n.Arm("second", T0.AddSeconds(1));
+            n.NoteClearTyped(T0.AddSeconds(1));
             Assert.Equal("second", n.TryTake(T0.AddSeconds(2)));
 
             n.Arm("third", T0);

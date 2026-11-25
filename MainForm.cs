@@ -1983,6 +1983,8 @@ namespace MultiTerminal
                         bool typed = t.Status == System.Threading.Tasks.TaskStatus.RanToCompletion && t.Result;
                         if (t.IsFaulted)
                             _debugLogService?.Error("MainForm", $"TerminalInjectRequested(submit) for '{e.AgentName}' faulted: {t.Exception?.GetBaseException().Message}");
+                        if (agentClear && typed)
+                            clearTerminal.NoteClearContinueTyped();
                         if (agentClear && !typed)
                         {
                             clearTerminal.DisarmClearContinue();
