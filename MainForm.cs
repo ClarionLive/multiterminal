@@ -1968,6 +1968,13 @@ namespace MultiTerminal
                     return;
                 }
 
+                // An agent-requested /clear (clear_my_context) with a continueWith note (ticket cc2e51ff): the pane
+                // holds the note BEFORE the /clear is typed, so its post-clear prompt (raised by the SessionStart
+                // hook, or the keystroke fallback) carries it into the fresh session. Every agent /clear arms,
+                // a blank note included, so an older note is never attached to this clear.
+                if (e.Text != null && e.Text.Trim().Equals("/clear", StringComparison.Ordinal))
+                    targetDoc.Terminal.ArmClearContinue(e.ContinueAfterClear);
+
                 _ = targetDoc.InjectInputAsync(e.Text).ContinueWith(
                     t => _debugLogService?.Error("MainForm",
                         $"TerminalInjectRequested(submit) for '{e.AgentName}' faulted: {t.Exception?.GetBaseException().Message}"),

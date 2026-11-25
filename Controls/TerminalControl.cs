@@ -817,6 +817,7 @@ namespace MultiTerminal.Controls
         /// </summary>
         public void TriggerClearSessionStart(string source, string text = "initializing...")
         {
+            string note;
             lock (_clearInjectLock)
             {
                 var now = DateTime.UtcNow;
@@ -827,10 +828,28 @@ namespace MultiTerminal.Controls
                 }
 
                 _lastClearInjectUtc = now;
+                // The note clear_my_context left for this clear (ticket cc2e51ff), taken once, here, so the
+                // hook path and the keystroke fallback cannot both carry it.
+                note = _clearContinue.TryTake(now);
             }
 
-            LogTrace($"/clear session-start injection triggered (source={source})");
-            _ = InjectInitializingAfterClearAsync(text);
+            LogTrace($"/clear session-start injection triggered (source={source}{(note == null ? string.Empty : $", with a continue note of {note.Length} chars")})");
+            _ = InjectInitializingAfterClearAsync(ClearContinueNote.Compose(text, note));
+        }
+
+        // What clear_my_context asked to carry into the fresh session (ticket cc2e51ff). Guarded by _clearInjectLock.
+        private readonly ClearContinueNote _clearContinue = new ClearContinueNote();
+
+        /// <summary>
+        /// Holds the text an agent passed to <c>clear_my_context</c> as <c>continueWith</c>, for this pane's next
+        /// post-clear prompt (ticket cc2e51ff). Called just before its <c>/clear</c> is typed. Blank clears it.
+        /// </summary>
+        public void ArmClearContinue(string text)
+        {
+            lock (_clearInjectLock)
+            {
+                _clearContinue.Arm(text, DateTime.UtcNow);
+            }
         }
 
         /// <summary>
