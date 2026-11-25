@@ -162,6 +162,7 @@ namespace MultiTerminal.API
                 builder.Services.AddSingleton<ICapabilityProvider>(new CaEmbeddedCapabilityProvider(_broker));
                 // POST /api/projects/{projectId}/open exists in this build (MT Conductor, ClarionLive#83).
                 builder.Services.AddSingleton<ICapabilityProvider>(new ProjectOpenCapabilityProvider());
+                builder.Services.AddSingleton<ICapabilityProvider>(new ProjectOpenStateCapabilityProvider());
                 // SessionDatabase removed — sessions now stored in multiterminal.db via SessionLineageService
                 builder.Services.AddSingleton<PlanDatabase>();
                 builder.Services.AddSingleton<TaskDatabase>();

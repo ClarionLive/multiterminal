@@ -1437,6 +1437,7 @@ namespace MultiTerminal
                 _mcpServer.SpawnService.Jobs.Collected += OnSpawnJobCollected;
                 if (_mcpServer.ProjectOpenService != null)
                     _mcpServer.ProjectOpenService.OnOpenRequested = OnProjectOpenRequested;
+                    _mcpServer.ProjectOpenService.OnOpenStateRequested = OnProjectOpenStateRequested;
 
                 // The launch record (task 7d20e94c): one recorder per MT process, on the broker's
                 // database, which is open from here on. Panes are created after this (session restore
@@ -5343,6 +5344,27 @@ namespace MultiTerminal
                 }));
             }).ConfigureAwait(false);
             return outcome;
+        }
+
+        /// <summary>
+        /// <c>GET /api/projects/open-state</c>: on the UI thread, every project open in a PM pane and how many
+        /// panes, by <see cref="ProjectAlreadyOpen.FindOpenPanes"/> (the rule the open and the "already open"
+        /// question use).
+        /// </summary>
+        private async Task<IReadOnlyList<ProjectOpenState>> OnProjectOpenStateRequested()
+        {
+            IReadOnlyList<ProjectOpenState> state = null;
+            await Task.Run(() =>
+            {
+                Invoke(new Action(() =>
+                {
+                    var panes = _dockPanel.Contents.OfType<TerminalDocument>().Where(d => !d.IsDisposed).ToList();
+                    var facts = panes.Select(d => new OpenPaneFacts(
+                        d.DocId, d.LaunchProjectId, d.LaunchRole, d.Terminal?.IsRunning == true, d.IsStartScreenVisible, d.TabText)).ToList();
+                    state = ProjectAlreadyOpen.OpenState(facts);
+                }));
+            }).ConfigureAwait(false);
+            return state;
         }
 
         /// <summary>The panes other than <paramref name="launchingDocId"/> that have the project open

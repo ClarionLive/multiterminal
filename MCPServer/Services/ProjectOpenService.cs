@@ -55,6 +55,24 @@ namespace MultiTerminal.MCPServer.Services
         public IEnumerable<string> GetCapabilities() => new[] { Token };
     }
 
+    /// <summary>How many PM panes have one project open right now.</summary>
+    /// <param name="ProjectId">The project.</param>
+    /// <param name="OpenPanes">Panes with it open, by the "already open" rule (always at least 1 in an answer).</param>
+    public sealed record ProjectOpenState(string ProjectId, int OpenPanes);
+
+    /// <summary>
+    /// Vouches for <see cref="Token"/>: this MT has <c>GET /api/projects/open-state</c>. Always given, as
+    /// for <see cref="ProjectOpenCapabilityProvider"/>.
+    /// </summary>
+    public sealed class ProjectOpenStateCapabilityProvider : ICapabilityProvider
+    {
+        /// <summary>The capability token. Clients compare it verbatim.</summary>
+        public const string Token = "project-open-state-v1";
+
+        /// <inheritdoc />
+        public IEnumerable<string> GetCapabilities() => new[] { Token };
+    }
+
     /// <summary>
     /// <c>POST /api/projects/{projectId}/open</c> (for MT Conductor, ClarionLive#83): bring a project's PM
     /// pane to the front, or launch the project when no pane has it open. The REST side cannot touch
@@ -65,6 +83,30 @@ namespace MultiTerminal.MCPServer.Services
     {
         /// <summary>Set by MainForm. Takes the project id; runs on the UI thread itself.</summary>
         public Func<string, Task<ProjectOpenOutcome>> OnOpenRequested { get; set; }
+
+        /// <summary>Set by MainForm. The projects open in a PM pane now; runs on the UI thread itself.</summary>
+        public Func<Task<IReadOnlyList<ProjectOpenState>>> OnOpenStateRequested { get; set; }
+
+        /// <summary>
+        /// The projects open in a PM pane, for <c>GET /api/projects/open-state</c>. Null when MT's window is
+        /// not ready (or the read failed), so the caller can answer 503 rather than "nothing is open".
+        /// </summary>
+        public async Task<IReadOnlyList<ProjectOpenState>> GetOpenStateAsync()
+        {
+            var handler = OnOpenStateRequested;
+            if (handler == null)
+                return null;
+            try
+            {
+                return await handler().ConfigureAwait(false);
+            }
+#pragma warning disable CA1031 // A REST caller gets a 503, never an unhandled exception from the UI thread.
+            catch (Exception)
+#pragma warning restore CA1031
+            {
+                return null;
+            }
+        }
 
         /// <summary>Asks MainForm to open <paramref name="projectId"/>. Never throws.</summary>
         public async Task<ProjectOpenOutcome> OpenAsync(string projectId)

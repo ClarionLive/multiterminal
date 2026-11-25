@@ -44,6 +44,26 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Every project that <see cref="FindOpenPanes"/> would call open, with its pane count, in the order
+        /// the projects first appear (<c>GET /api/projects/open-state</c>). The same rule, so a caller's
+        /// "Switch to" or "Open" label agrees with what the open itself will do.
+        /// </summary>
+        internal static IReadOnlyList<MultiTerminal.MCPServer.Services.ProjectOpenState> OpenState(IEnumerable<OpenPaneFacts> panes)
+        {
+            if (panes == null)
+                return Array.Empty<MultiTerminal.MCPServer.Services.ProjectOpenState>();
+
+            var list = panes.Where(p => p != null).ToList();
+            return list
+                .Select(p => p.LaunchProjectId)
+                .Where(id => !string.IsNullOrEmpty(id))
+                .Distinct(StringComparer.Ordinal)
+                .Select(id => new MultiTerminal.MCPServer.Services.ProjectOpenState(id, FindOpenPanes(id, null, list).Count))
+                .Where(s => s.OpenPanes > 0)
+                .ToList();
+        }
+
+        /// <summary>
         /// The question's body: which pane holds the project and where it is, and what the choices do.
         /// <paramref name="floating"/> says whether that pane is in a floating window.
         /// </summary>

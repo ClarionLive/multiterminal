@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using MultiTerminal.MCPServer.Services;
@@ -41,6 +42,29 @@ namespace MultiTerminal.API.Controllers
         {
             var outcome = await _openService.OpenAsync(projectId).ConfigureAwait(false);
             return ToResponse(outcome);
+        }
+
+        /// <summary>
+        /// <c>GET /api/projects/open-state</c>: the projects open in a PM pane right now, by the same rule the
+        /// "already open" question and <see cref="Open"/> use. A project not listed has no pane open.
+        /// 200 <c>{projects:[{projectId, openPanes}]}</c>; 503 when MT's window is not ready.
+        /// </summary>
+        [HttpGet("open-state")]
+        public async Task<IActionResult> OpenState()
+        {
+            var state = await _openService.GetOpenStateAsync().ConfigureAwait(false);
+            return ToOpenStateResponse(state);
+        }
+
+        /// <summary>The HTTP form of an open-state answer. Internal for the tests.</summary>
+        internal IActionResult ToOpenStateResponse(System.Collections.Generic.IReadOnlyList<ProjectOpenState> state)
+        {
+            if (state == null)
+                return Problem(detail: "MultiTerminal's window is not ready yet.", statusCode: 503);
+            return Ok(new
+            {
+                projects = state.Select(s => new { projectId = s.ProjectId, openPanes = s.OpenPanes }).ToList(),
+            });
         }
 
         /// <summary>The HTTP form of an outcome. Internal so the tests can map each outcome without a host.</summary>
