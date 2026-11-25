@@ -7926,6 +7926,11 @@ namespace MultiTerminal
                         continue;
                     floatWindow.Activated += (s, _) => OnHostWindowActivated((Form)s);
                     floatWindow.Disposed += (s, _) => _activationHookedWindows.Remove((Form)s);
+
+                    // Activated before it was wired (Alt+Tab straight into a just-restored window): that
+                    // activation was missed, so act on it now. The usual guards still apply.
+                    if (Form.ActiveForm == floatWindow)
+                        OnHostWindowActivated(floatWindow);
                 }
             }
             catch (Exception ex)
