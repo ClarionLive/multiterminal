@@ -1301,6 +1301,9 @@ curl "http://localhost:5050/api/session-lineage/latest?projectPath=H%3A%5CDevLap
   <p>Windows only lets the foreground app hand focus to another one. A caller outside MT should call
   <code>AllowSetForegroundWindow</code> with MT's process id (from <code>GET /api/health</code>)
   first, or MT may only flash in the taskbar.</p>
+  <p>An MT that has this route lists <code>project-open-v1</code> in the <code>capabilities</code>
+  array of <code>GET /api/health</code>. Check for it before calling, so an older MT is not mistaken
+  for an unknown project.</p>
   <h4>Response</h4>
   <pre><code>// 200: the project was open, and its pane is now in front
 { "result": "focused", "projectId": "02629766", "projectName": "MultiTerminal",
