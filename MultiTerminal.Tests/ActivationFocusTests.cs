@@ -4,16 +4,26 @@ using Xunit;
 namespace MultiTerminal.Tests
 {
     /// <summary>
-    /// When activating a MultiTerminal window puts focus back in the bordered pane (task 76a9d71a).
+    /// What activating a MultiTerminal window does with the keyboard focus (task 76a9d71a).
     /// </summary>
     public class ActivationFocusTests
     {
-        [Theory]
-        [InlineData(ActivationFocusState.Nothing)]
-        [InlineData(ActivationFocusState.Terminal)]
-        public void AltTab_back_restores_the_bordered_pane(ActivationFocusState focused)
+        [Fact]
+        public void AltTab_back_with_nothing_focused_goes_to_the_bordered_pane()
         {
-            Assert.True(ActivationFocus.ShouldRestore(mouseButtonDown: false, hasBorderedTerminal: true, focused));
+            Assert.Equal(ActivationFocusTarget.BorderedPane,
+                ActivationFocus.Decide(mouseButtonDown: false, hasBorderedTerminal: true, ActivationFocusState.Nothing));
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void A_focused_terminal_wins_over_the_border(bool hasBorderedTerminal)
+        {
+            // MT raising itself (the REST open's BringPaneToFront) focuses the target pane without the border
+            // necessarily following; the restore must re-assert that pane, not go back to the bordered one.
+            Assert.Equal(ActivationFocusTarget.FocusedPane,
+                ActivationFocus.Decide(mouseButtonDown: false, hasBorderedTerminal, ActivationFocusState.Terminal));
         }
 
         [Theory]
@@ -22,21 +32,24 @@ namespace MultiTerminal.Tests
         [InlineData(ActivationFocusState.OtherControl)]
         public void A_click_activation_leaves_focus_where_the_click_put_it(ActivationFocusState focused)
         {
-            Assert.False(ActivationFocus.ShouldRestore(mouseButtonDown: true, hasBorderedTerminal: true, focused));
-        }
-
-        [Theory]
-        [InlineData(ActivationFocusState.Nothing)]
-        [InlineData(ActivationFocusState.Terminal)]
-        public void A_window_without_the_bordered_pane_is_left_alone(ActivationFocusState focused)
-        {
-            Assert.False(ActivationFocus.ShouldRestore(mouseButtonDown: false, hasBorderedTerminal: false, focused));
+            Assert.Equal(ActivationFocusTarget.None,
+                ActivationFocus.Decide(mouseButtonDown: true, hasBorderedTerminal: true, focused));
         }
 
         [Fact]
-        public void Focus_in_another_control_is_kept()
+        public void Nothing_focused_and_no_bordered_pane_in_the_window_is_left_alone()
         {
-            Assert.False(ActivationFocus.ShouldRestore(mouseButtonDown: false, hasBorderedTerminal: true, ActivationFocusState.OtherControl));
+            Assert.Equal(ActivationFocusTarget.None,
+                ActivationFocus.Decide(mouseButtonDown: false, hasBorderedTerminal: false, ActivationFocusState.Nothing));
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void Focus_in_another_control_is_kept(bool hasBorderedTerminal)
+        {
+            Assert.Equal(ActivationFocusTarget.None,
+                ActivationFocus.Decide(mouseButtonDown: false, hasBorderedTerminal, ActivationFocusState.OtherControl));
         }
     }
 }
