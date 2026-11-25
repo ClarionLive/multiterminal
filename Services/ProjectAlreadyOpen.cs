@@ -12,8 +12,11 @@ namespace MultiTerminal.Services
     /// <param name="IsRunning">Whether the pane's process is running.</param>
     /// <param name="OnStartScreen">Whether the pane is showing its start screen.</param>
     /// <param name="Title">The pane's tab text, for the question.</param>
-    /// <param name="Kind">The <see cref="PaneLaunchKind"/> of the pane's current launch; null when not known.</param>
-    internal sealed record OpenPaneFacts(string DocId, string LaunchProjectId, TerminalRole Role, bool IsRunning, bool OnStartScreen, string Title, string Kind = null);
+    /// <param name="Kind">The <see cref="PaneLaunchKind"/> of the pane's current launch; null when not known.
+    /// Required, with no default, on purpose: a call site that forgot it would still compile and silently
+    /// count PowerShell panes as open again, and a merge that keeps an older call site is the likely way
+    /// to forget it.</param>
+    internal sealed record OpenPaneFacts(string DocId, string LaunchProjectId, TerminalRole Role, bool IsRunning, bool OnStartScreen, string Title, string Kind);
 
     /// <summary>
     /// GitHub #95: launching a project that is already open in another pane used to open a second one
