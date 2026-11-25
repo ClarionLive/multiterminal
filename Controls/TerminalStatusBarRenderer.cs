@@ -293,6 +293,7 @@ namespace MultiTerminal.Controls
                             SendMessage($"remoteMode:{(_lastRemoteMode.Value ? "true" : "false")}");
                         SendMessage($"projectSettings:{(_lastProjectSettingsAvailable ? "true" : "false")}");
                         SendMessage($"attention:{_lastAttention}");
+                        SendMessage($"claudeProfile:{_lastClaudeProfileJson}");
                         SendMessage($"github:{_lastGitHubJson}");
 
                         Ready?.Invoke(this, EventArgs.Empty);
@@ -568,6 +569,23 @@ namespace MultiTerminal.Controls
             _lastGitHubJson = json;
             if (_isInitialized)
                 SendMessage($"github:{_lastGitHubJson}");
+        }
+
+        // Ticket 37edc158: the pane's Claude profile badge as wire JSON ("null" = show nothing), text and
+        // tooltip together. Last-known and replayed on 'ready', like the values around it, so a value set
+        // before the page loads is not lost and a reload keeps the tooltip too.
+        private string _lastClaudeProfileJson = "null";
+
+        /// <summary>
+        /// Shows the pane's Claude profile as a pill in the identity row; null clears it. The caller decides
+        /// what is worth showing (<see cref="Services.PaneProfileBadge"/>). Text and tooltip are free text, so
+        /// they travel as JSON and the page sets them with textContent and the title property.
+        /// </summary>
+        internal void SetClaudeProfile(Services.PaneProfileBadgeInfo badge)
+        {
+            _lastClaudeProfileJson = Services.PaneProfileBadge.ToWire(badge);
+            if (_isInitialized)
+                SendMessage($"claudeProfile:{_lastClaudeProfileJson}");
         }
 
         private string _lastAttention = "none";
