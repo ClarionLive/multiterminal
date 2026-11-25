@@ -5335,7 +5335,8 @@ namespace MultiTerminal
 
             // Activate() raises no ActiveDocumentChanged when the pane already was the dock panel's active
             // document (a click into another pane's terminal does not change it), so move the border here too.
-            foreach (var termDoc in _gridManager.GetTerminalDocuments())
+            // Contents, not Documents: a floating pane is not a document.
+            foreach (var termDoc in _dockPanel.Contents.OfType<TerminalDocument>())
                 termDoc.SetFocusBorder(termDoc == pane);
         }
 
@@ -7978,7 +7979,8 @@ namespace MultiTerminal
                 // is the window it sits in (the main window or a floating one).
                 // A pane showing its Home screen has no terminal to type into: it does not count.
                 TerminalDocument bordered = null;
-                foreach (var doc in _gridManager.GetTerminalDocuments())
+                // Contents, not Documents: a pane in a floating window is not a document.
+                foreach (var doc in _dockPanel.Contents.OfType<TerminalDocument>())
                 {
                     if (doc.HasFocusBorder && !doc.IsDisposed && !doc.IsStartScreenVisible && doc.TopLevelControl == window)
                     {
