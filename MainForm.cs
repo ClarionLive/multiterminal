@@ -921,6 +921,13 @@ namespace MultiTerminal
             // Handle active document changes
             _dockPanel.ActiveDocumentChanged += OnActiveDocumentChanged;
 
+            // Alt+Tab back into a floating window must give its bordered pane focus too (task 76a9d71a).
+            _dockPanel.ContentAdded += (s, e) =>
+            {
+                if (e.Content is TerminalDocument doc)
+                    doc.DockStateChanged += OnTerminalDockStateChangedForActivation;
+            };
+
             // Robustly tear a terminal down when its tab is closed. ContentRemoved is
             // DockPanelSuite's authoritative "this content left the panel" signal — unlike
             // relying on TerminalDocument.Dispose, which WebView2-hosted docs can skip on a
@@ -7879,6 +7886,100 @@ namespace MultiTerminal
                 .Take(12);
             _debugLogService?.Info("FocusGuard",
                 $"'{activeDoc.TabText}' became active while you were typing in '{previous.TabText}'. Called from: {string.Join(" < ", callers)}");
+        }
+
+        /// <summary>Floating windows already wired for <see cref="RestoreTerminalFocusOnActivate"/>.</summary>
+        private readonly HashSet<Form> _activationHookedWindows = new HashSet<Form>();
+
+        protected override void OnActivated(EventArgs e)
+        {
+            base.OnActivated(e);
+            OnHostWindowActivated(this);
+        }
+
+        private void OnTerminalDockStateChangedForActivation(object sender, EventArgs e)
+        {
+            if (sender is TerminalDocument doc && doc.DockState == DockState.Float
+                && doc.Pane?.FloatWindow is Form floatWindow && !floatWindow.IsDisposed
+                && _activationHookedWindows.Add(floatWindow))
+            {
+                floatWindow.Activated += (s, _) => OnHostWindowActivated((Form)s);
+                floatWindow.Disposed += (s, _) => _activationHookedWindows.Remove((Form)s);
+            }
+        }
+
+        /// <summary>
+        /// A MultiTerminal window was activated. Read the mouse now, while it still says how the window was
+        /// activated, and restore after the activation has finished moving focus (task 76a9d71a).
+        /// </summary>
+        private void OnHostWindowActivated(Form window)
+        {
+            try
+            {
+                if (window.IsDisposed || !IsHandleCreated)
+                    return;
+                bool mouseButtonDown = Control.MouseButtons != System.Windows.Forms.MouseButtons.None;
+                BeginInvoke(new Action(() => RestoreTerminalFocusOnActivate(window, mouseButtonDown)));
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("MainForm", $"OnHostWindowActivated error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Puts the keyboard focus back in the pane with the green border, if that pane is in
+        /// <paramref name="window"/> and focus is not in some other control there. See <see cref="ActivationFocus"/>.
+        /// </summary>
+        private void RestoreTerminalFocusOnActivate(Form window, bool mouseButtonDown)
+        {
+            try
+            {
+                if (window.IsDisposed || Form.ActiveForm != window)
+                    return;
+
+                // A DockContent is itself a Form, so FindForm() would return the pane: TopLevelControl
+                // is the window it sits in (the main window or a floating one).
+                TerminalDocument bordered = null;
+                foreach (var doc in _gridManager.GetTerminalDocuments())
+                {
+                    if (doc.HasFocusBorder && !doc.IsDisposed && doc.TopLevelControl == window)
+                    {
+                        bordered = doc;
+                        break;
+                    }
+                }
+
+                var focused = FocusStateOf(window);
+                if (!ActivationFocus.ShouldRestore(mouseButtonDown, bordered != null, focused))
+                    return;
+
+                bordered.FocusTerminal();
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("MainForm", $"RestoreTerminalFocusOnActivate error: {ex.Message}");
+            }
+        }
+
+        /// <summary>Follows the ActiveControl chain to the control that really has focus in the window.</summary>
+        private static ActivationFocusState FocusStateOf(Form window)
+        {
+            Control c = window.ActiveControl;
+            while (c is ContainerControl cc && cc.ActiveControl != null && !(c is TerminalDocument))
+                c = cc.ActiveControl;
+            if (c == null)
+                return ActivationFocusState.Nothing;
+
+            for (Control p = c; p != null; p = p.Parent)
+            {
+                if (p is TerminalDocument)
+                    return ActivationFocusState.Terminal;
+            }
+
+            // DockPanelSuite's own containers (the dock panel, a pane, a float window's surface) with
+            // nothing deeper active are not a control you were typing in.
+            return c is DockPanel || c is DockPane ? ActivationFocusState.Nothing : ActivationFocusState.OtherControl;
         }
 
         private void OnActiveDocumentChanged(object sender, EventArgs e)

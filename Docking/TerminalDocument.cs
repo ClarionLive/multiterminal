@@ -1865,6 +1865,9 @@ namespace MultiTerminal.Docking
         private static readonly Color FocusBorderColor = Color.FromArgb(76, 175, 80);
         private bool _hasFocusBorder;
 
+        /// <summary>True while this pane shows the green focus border (it is the pane you are in).</summary>
+        internal bool HasFocusBorder => _hasFocusBorder;
+
         /// <summary>
         /// Shows or hides a green focus border around this terminal.
         /// Padding is always 2 to avoid layout shift. The border is drawn in that padding by
