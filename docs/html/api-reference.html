@@ -2466,6 +2466,10 @@ ws.onmessage = (e) => { /* handle terminal output */ };</code></pre>
   <div class="endpoint-block">
     <span class="method get">GET</span> <code>/api/health</code>
   </div>
+  <p>Its <code>capabilities</code> array lists features a client can check for before calling them:
+  <code>ca-embedded-v1</code> (ClarionAssistant tabs may register), <code>project-open-v1</code>
+  (<code>POST /api/projects/{projectId}/open</code>) and <code>project-open-state-v1</code>
+  (<code>GET /api/projects/open-state</code>). Tokens are compared verbatim.</p>
 
   <div class="endpoint-block">
     <span class="method post">POST</span> <code>/api/knowledge/bump</code>

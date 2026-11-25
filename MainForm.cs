@@ -5315,43 +5315,83 @@ namespace MultiTerminal
         /// </summary>
         private async Task<ProjectOpenOutcome> OnProjectOpenRequested(string projectId)
         {
-            ProjectOpenOutcome outcome = null;
-            await Task.Run(() =>
+            // Posted with a time limit (review of PR #103): a stalled UI thread answers "busy" instead of
+            // holding the HTTP request, and work abandoned at the limit never runs late.
+            if (IsDisposed || !IsHandleCreated)
+                return new ProjectOpenOutcome(ProjectOpenResult.Failed, projectId, Error: "MultiTerminal's window is not ready yet.");
+            var (ran, result) = await Services.UiThreadCall.RunAsync<ProjectOpenOutcome>(
+                work => BeginInvoke(work), () => OpenProjectOnUiThread(projectId), Services.UiThreadCall.DefaultTimeout).ConfigureAwait(false);
+            return ran ? result : new ProjectOpenOutcome(ProjectOpenResult.Failed, projectId, Error: "MultiTerminal is busy; try again.");
+        }
+
+        // Launches started by POST /api/projects/{id}/open that have not finished yet (review of PR #103).
+        private readonly Services.ProjectOpenGate _restOpenLaunches = new Services.ProjectOpenGate();
+
+        /// <summary>The UI-thread half of <see cref="OnProjectOpenRequested"/>.</summary>
+        private ProjectOpenOutcome OpenProjectOnUiThread(string projectId)
+        {
+            var project = _sharedProjectDatabase?.GetRichProject(projectId);
+            if (project == null || !string.Equals(project.Id, projectId, StringComparison.Ordinal))
+                return new ProjectOpenOutcome(ProjectOpenResult.NotFound, projectId);
+
+            var open = FindPanesWithProjectOpen(project.Id, launchingDocId: null, out var panes);
+            if (open.Count > 0)
             {
-                Invoke(new Action(() =>
+                var target = panes.First(d => d.DocId == open[0].DocId);
+                bool floating = target.DockState == DockState.Float;
+                BringPaneToFront(target);
+                _debugLogService?.Info("MainForm", $"open project '{project.Name}' over REST: focused '{open[0].Title}' ({open.Count} pane(s))");
+                return new ProjectOpenOutcome(ProjectOpenResult.Focused, project.Id, project.Name,
+                    PaneTitle: open[0].Title, Floating: floating, OtherPanes: open.Count - 1);
+            }
+
+            string id = project.Id;
+            // One launch per project at a time (review of PR #103): the launch can wait in modal questions, whose
+            // message loop serves the next request; a second request joins the first instead of posting another
+            // launch onto the same Home tab.
+            if (!_restOpenLaunches.TryBegin(id))
+            {
+                _debugLogService?.Info("MainForm", $"open project '{project.Name}' over REST: a launch is already under way; not starting another");
+                return new ProjectOpenOutcome(ProjectOpenResult.Launching, project.Id, project.Name);
+            }
+
+            _debugLogService?.Info("MainForm", $"open project '{project.Name}' over REST: not open, launching on a Home tab");
+            try
+            {
+                BeginInvoke(new Action(() =>
                 {
-                    var project = _sharedProjectDatabase?.GetRichProject(projectId);
-                    if (project == null || !string.Equals(project.Id, projectId, StringComparison.Ordinal))
-                    {
-                        outcome = new ProjectOpenOutcome(ProjectOpenResult.NotFound, projectId);
-                        return;
-                    }
-
-                    var open = FindPanesWithProjectOpen(project.Id, launchingDocId: null, out var panes);
-                    if (open.Count > 0)
-                    {
-                        var target = panes.First(d => d.DocId == open[0].DocId);
-                        bool floating = target.DockState == DockState.Float;
-                        BringPaneToFront(target);
-                        _debugLogService?.Info("MainForm", $"open project '{project.Name}' over REST: focused '{open[0].Title}' ({open.Count} pane(s))");
-                        outcome = new ProjectOpenOutcome(ProjectOpenResult.Focused, project.Id, project.Name,
-                            PaneTitle: open[0].Title, Floating: floating, OtherPanes: open.Count - 1);
-                        return;
-                    }
-
-                    _debugLogService?.Info("MainForm", $"open project '{project.Name}' over REST: not open, launching on a Home tab");
-                    string id = project.Id;
-                    BeginInvoke(new Action(() =>
+                    try
                     {
                         if (WindowState == FormWindowState.Minimized)
                             WindowState = FormWindowState.Normal;
                         Activate();
-                        RunOnHomeTab((sender, _) => OnStartScreenProjectLaunched(sender, new StartScreenLaunchEventArgs(id)));
-                    }));
-                    outcome = new ProjectOpenOutcome(ProjectOpenResult.Launching, project.Id, project.Name);
+                        RunOnHomeTab((sender, _) =>
+                        {
+                            OnStartScreenProjectLaunched(sender, new StartScreenLaunchEventArgs(id));
+                            // Give the launched pane the green border (review of PR #104): Activate() above queued the
+                            // activation focus restore, which focuses the bordered pane, and the border may still be on
+                            // the pane that had it before.
+                            if (sender is TerminalDocument launched && !launched.IsDisposed && launched.IsTerminalStarted)
+                            {
+                                foreach (var termDoc in _dockPanel.Contents.OfType<TerminalDocument>())
+                                    termDoc.SetFocusBorder(termDoc == launched);
+                                _lastActiveTerminal = launched;
+                            }
+                        });
+                    }
+                    finally
+                    {
+                        _restOpenLaunches.End(id);
+                    }
                 }));
-            }).ConfigureAwait(false);
-            return outcome;
+            }
+            catch (InvalidOperationException)
+            {
+                _restOpenLaunches.End(id);
+                throw;
+            }
+
+            return new ProjectOpenOutcome(ProjectOpenResult.Launching, project.Id, project.Name);
         }
 
         /// <summary>
@@ -5361,12 +5401,12 @@ namespace MultiTerminal
         /// </summary>
         private async Task<IReadOnlyList<ProjectOpenState>> OnProjectOpenStateRequested()
         {
-            IReadOnlyList<ProjectOpenState> state = null;
-            await Task.Run(() =>
-            {
-                Invoke(new Action(() => state = ProjectAlreadyOpen.OpenState(SnapshotOpenPaneFacts(out _))));
-            }).ConfigureAwait(false);
-            return state;
+            // Null (the route answers 503) when the window is not ready or its UI thread does not answer in time.
+            if (IsDisposed || !IsHandleCreated)
+                return null;
+            var (ran, state) = await Services.UiThreadCall.RunAsync<IReadOnlyList<ProjectOpenState>>(
+                work => BeginInvoke(work), () => ProjectAlreadyOpen.OpenState(SnapshotOpenPaneFacts(out _)), Services.UiThreadCall.DefaultTimeout).ConfigureAwait(false);
+            return ran ? state : null;
         }
 
         /// <summary>The panes other than <paramref name="launchingDocId"/> that have the project open
