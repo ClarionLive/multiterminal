@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 
 namespace MultiTerminal.MCPServer.Services
@@ -37,6 +38,22 @@ namespace MultiTerminal.MCPServer.Services
         bool Floating = false,
         int OtherPanes = 0,
         string Error = null);
+
+    /// <summary>
+    /// Vouches for <see cref="Token"/> in <c>GET /api/health</c>'s capabilities: this MT has
+    /// <c>POST /api/projects/{projectId}/open</c>. A caller can then tell a missing route (older MT) from
+    /// an unknown project without reading the shape of a 404. The route exists in every build that
+    /// carries this provider, so the token is always given; a window that is not ready yet still
+    /// answers the route with 503.
+    /// </summary>
+    public sealed class ProjectOpenCapabilityProvider : ICapabilityProvider
+    {
+        /// <summary>The capability token. Clients compare it verbatim.</summary>
+        public const string Token = "project-open-v1";
+
+        /// <inheritdoc />
+        public IEnumerable<string> GetCapabilities() => new[] { Token };
+    }
 
     /// <summary>
     /// <c>POST /api/projects/{projectId}/open</c> (for MT Conductor, ClarionLive#83): bring a project's PM

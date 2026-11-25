@@ -160,6 +160,8 @@ namespace MultiTerminal.API
                 // Ticket 9a731cda item 2: GET /api/health's capabilities, answered from the broker's
                 // runtime state on every request (see CaEmbeddedCapabilityProvider).
                 builder.Services.AddSingleton<ICapabilityProvider>(new CaEmbeddedCapabilityProvider(_broker));
+                // POST /api/projects/{projectId}/open exists in this build (MT Conductor, ClarionLive#83).
+                builder.Services.AddSingleton<ICapabilityProvider>(new ProjectOpenCapabilityProvider());
                 // SessionDatabase removed — sessions now stored in multiterminal.db via SessionLineageService
                 builder.Services.AddSingleton<PlanDatabase>();
                 builder.Services.AddSingleton<TaskDatabase>();
