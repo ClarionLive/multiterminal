@@ -7846,7 +7846,7 @@ namespace MultiTerminal.MCPServer.Services
         /// (task be599e08). Best-effort: the event is raised synchronously, but delivery/injection
         /// is the subscriber's responsibility — a missing terminal is a no-op, not an error here.
         /// </summary>
-        public (bool success, string error) RequestTerminalInject(string agentName, string sessionId, string text, string kind = "clear-trigger", bool continueAfterCompact = false)
+        public (bool success, string error) RequestTerminalInject(string agentName, string sessionId, string text, string kind = "clear-trigger", bool continueAfterCompact = false, string continueAfterClear = null)
         {
             if (string.IsNullOrWhiteSpace(agentName))
                 return (false, "agentName is required");
@@ -7859,7 +7859,8 @@ namespace MultiTerminal.MCPServer.Services
                 SessionId = sessionId,
                 Text = text,
                 Kind = string.IsNullOrEmpty(kind) ? "clear-trigger" : kind,
-                ContinueAfterCompact = continueAfterCompact
+                ContinueAfterCompact = continueAfterCompact,
+                ContinueAfterClear = continueAfterClear
             });
 
             return (true, null);
@@ -8664,6 +8665,13 @@ namespace MultiTerminal.MCPServer.Services
         /// pane to continue once the compaction finishes (ticket c0ebcfd4).
         /// </summary>
         public bool ContinueAfterCompact { get; set; }
+
+        /// <summary>
+        /// Kind <c>"submit"</c> with <see cref="Text"/> <c>/clear</c> only: what <c>clear_my_context</c> was asked to
+        /// carry into the fresh session (<c>continueWith</c>, ticket cc2e51ff). The pane holds it and adds it to the
+        /// prompt typed after the clear. Null for none.
+        /// </summary>
+        public string ContinueAfterClear { get; set; }
 
         /// <summary>Kinds <c>"compact-starting"</c> and <c>"compact-continue"</c>: the pane (MULTITERMINAL_DOC_ID) that is compacting.</summary>
         public string DocId { get; set; }
