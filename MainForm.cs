@@ -5301,7 +5301,8 @@ namespace MultiTerminal
         {
             panes = _dockPanel.Contents.OfType<TerminalDocument>().Where(d => !d.IsDisposed).ToList();
             var facts = panes.Select(d => new OpenPaneFacts(
-                d.DocId, d.LaunchProjectId, d.LaunchRole, d.Terminal?.IsRunning == true, d.IsStartScreenVisible, d.TabText));
+                d.DocId, d.LaunchProjectId, d.LaunchRole, d.Terminal?.IsRunning == true, d.IsStartScreenVisible, d.TabText,
+                d.LastLaunchArgs?.Kind));
             return ProjectAlreadyOpen.FindOpenPanes(projectId, launchingDocId, facts);
         }
 
