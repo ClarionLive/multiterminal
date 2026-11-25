@@ -8,22 +8,22 @@ namespace MultiTerminal.Tests
     /// </summary>
     public class ActivationFocusTests
     {
-        [Fact]
-        public void AltTab_back_with_nothing_focused_goes_to_the_bordered_pane()
+        [Theory]
+        [InlineData(ActivationFocusState.Nothing)]
+        [InlineData(ActivationFocusState.Terminal)]
+        public void AltTab_back_goes_to_the_bordered_pane(ActivationFocusState focused)
         {
+            // Terminal included: WinForms' focused terminal is stale after a click inside a WebView2 page,
+            // so it must not beat the border, which follows clicks. (Owner's live report after the first fix.)
             Assert.Equal(ActivationFocusTarget.BorderedPane,
-                ActivationFocus.Decide(mouseButtonDown: false, hasBorderedTerminal: true, ActivationFocusState.Nothing));
+                ActivationFocus.Decide(mouseButtonDown: false, hasBorderedTerminal: true, focused));
         }
 
-        [Theory]
-        [InlineData(true)]
-        [InlineData(false)]
-        public void A_focused_terminal_wins_over_the_border(bool hasBorderedTerminal)
+        [Fact]
+        public void Without_a_bordered_pane_a_focused_terminal_gets_focus_back()
         {
-            // MT raising itself (the REST open's BringPaneToFront) focuses the target pane without the border
-            // necessarily following; the restore must re-assert that pane, not go back to the bordered one.
             Assert.Equal(ActivationFocusTarget.FocusedPane,
-                ActivationFocus.Decide(mouseButtonDown: false, hasBorderedTerminal, ActivationFocusState.Terminal));
+                ActivationFocus.Decide(mouseButtonDown: false, hasBorderedTerminal: false, ActivationFocusState.Terminal));
         }
 
         [Theory]
