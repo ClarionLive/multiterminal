@@ -795,6 +795,9 @@ namespace MultiTerminal.Controls
         private DateTime _lastClearInjectUtc = DateTime.MinValue;
         private readonly object _clearInjectLock = new object();
 
+        // What clear_my_context asked to carry into the fresh session (ticket cc2e51ff). Guarded by _clearInjectLock.
+        private readonly ClearContinueNote _clearContinue = new ClearContinueNote();
+
         /// <summary>
         /// Keystroke fallback: called when BufferInputForSlashDetection sees the user type
         /// "/clear". The PRIMARY trigger is now the SessionStart(source=clear) hook →
@@ -828,17 +831,21 @@ namespace MultiTerminal.Controls
                 }
 
                 _lastClearInjectUtc = now;
-                // The note clear_my_context left for this clear (ticket cc2e51ff), taken once, here, so the
-                // hook path and the keystroke fallback cannot both carry it.
+                // The note clear_my_context left for this clear (ticket cc2e51ff), taken once, here, so the two
+                // paths cannot both carry it. Only the hook path delivers it: an agent's /clear is written to the
+                // ConPTY directly and never reaches the keystroke detector, so a keystroke trigger is a /clear
+                // somebody TYPED, which is not the clear the note was left for. It drops the note.
                 note = _clearContinue.TryTake(now);
+                if (note != null && !ClearContinueNote.SourceMayDeliver(source))
+                {
+                    LogTrace("/clear continue note dropped: this /clear was typed in the pane, not the agent's");
+                    note = null;
+                }
             }
 
             LogTrace($"/clear session-start injection triggered (source={source}{(note == null ? string.Empty : $", with a continue note of {note.Length} chars")})");
-            _ = InjectInitializingAfterClearAsync(ClearContinueNote.Compose(text, note));
+            _ = InjectInitializingAfterClearAsync(text, note);
         }
-
-        // What clear_my_context asked to carry into the fresh session (ticket cc2e51ff). Guarded by _clearInjectLock.
-        private readonly ClearContinueNote _clearContinue = new ClearContinueNote();
 
         /// <summary>
         /// Holds the text an agent passed to <c>clear_my_context</c> as <c>continueWith</c>, for this pane's next
@@ -852,12 +859,21 @@ namespace MultiTerminal.Controls
             }
         }
 
+        /// <summary>Drops a held continue note: its <c>/clear</c> could not be typed (ticket cc2e51ff).</summary>
+        public void DisarmClearContinue()
+        {
+            lock (_clearInjectLock)
+            {
+                _clearContinue.Arm(null, DateTime.UtcNow);
+            }
+        }
+
         /// <summary>
         /// Flushes the now-frozen session's memory/lineage, waits for the renderer to settle
         /// after the /clear transition, then injects <paramref name="text"/> to trigger the
         /// session-start flow. Funneled through <see cref="TriggerClearSessionStart"/>.
         /// </summary>
-        private async Task InjectInitializingAfterClearAsync(string text)
+        private async Task InjectInitializingAfterClearAsync(string text, string note = null)
         {
             // Flush session memory for this project (old session file is now frozen)
             FlushSessionMemoryAsync();
@@ -871,7 +887,7 @@ namespace MultiTerminal.Controls
 
             if (_isDisposed || _terminal == null || !_terminal.IsRunning)
             {
-                LogTrace($"/clear injection aborted: terminal not running (disposed={_isDisposed}, terminal={(_terminal == null ? "null" : "ok")}, running={_terminal?.IsRunning ?? false})");
+                LogTrace($"/clear injection aborted: terminal not running (disposed={_isDisposed}, terminal={(_terminal == null ? "null" : "ok")}, running={_terminal?.IsRunning ?? false}){(note == null ? string.Empty : "; its continue note was lost")}");
                 return;
             }
 
@@ -885,13 +901,15 @@ namespace MultiTerminal.Controls
 
             if (!IsRendererReady)
             {
-                LogTrace($"/clear injection failed: renderer not ready after {waitedMs}ms (renderer={(_renderer == null ? "null" : "not initialized")})");
+                LogTrace($"/clear injection failed: renderer not ready after {waitedMs}ms (renderer={(_renderer == null ? "null" : "not initialized")}){(note == null ? string.Empty : "; its continue note was lost")}");
                 return;
             }
 
-            // Quiet start (GitHub #34): the session/lineage flush above still runs, but nothing is typed.
-            // The SessionStart hook does not ask for session-start in a quiet terminal either.
-            if (QuietStart)
+            // Quiet start (GitHub #34): the session/lineage flush above still runs, but nothing is typed and no
+            // session-start runs, EXCEPT an agent's continue note (ticket cc2e51ff), typed on its own with a plain
+            // "your context was cleared" head instead of the hook's text.
+            text = ClearContinueNote.PromptAfterClear(text, note, QuietStart);
+            if (text == null)
             {
                 LogTrace("/clear injection skipped: quiet start");
                 return;

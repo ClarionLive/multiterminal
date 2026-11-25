@@ -17,8 +17,12 @@ namespace MultiTerminal.Services
     /// </summary>
     public sealed class ClearContinueNote
     {
-        /// <summary>How long an armed note waits for its clear. The <c>/clear</c> is typed at once, so minutes is generous.</summary>
-        public static readonly TimeSpan Expiry = TimeSpan.FromMinutes(10);
+        /// <summary>
+        /// How long an armed note waits for its clear. The hook's request arrives about 4 s after the agent's
+        /// <c>/clear</c> (MT log, 2026-11-24); a short window keeps a note whose clear never came from riding on
+        /// a later, unrelated one (pipeline Run 1).
+        /// </summary>
+        public static readonly TimeSpan Expiry = TimeSpan.FromMinutes(2);
 
         /// <summary>Longest note kept; the rest is cut. It is typed into the pane one character at a time.</summary>
         public const int MaxLength = 1500;
@@ -78,9 +82,8 @@ namespace MultiTerminal.Services
                     break;
             }
 
+            // The loop stops at MaxLength, so no further cut is needed.
             string result = sb.ToString().Trim();
-            if (result.Length > MaxLength)
-                result = result.Substring(0, MaxLength).TrimEnd();
             // Cut in the middle of a surrogate pair: drop the orphan.
             if (result.Length > 0 && char.IsHighSurrogate(result[result.Length - 1]))
                 result = result.Substring(0, result.Length - 1);
@@ -88,8 +91,30 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Whether a post-clear trigger from <paramref name="source"/> may deliver the note. Only the SessionStart
+        /// hook's ("hook"): an agent's <c>/clear</c> is written to the ConPTY directly and never reaches the keystroke
+        /// detector, so a "keystroke" trigger is a <c>/clear</c> somebody typed, not the clear the note was left
+        /// for (pipeline Run 1: a stale note must not run in the wrong session).
+        /// </summary>
+        public static bool SourceMayDeliver(string source) => string.Equals(source, "hook", StringComparison.Ordinal);
+
+        /// <summary>
+        /// What to type after a clear, or null for nothing. A quiet-start pane gets nothing, except a note,
+        /// typed with a plain head instead of the hook's text (no session-start in a quiet pane); any other
+        /// pane gets <see cref="Compose"/> of the hook's text and the note.
+        /// </summary>
+        public static string PromptAfterClear(string baseText, string note, bool quietStart)
+        {
+            if (quietStart)
+                return note == null ? null : Compose(null, note);
+            return Compose(baseText, note);
+        }
+
+        /// <summary>
         /// The prompt typed after the clear: <paramref name="baseText"/> (the hook's text, or "initializing...")
-        /// followed by the note, on one line. No note gives <paramref name="baseText"/> unchanged.
+        /// followed by the note, on one line. No note gives <paramref name="baseText"/> unchanged. The note is
+        /// always LAST and introduced by exactly "Before clearing, you left yourself this to do next:": the
+        /// plugin's helper /clear text tells the agent to look for that phrase at the end of the prompt.
         /// </summary>
         public static string Compose(string baseText, string note)
         {

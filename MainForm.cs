@@ -1969,16 +1969,27 @@ namespace MultiTerminal
                 }
 
                 // An agent-requested /clear (clear_my_context) with a continueWith note (ticket cc2e51ff): the pane
-                // holds the note BEFORE the /clear is typed, so its post-clear prompt (raised by the SessionStart
-                // hook, or the keystroke fallback) carries it into the fresh session. Every agent /clear arms,
-                // a blank note included, so an older note is never attached to this clear.
-                if (e.Text != null && e.Text.Trim().Equals("/clear", StringComparison.Ordinal))
-                    targetDoc.Terminal.ArmClearContinue(e.ContinueAfterClear);
+                // holds the note BEFORE the /clear is typed, so the post-clear prompt the SessionStart hook asks for
+                // carries it into the fresh session. Every agent /clear arms, a blank note included, so an older note
+                // is never attached to this clear; a /clear that could not be typed disarms it again (pipeline Run 1).
+                bool agentClear = e.Text != null && e.Text.Trim().Equals("/clear", StringComparison.Ordinal);
+                var clearTerminal = targetDoc.Terminal;
+                if (agentClear)
+                    clearTerminal.ArmClearContinue(e.ContinueAfterClear);
 
                 _ = targetDoc.InjectInputAsync(e.Text).ContinueWith(
-                    t => _debugLogService?.Error("MainForm",
-                        $"TerminalInjectRequested(submit) for '{e.AgentName}' faulted: {t.Exception?.GetBaseException().Message}"),
-                    System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);
+                    t =>
+                    {
+                        bool typed = t.Status == System.Threading.Tasks.TaskStatus.RanToCompletion && t.Result;
+                        if (t.IsFaulted)
+                            _debugLogService?.Error("MainForm", $"TerminalInjectRequested(submit) for '{e.AgentName}' faulted: {t.Exception?.GetBaseException().Message}");
+                        if (agentClear && !typed)
+                        {
+                            clearTerminal.DisarmClearContinue();
+                            _debugLogService?.Warning("MainForm", $"/clear for '{e.AgentName}' was not typed; its continue note was dropped");
+                        }
+                    },
+                    System.Threading.Tasks.TaskScheduler.Default);
                 return;
             }
 

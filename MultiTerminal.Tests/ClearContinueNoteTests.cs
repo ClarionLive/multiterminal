@@ -34,7 +34,43 @@ namespace MultiTerminal.Tests
             var n = new ClearContinueNote();
             n.Arm("old", T0);
             Assert.Null(n.TryTake(T0 + ClearContinueNote.Expiry + TimeSpan.FromSeconds(1)));
-            Assert.Null(n.TryTake(T0));
+        }
+
+        /// <summary>A clock that went backwards (taken "before" it was armed) is not trusted either.</summary>
+        [Fact]
+        public void A_note_taken_before_its_arm_time_is_dropped()
+        {
+            var n = new ClearContinueNote();
+            n.Arm("note", T0);
+            Assert.Null(n.TryTake(T0.AddSeconds(-1)));
+        }
+
+        /// <summary>
+        /// Only the hook's trigger delivers a note: a typed /clear (the keystroke fallback) is not the agent's clear.
+        /// Falsified: returning true for "keystroke" turns this red.
+        /// </summary>
+        [Fact]
+        public void Only_the_hook_trigger_may_deliver_a_note()
+        {
+            Assert.True(ClearContinueNote.SourceMayDeliver("hook"));
+            Assert.False(ClearContinueNote.SourceMayDeliver("keystroke"));
+            Assert.False(ClearContinueNote.SourceMayDeliver(null));
+        }
+
+        /// <summary>
+        /// A quiet-start pane gets nothing typed after a clear, unless the agent left a note; then only the note,
+        /// with a plain head, never the hook's text (which would start session-start). Falsified: returning
+        /// Compose(baseText, note) for a quiet pane turns the third assertion red.
+        /// </summary>
+        [Fact]
+        public void A_quiet_pane_gets_only_a_note()
+        {
+            Assert.Null(ClearContinueNote.PromptAfterClear("initializing...", null, quietStart: true));
+            Assert.Equal("initializing...", ClearContinueNote.PromptAfterClear("initializing...", null, quietStart: false));
+
+            string quiet = ClearContinueNote.PromptAfterClear("initializing...", "Claim card X.", quietStart: true);
+            Assert.DoesNotContain("initializing", quiet);
+            Assert.Equal("[MultiTerminal] Your context was cleared. Before clearing, you left yourself this to do next: Claim card X.", quiet);
         }
 
         [Fact]
