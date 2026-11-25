@@ -54,6 +54,9 @@ namespace MultiTerminal
         private ProjectService _projectService;
         private ToolStripDropDownButton _recentFoldersDropdown;
         private TerminalDocument _lastActiveTerminal;
+
+        /// <summary>Floating windows already wired for <see cref="RestoreTerminalFocusOnActivate"/> (task 76a9d71a).</summary>
+        private readonly HashSet<Form> _activationHookedWindows = new HashSet<Form>();
         private Models.Project _currentProject;
 
         // REST API Server for inter-terminal communication
@@ -921,6 +924,9 @@ namespace MultiTerminal
             // Handle active document changes
             _dockPanel.ActiveDocumentChanged += OnActiveDocumentChanged;
 
+            // Alt+Tab back into a floating window must give its bordered pane focus too (task 76a9d71a).
+            _dockPanel.ContentAdded += OnContentAddedForActivation;
+
             // Robustly tear a terminal down when its tab is closed. ContentRemoved is
             // DockPanelSuite's authoritative "this content left the panel" signal — unlike
             // relying on TerminalDocument.Dispose, which WebView2-hosted docs can skip on a
@@ -1435,6 +1441,11 @@ namespace MultiTerminal
                 _mcpServer.SpawnService.OnSpawnAgentRequested = OnSpawnAgentRequested;
                 _mcpServer.SpawnService.OnCloseRequested = OnSpawnedPaneCloseRequested;
                 _mcpServer.SpawnService.Jobs.Collected += OnSpawnJobCollected;
+                if (_mcpServer.ProjectOpenService != null)
+                {
+                    _mcpServer.ProjectOpenService.OnOpenRequested = OnProjectOpenRequested;
+                    _mcpServer.ProjectOpenService.OnOpenStateRequested = OnProjectOpenStateRequested;
+                }
 
                 // The launch record (task 7d20e94c): one recorder per MT process, on the broker's
                 // database, which is open from here on. Panes are created after this (session restore
@@ -5521,15 +5532,123 @@ namespace MultiTerminal
             return AlreadyOpenAnswer.Switched;
         }
 
+        /// <summary>
+        /// <c>POST /api/projects/{id}/open</c> (MT Conductor, ClarionLive#83). On the UI thread: when a PM
+        /// pane has the project open, bring the first one to the front (the same pane the "already open"
+        /// question's Switch picks); otherwise post a launch on a Home tab, exactly as the header's Launch
+        /// Project does, and answer at once. The launch is posted rather than run inside this call because
+        /// it can show modal questions (the session choice, a profile refusal), and a REST caller must not
+        /// be held open until the Owner answers them.
+        /// </summary>
+        private async Task<ProjectOpenOutcome> OnProjectOpenRequested(string projectId)
+        {
+            // Posted with a time limit (review of PR #103): a stalled UI thread answers "busy" instead of
+            // holding the HTTP request, and work abandoned at the limit never runs late.
+            if (IsDisposed || !IsHandleCreated)
+                return new ProjectOpenOutcome(ProjectOpenResult.Failed, projectId, Error: "MultiTerminal's window is not ready yet.");
+            var (ran, result) = await Services.UiThreadCall.RunAsync<ProjectOpenOutcome>(
+                work => BeginInvoke(work), () => OpenProjectOnUiThread(projectId), Services.UiThreadCall.DefaultTimeout).ConfigureAwait(false);
+            return ran ? result : new ProjectOpenOutcome(ProjectOpenResult.Failed, projectId, Error: "MultiTerminal is busy; try again.");
+        }
+
+        // Launches started by POST /api/projects/{id}/open that have not finished yet (review of PR #103).
+        private readonly Services.ProjectOpenGate _restOpenLaunches = new Services.ProjectOpenGate();
+
+        /// <summary>The UI-thread half of <see cref="OnProjectOpenRequested"/>.</summary>
+        private ProjectOpenOutcome OpenProjectOnUiThread(string projectId)
+        {
+            var project = _sharedProjectDatabase?.GetRichProject(projectId);
+            if (project == null || !string.Equals(project.Id, projectId, StringComparison.Ordinal))
+                return new ProjectOpenOutcome(ProjectOpenResult.NotFound, projectId);
+
+            var open = FindPanesWithProjectOpen(project.Id, launchingDocId: null, out var panes);
+            if (open.Count > 0)
+            {
+                var target = panes.First(d => d.DocId == open[0].DocId);
+                bool floating = target.DockState == DockState.Float;
+                BringPaneToFront(target);
+                _debugLogService?.Info("MainForm", $"open project '{project.Name}' over REST: focused '{open[0].Title}' ({open.Count} pane(s))");
+                return new ProjectOpenOutcome(ProjectOpenResult.Focused, project.Id, project.Name,
+                    PaneTitle: open[0].Title, Floating: floating, OtherPanes: open.Count - 1);
+            }
+
+            string id = project.Id;
+            // One launch per project at a time (review of PR #103): the launch can wait in modal questions, whose
+            // message loop serves the next request; a second request joins the first instead of posting another
+            // launch onto the same Home tab.
+            if (!_restOpenLaunches.TryBegin(id))
+            {
+                _debugLogService?.Info("MainForm", $"open project '{project.Name}' over REST: a launch is already under way; not starting another");
+                return new ProjectOpenOutcome(ProjectOpenResult.Launching, project.Id, project.Name);
+            }
+
+            _debugLogService?.Info("MainForm", $"open project '{project.Name}' over REST: not open, launching on a Home tab");
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    try
+                    {
+                        if (WindowState == FormWindowState.Minimized)
+                            WindowState = FormWindowState.Normal;
+                        Activate();
+                        RunOnHomeTab((sender, _) =>
+                        {
+                            OnStartScreenProjectLaunched(sender, new StartScreenLaunchEventArgs(id));
+                            // Give the launched pane the green border (review of PR #104): Activate() above queued the
+                            // activation focus restore, which focuses the bordered pane, and the border may still be on
+                            // the pane that had it before.
+                            if (sender is TerminalDocument launched && !launched.IsDisposed && launched.IsTerminalStarted)
+                            {
+                                foreach (var termDoc in _dockPanel.Contents.OfType<TerminalDocument>())
+                                    termDoc.SetFocusBorder(termDoc == launched);
+                                _lastActiveTerminal = launched;
+                            }
+                        });
+                    }
+                    finally
+                    {
+                        _restOpenLaunches.End(id);
+                    }
+                }));
+            }
+            catch (InvalidOperationException)
+            {
+                _restOpenLaunches.End(id);
+                throw;
+            }
+
+            return new ProjectOpenOutcome(ProjectOpenResult.Launching, project.Id, project.Name);
+        }
+
+        /// <summary>
+        /// <c>GET /api/projects/open-state</c>: on the UI thread, every project open in a PM pane and how many
+        /// panes, by <see cref="ProjectAlreadyOpen.FindOpenPanes"/> (the rule the open and the "already open"
+        /// question use).
+        /// </summary>
+        private async Task<IReadOnlyList<ProjectOpenState>> OnProjectOpenStateRequested()
+        {
+            // Null (the route answers 503) when the window is not ready or its UI thread does not answer in time.
+            if (IsDisposed || !IsHandleCreated)
+                return null;
+            var (ran, state) = await Services.UiThreadCall.RunAsync<IReadOnlyList<ProjectOpenState>>(
+                work => BeginInvoke(work), () => ProjectAlreadyOpen.OpenState(SnapshotOpenPaneFacts(out _)), Services.UiThreadCall.DefaultTimeout).ConfigureAwait(false);
+            return ran ? state : null;
+        }
+
         /// <summary>The panes other than <paramref name="launchingDocId"/> that have the project open
         /// (<see cref="ProjectAlreadyOpen.FindOpenPanes"/>), and every live pane they were picked from.
         /// <c>DockPanel.Contents</c> includes floating, auto-hidden and hidden panes.</summary>
         private IReadOnlyList<OpenPaneFacts> FindPanesWithProjectOpen(string projectId, string launchingDocId, out List<TerminalDocument> panes)
+            => ProjectAlreadyOpen.FindOpenPanes(projectId, launchingDocId, SnapshotOpenPaneFacts(out panes));
+
+        /// <summary>Every live pane and its <see cref="OpenPaneFacts"/>: the one snapshot the open, the
+        /// open-state and the "already open" question all read, so they cannot disagree.</summary>
+        private List<OpenPaneFacts> SnapshotOpenPaneFacts(out List<TerminalDocument> panes)
         {
             panes = _dockPanel.Contents.OfType<TerminalDocument>().Where(d => !d.IsDisposed).ToList();
-            var facts = panes.Select(d => new OpenPaneFacts(
-                d.DocId, d.LaunchProjectId, d.LaunchRole, d.Terminal?.IsRunning == true, d.IsStartScreenVisible, d.TabText));
-            return ProjectAlreadyOpen.FindOpenPanes(projectId, launchingDocId, facts);
+            return panes.Select(d => new OpenPaneFacts(
+                d.DocId, d.LaunchProjectId, d.LaunchRole, d.Terminal?.IsRunning == true, d.IsStartScreenVisible, d.TabText)).ToList();
         }
 
         /// <summary>
@@ -5553,6 +5672,12 @@ namespace MultiTerminal
             pane.Activate();
             pane.FocusTerminal();
             _lastActiveTerminal = pane;
+
+            // Activate() raises no ActiveDocumentChanged when the pane already was the dock panel's active
+            // document (a click into another pane's terminal does not change it), so move the border here too.
+            // Contents, not Documents: a floating pane is not a document.
+            foreach (var termDoc in _dockPanel.Contents.OfType<TerminalDocument>())
+                termDoc.SetFocusBorder(termDoc == pane);
         }
 
         /// <summary>
@@ -8202,12 +8327,159 @@ namespace MultiTerminal
                 $"'{activeDoc.TabText}' became active while you were typing in '{previous.TabText}'. Called from: {string.Join(" < ", callers)}");
         }
 
+        protected override void OnActivated(EventArgs e)
+        {
+            base.OnActivated(e);
+            OnHostWindowActivated(this);
+        }
+
+        private void OnContentAddedForActivation(object sender, DockContentEventArgs e)
+        {
+            if (e.Content is TerminalDocument doc)
+            {
+                doc.DockStateChanged -= OnTerminalDockStateChangedForActivation;
+                doc.DockStateChanged += OnTerminalDockStateChangedForActivation;
+            }
+
+            // A pane restored straight into a floating window never changes dock state, and its window
+            // may not exist yet while it is being added: look again once the layout has settled.
+            if (IsHandleCreated)
+                BeginInvoke(new Action(HookFloatWindowsForActivation));
+        }
+
+        private void OnTerminalDockStateChangedForActivation(object sender, EventArgs e) => HookFloatWindowsForActivation();
+
+        /// <summary>
+        /// Wires every floating window's Activated event once. Called when content is added, when a pane
+        /// changes dock state, and when the active pane changes (a pane dragged from one floating window into
+        /// another stays Float, so only the last of these sees its new window).
+        /// </summary>
+        private void HookFloatWindowsForActivation()
+        {
+            try
+            {
+                if (_dockPanel == null || _dockPanel.IsDisposed)
+                    return;
+                foreach (var floatWindow in _dockPanel.FloatWindows)
+                {
+                    if (floatWindow == null || floatWindow.IsDisposed || !_activationHookedWindows.Add(floatWindow))
+                        continue;
+                    floatWindow.Activated += (s, _) => OnHostWindowActivated((Form)s);
+                    floatWindow.Disposed += (s, _) => _activationHookedWindows.Remove((Form)s);
+
+                    // Activated before it was wired (Alt+Tab straight into a just-restored window): that
+                    // activation was missed, so act on it now. The usual guards still apply.
+                    if (Form.ActiveForm == floatWindow)
+                        OnHostWindowActivated(floatWindow);
+                }
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("MainForm", $"HookFloatWindowsForActivation error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// A MultiTerminal window was activated. Read the mouse now, while it still says how the window was
+        /// activated, and restore after the activation has finished moving focus (task 76a9d71a).
+        /// </summary>
+        private void OnHostWindowActivated(Form window)
+        {
+            try
+            {
+                if (window.IsDisposed || !IsHandleCreated)
+                    return;
+                bool mouseButtonDown = Control.MouseButtons != System.Windows.Forms.MouseButtons.None;
+                BeginInvoke(new Action(() => RestoreTerminalFocusOnActivate(window, mouseButtonDown)));
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("MainForm", $"OnHostWindowActivated error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Puts the keyboard focus back in the pane with the green border, if that pane is in
+        /// <paramref name="window"/> and focus is not in some other control there. See <see cref="ActivationFocus"/>.
+        /// </summary>
+        private void RestoreTerminalFocusOnActivate(Form window, bool mouseButtonDown)
+        {
+            try
+            {
+                if (window.IsDisposed || Form.ActiveForm != window)
+                    return;
+
+                // A DockContent is itself a Form, so FindForm() would return the pane: TopLevelControl
+                // is the window it sits in (the main window or a floating one).
+                // A pane showing its Home screen has no terminal to type into: it does not count.
+                TerminalDocument bordered = null;
+                // Contents, not Documents: a pane in a floating window is not a document.
+                foreach (var doc in _dockPanel.Contents.OfType<TerminalDocument>())
+                {
+                    if (doc.HasFocusBorder && !doc.IsDisposed && !doc.IsStartScreenVisible && doc.TopLevelControl == window)
+                    {
+                        bordered = doc;
+                        break;
+                    }
+                }
+
+                var focused = FocusStateOf(window, out TerminalDocument focusedPane);
+                switch (ActivationFocus.Decide(mouseButtonDown, bordered != null, focused))
+                {
+                    case ActivationFocusTarget.FocusedPane:
+                        focusedPane?.FocusTerminal();
+                        break;
+                    case ActivationFocusTarget.BorderedPane:
+                        bordered?.FocusTerminal();
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("MainForm", $"RestoreTerminalFocusOnActivate error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Follows the ActiveControl chain to the control that really has focus in the window. Only the
+        /// terminal itself counts as Terminal: a pane's agent panel, HUD or start screen is another control,
+        /// and focus there is kept. <paramref name="focusedPane"/> is the pane whose terminal has focus.
+        /// </summary>
+        private static ActivationFocusState FocusStateOf(Form window, out TerminalDocument focusedPane)
+        {
+            focusedPane = null;
+            Control c = window.ActiveControl;
+            while (c is ContainerControl cc && cc.ActiveControl != null)
+                c = cc.ActiveControl;
+
+            // Nothing active, or only a container with nothing deeper (DockPanelSuite's dock panel, a pane,
+            // or a pane's own document form): not a control you were typing in.
+            if (c == null || c is DockPanel || c is DockPane || c is TerminalDocument)
+                return ActivationFocusState.Nothing;
+
+            for (Control p = c; p != null; p = p.Parent)
+            {
+                if (p is TerminalDocument doc)
+                {
+                    var terminal = doc.Terminal;
+                    if (terminal != null && (terminal == c || terminal.Contains(c)))
+                    {
+                        focusedPane = doc;
+                        return ActivationFocusState.Terminal;
+                    }
+                    return ActivationFocusState.OtherControl;
+                }
+            }
+            return ActivationFocusState.OtherControl;
+        }
+
         private void OnActiveDocumentChanged(object sender, EventArgs e)
         {
             try
             {
                 var activeDoc = _dockPanel.ActiveDocument as TerminalDocument;
                 LogSwitchAfterTyping(activeDoc);
+                HookFloatWindowsForActivation();
 
                 // The Attention Rail's highlight has to follow focus changed by clicking a TAB,
                 // not just focus it requested itself (task 42052f0c, pipeline run 1).

@@ -1294,6 +1294,47 @@ curl "http://localhost:5050/api/session-lineage/latest?projectPath=H%3A%5CDevLap
   <h4>curl</h4>
   <pre><code>curl http://localhost:5050/api/projects/contexts</code></pre>
 
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/projects/{projectId}/open</code>
+  </div>
+  <p>Bring a project forward in MultiTerminal, for an outside dashboard such as MT Conductor. If a
+  Project Manager pane has the project open, MT brings that pane to the front and answers
+  <code>200</code>. If not, MT launches the project on a Home tab, as the header's Launch Project
+  does, and answers <code>202</code> at once, without waiting for any question the launch asks.
+  <code>404</code> means an unknown project. <code>503</code> means MT's window is not ready or the
+  open failed. This route is not available through the phone gateway.</p>
+  <p>Windows only lets the foreground app hand focus to another one. A caller outside MT should call
+  <code>AllowSetForegroundWindow</code> with MT's process id (from <code>GET /api/health</code>)
+  first, or MT may only flash in the taskbar.</p>
+  <p>An MT that has this route lists <code>project-open-v1</code> in the <code>capabilities</code>
+  array of <code>GET /api/health</code>. Check for it before calling, so an older MT is not mistaken
+  for an unknown project.</p>
+  <h4>Response</h4>
+  <pre><code>// 200: the project was open, and its pane is now in front
+{ "result": "focused", "projectId": "02629766", "projectName": "MultiTerminal",
+  "paneTitle": "Bob", "floating": false, "otherPanes": 0 }
+
+// 202: the project was not open, and its launch has started
+{ "result": "launching", "projectId": "02629766", "projectName": "MultiTerminal" }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/projects/02629766/open</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/projects/open-state</code>
+  </div>
+  <p>Which projects are open in MultiTerminal right now, so a dashboard can label a project
+  "Switch to" or "Open" before calling the route above. A project is open when a running Project
+  Manager pane has it, by the same rule the open and the "already open" question use. Helper panes
+  and panes back on their Home screen do not count. A project that is not listed has no pane open.
+  <code>503</code> means MT's window is not ready. This route is not available through the phone
+  gateway.</p>
+  <p>An MT that has this route lists <code>project-open-state-v1</code> in the
+  <code>capabilities</code> array of <code>GET /api/health</code>.</p>
+  <h4>Response</h4>
+  <pre><code>{ "projects": [ { "projectId": "02629766", "openPanes": 1 } ] }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/projects/open-state</code></pre>
+
   <!-- ================================================================== -->
   <h2 id="team">Team</h2>
   <!-- ================================================================== -->
@@ -2430,6 +2471,10 @@ ws.onmessage = (e) => { /* handle terminal output */ };</code></pre>
   <div class="endpoint-block">
     <span class="method get">GET</span> <code>/api/health</code>
   </div>
+  <p>Its <code>capabilities</code> array lists features a client can check for before calling them:
+  <code>ca-embedded-v1</code> (ClarionAssistant tabs may register), <code>project-open-v1</code>
+  (<code>POST /api/projects/{projectId}/open</code>) and <code>project-open-state-v1</code>
+  (<code>GET /api/projects/open-state</code>). Tokens are compared verbatim.</p>
 
   <div class="endpoint-block">
     <span class="method post">POST</span> <code>/api/knowledge/bump</code>
