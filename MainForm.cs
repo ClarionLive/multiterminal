@@ -1481,13 +1481,13 @@ namespace MultiTerminal
                         // Crash recovery: index any unflushed sessions from previous runs
                         // Must run after StartAsync so ProjectService is wired.
                         //
-                        // Runs on its OWN background task rather than inline. Inline, every step below
-                        // (activity watcher, liveness reaper, GitHub watch, plugin check, phone gateway)
-                        // waited for it. That is ~1 s normally, but one long-lived session
-                        // finally going idle is indexed in one go. Measured: a single 45 MB transcript
-                        // took 218 s (1,723 chunks), and the attention rail's poller and the gateway
-                        // started nearly 4 minutes late. Nothing below reads the session-memory index,
-                        // so none of it needs to wait. Search just returns more as indexing catches up.
+                        // Runs on its OWN background task rather than inline in this (already off-UI-thread)
+                        // startup chain. Inline, every step below (activity watcher, liveness reaper, GitHub
+                        // watch, plugin check, phone gateway) waited for it, and one long-lived session that
+                        // finally went idle is indexed in one go: PR #105 reports a 45 MB transcript taking
+                        // minutes, with those services starting that much later. Nothing below reads the
+                        // session-memory index, so none of it needs to wait; search returns more as indexing
+                        // catches up. It stops when MT closes (_crashRecoveryStop).
                         _ = Task.Run(RunCrashRecoveryIndexing);
 
                         // The REST host has assigned Broker.ActivityFeedService by now, so the
@@ -8480,6 +8480,10 @@ namespace MultiTerminal
             // Idempotent, so the session-save pass's re-triggered Close() does nothing twice.
             _paneLaunches?.BeginShutdown();
 
+            // Background crash-recovery indexing stops at the next chunk (review of PR #105), so the session-memory
+            // flush below and the database's Dispose do not wait for a whole transcript.
+            _crashRecoveryStop = true;
+
             // Stop the UI timers whose ticks start async work (GitHub #38). Disposed only in Dispose,
             // they kept starting awaits while MT closed, and an await that finishes after the message
             // loop has ended posts to a dead UI context: the BeginInvoke crash, on the way out.
@@ -10403,6 +10407,10 @@ namespace MultiTerminal
         /// already expected: the REST API is live throughout, and each file's write goes through
         /// <c>SqliteWriteGate</c>. Never throws; failures are logged as before.
         /// </summary>
+        // Set once MT is really closing (OnFormClosing, after the exit confirmation); read by the background
+        // crash-recovery indexing (review of PR #105).
+        private volatile bool _crashRecoveryStop;
+
         private void RunCrashRecoveryIndexing()
         {
             try
@@ -10418,11 +10426,12 @@ namespace MultiTerminal
                 Services.WriteContentionDiagnostics.MarkPhase("Crash-recovery session indexing started in background (REST API is already accepting requests)");
                 foreach (var project in projects)
                 {
-                    // Stop early on shutdown rather than indexing into a database being torn down.
-                    if (IsDisposed || Disposing) return;
+                    // MT is closing (set in OnFormClosing after the exit confirmation): stop. The indexer checks
+                    // the same flag per file and per chunk, so a large transcript cannot hold up the close.
+                    if (_crashRecoveryStop) return;
 
                     if (!string.IsNullOrEmpty(project.Path))
-                        sessionMemDb.IndexProjectSessions(project.Path);
+                        sessionMemDb.IndexProjectSessions(project.Path, () => _crashRecoveryStop);
                 }
 
                 Services.WriteContentionDiagnostics.MarkPhase($"Crash-recovery session indexing finished in {recoverySw.ElapsedMilliseconds}ms");

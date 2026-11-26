@@ -167,7 +167,16 @@ namespace MultiTerminal.Services
         /// Index a session JSONL file: read, filter, chunk, embed, store.
         /// Returns the number of chunks created, or 0 if already indexed or empty.
         /// </summary>
-        public int IndexSessionFile(string jsonlPath, string terminalName = null, string projectPath = null)
+        public int IndexSessionFile(string jsonlPath, string terminalName = null, string projectPath = null) =>
+            IndexSessionFile(jsonlPath, terminalName, projectPath, shouldStop: null);
+
+        /// <summary>
+        /// As above; <paramref name="shouldStop"/> (review of PR #105) is asked before embedding and between
+        /// chunks, and a true answer abandons the file before anything is written, so a caller that is shutting
+        /// down releases the gate within one chunk instead of after a whole transcript (minutes for a big one).
+        /// An abandoned file is not marked indexed and is picked up again next time.
+        /// </summary>
+        internal int IndexSessionFile(string jsonlPath, string terminalName, string projectPath, Func<bool> shouldStop)
         {
             using var gate = _gate.Enter();
             // CA3003: jsonlPath reaches this sink only through sanitized flows — SessionMemoryController.
@@ -191,13 +200,16 @@ namespace MultiTerminal.Services
             var chunks = ChunkText(filteredText);
             if (chunks.Count == 0) return 0;
 
-            // Embed all chunks
+            // Embed all chunks (not even loading the model when the caller is already stopping)
+            if (shouldStop != null && shouldStop()) return 0;
             var embedder = GetEmbedder();
             var embeddings = new List<EmbeddingF32>(chunks.Count);
             foreach (var chunk in chunks)
             {
+                if (shouldStop != null && shouldStop()) return 0;
                 embeddings.Add(embedder.Embed(chunk.Text));
             }
+            if (shouldStop != null && shouldStop()) return 0;
 
             // Write to SQLite in a transaction
             var fileLastModified = File.GetLastWriteTimeUtc(jsonlPath).ToString("o");
@@ -285,7 +297,18 @@ namespace MultiTerminal.Services
         /// caller has already decided (ticket c8ee0eec item 33: from the PANE's profile where one is
         /// known). A null root indexes nothing.
         /// </summary>
-        internal int IndexProjectSessionsUnder(ClaudeDataRoot root, string projectPath, string terminalName = null)
+        internal int IndexProjectSessionsUnder(ClaudeDataRoot root, string projectPath, string terminalName = null) =>
+            IndexProjectSessionsUnder(root, projectPath, terminalName, shouldStop: null);
+
+        /// <summary>
+        /// As <see cref="IndexProjectSessions"/>, stopping as soon as <paramref name="shouldStop"/> answers true:
+        /// checked per file and, inside a file, per chunk (review of PR #105: startup crash recovery runs in the
+        /// background and must let MT close).
+        /// </summary>
+        public int IndexProjectSessions(string projectPath, Func<bool> shouldStop) =>
+            IndexProjectSessionsUnder(ClaudeProfileDataRoots.ForFolder(projectPath), projectPath, null, shouldStop);
+
+        internal int IndexProjectSessionsUnder(ClaudeDataRoot root, string projectPath, string terminalName, Func<bool> shouldStop)
         {
             string claudeFolder = SessionLineageService.GetClaudeProjectFolderUnder(root, projectPath);
             if (claudeFolder == null) return 0;
@@ -309,7 +332,8 @@ namespace MultiTerminal.Services
                 }
                 catch { continue; }
 
-                totalChunks += IndexSessionFile(file, terminalName, projectPath);
+                if (shouldStop != null && shouldStop()) break;
+                totalChunks += IndexSessionFile(file, terminalName, projectPath, shouldStop);
             }
 
             // Subagent sessions
@@ -334,7 +358,8 @@ namespace MultiTerminal.Services
                     }
                     catch { continue; }
 
-                    totalChunks += IndexSessionFile(file, terminalName, projectPath);
+                    if (shouldStop != null && shouldStop()) break;
+                    totalChunks += IndexSessionFile(file, terminalName, projectPath, shouldStop);
                 }
             }
 
@@ -1297,6 +1322,10 @@ namespace MultiTerminal.Services
             _disposed = true;
             if (disposing)
             {
+                // Wait for an operation in progress (review of PR #105): background crash recovery may be mid-file,
+                // and closing the connection or the embedder under it is not safe. A stopping indexer releases
+                // the gate within one chunk.
+                using var gate = _gate.Enter();
                 _embedder?.Dispose();
                 _embedder = null;
                 _connection?.Close();
