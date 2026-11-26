@@ -1479,35 +1479,16 @@ namespace MultiTerminal
                         }
 
                         // Crash recovery: index any unflushed sessions from previous runs
-                        // Must run after StartAsync so ProjectService is wired
-                        try
-                        {
-                            var sessionMemDb = _mcpServer.Broker.SessionMemoryDb;
-                            var projects = _mcpServer.Broker.ProjectService?.GetAllRegisteredProjects();
-                            if (sessionMemDb != null && projects != null)
-                            {
-                                // a5ac5f71: this loop runs AFTER the REST server is live, so its write
-                                // burst overlaps incoming API writes — the prime startup-contention window.
-                                // The markers bound that window in the WriteContention log stream.
-                                var recoverySw = System.Diagnostics.Stopwatch.StartNew();
-                                Services.WriteContentionDiagnostics.MarkPhase("Crash-recovery session indexing started (REST API is already accepting requests)");
-                                foreach (var project in projects)
-                                {
-                                    if (!string.IsNullOrEmpty(project.Path))
-                                        sessionMemDb.IndexProjectSessions(project.Path);
-                                }
-
-                                Services.WriteContentionDiagnostics.MarkPhase($"Crash-recovery session indexing finished in {recoverySw.ElapsedMilliseconds}ms");
-                            }
-                        }
-                        catch (Exception crEx)
-                        {
-                            _debugLogService?.Error("MainForm", $"Session memory crash recovery failed: {crEx.Message}");
-                            if (Services.WriteContentionDiagnostics.IsBusyException(crEx))
-                            {
-                                Services.WriteContentionDiagnostics.LogBusy("MainForm.CrashRecovery", crEx.Message);
-                            }
-                        }
+                        // Must run after StartAsync so ProjectService is wired.
+                        //
+                        // Runs on its OWN background task rather than inline. Inline, every step below
+                        // (activity watcher, liveness reaper, GitHub watch, plugin check, phone gateway)
+                        // waited for it. That is ~1 s normally, but one long-lived session
+                        // finally going idle is indexed in one go. Measured: a single 45 MB transcript
+                        // took 218 s (1,723 chunks), and the attention rail's poller and the gateway
+                        // started nearly 4 minutes late. Nothing below reads the session-memory index,
+                        // so none of it needs to wait. Search just returns more as indexing catches up.
+                        _ = Task.Run(RunCrashRecoveryIndexing);
 
                         // The REST host has assigned Broker.ActivityFeedService by now, so the
                         // attention rail's poller can actually be built (task edcdcdd5).
@@ -10410,6 +10391,49 @@ namespace MultiTerminal
             catch (Exception ex)
             {
                 _debugLogService?.Info("PaneAttention", $"Refresh failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Startup crash recovery: indexes every registered project's session transcripts that
+        /// the session-memory index has not seen yet (files idle for 2+ minutes; already-indexed
+        /// sessions are skipped by <c>IsSessionIndexed</c>).
+        /// Called on a background task from <c>InitializeMcpServerAndChatPanel</c> so that one
+        /// large transcript cannot hold up the services started after it. Concurrent writers are
+        /// already expected: the REST API is live throughout, and each file's write goes through
+        /// <c>SqliteWriteGate</c>. Never throws; failures are logged as before.
+        /// </summary>
+        private void RunCrashRecoveryIndexing()
+        {
+            try
+            {
+                var sessionMemDb = _mcpServer?.Broker?.SessionMemoryDb;
+                var projects = _mcpServer?.Broker?.ProjectService?.GetAllRegisteredProjects();
+                if (sessionMemDb == null || projects == null) return;
+
+                // a5ac5f71: this loop runs AFTER the REST server is live, so its write
+                // burst overlaps incoming API writes — the prime startup-contention window.
+                // The markers bound that window in the WriteContention log stream.
+                var recoverySw = System.Diagnostics.Stopwatch.StartNew();
+                Services.WriteContentionDiagnostics.MarkPhase("Crash-recovery session indexing started in background (REST API is already accepting requests)");
+                foreach (var project in projects)
+                {
+                    // Stop early on shutdown rather than indexing into a database being torn down.
+                    if (IsDisposed || Disposing) return;
+
+                    if (!string.IsNullOrEmpty(project.Path))
+                        sessionMemDb.IndexProjectSessions(project.Path);
+                }
+
+                Services.WriteContentionDiagnostics.MarkPhase($"Crash-recovery session indexing finished in {recoverySw.ElapsedMilliseconds}ms");
+            }
+            catch (Exception crEx)
+            {
+                _debugLogService?.Error("MainForm", $"Session memory crash recovery failed: {crEx.Message}");
+                if (Services.WriteContentionDiagnostics.IsBusyException(crEx))
+                {
+                    Services.WriteContentionDiagnostics.LogBusy("MainForm.CrashRecovery", crEx.Message);
+                }
             }
         }
 
