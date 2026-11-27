@@ -5406,8 +5406,22 @@ namespace MultiTerminal
         private void ReleaseRestOpenWhenOpen(string projectId, bool paneLaunched)
         {
             var watch = System.Diagnostics.Stopwatch.StartNew();
-            bool Ready() => IsDisposed || Services.ProjectOpenGate.MayRelease(
-                FindPanesWithProjectOpen(projectId, launchingDocId: null, out _).Count > 0, paneLaunched, watch.Elapsed);
+            // A failed pane lookup counts as "not open", so the time limit still releases the gate: an exception
+            // here would otherwise leave it held for the rest of the run (and a throwing timer ticking forever).
+            bool Ready()
+            {
+                if (IsDisposed) return true;
+                bool open;
+#pragma warning disable CA1031 // any failure of the lookup must still let the gate go
+                try { open = FindPanesWithProjectOpen(projectId, launchingDocId: null, out _).Count > 0; }
+                catch (Exception ex)
+                {
+                    open = false;
+                    _debugLogService?.Warning("MainForm", $"open project over REST: open-pane check failed ({ex.Message}); the gate is released at the time limit");
+                }
+#pragma warning restore CA1031
+                return Services.ProjectOpenGate.MayRelease(open, paneLaunched, watch.Elapsed);
+            }
 
             if (Ready())
             {

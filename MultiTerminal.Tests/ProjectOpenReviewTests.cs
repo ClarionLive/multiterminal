@@ -113,8 +113,9 @@ namespace MultiTerminal.Tests
         /// Live test N (2026-11-27): two quick opens of a project that was not open gave two panes (TestB and
         /// TestB-2), because the gate was released when the launch code returned, before the new pane's terminal
         /// ran and so before it counted as open. The gate is now kept while a launched pane is not yet open, for at
-        /// most MaxHoldAfterLaunch. Falsified: making MayRelease answer true while a launched pane is not yet open
-        /// turns the first assertion red.
+        /// most MaxHoldAfterLaunch. This pins that policy only; MainForm's wiring of it (when paneLaunched is set,
+        /// End on every path) is checked live, not here. Falsified: making MayRelease answer true while a launched
+        /// pane is not yet open turns the first assertion red.
         /// </summary>
         [Fact]
         public void The_gate_is_kept_until_a_launched_pane_counts_as_open()
