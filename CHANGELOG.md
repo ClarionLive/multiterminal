@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Project Settings says what Icon and Icon colour accept, and refuses what
+  they cannot show** (GitHub #77). Icon takes an emoji or a named icon (now
+  listed under the field); an image path used to be saved and silently shown as
+  the name's first letter. Icon colour has a colour picker and an Automatic
+  button. Home and the header's project list now show the same icon (the list
+  showed the letter for named icons), and the /new-project wizard's `hub` and
+  `apps` icons are known. `update_project` refuses the same values, with the
+  reason.
+- **Project Settings' Git section says what each setting does** (GitHub #79).
+  The repository is the one MT watches for issues and pull requests, not where
+  code is pushed (pushes use the folder's own git remote). The Auto-commit
+  checkbox, which did nothing, is gone.
+- **Danger zone has a highway icon** (GitHub #80).
 - **MultiTerminal starts when another program uses port 5000** (GitHub #101).
   MT opened an unused listener on localhost:5000 at startup, and when the port
   was taken the rest of its startup was skipped. The listener and the message

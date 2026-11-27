@@ -423,6 +423,7 @@ namespace MultiTerminal.DashboardHeader
                     name = p.Name,
                     path = p.Path,
                     icon = p.Icon,
+                    iconGlyph = Services.ProjectIcon.Glyph(p.Icon),
                     iconColor = p.IconColor,
                     isPinned = p.IsPinned,
                     status = p.Status,

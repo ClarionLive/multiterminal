@@ -880,7 +880,7 @@ mark_inbox_read(userId="Owner")</code></pre>
       <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>projectId</code></td><td>string</td><td>Yes</td><td>Project ID</td></tr>
-        <tr><td><code>fields</code></td><td>object</td><td>Yes</td><td>Object of field names to values. Accepted keys: <code>deployPath</code>, <code>buildCommand</code>, <code>projectType</code>, <code>description</code>, <code>icon</code>, <code>iconColor</code>, <code>teamLead</code>, <code>gitRepoUrl</code>, <code>gitDefaultBranch</code>, <code>gitAutoCommit</code>, <code>currentVersion</code>, <code>isPinned</code></td></tr>
+        <tr><td><code>fields</code></td><td>object</td><td>Yes</td><td>Object of field names to values. Accepted keys: <code>deployPath</code>, <code>buildCommand</code>, <code>projectType</code>, <code>description</code>, <code>icon</code>, <code>iconColor</code>, <code>teamLead</code>, <code>gitRepoUrl</code>, <code>gitDefaultBranch</code>, <code>gitAutoCommit</code> (stored, no effect), <code>currentVersion</code>, <code>isPinned</code>. <code>icon</code> must be an emoji or a known icon name and <code>iconColor</code> a CSS colour (or blank); anything else is rejected with the reason. <code>gitRepoUrl</code> is the GitHub repository MT watches for issues and PRs, not where code is pushed.</td></tr>
       </tbody>
     </table>
     <h4>Returns</h4>

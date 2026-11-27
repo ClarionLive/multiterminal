@@ -137,21 +137,23 @@ namespace MultiTerminal.Services
     {
         /// <summary>
         /// Scalar fields the form may write. <c>path</c> is deliberately absent (the project's identity
-        /// folder is not edited here) and so is <c>lastOpenedAt</c> (system-maintained).
+        /// folder is not edited here) and so is <c>lastOpenedAt</c> (system-maintained). So is <c>gitAutoCommit</c>
+        /// (GitHub #79): nothing reads it, MT commits a task's worktree when the task is done regardless, so its
+        /// checkbox only misled; the column and update_project keep it.
         /// </summary>
         public static readonly IReadOnlyCollection<string> EditableFields = new HashSet<string>(StringComparer.Ordinal)
         {
             "name", "description", "projectType", "status", "currentVersion", "icon", "iconColor",
             "isPinned", "createdBy", "claudeProfile", "launchMode", "defaultTerminal", "quietStart", "teamLead",
             "launchCommand", "sourcePath", "deployPath", "buildOutputPath", "buildCommand", "deployCommand",
-            "gitRepoUrl", "gitDefaultBranch", "gitAutoCommit", "sourceControlAccountId", "changeLog",
+            "gitRepoUrl", "gitDefaultBranch", "sourceControlAccountId", "changeLog",
             "gitHubWatchMode", "gitHubCheckOnStart", "gitHubCheckInterval", "gitHubExtraRepos",
             "claudeModel", "claudeHelperModel", "claudeExtraArgs",
         };
 
         private static readonly HashSet<string> BooleanFields = new HashSet<string>(StringComparer.Ordinal)
         {
-            "isPinned", "quietStart", "gitAutoCommit", "gitHubCheckOnStart",
+            "isPinned", "quietStart", "gitHubCheckOnStart",
         };
 
         /// <summary>Whether a field is a checkbox (sent to the page as a bool).</summary>
@@ -198,6 +200,21 @@ namespace MultiTerminal.Services
                     && !ClaudeModelLaunchPolicy.IsDefaultToken(modelName) && !ClaudeModelLaunchPolicy.IsValidModelName(modelName))
                     return ProjectSettingsSaveResult.Fail(
                         $"'{modelName}' is not a valid model name (letters, digits, dots and hyphens, with an optional [1m] suffix). Nothing was saved.");
+            }
+
+            // Icon and Icon colour (GitHub #77): a value the pages cannot show used to be saved silently. Only a
+            // value the user changed is checked, so an old stored value does not block an unrelated save.
+            if (normalized.TryGetValue("icon", out var icon) && !SameValue("icon", ReadField(current, "icon"), icon))
+            {
+                string iconError = ProjectIcon.ValidateIcon(icon);
+                if (iconError != null)
+                    return ProjectSettingsSaveResult.Fail(iconError + " Nothing was saved.");
+            }
+            if (normalized.TryGetValue("iconColor", out var iconColor) && !SameValue("iconColor", ReadField(current, "iconColor"), iconColor))
+            {
+                string colorError = ProjectIcon.ValidateColor(iconColor);
+                if (colorError != null)
+                    return ProjectSettingsSaveResult.Fail(colorError + " Nothing was saved.");
             }
 
             string watchListError = ValidateWatchList(current, normalized);

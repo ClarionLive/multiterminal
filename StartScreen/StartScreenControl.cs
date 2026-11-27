@@ -493,6 +493,7 @@ namespace MultiTerminal.StartScreen
                         isPinned = p.IsPinned,
                         status = Project.NormalizeStatus(p.Status),
                         icon = p.Icon,
+                        iconGlyph = Services.ProjectIcon.Glyph(p.Icon),
                         iconColor = p.IconColor,
                         projectType = p.ProjectType,
                         createdAt = p.CreatedAt == default
