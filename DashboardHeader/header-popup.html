@@ -235,11 +235,10 @@ function renderSubmenu() {
   document.getElementById('submenu').innerHTML = html;
 }
 
-/* Emoji icons show as-is; anything else becomes the first letter of the name in the project's
-   colour, like the start screen's cards. */
+/* The project's glyph (an emoji or a known icon name's, resolved in C# by Services/ProjectIcon so it matches
+   the start screen, GitHub #77) shows as-is; otherwise the first letter of the name in the project's colour. */
 function glyph(p) {
-  var icon = (p.icon || '').trim();
-  if (icon && icon.codePointAt(0) > 127) return { text: icon, color: '' };
+  if (p.iconGlyph) return { text: p.iconGlyph, color: '' };
   return { text: (p.name || '?').charAt(0).toUpperCase(), color: p.iconColor || 'var(--accent)' };
 }
 

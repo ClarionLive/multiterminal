@@ -1590,7 +1590,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "update_project",
-        description: "Update one or more project fields. Accepts a fields object with camelCase keys (e.g., deployPath, buildCommand, projectType, description, icon, iconColor, teamLead, gitRepoUrl, gitDefaultBranch, gitAutoCommit, currentVersion, isPinned).",
+        description: "Update one or more project fields. Accepts a fields object with camelCase keys (e.g., deployPath, buildCommand, projectType, description, icon, iconColor, teamLead, gitRepoUrl, gitDefaultBranch, currentVersion, isPinned). icon: an emoji or a known icon name (terminal, code, folder, web, database, cloud, star, rocket, gear, bug, package, extension, smartphone, hub, apps), blank for the first letter; iconColor: a CSS colour such as #4FC3F7, blank for automatic; other values are rejected with the reason. gitRepoUrl is the GitHub repository MT watches for issues and PRs, never where code is pushed (pushes use the folder's own git remote). gitDefaultBranch is the branch task branches merge into. gitAutoCommit is stored but has no effect.",
         inputSchema: {
           type: "object",
           properties: {

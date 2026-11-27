@@ -107,16 +107,42 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// GitHub #77: an icon the pages cannot show (an image path) and a colour that is not one are refused
+        /// with the reason and nothing is written; an old stored value the user did not touch does not block
+        /// an unrelated save. Falsified: removing either check in Save turns the matching refusal red.
+        /// </summary>
+        [Fact]
+        public void An_unshowable_icon_or_colour_is_refused_but_an_untouched_one_does_not_block()
+        {
+            var p = Seed();
+
+            var badIcon = _service.Save(UpdateFor(p, ("icon", @"M:\x.ico"), ("isPinned", "true")));
+            Assert.False(badIcon.Success);
+            Assert.Contains("Image files are not supported", badIcon.Error);
+            Assert.False(_db.GetRichProject(p.Id).IsPinned);
+
+            var badColor = _service.Save(UpdateFor(p, ("iconColor", "blurple")));
+            Assert.False(badColor.Success);
+            Assert.Contains("not a colour", badColor.Error);
+
+            Assert.True(_db.UpdateProjectField(p.Id, "icon", @"M:\old.ico"));
+            var unrelated = _service.Save(UpdateFor(p, ("icon", @"M:\old.ico"), ("isPinned", "true")));
+            Assert.True(unrelated.Success, unrelated.Error);
+        }
+
+        /// <summary>
         /// The retired Project Manager edit re-saved the row from project.json, which has no gitAutoCommit,
         /// and so reset Auto-commit to off right after the dialog set it. A save that changes a project.json
-        /// field must leave Auto-commit as saved. Falsified: routing SyncProjectJson through
-        /// ProjectService.SaveProject(LoadProject(path)) turns the first assertion red.
+        /// field must leave the stored Auto-commit alone. The form no longer offers Auto-commit (GitHub #79),
+        /// so it is set on the row directly. Falsified (before #79): routing SyncProjectJson through
+        /// ProjectService.SaveProject(LoadProject(path)) turned the first assertion red.
         /// </summary>
         [Fact]
         public void Auto_commit_survives_a_save_that_also_rewrites_project_json()
         {
             var p = Seed();
-            var result = _service.Save(UpdateFor(p, ("gitAutoCommit", "true"), ("isPinned", "true")));
+            Assert.True(_db.UpdateProjectField(p.Id, "gitAutoCommit", "true"));
+            var result = _service.Save(UpdateFor(p, ("isPinned", "true")));
 
             Assert.True(result.Success, result.Error);
             Assert.True(_db.GetRichProject(p.Id).GitAutoCommit);

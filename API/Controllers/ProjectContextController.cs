@@ -134,6 +134,14 @@ namespace MultiTerminal.API.Controllers
                     continue;
                 }
 
+                // Icon and Icon colour get the settings form's check (GitHub #77), with the reason.
+                string iconError = IconFieldError(kvp.Key, kvp.Value);
+                if (iconError != null)
+                {
+                    rejected.Add($"{kvp.Key} ({iconError})");
+                    continue;
+                }
+
                 if (_projectDb.UpdateProjectField(projectId, kvp.Key, kvp.Value))
                 {
                     updated.Add(kvp.Key);
@@ -152,6 +160,16 @@ namespace MultiTerminal.API.Controllers
                 SyncProjectJsonClaudeProfile(projectId);
 
             return Ok(new { updated, rejected });
+        }
+
+        private static string IconFieldError(string field, string value)
+        {
+            if (string.Equals(field, "icon", System.StringComparison.OrdinalIgnoreCase))
+                return MultiTerminal.Services.ProjectIcon.ValidateIcon(value);
+            if (string.Equals(field, "iconColor", System.StringComparison.OrdinalIgnoreCase)
+                || string.Equals(field, "icon_color", System.StringComparison.OrdinalIgnoreCase))
+                return MultiTerminal.Services.ProjectIcon.ValidateColor(value);
+            return null;
         }
 
         private static bool IsClaudeProfileField(string field) =>

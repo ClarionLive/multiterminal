@@ -52,7 +52,7 @@ namespace MultiTerminal.Tests
 
             var names = fields.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal);
             Assert.Equal(ProjectSettingsService.EditableFields.OrderBy(n => n, StringComparer.Ordinal), names);
-            Assert.Equal(JsonValueKind.True, fields.GetProperty("gitAutoCommit").ValueKind);
+            Assert.False(fields.TryGetProperty("gitAutoCommit", out _)); // GitHub #79: no longer on the form
             Assert.Equal(JsonValueKind.False, fields.GetProperty("quietStart").ValueKind); // null reads as off
             Assert.Equal("parked", fields.GetProperty("status").GetString());
             Assert.Equal("dark", doc.RootElement.GetProperty("theme").GetString());
@@ -101,7 +101,7 @@ namespace MultiTerminal.Tests
         public void Save_parses_booleans_lists_and_absent_lists()
         {
             const string json = @"{""type"":""save"",
-                ""fields"":{""name"":""N"",""isPinned"":true,""gitAutoCommit"":false,""claudeProfile"":""""},
+                ""fields"":{""name"":""N"",""isPinned"":true,""quietStart"":false,""claudeProfile"":""""},
                 ""paths"":[{""id"":7,""pathType"":""docs"",""pathValue"":""C:\\d"",""description"":""""}],
                 ""mcpServers"":[]}";
             using var doc = JsonDocument.Parse(json);
@@ -109,7 +109,7 @@ namespace MultiTerminal.Tests
 
             Assert.Equal("p-1", u.ProjectId);
             Assert.Equal("true", u.Fields["isPinned"]);
-            Assert.Equal("false", u.Fields["gitAutoCommit"]);
+            Assert.Equal("false", u.Fields["quietStart"]);
             Assert.Equal("", u.Fields["claudeProfile"]);
             Assert.Equal(7, u.Paths.Single().Id);
             Assert.Empty(u.McpServers);   // sent empty: clear the table

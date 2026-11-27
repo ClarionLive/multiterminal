@@ -86,6 +86,7 @@
     nav.rail button:hover { background: var(--btn-secondary-hover); color: var(--text-primary); }
     nav.rail button.active { background: var(--bg-card); color: var(--text-primary); box-shadow: inset 3px 0 0 var(--accent); }
     nav.rail button.danger-link { color: var(--danger); margin-top: 12px; }
+    .nav-icon { margin-right: 6px; }
     nav.rail .count { float: right; color: var(--text-muted); font-size: 11px; }
     .content { overflow-y: auto; padding: 18px 24px 28px; }
     section { display: none; max-width: 760px; }
@@ -164,7 +165,7 @@
         <button data-section="mcp">MCP &amp; Skills <span class="count" data-count="mcpServers"></span></button>
         <button data-section="prompts">Prompts <span class="count" data-count="prompts"></span></button>
         <button data-section="changelog">Change Log</button>
-        <button data-section="danger" class="danger-link">Danger zone</button>
+        <button data-section="danger" class="danger-link" title="Highway to the…"><span class="nav-icon" aria-hidden="true">🛣️</span>Danger zone</button>
     </nav>
 
     <div class="content" id="content">
@@ -177,8 +178,13 @@
             <div class="field"><label for="f-status">Status</label><select id="f-status" data-field="status" data-options="statuses"></select>
                 <div class="hint">Archived projects are hidden on Home unless you show them.</div></div>
             <div class="field"><label for="f-currentVersion">Version</label><input type="text" id="f-currentVersion" data-field="currentVersion"></div>
-            <div class="field"><label for="f-icon">Icon</label><input type="text" id="f-icon" data-field="icon"></div>
-            <div class="field"><label for="f-iconColor">Icon colour</label><input type="text" id="f-iconColor" data-field="iconColor" placeholder="#4FC3F7"></div>
+            <div class="field"><label for="f-icon">Icon</label><input type="text" id="f-icon" data-field="icon" placeholder="🎵">
+                <div class="hint">Shown in the project's square on Home and in the header's project list. An emoji (🎵), or one of: terminal, code, folder, web, database, cloud, star, rocket, gear, bug, package, extension, smartphone, hub, apps. Leave blank for the first letter of the name. Image files are not supported.</div></div>
+            <div class="field"><label for="f-iconColor">Icon colour</label>
+                <div class="row"><input type="color" id="f-iconColorPick" aria-label="Pick the icon colour" style="width:44px;flex:0 0 44px;padding:2px;height:32px">
+                    <input type="text" id="f-iconColor" data-field="iconColor" placeholder="Automatic">
+                    <button class="btn" id="btn-icon-color-auto">Automatic</button></div>
+                <div class="hint">The background of the project's square. Pick a colour or type one (#4FC3F7 or a colour name); Automatic leaves it to MT.</div></div>
             <div class="field"><label>Pinned</label><label class="check"><input type="checkbox" data-field="isPinned"> Keep at the top of Home</label></div>
             <div class="field"><label for="f-createdBy">Created by</label><input type="text" id="f-createdBy" data-field="createdBy"></div>
 
@@ -248,16 +254,18 @@
 
         <section id="git">
             <h2>Git</h2>
-            <p class="lead">Repository and the account agents commit with.</p>
-            <div class="field"><label for="f-gitRepoUrl">Repository URL</label><input type="text" id="f-gitRepoUrl" data-field="gitRepoUrl"></div>
-            <div class="field"><label for="f-gitDefaultBranch">Default branch</label><input type="text" id="f-gitDefaultBranch" data-field="gitDefaultBranch" placeholder="main"></div>
-            <div class="field"><label>Auto-commit</label><label class="check"><input type="checkbox" data-field="gitAutoCommit"> Commit agent changes automatically</label></div>
-            <div class="field"><label for="f-sourceControlAccountId">Source control account</label><select id="f-sourceControlAccountId" data-field="sourceControlAccountId" data-options="sourceAccounts" data-none="(none)"></select></div>
+            <p class="lead">Which GitHub repository MT watches and links to, and the branch task branches merge into. Nothing here changes where code is pushed: commits and pushes use this folder's own git remote and your machine's git credentials.</p>
+            <div class="field"><label for="f-gitRepoUrl">GitHub repository (issues &amp; PRs)</label><input type="text" id="f-gitRepoUrl" data-field="gitRepoUrl" placeholder="https://github.com/owner/name">
+                <div class="hint">The repository MT watches for new issues and pull requests and links to from the terminal header. If your code is private and you publish releases in a separate public repository, enter the public one: that is where users file issues. To watch both, add the other under Also watch.</div></div>
+            <div class="field"><label for="f-gitDefaultBranch">Default branch</label><input type="text" id="f-gitDefaultBranch" data-field="gitDefaultBranch" placeholder="main">
+                <div class="hint">The branch task branches are merged back into when a task is done. Leave blank to detect it.</div></div>
+            <div class="field"><label for="f-sourceControlAccountId">Source control account</label><select id="f-sourceControlAccountId" data-field="sourceControlAccountId" data-options="sourceAccounts" data-none="(none)"></select>
+                <div class="hint">The GitHub account Watch GitHub uses to read the repositories here. It is not used for commits or pushes.</div></div>
             <h3>Watch GitHub</h3>
-            <div class="note">MT checks the repository above (and any listed under Also watch) for new issues and pull requests, using the source control account above (a GitHub account). The first check only notes what is already there, so turning this on does not add the existing backlog. MT never comments on, labels or closes anything.</div>
+            <div class="note">MT checks the GitHub repository above (and any listed under Also watch) for new issues and pull requests, using the source control account above (a GitHub account). The first check only notes what is already there, so turning this on does not add the existing backlog. MT never comments on, labels or closes anything.</div>
             <div class="hint" id="github-watch-status"></div>
             <div class="field"><label for="f-gitHubExtraRepos">Also watch</label><textarea id="f-gitHubExtraRepos" data-field="gitHubExtraRepos" placeholder="One repository per line, e.g. owner/name"></textarea>
-                <div class="hint">More repositories to watch besides the Repository URL, one per line (a github.com URL or owner/name). At most 10 repositories in all. The same account's token is used for each. A repository added here starts from a fresh baseline, so its existing backlog is not added.</div></div>
+                <div class="hint">More repositories to watch besides the GitHub repository above, one per line (a github.com URL or owner/name). At most 10 repositories in all. The same account's token is used for each. A repository added here starts from a fresh baseline, so its existing backlog is not added.</div></div>
             <div class="field"><label for="f-gitHubWatchMode">New issues and PRs</label><select id="f-gitHubWatchMode" data-field="gitHubWatchMode" data-options="gitHubWatchModes"></select>
                 <div class="hint">"Add them to the board" puts one card per issue or PR in the board's Suggestion column, linked to GitHub, never twice.</div></div>
             <div class="field"><label>On terminal start</label><label class="check"><input type="checkbox" data-field="gitHubCheckOnStart"> Check when a terminal for this project starts</label></div>
@@ -301,7 +309,7 @@
         </section>
 
         <section id="danger">
-            <h2>Danger zone</h2>
+            <h2><span class="nav-icon" aria-hidden="true">🛣️</span>Danger zone</h2>
             <p class="lead">Actions that cannot be undone from here.</p>
             <div class="danger-zone">
                 <p style="margin-top:0">Delete removes the project from MultiTerminal. Its tasks are kept. You can choose to also delete the folder's .claude/project.json.</p>
@@ -525,6 +533,23 @@
         s.className = 'status' + (kind ? ' ' + kind : '');
     }
 
+    // Icon colour (GitHub #77): the swatch and the text box are one setting; the text box is the field.
+    function syncIconColorSwatch() {
+        var v = ($('f-iconColor').value || '').trim();
+        var m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(v);
+        if (m) $('f-iconColorPick').value = m[1].length === 3 ? '#' + m[1].replace(/(.)/g, '$1$1') : v;
+        // Automatic (blank) or a colour the swatch cannot show: dim it, so a leftover swatch colour does not
+        // read as the chosen one (it would be black on first load).
+        $('f-iconColorPick').style.opacity = m ? '' : '0.35';
+    }
+    function setIconColor(v) {
+        $('f-iconColor').value = v;
+        $('f-iconColor').dispatchEvent(new Event('input'));
+    }
+    $('f-iconColorPick').addEventListener('input', function () { setIconColor(this.value.toUpperCase()); });
+    $('btn-icon-color-auto').addEventListener('click', function () { setIconColor(''); });
+    $('f-iconColor').addEventListener('input', syncIconColorSwatch);
+
     fieldEls().forEach(function (el) {
         el.addEventListener('input', onChanged);
         el.addEventListener('change', onChanged);
@@ -539,6 +564,7 @@
         document.querySelectorAll('datalist').forEach(function (d) { d.parentNode.removeChild(d); });
 
         fieldEls().forEach(function (el) { setField(el, msg.fields[el.getAttribute('data-field')]); });
+        syncIconColorSwatch();
 
         var name = msg.fields.name || 'Project';
         $('title').textContent = name;

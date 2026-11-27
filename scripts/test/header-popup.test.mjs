@@ -88,12 +88,14 @@ test('archived projects are hidden until searched for', () => {
   assert.deepEqual(names(pickerSections(list, 'shel', 8)[0]), ['Shelved']);
 });
 
-test('an emoji icon shows as-is; anything else becomes the first letter', () => {
+test('the glyph C# resolved shows as-is; without one, the first letter (GitHub #77)', () => {
   const { glyph } = load();
-  assert.equal(glyph({ name: 'x', icon: '\u{1F4E6}' }).text, '\u{1F4E6}');
-  assert.equal(glyph({ name: 'clarion', icon: 'code' }).text, 'C');
+  assert.equal(glyph({ name: 'x', icon: '\u{1F4E6}', iconGlyph: '\u{1F4E6}' }).text, '\u{1F4E6}');
+  // A known name arrives resolved, so the picker shows what Home shows (it used to show the letter).
+  assert.equal(glyph({ name: 'rocketeer', icon: 'rocket', iconGlyph: '\u{1F680}' }).text, '\u{1F680}');
+  assert.equal(glyph({ name: 'clarion', icon: 'M:\\x.ico', iconGlyph: null }).text, 'C');
   assert.equal(glyph({ name: 'zeta', icon: '' }).text, 'Z');
-  assert.equal(glyph({ name: 'zeta', icon: 'code', iconColor: '#ff0000' }).color, '#ff0000');
+  assert.equal(glyph({ name: 'zeta', icon: 'nope', iconColor: '#ff0000' }).color, '#ff0000');
 });
 
 // ---- Clear (x) button in the search (task 28343a65) ----
