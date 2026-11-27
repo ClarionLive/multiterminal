@@ -184,7 +184,7 @@
                 <div class="row"><input type="color" id="f-iconColorPick" aria-label="Pick the icon colour" style="width:44px;flex:0 0 44px;padding:2px;height:32px">
                     <input type="text" id="f-iconColor" data-field="iconColor" placeholder="Automatic">
                     <button class="btn" id="btn-icon-color-auto">Automatic</button></div>
-                <div class="hint">The background of the project's square. Pick a colour or type one (#4FC3F7); Automatic picks one from the project's id.</div></div>
+                <div class="hint">The background of the project's square. Pick a colour or type one (#4FC3F7 or a colour name); Automatic leaves it to MT.</div></div>
             <div class="field"><label>Pinned</label><label class="check"><input type="checkbox" data-field="isPinned"> Keep at the top of Home</label></div>
             <div class="field"><label for="f-createdBy">Created by</label><input type="text" id="f-createdBy" data-field="createdBy"></div>
 
@@ -538,6 +538,9 @@
         var v = ($('f-iconColor').value || '').trim();
         var m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(v);
         if (m) $('f-iconColorPick').value = m[1].length === 3 ? '#' + m[1].replace(/(.)/g, '$1$1') : v;
+        // Automatic (blank) or a colour the swatch cannot show: dim it, so a leftover swatch colour does not
+        // read as the chosen one (it would be black on first load).
+        $('f-iconColorPick').style.opacity = m ? '' : '0.35';
     }
     function setIconColor(v) {
         $('f-iconColor').value = v;

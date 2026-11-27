@@ -494,7 +494,7 @@ namespace MultiTerminal.StartScreen
                         status = Project.NormalizeStatus(p.Status),
                         icon = p.Icon,
                         iconGlyph = Services.ProjectIcon.Glyph(p.Icon),
-                        iconColor = p.IconColor,
+                        iconColor = Services.ProjectIcon.SafeColor(p.IconColor),
                         projectType = p.ProjectType,
                         createdAt = p.CreatedAt == default
                             ? null

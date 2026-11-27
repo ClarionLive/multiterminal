@@ -107,13 +107,6 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
-        /// The retired Project Manager edit re-saved the row from project.json, which has no gitAutoCommit,
-        /// and so reset Auto-commit to off right after the dialog set it. A save that changes a project.json
-        /// field must leave the stored Auto-commit alone. The form no longer offers Auto-commit (GitHub #79),
-        /// so it is set on the row directly. Falsified (before #79): routing SyncProjectJson through
-        /// ProjectService.SaveProject(LoadProject(path)) turned the first assertion red.
-        /// </summary>
-        /// <summary>
         /// GitHub #77: an icon the pages cannot show (an image path) and a colour that is not one are refused
         /// with the reason and nothing is written; an old stored value the user did not touch does not block
         /// an unrelated save. Falsified: removing either check in Save turns the matching refusal red.
@@ -137,6 +130,13 @@ namespace MultiTerminal.Tests
             Assert.True(unrelated.Success, unrelated.Error);
         }
 
+        /// <summary>
+        /// The retired Project Manager edit re-saved the row from project.json, which has no gitAutoCommit,
+        /// and so reset Auto-commit to off right after the dialog set it. A save that changes a project.json
+        /// field must leave the stored Auto-commit alone. The form no longer offers Auto-commit (GitHub #79),
+        /// so it is set on the row directly. Falsified (before #79): routing SyncProjectJson through
+        /// ProjectService.SaveProject(LoadProject(path)) turned the first assertion red.
+        /// </summary>
         [Fact]
         public void Auto_commit_survives_a_save_that_also_rewrites_project_json()
         {

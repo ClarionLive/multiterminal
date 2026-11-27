@@ -424,7 +424,7 @@ namespace MultiTerminal.DashboardHeader
                     path = p.Path,
                     icon = p.Icon,
                     iconGlyph = Services.ProjectIcon.Glyph(p.Icon),
-                    iconColor = p.IconColor,
+                    iconColor = Services.ProjectIcon.SafeColor(p.IconColor),
                     isPinned = p.IsPinned,
                     status = p.Status,
                     lastOpenedAt = p.LastOpenedAt == default ? null : p.LastOpenedAt.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture),

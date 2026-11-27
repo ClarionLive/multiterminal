@@ -58,24 +58,48 @@ namespace MultiTerminal.Services
                 + string.Join(", ", Names) + ", or leave it blank for the first letter of the name. Image files are not supported.";
         }
 
-        /// <summary>Null when <paramref name="color"/> may be saved (blank or a CSS colour), else why not.</summary>
+        /// <summary>
+        /// <paramref name="color"/> when it is a colour, else null (automatic). The pages put the colour into a
+        /// style attribute, and a value stored before these checks, or by a writer that skips them
+        /// (project.json, ProjectDatabase.SaveRichProject), could otherwise add CSS declarations there.
+        /// </summary>
+        public static string SafeColor(string color)
+        {
+            string value = color?.Trim();
+            return string.IsNullOrEmpty(value) || !IsCssColor(value) ? null : value;
+        }
+
+        /// <summary>Null when <paramref name="color"/> may be saved (blank, hex or a CSS colour name), else why not.</summary>
         public static string ValidateColor(string color)
         {
             string value = color?.Trim();
             if (string.IsNullOrEmpty(value) || IsCssColor(value)) return null;
-            return $"Icon colour '{value}' is not a colour. Use a hex colour such as #4FC3F7 (or a CSS colour name), or leave it blank for an automatic colour.";
+            return $"Icon colour '{value}' is not a colour. Use a hex colour such as #4FC3F7 or a CSS colour name such as teal, or leave it blank for an automatic colour.";
         }
 
-        // A single short grapheme-ish value starting above ASCII: the same first test both pages used, kept
-        // short so a sentence or a path with an accented first letter is not taken for an emoji.
-        private static bool IsEmoji(string value) => value.Length <= 16 && value[0] > 127
-            && !value.Any(char.IsWhiteSpace) && !value.Contains('\\') && !value.Contains('/');
+        // An emoji: a short value that starts with a pictographic code point (the emoji planes, or the symbol
+        // blocks U+2190-U+2BFF that hold ☁ ⚙ ⭐ and the like) or is a keycap (1️⃣, #️⃣), and holds no letters,
+        // spaces or slashes after it. So 'éclair', '中文' or 'ü.ico' are not taken for one (the pages used to
+        // accept any value starting above ASCII), while a sequence with joiners and variation selectors is.
+        private static bool IsEmoji(string value)
+        {
+            if (value.Length > 16 || value.Any(char.IsWhiteSpace) || value.Contains('\\') || value.Contains('/'))
+                return false;
+            bool keycap = value.Length >= 2 && "0123456789#*".IndexOf(value[0]) >= 0 && value.Contains('\u20E3');
+            int first = char.IsHighSurrogate(value[0]) && value.Length > 1 && char.IsLowSurrogate(value[1])
+                ? char.ConvertToUtf32(value[0], value[1]) : value[0];
+            bool pictographic = first >= 0x1F000 || (first >= 0x2190 && first <= 0x2BFF)
+                || first == 0x00A9 || first == 0x00AE || first == 0x3030 || first == 0x303D || first == 0x3297 || first == 0x3299;
+            if (!keycap && !pictographic) return false;
+            for (int i = keycap ? 1 : 0; i < value.Length; i++)
+            {
+                if (char.IsLetter(value[i])) return false;
+                if (char.IsDigit(value[i]) && !keycap) return false;
+            }
+            return true;
+        }
 
         private static readonly Regex HexColor = new Regex("^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$", RegexOptions.CultureInvariant);
-
-        private static readonly Regex FunctionColor = new Regex(
-            @"^(?:rgba?|hsla?)\(\s*[0-9.]+%?(?:\s*[,\s]\s*[0-9.]+%?){2}(?:\s*[,/]\s*[0-9.]+%?)?\s*\)$",
-            RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
         private static readonly HashSet<string> NamedColors = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -101,7 +125,8 @@ namespace MultiTerminal.Services
             "whitesmoke", "yellow", "yellowgreen",
         };
 
-        private static bool IsCssColor(string value) =>
-            HexColor.IsMatch(value) || FunctionColor.IsMatch(value) || NamedColors.Contains(value);
+        // Hex and the CSS colour names only: the picker writes hex, and a looser rgb()/hsl() pattern let values
+        // through that the browser then ignored, which is the silent failure #77 is about.
+        private static bool IsCssColor(string value) => HexColor.IsMatch(value) || NamedColors.Contains(value);
     }
 }
