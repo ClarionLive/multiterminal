@@ -47,6 +47,21 @@ namespace MultiTerminal.API.Gateway
     /// </summary>
     public class MultiRemoteGatewayHost : IDisposable
     {
+        /// <summary>
+        /// The only MT controllers the phone gateway mounts (the PWA's api/tasks, api/projects, api/team,
+        /// api/remote-mode, api/digest). Anything not listed is unreachable from the phone. A named list so a
+        /// test can pin what must stay off it, e.g. ProjectOpenController, which raises windows and launches
+        /// sessions on the desk (review of PR #103).
+        /// </summary>
+        internal static readonly System.Type[] MountedControllers =
+        {
+            typeof(TasksController),
+            typeof(ProjectContextController),
+            typeof(TeamController),
+            typeof(RemoteModeController),
+            typeof(DigestController),
+        };
+
         // Constructor-supplied fallback; the effective port is resolved from the
         // MultiRemote:Port config key in StartAsync (config wins so a Dev can change
         // the listen port without recompiling). Not readonly for that reason.
@@ -217,12 +232,7 @@ namespace MultiTerminal.API.Gateway
                         {
                             foreach (var existing in apm.FeatureProviders.OfType<ControllerFeatureProvider>().ToList())
                                 apm.FeatureProviders.Remove(existing);
-                            apm.FeatureProviders.Add(new GatewayControllerFeatureProvider(
-                                typeof(TasksController),
-                                typeof(ProjectContextController),
-                                typeof(TeamController),
-                                typeof(RemoteModeController),
-                                typeof(DigestController)));
+                            apm.FeatureProviders.Add(new GatewayControllerFeatureProvider(MountedControllers));
                         });
 
                     // Same relaxed escaping for the hand-mapped minimal-API handlers

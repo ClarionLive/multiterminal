@@ -188,6 +188,16 @@ namespace MultiTerminal.MCPServer.Services
             _summaryLookup = summaryLookup;
         }
 
+        /// <summary>
+        /// Folders the project lived in before a Move Project (ticket 6f879683, <c>projects.previous_paths</c>).
+        /// A moved project's transcripts still record the old folder as their cwd; the move renamed their
+        /// Claude history folder to the new folder's encoding. A recorded cwd at or under one of these is
+        /// read as the same place under the current root (<see cref="TranslateMovedCwds"/>) BEFORE any
+        /// validation, so it then passes or fails <see cref="ValidateResumeCwd"/> exactly like a cwd
+        /// recorded after the move. String arithmetic only; nothing here touches the file system.
+        /// </summary>
+        public IReadOnlyList<string> PreviousRoots { get; set; } = Array.Empty<string>();
+
         /// <summary>How many transcripts one <see cref="List"/> call may read, as a multiple of its <c>max</c>.</summary>
         internal const int ReadBudgetFactor = 3;
 
@@ -364,7 +374,14 @@ namespace MultiTerminal.MCPServer.Services
             string newestPath = null;
             string newestFolder = null;
             var newestWriteUtc = DateTime.MinValue;
-            foreach (var folder in GetCandidateFolders(root, worktreeBase))
+            // TranscriptNotFoundReason is a verdict for good (task 688ad2f6: the helper resume leaves such a
+            // helper behind), so it is given only after a complete search: the projects root exists, every
+            // candidate folder was listed, and no file of that name was there. A search that could not run
+            // or a file that could not be read is a different, passing reason.
+            bool sawUnreadableFile = false;
+            var candidateFolders = GetCandidateFolders(root, worktreeBase, out bool listedAll);
+            bool searchIncomplete = !listedAll;
+            foreach (var folder in candidateFolders)
             {
                 List<string> files;
                 try
@@ -377,6 +394,7 @@ namespace MultiTerminal.MCPServer.Services
                 catch (Exception ex)
                 {
                     Debug.WriteLine($"[SessionCatalog] cannot enumerate {folder}: {ex.Message}");
+                    searchIncomplete = true;
                     continue;
                 }
 
@@ -384,7 +402,12 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     if (!string.Equals(Path.GetFileNameWithoutExtension(file), sessionId, StringComparison.OrdinalIgnoreCase))
                         continue;
-                    if (TryGetCandidate(file, live, out var lastWriteUtc) && (newestPath == null || lastWriteUtc > newestWriteUtc))
+                    if (!TryGetCandidate(file, live, out var lastWriteUtc))
+                    {
+                        sawUnreadableFile = true;
+                        continue;
+                    }
+                    if (newestPath == null || lastWriteUtc > newestWriteUtc)
                     {
                         newestPath = file;
                         newestFolder = Path.GetFileName(folder);
@@ -394,10 +417,23 @@ namespace MultiTerminal.MCPServer.Services
             }
 
             if (newestPath == null)
-                return Miss("its transcript was not found in this project's session folders (it may have run in another project's folder)");
+            {
+                if (sawUnreadableFile)
+                    return Miss("its transcript could not be read");
+                if (searchIncomplete)
+                    return Miss("its transcript could not be looked for (the session folders could not all be listed)");
+                return Miss(TranscriptNotFoundReason);
+            }
             var entry = TryBuildEntry(root, worktreeBase, ListWorktreeDirs(root, worktreeBase), newestPath, newestFolder, newestWriteUtc, utcNow, new ReadMeter(ReadByteBudget), out var why);
             return entry ?? Miss(why ?? "its transcript could not be read");
         }
+
+        /// <summary>
+        /// <see cref="LastMissReason"/> when no transcript of the session exists in this project's folders.
+        /// <see cref="HelperResume.Check"/> treats it as a skip for good (task 688ad2f6).
+        /// </summary>
+        public const string TranscriptNotFoundReason =
+            "its transcript was not found in this project's session folders (it may have run in another project's folder)";
 
         private SessionCatalogEntry Miss(string reason)
         {
@@ -515,7 +551,16 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         private IEnumerable<string> GetCandidateFolders(string root, string worktreeBase)
+            => GetCandidateFolders(root, worktreeBase, out _);
+
+        /// <param name="listedAll">
+        /// False when the projects root is missing or could not be listed, so an empty result does not mean
+        /// "no such folder" (task 688ad2f6, Codex re-verify: <see cref="TranscriptNotFoundReason"/> is a verdict
+        /// for good and needs a complete search).
+        /// </param>
+        private IEnumerable<string> GetCandidateFolders(string root, string worktreeBase, out bool listedAll)
         {
+            listedAll = false;
             if (!Directory.Exists(_claudeProjectsRoot))
                 return Array.Empty<string>();
 
@@ -536,7 +581,7 @@ namespace MultiTerminal.MCPServer.Services
 
             try
             {
-                return Directory.EnumerateDirectories(_claudeProjectsRoot)
+                var folders = Directory.EnumerateDirectories(_claudeProjectsRoot)
                     .Where(d =>
                     {
                         var name = Path.GetFileName(d);
@@ -546,6 +591,8 @@ namespace MultiTerminal.MCPServer.Services
                         return match.Prefix != null && WorktreeMayExist(match.Base, name.Substring(match.Prefix.Length));
                     })
                     .ToList();
+                listedAll = true;
+                return folders;
             }
             catch (Exception ex)
             {
@@ -633,6 +680,11 @@ namespace MultiTerminal.MCPServer.Services
         {
             missReason = null;
             var scan = TranscriptScan.Read(path, meter);
+            if (scan != null)
+            {
+                TranslateMovedCwds(scan.HeadCwds, root, PreviousRoots);
+                TranslateMovedCwds(scan.TailCwds, root, PreviousRoots);
+            }
             if (scan == null || !scan.HasTurns)
             {
                 missReason = "its transcript holds no conversation";
@@ -835,6 +887,40 @@ namespace MultiTerminal.MCPServer.Services
                 && IsUnderWorktrees(repo, dir))
                 return dir;
             return null;
+        }
+
+        /// <summary>
+        /// Rewrites, in place, each cwd that is a previous root or lies under one to the same place under
+        /// <paramref name="root"/> (ticket 6f879683). A cwd that is not a canonical local path, or is under
+        /// no previous root, is left exactly as recorded. The result is still untrusted: callers validate it.
+        /// </summary>
+        internal static void TranslateMovedCwds(List<string> cwds, string root, IReadOnlyList<string> previousRoots)
+        {
+            if (cwds == null || previousRoots == null || previousRoots.Count == 0 || !TryCanonicalLocalPath(root, out var current))
+                return;
+
+            for (var i = 0; i < cwds.Count; i++)
+            {
+                if (!TryCanonicalLocalPath(cwds[i], out var dir))
+                    continue;
+                foreach (var previous in previousRoots)
+                {
+                    if (!TryCanonicalLocalPath(previous, out var prev)
+                        || string.Equals(prev, current, StringComparison.OrdinalIgnoreCase)
+                        || prev.EndsWith(":\\", StringComparison.Ordinal))
+                        continue;
+                    if (string.Equals(dir, prev, StringComparison.OrdinalIgnoreCase))
+                    {
+                        cwds[i] = current;
+                        break;
+                    }
+                    if (dir.StartsWith(prev + "\\", StringComparison.OrdinalIgnoreCase))
+                    {
+                        cwds[i] = current.TrimEnd('\\') + dir.Substring(prev.Length);
+                        break;
+                    }
+                }
+            }
         }
 
         // The transcript's first recorded cwd is exactly the project root (string checks only). Exact,

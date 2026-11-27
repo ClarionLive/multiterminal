@@ -97,11 +97,14 @@ namespace MultiTerminal.Services
         public static readonly IReadOnlyCollection<string> LaunchTimeFields = new HashSet<string>(StringComparer.Ordinal)
         {
             "claudeProfile", "launchMode", "defaultTerminal", "quietStart", "launchCommand",
-            "claudeModel", "claudeHelperModel",
+            "claudeModel", "claudeHelperModel", "claudeExtraArgs",
         };
 
         /// <summary>True when this save changed something running terminals will not pick up until they restart.</summary>
-        public bool AppliesAtNextLaunch => McpServersChanged || ChangedFields.Exists(LaunchTimeFields.Contains);
+        public bool AppliesAtNextLaunch => McpServersChanged || AgentExtraArgsChanged || ChangedFields.Exists(LaunchTimeFields.Contains);
+
+        /// <summary>True when an agent row's extra Claude flags changed (ticket 5380b6fb); read at launch only.</summary>
+        public bool AgentExtraArgsChanged { get; set; }
 
         internal static ProjectSettingsSaveResult Fail(string error) => new ProjectSettingsSaveResult { Success = false, Error = error };
     }
@@ -134,21 +137,23 @@ namespace MultiTerminal.Services
     {
         /// <summary>
         /// Scalar fields the form may write. <c>path</c> is deliberately absent (the project's identity
-        /// folder is not edited here) and so is <c>lastOpenedAt</c> (system-maintained).
+        /// folder is not edited here) and so is <c>lastOpenedAt</c> (system-maintained). So is <c>gitAutoCommit</c>
+        /// (GitHub #79): nothing reads it, MT commits a task's worktree when the task is done regardless, so its
+        /// checkbox only misled; the column and update_project keep it.
         /// </summary>
         public static readonly IReadOnlyCollection<string> EditableFields = new HashSet<string>(StringComparer.Ordinal)
         {
             "name", "description", "projectType", "status", "currentVersion", "icon", "iconColor",
             "isPinned", "createdBy", "claudeProfile", "launchMode", "defaultTerminal", "quietStart", "teamLead",
             "launchCommand", "sourcePath", "deployPath", "buildOutputPath", "buildCommand", "deployCommand",
-            "gitRepoUrl", "gitDefaultBranch", "gitAutoCommit", "sourceControlAccountId", "changeLog",
-            "gitHubWatchMode", "gitHubCheckOnStart", "gitHubCheckInterval",
-            "claudeModel", "claudeHelperModel",
+            "gitRepoUrl", "gitDefaultBranch", "sourceControlAccountId", "changeLog",
+            "gitHubWatchMode", "gitHubCheckOnStart", "gitHubCheckInterval", "gitHubExtraRepos",
+            "claudeModel", "claudeHelperModel", "claudeExtraArgs",
         };
 
         private static readonly HashSet<string> BooleanFields = new HashSet<string>(StringComparer.Ordinal)
         {
-            "isPinned", "quietStart", "gitAutoCommit", "gitHubCheckOnStart",
+            "isPinned", "quietStart", "gitHubCheckOnStart",
         };
 
         /// <summary>Whether a field is a checkbox (sent to the page as a bool).</summary>
@@ -197,6 +202,49 @@ namespace MultiTerminal.Services
                         $"'{modelName}' is not a valid model name (letters, digits, dots and hyphens, with an optional [1m] suffix). Nothing was saved.");
             }
 
+            // Icon and Icon colour (GitHub #77): a value the pages cannot show used to be saved silently. Only a
+            // value the user changed is checked, so an old stored value does not block an unrelated save.
+            if (normalized.TryGetValue("icon", out var icon) && !SameValue("icon", ReadField(current, "icon"), icon))
+            {
+                string iconError = ProjectIcon.ValidateIcon(icon);
+                if (iconError != null)
+                    return ProjectSettingsSaveResult.Fail(iconError + " Nothing was saved.");
+            }
+            if (normalized.TryGetValue("iconColor", out var iconColor) && !SameValue("iconColor", ReadField(current, "iconColor"), iconColor))
+            {
+                string colorError = ProjectIcon.ValidateColor(iconColor);
+                if (colorError != null)
+                    return ProjectSettingsSaveResult.Fail(colorError + " Nothing was saved.");
+            }
+
+            string watchListError = ValidateWatchList(current, normalized);
+            if (watchListError != null)
+                return ProjectSettingsSaveResult.Fail(watchListError);
+
+            // Extra Claude flags (ticket 5380b6fb): refused with the reason, nothing written. Only text the user
+            // changed is checked, as for the model names above.
+            if (normalized.TryGetValue("claudeExtraArgs", out var extraArgs) && extraArgs != null
+                && !SameValue("claudeExtraArgs", ReadField(current, "claudeExtraArgs"), extraArgs))
+            {
+                string extraError = ClaudeExtraArgsPolicy.Validate(extraArgs);
+                if (extraError != null)
+                    return ProjectSettingsSaveResult.Fail($"Extra Claude flags: {extraError} Nothing was saved.");
+            }
+
+            if (update.Agents != null)
+            {
+                var storedAgents = _db.GetProjectAgents(update.ProjectId);
+                foreach (var agent in update.Agents.Where(a => !string.IsNullOrWhiteSpace(a.AgentName) && !string.IsNullOrWhiteSpace(a.ExtraArgs)))
+                {
+                    var stored = storedAgents.FirstOrDefault(s => string.Equals(s.AgentName, agent.AgentName, StringComparison.Ordinal));
+                    if (stored != null && string.Equals(NormalizeExtraArgs(stored.ExtraArgs), NormalizeExtraArgs(agent.ExtraArgs), StringComparison.Ordinal))
+                        continue;
+                    string agentError = ClaudeExtraArgsPolicy.Validate(agent.ExtraArgs);
+                    if (agentError != null)
+                        return ProjectSettingsSaveResult.Fail($"Extra flags for agent '{agent.AgentName}': {agentError} Nothing was saved.");
+                }
+            }
+
             string listError = ValidateLists(update);
             if (listError != null)
                 return ProjectSettingsSaveResult.Fail(listError);
@@ -225,6 +273,11 @@ namespace MultiTerminal.Services
                     changed = normalized.Where(p => !SameValue(p.Key, ReadField(current, p.Key), p.Value))
                                         .ToDictionary(p => p.Key, p => p.Value, StringComparer.Ordinal);
 
+                    // The watch list is judged once, after both of its fields are written: a repo that moves between
+                    // Repository URL and Also watch must not lose its baseline to the half-way state (a923589f).
+                    var watchListBefore = changed.ContainsKey("gitRepoUrl") || changed.ContainsKey("gitHubExtraRepos")
+                        ? GitHubWatchList.Of(current.GitRepoUrl, current.GitHubExtraRepos) : null;
+
                     foreach (var pair in changed)
                     {
                         // launch_mode has one writer, SetLaunchMode (task ec2ed636); UpdateProjectField does not
@@ -232,7 +285,8 @@ namespace MultiTerminal.Services
                         // connection, so it runs inside this transaction like every other write here.
                         bool written = pair.Key == "launchMode"
                             ? _db.SetLaunchMode(update.ProjectId, Project.ParseLaunchMode(pair.Value))
-                            : _db.UpdateProjectField(update.ProjectId, pair.Key, pair.Value);
+                            : _db.UpdateProjectField(update.ProjectId, pair.Key, pair.Value,
+                                pruneWatchList: pair.Key != "gitRepoUrl" && pair.Key != "gitHubExtraRepos");
                         if (!written)
                         {
                             failedField = pair.Key;
@@ -240,10 +294,13 @@ namespace MultiTerminal.Services
                         }
                     }
 
-                    // Turning GitHub watch back on, or pointing it at another repository, resets its
-                    // baseline inside UpdateProjectField (task 92eeeb47), so every writer gets it.
+                    // Turning GitHub watch back on resets every baseline inside UpdateProjectField (task 92eeeb47).
+                    // The two list fields were written above without their own prune; here, once, each repository
+                    // that is no longer on the list loses its state and queued notices (ticket a923589f).
+                    if (watchListBefore != null)
+                        _db.PruneGitHubWatchList(update.ProjectId, watchListBefore);
 
-                    SaveAgents(update.ProjectId, update.Agents);
+                    result.AgentExtraArgsChanged = SaveAgents(update.ProjectId, update.Agents);
                     SaveSpecialists(update.ProjectId, update.SpecialistAgents);
                     result.McpServersChanged = SaveMcpServers(update.ProjectId, update.McpServers);
                     SaveSkills(update.ProjectId, update.Skills);
@@ -355,7 +412,10 @@ namespace MultiTerminal.Services
         private static string Row(params object[] cells) => string.Join("\u001f", cells.Select(c => c?.ToString() ?? string.Empty));
 
         internal static string AgentsKey(IEnumerable<ProjectAgent> rows) =>
-            JoinRows(rows.Where(r => !string.IsNullOrWhiteSpace(r.AgentName)).Select(r => Row(r.AgentName, r.Role, r.PreferredModel)));
+            JoinRows(rows.Where(r => !string.IsNullOrWhiteSpace(r.AgentName)).Select(r => Row(r.AgentName, r.Role, r.PreferredModel, NormalizeExtraArgs(r.ExtraArgs))));
+
+        /// <summary>Extra Claude flags as stored (ticket 5380b6fb): trimmed, blank as null. The one rule for every compare.</summary>
+        internal static string NormalizeExtraArgs(string value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
         internal static string SpecialistsKey(IEnumerable<ProjectSpecialistAgent> rows) =>
             JoinRows(rows.Where(r => !string.IsNullOrWhiteSpace(r.AgentType)).Select(r => Row(r.AgentType, r.IsEnabled, r.CustomPrompt)));
         internal static string McpServersKey(IEnumerable<ProjectMcpServer> rows) =>
@@ -388,6 +448,8 @@ namespace MultiTerminal.Services
                 case "claudeHelperModel":
                     // Blank means "use the global setting" and is stored as NULL (ticket b0d2f090).
                     return ClaudeModelLaunchPolicy.Normalize(value);
+                case "claudeExtraArgs":
+                    return NormalizeExtraArgs(value);
                 case "launchMode":
                     // Unknown or blank reads as ask, the same rule as the stored value (task ec2ed636).
                     return Project.LaunchModeToStorage(Project.ParseLaunchMode(value));
@@ -396,12 +458,42 @@ namespace MultiTerminal.Services
                     return GitHubWatchSettings.ModeToStorage(GitHubWatchSettings.ParseMode(value));
                 case "gitHubCheckInterval":
                     return GitHubWatchSettings.IntervalToStorage(GitHubWatchSettings.ParseInterval(value));
+                case "gitHubExtraRepos":
+                    return NormalizeExtraRepos(value);
                 case "currentVersion":
                     return string.IsNullOrWhiteSpace(value) ? "0.1.0" : value;
                 default:
                     // A blank optional field is stored as null, as EditProjectDialog did.
                     return string.IsNullOrWhiteSpace(value) ? null : value;
             }
+        }
+
+        /// <summary>
+        /// The Also watch text as stored: one entry per line, blanks dropped (commas also split), null when
+        /// empty, so the same list typed two ways compares equal.
+        /// </summary>
+        internal static string NormalizeExtraRepos(string value)
+        {
+            var lines = GitHubWatchList.Split(value);
+            return lines.Count == 0 ? null : string.Join("\n", lines);
+        }
+
+        /// <summary>
+        /// Refuses a save that would put more than <see cref="GitHubWatchList.MaxRepos"/> repositories on a
+        /// project's watch list, so a mistake cannot multiply API calls (ticket a923589f). Judged only when the
+        /// save changes the Repository URL or Also watch. A line that cannot be read does not block the save:
+        /// the form and the header say so instead.
+        /// </summary>
+        private static string ValidateWatchList(Project current, Dictionary<string, string> normalized)
+        {
+            bool urlChanged = normalized.TryGetValue("gitRepoUrl", out var url) && !SameValue("gitRepoUrl", current.GitRepoUrl, url);
+            bool extraChanged = normalized.TryGetValue("gitHubExtraRepos", out var extra) && !SameValue("gitHubExtraRepos", ReadField(current, "gitHubExtraRepos"), extra);
+            if (!urlChanged && !extraChanged) return null;
+
+            var list = GitHubWatchList.Of(urlChanged ? url : current.GitRepoUrl, extraChanged ? extra : current.GitHubExtraRepos);
+            if (list.OverLimit == 0) return null;
+            return $"A project can watch at most {GitHubWatchList.MaxRepos} GitHub repositories (the Repository URL and Also watch together); " +
+                   $"{list.OverLimit} too many are listed. Nothing was saved.";
         }
 
         private static bool SameValue(string field, string stored, string incoming)
@@ -432,6 +524,7 @@ namespace MultiTerminal.Services
                 case "launchMode": return Project.LaunchModeToStorage(p.LaunchMode);
                 case "claudeModel": return ClaudeModelLaunchPolicy.Normalize(p.ClaudeModel);
                 case "claudeHelperModel": return ClaudeModelLaunchPolicy.Normalize(p.ClaudeHelperModel);
+                case "claudeExtraArgs": return NormalizeExtraArgs(p.ClaudeExtraArgs);
                 case "defaultTerminal": return TerminalKindHelper.Normalize(p.DefaultTerminal);
                 case "quietStart": return p.IsQuietStart ? "true" : "false";
                 case "teamLead": return p.TeamLead;
@@ -449,6 +542,7 @@ namespace MultiTerminal.Services
                 case "gitHubWatchMode": return GitHubWatchSettings.ModeToStorage(p.GitHubWatchMode);
                 case "gitHubCheckOnStart": return p.GitHubCheckOnStart ? "true" : "false";
                 case "gitHubCheckInterval": return GitHubWatchSettings.IntervalToStorage(p.GitHubCheckInterval);
+                case "gitHubExtraRepos": return NormalizeExtraRepos(p.GitHubExtraRepos);
                 default: throw new ArgumentOutOfRangeException(nameof(field), field, "Not an editable project field.");
             }
         }
@@ -515,15 +609,22 @@ namespace MultiTerminal.Services
             return null;
         }
 
-        private void SaveAgents(string projectId, List<ProjectAgent> rows)
+        /// <summary>Diff-saves the agent rows; true when any agent's extra Claude flags changed (ticket 5380b6fb).</summary>
+        private bool SaveAgents(string projectId, List<ProjectAgent> rows)
         {
-            if (rows == null) return;
+            if (rows == null) return false;
             var keep = rows.Where(r => !string.IsNullOrWhiteSpace(r.AgentName)).ToList();
             var keepNames = new HashSet<string>(keep.Select(r => r.AgentName), StringComparer.Ordinal);
-            foreach (var stored in _db.GetProjectAgents(projectId).Where(s => !keepNames.Contains(s.AgentName)))
+            var storedRows = _db.GetProjectAgents(projectId);
+            static string ExtraOf(IEnumerable<ProjectAgent> list) => JoinRows(list
+                .Where(a => !string.IsNullOrWhiteSpace(a.AgentName) && NormalizeExtraArgs(a.ExtraArgs) != null)
+                .Select(a => Row(a.AgentName, NormalizeExtraArgs(a.ExtraArgs))));
+            bool extraChanged = !string.Equals(ExtraOf(storedRows), ExtraOf(keep), StringComparison.Ordinal);
+            foreach (var stored in storedRows.Where(s => !keepNames.Contains(s.AgentName)))
                 _db.DeleteProjectAgent(projectId, stored.AgentName);
             foreach (var r in keep)
-                _db.SaveProjectAgent(new ProjectAgent { ProjectId = projectId, AgentName = r.AgentName, Role = r.Role, PreferredModel = r.PreferredModel });
+                _db.SaveProjectAgent(new ProjectAgent { ProjectId = projectId, AgentName = r.AgentName, Role = r.Role, PreferredModel = r.PreferredModel, ExtraArgs = r.ExtraArgs });
+            return extraChanged;
         }
 
         private void SaveSpecialists(string projectId, List<ProjectSpecialistAgent> rows)

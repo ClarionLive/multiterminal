@@ -12,6 +12,13 @@ namespace MultiTerminal.Models
         public string AgentName { get; set; }
         public string Role { get; set; }
         public string PreferredModel { get; set; }
+
+        /// <summary>
+        /// Extra Claude Code flags for this agent's terminals only, added after the project's
+        /// (<c>project_agents.extra_args</c>, ticket 5380b6fb); null for none. Decided by
+        /// <see cref="Services.ClaudeExtraArgsPolicy"/>, which quotes it for the command line.
+        /// </summary>
+        public string ExtraArgs { get; set; }
     }
 
     /// <summary>

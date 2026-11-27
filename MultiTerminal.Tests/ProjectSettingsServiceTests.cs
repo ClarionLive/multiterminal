@@ -107,16 +107,42 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// GitHub #77: an icon the pages cannot show (an image path) and a colour that is not one are refused
+        /// with the reason and nothing is written; an old stored value the user did not touch does not block
+        /// an unrelated save. Falsified: removing either check in Save turns the matching refusal red.
+        /// </summary>
+        [Fact]
+        public void An_unshowable_icon_or_colour_is_refused_but_an_untouched_one_does_not_block()
+        {
+            var p = Seed();
+
+            var badIcon = _service.Save(UpdateFor(p, ("icon", @"M:\x.ico"), ("isPinned", "true")));
+            Assert.False(badIcon.Success);
+            Assert.Contains("Image files are not supported", badIcon.Error);
+            Assert.False(_db.GetRichProject(p.Id).IsPinned);
+
+            var badColor = _service.Save(UpdateFor(p, ("iconColor", "blurple")));
+            Assert.False(badColor.Success);
+            Assert.Contains("not a colour", badColor.Error);
+
+            Assert.True(_db.UpdateProjectField(p.Id, "icon", @"M:\old.ico"));
+            var unrelated = _service.Save(UpdateFor(p, ("icon", @"M:\old.ico"), ("isPinned", "true")));
+            Assert.True(unrelated.Success, unrelated.Error);
+        }
+
+        /// <summary>
         /// The retired Project Manager edit re-saved the row from project.json, which has no gitAutoCommit,
         /// and so reset Auto-commit to off right after the dialog set it. A save that changes a project.json
-        /// field must leave Auto-commit as saved. Falsified: routing SyncProjectJson through
-        /// ProjectService.SaveProject(LoadProject(path)) turns the first assertion red.
+        /// field must leave the stored Auto-commit alone. The form no longer offers Auto-commit (GitHub #79),
+        /// so it is set on the row directly. Falsified (before #79): routing SyncProjectJson through
+        /// ProjectService.SaveProject(LoadProject(path)) turned the first assertion red.
         /// </summary>
         [Fact]
         public void Auto_commit_survives_a_save_that_also_rewrites_project_json()
         {
             var p = Seed();
-            var result = _service.Save(UpdateFor(p, ("gitAutoCommit", "true"), ("isPinned", "true")));
+            Assert.True(_db.UpdateProjectField(p.Id, "gitAutoCommit", "true"));
+            var result = _service.Save(UpdateFor(p, ("isPinned", "true")));
 
             Assert.True(result.Success, result.Error);
             Assert.True(_db.GetRichProject(p.Id).GitAutoCommit);
@@ -518,6 +544,71 @@ namespace MultiTerminal.Tests
             Assert.Null(_db.GetGitHubWatchState(p.Id, "o/r").Baseline);        // repo changed: fresh
         }
 
+        /// <summary>Ticket a923589f: Also watch saves as one repository per line, an unrelated save leaves it alone, a blank clears it.</summary>
+        [Fact]
+        public void Also_watch_saves_one_repository_per_line_and_an_unrelated_save_keeps_it()
+        {
+            var p = Seed();
+            Assert.Null(_db.GetRichProject(p.Id).GitHubExtraRepos);
+
+            var set = _service.Save(UpdateFor(p, ("gitHubExtraRepos", " o/second, https://github.com/o/third \r\n\r\nnot a repo ")));
+            Assert.True(set.Success, set.Error);
+            Assert.Contains("gitHubExtraRepos", set.ChangedFields);
+            Assert.Equal("o/second\nhttps://github.com/o/third\nnot a repo", _db.GetRichProject(p.Id).GitHubExtraRepos);   // an unreadable line still saves
+
+            var other = _service.Save(UpdateFor(p, ("buildCommand", "dotnet build")));
+            Assert.True(other.Success, other.Error);
+            Assert.DoesNotContain("gitHubExtraRepos", other.ChangedFields);
+            Assert.Equal("o/second\nhttps://github.com/o/third\nnot a repo", _db.GetRichProject(p.Id).GitHubExtraRepos);
+
+            var same = _service.Save(UpdateFor(p, ("gitHubExtraRepos", "o/second\nhttps://github.com/o/third\nnot a repo")));
+            Assert.DoesNotContain("gitHubExtraRepos", same.ChangedFields);   // typed another way, same list
+
+            Assert.True(_service.Save(UpdateFor(p, ("gitHubExtraRepos", "  \n "))).Success);
+            Assert.Null(_db.GetRichProject(p.Id).GitHubExtraRepos);
+        }
+
+        [Fact]
+        public void A_save_that_would_watch_more_than_ten_repositories_is_refused_and_writes_nothing()
+        {
+            var p = Seed();
+            string eleven = string.Join("\n", Enumerable.Range(1, 11).Select(i => "o/r" + i));
+
+            var result = _service.Save(UpdateFor(p, ("buildCommand", "x"), ("gitHubExtraRepos", eleven)));
+
+            Assert.False(result.Success);
+            Assert.Contains("at most 10", result.Error);
+            Assert.Null(_db.GetRichProject(p.Id).GitHubExtraRepos);
+            Assert.Null(_db.GetRichProject(p.Id).BuildCommand);
+
+            Assert.True(_service.Save(UpdateFor(p, ("gitHubExtraRepos", string.Join("\n", Enumerable.Range(1, 9).Select(i => "o/r" + i))))).Success);   // ten with the Repository URL
+            Assert.True(_service.Save(UpdateFor(p, ("gitRepoUrl", "o/primary"))).Success);
+            Assert.False(_service.Save(UpdateFor(p, ("gitHubExtraRepos", eleven))).Success);
+        }
+
+        /// <summary>
+        /// A repository that moves between Repository URL and Also watch in one save keeps its baseline: the
+        /// two writes are judged together, not one after the other (ticket a923589f).
+        /// </summary>
+        [Fact]
+        public void Swapping_a_repository_between_the_Repository_URL_and_Also_watch_keeps_both_baselines()
+        {
+            var p = Seed();
+            Assert.True(_service.Save(UpdateFor(p, ("gitHubWatchMode", "board"), ("gitRepoUrl", "https://github.com/o/a"), ("gitHubExtraRepos", "o/b"))).Success);
+            _db.RecordGitHubWatchCheck(p.Id, "o/a", 40, null);
+            _db.RecordGitHubWatchCheck(p.Id, "o/b", 50, null);
+
+            var swap = _service.Save(UpdateFor(p, ("gitRepoUrl", "https://github.com/o/b"), ("gitHubExtraRepos", "o/a")));
+            Assert.True(swap.Success, swap.Error);
+            Assert.Equal(40, _db.GetGitHubWatchState(p.Id, "o/a").Baseline);
+            Assert.Equal(50, _db.GetGitHubWatchState(p.Id, "o/b").Baseline);
+
+            // Replace one and drop the other: only those two lose theirs, and a new one has none yet.
+            Assert.True(_service.Save(UpdateFor(p, ("gitRepoUrl", "https://github.com/o/c"), ("gitHubExtraRepos", "o/a"))).Success);
+            Assert.Null(_db.GetGitHubWatchState(p.Id, "o/b").Baseline);
+            Assert.Equal(40, _db.GetGitHubWatchState(p.Id, "o/a").Baseline);
+        }
+
         /// <summary>Ticket b0d2f090: the two model fields save through UpdateProjectField, blank clears to NULL, and apply at the next launch.</summary>
         [Fact]
         public void Model_fields_save_clear_and_apply_at_next_launch()
@@ -634,6 +725,105 @@ namespace MultiTerminal.Tests
         public void An_unknown_launch_mode_reads_as_ask(string sent, string normalized)
         {
             Assert.Equal(normalized, ProjectSettingsService.NormalizeValue("launchMode", sent));
+        }
+
+        // ── Extra Claude flags (ticket 5380b6fb) ─────────────────────────────
+
+        [Fact]
+        public void Extra_Claude_flags_save_to_the_row_and_apply_at_next_launch()
+        {
+            var p = Seed();
+            var result = _service.Save(UpdateFor(p, ("claudeExtraArgs", "  --plugin-dir \"C:\\dolly\"  ")));
+
+            Assert.True(result.Success, result.Error);
+            Assert.True(result.AppliesAtNextLaunch);
+            Assert.Equal("--plugin-dir \"C:\\dolly\"", _db.GetRichProject(p.Id).ClaudeExtraArgs);
+
+            var cleared = _service.Save(UpdateFor(p, ("claudeExtraArgs", "")));
+            Assert.True(cleared.Success, cleared.Error);
+            Assert.Null(_db.GetRichProject(p.Id).ClaudeExtraArgs);
+        }
+
+        [Fact]
+        public void An_invalid_extra_flag_refuses_the_whole_save_with_the_reason()
+        {
+            var p = Seed();
+            var result = _service.Save(UpdateFor(p, ("buildCommand", "dotnet build"), ("claudeExtraArgs", "--resume x")));
+
+            Assert.False(result.Success);
+            Assert.Contains("--resume", result.Error);
+            Assert.Null(_db.GetRichProject(p.Id).BuildCommand);
+            Assert.Null(_db.GetRichProject(p.Id).ClaudeExtraArgs);
+        }
+
+        [Fact]
+        public void An_agents_extra_flags_round_trip_and_an_invalid_one_refuses_the_save()
+        {
+            var p = Seed();
+            var u = UpdateFor(p);
+            u.Agents = new List<ProjectAgent> { new ProjectAgent { AgentName = "Vella-2", Role = "dev", ExtraArgs = "--plugin-dir \"C:\\dolly\"" } };
+            var saved = _service.Save(u);
+
+            Assert.True(saved.Success, saved.Error);
+            Assert.True(saved.AgentExtraArgsChanged);
+            Assert.True(saved.AppliesAtNextLaunch);
+            Assert.Equal("--plugin-dir \"C:\\dolly\"", _db.GetProjectAgents(p.Id).Single().ExtraArgs);
+
+            var bad = UpdateFor(p);
+            bad.Agents = new List<ProjectAgent> { new ProjectAgent { AgentName = "Vella-2", Role = "dev", ExtraArgs = "--model fable" } };
+            var refused = _service.Save(bad);
+            Assert.False(refused.Success);
+            Assert.Contains("Vella-2", refused.Error);
+            Assert.Equal("--plugin-dir \"C:\\dolly\"", _db.GetProjectAgents(p.Id).Single().ExtraArgs);
+
+            var roleOnly = UpdateFor(p);
+            roleOnly.Agents = new List<ProjectAgent> { new ProjectAgent { AgentName = "Vella-2", Role = "lead", ExtraArgs = "--plugin-dir \"C:\\dolly\"" } };
+            var roleSaved = _service.Save(roleOnly);
+            Assert.True(roleSaved.Success, roleSaved.Error);
+            Assert.False(roleSaved.AgentExtraArgsChanged);
+        }
+
+        /// <summary>
+        /// The REST agent endpoint (what agents reach through add_project_agent) must not clear or set an
+        /// agent's extra flags: <c>SaveProjectAgent(..., writeExtraArgs: false)</c>. Falsified: passing true
+        /// clears the Owner's flags and turns the first assertion red.
+        /// </summary>
+        [Fact]
+        public void The_agent_upsert_agents_reach_keeps_the_owners_extra_flags()
+        {
+            var p = Seed();
+            _db.SaveProjectAgent(new ProjectAgent { ProjectId = p.Id, AgentName = "Vella", ExtraArgs = "--plugin-dir C:\\dolly" });
+            _db.SaveProjectAgent(new ProjectAgent { ProjectId = p.Id, AgentName = "Vella", Role = "dev", ExtraArgs = "--evil" }, writeExtraArgs: false);
+            _db.SaveProjectAgent(new ProjectAgent { ProjectId = p.Id, AgentName = "Quinn", ExtraArgs = "--evil" }, writeExtraArgs: false);
+
+            var rows = _db.GetProjectAgents(p.Id);
+            Assert.Equal("--plugin-dir C:\\dolly", rows.Single(r => r.AgentName == "Vella").ExtraArgs);
+            Assert.Equal("dev", rows.Single(r => r.AgentName == "Vella").Role);
+            Assert.Null(rows.Single(r => r.AgentName == "Quinn").ExtraArgs);
+        }
+
+        /// <summary>
+        /// PATCH /api/projects/{id} (what agents reach through update_project) refuses the extra flags in
+        /// both spellings and still writes the other fields. Falsified: removing the refusal in
+        /// UpdateProject writes the row and turns the null assertions red.
+        /// </summary>
+        [Theory]
+        [InlineData("claudeExtraArgs")]
+        [InlineData("CLAUDE_EXTRA_ARGS")]
+        public void The_PATCH_endpoint_agents_reach_refuses_the_extra_flags(string field)
+        {
+            var p = Seed();
+            var controller = new MultiTerminal.API.Controllers.ProjectContextController(null, _db, null);
+            var request = new MultiTerminal.API.Controllers.ProjectContextController.UpdateProjectRequest
+            {
+                Fields = new Dictionary<string, string> { [field] = "--plugin-dir C:\\evil", ["buildCommand"] = "dotnet build" },
+            };
+
+            controller.UpdateProject(p.Id, request);
+
+            var row = _db.GetRichProject(p.Id);
+            Assert.Null(row.ClaudeExtraArgs);
+            Assert.Equal("dotnet build", row.BuildCommand);
         }
 
         private sealed class StubHost : IProjectSettingsHost

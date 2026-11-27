@@ -756,7 +756,99 @@ namespace MultiTerminal.Controls
         public bool InputLineHasTypedText => _inputLineBuffer.Length > 0;
 
         /// <summary>The plugin's PreCompact hook reported a compaction starting in this pane.</summary>
-        public void NoteCompactionStarting(bool manual) => _compactContinueGate.NoteCompactionStarting(manual);
+        public void NoteCompactionStarting(bool manual)
+        {
+            LastCompactionStartingUtc = DateTime.UtcNow;
+            _compactContinueGate.NoteCompactionStarting(manual);
+        }
+
+        /// <summary>
+        /// When the plugin's PreCompact hook last reported a compaction starting in this pane (manual or
+        /// automatic), or null. Proof that an injected /compact went in (ticket 354f1efa).
+        /// </summary>
+        public DateTime? LastCompactionStartingUtc { get; private set; }
+
+        /// <summary>
+        /// Types an agent-requested slash command and presses Enter ONLY if nobody typed in the pane since just
+        /// before the text was written (ticket 354f1efa; the sequence is <see cref="GuardedSubmit"/>'s). The
+        /// check and the Enter are one step in the page (<c>terminalSendEnterIfNoInputSince</c>), so a keystroke
+        /// cannot slip between them: an Owner who starts typing during the settle keeps their text unsent.
+        /// UI thread.
+        /// </summary>
+        internal async Task<GuardedSubmitResult> InjectAndSubmitUnlessTypedAsync(string text, int enterSettleMs)
+        {
+            if (IsDisposed || _terminal == null || _renderer == null || string.IsNullOrEmpty(text))
+            {
+                return new GuardedSubmitResult(GuardedSubmitOutcome.Failed, null);
+            }
+
+            List<string> submissions = InjectionChunking.Plan(text, out int? truncatedFromBytes);
+            if (truncatedFromBytes is int originalBytes)
+            {
+                _debugLogService?.Warning("TerminalControl",
+                    $"InjectAndSubmitUnlessTypedAsync: slash command of {originalBytes} bytes cut to {InjectionChunking.MaxChunkBytes}");
+            }
+
+            if (submissions.Count != 1)
+            {
+                return new GuardedSubmitResult(GuardedSubmitOutcome.Failed, null);
+            }
+
+            return await GuardedSubmit.RunAsync(
+                submissions[0],
+                enterSettleMs,
+                ReadInputEpochAsync,
+                written => _terminal.Write(written),
+                ms => Task.Delay(ms),
+                SendEnterUnlessTypedSinceAsync);
+        }
+
+        /// <summary>The page's count of keystrokes and pastes a person sent (ticket 354f1efa), or null when it cannot be read.</summary>
+        private async Task<long?> ReadInputEpochAsync()
+        {
+            if (IsDisposed || _renderer == null)
+            {
+                return null;
+            }
+
+            return await _renderer.ReadInputEpochAsync();
+        }
+
+        /// <summary>
+        /// Presses Enter only if nobody typed in the pane since <paramref name="epoch"/> was read (ticket 354f1efa):
+        /// true sent, false withheld (someone typed), null unknown (the page could not be asked). UI thread.
+        /// </summary>
+        internal async Task<bool?> SendEnterUnlessTypedSinceAsync(long epoch)
+        {
+            if (IsDisposed || _renderer == null)
+            {
+                return null;
+            }
+
+            return await _renderer.SendEnterIfNoInputSinceAsync(epoch);
+        }
+
+        /// <summary>
+        /// The screen text from <paramref name="rowsAbove"/> rows above the cursor down to the cursor row, one
+        /// line per row, or null when it cannot be read (ticket 354f1efa). UI thread.
+        /// </summary>
+        public async Task<string> ReadScreenNearCursorAsync(int rowsAbove)
+        {
+            if (IsDisposed || _renderer == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                return await _renderer.ReadRowsNearCursorAsync(rowsAbove);
+            }
+            catch (Exception ex)
+            {
+                LogTrace($"ReadScreenNearCursorAsync failed: {ex.Message}");
+                return null;
+            }
+        }
 
         /// <summary>
         /// True once per <see cref="ArmCompactContinue"/>, within <see cref="CompactContinueGate.Expiry"/>,
@@ -795,6 +887,9 @@ namespace MultiTerminal.Controls
         private DateTime _lastClearInjectUtc = DateTime.MinValue;
         private readonly object _clearInjectLock = new object();
 
+        // What clear_my_context asked to carry into the fresh session (ticket cc2e51ff). Guarded by _clearInjectLock.
+        private readonly ClearContinueNote _clearContinue = new ClearContinueNote();
+
         /// <summary>
         /// Keystroke fallback: called when BufferInputForSlashDetection sees the user type
         /// "/clear". The PRIMARY trigger is now the SessionStart(source=clear) hook →
@@ -817,6 +912,7 @@ namespace MultiTerminal.Controls
         /// </summary>
         public void TriggerClearSessionStart(string source, string text = "initializing...")
         {
+            string note;
             lock (_clearInjectLock)
             {
                 var now = DateTime.UtcNow;
@@ -827,10 +923,50 @@ namespace MultiTerminal.Controls
                 }
 
                 _lastClearInjectUtc = now;
+                // The note clear_my_context left for this clear (ticket cc2e51ff), taken once, here, so the two
+                // paths cannot both carry it. Only the hook path delivers it: an agent's /clear is written to the
+                // ConPTY directly and never reaches the keystroke detector, so a keystroke trigger is a /clear
+                // somebody TYPED, which is not the clear the note was left for. It drops the note.
+                note = _clearContinue.TryTake(now);
+                if (note != null && !ClearContinueNote.SourceMayDeliver(source))
+                {
+                    LogTrace("/clear continue note dropped: this /clear was typed in the pane, not the agent's");
+                    note = null;
+                }
             }
 
-            LogTrace($"/clear session-start injection triggered (source={source})");
-            _ = InjectInitializingAfterClearAsync(text);
+            LogTrace($"/clear session-start injection triggered (source={source}{(note == null ? string.Empty : $", with a continue note of {note.Length} chars")})");
+            _ = InjectInitializingAfterClearAsync(text, note);
+        }
+
+        /// <summary>
+        /// Holds the text an agent passed to <c>clear_my_context</c> as <c>continueWith</c>, for this pane's next
+        /// post-clear prompt (ticket cc2e51ff). Called just before its <c>/clear</c> is typed. Blank clears it.
+        /// </summary>
+        public void ArmClearContinue(string text)
+        {
+            lock (_clearInjectLock)
+            {
+                _clearContinue.Arm(text, DateTime.UtcNow);
+            }
+        }
+
+        /// <summary>The held continue note's <c>/clear</c> was typed; only from now may a trigger take it (ticket cc2e51ff).</summary>
+        public void NoteClearContinueTyped()
+        {
+            lock (_clearInjectLock)
+            {
+                _clearContinue.NoteClearTyped(DateTime.UtcNow);
+            }
+        }
+
+        /// <summary>Drops a held continue note: its <c>/clear</c> could not be typed (ticket cc2e51ff).</summary>
+        public void DisarmClearContinue()
+        {
+            lock (_clearInjectLock)
+            {
+                _clearContinue.Arm(null, DateTime.UtcNow);
+            }
         }
 
         /// <summary>
@@ -838,7 +974,7 @@ namespace MultiTerminal.Controls
         /// after the /clear transition, then injects <paramref name="text"/> to trigger the
         /// session-start flow. Funneled through <see cref="TriggerClearSessionStart"/>.
         /// </summary>
-        private async Task InjectInitializingAfterClearAsync(string text)
+        private async Task InjectInitializingAfterClearAsync(string text, string note = null)
         {
             // Flush session memory for this project (old session file is now frozen)
             FlushSessionMemoryAsync();
@@ -852,7 +988,7 @@ namespace MultiTerminal.Controls
 
             if (_isDisposed || _terminal == null || !_terminal.IsRunning)
             {
-                LogTrace($"/clear injection aborted: terminal not running (disposed={_isDisposed}, terminal={(_terminal == null ? "null" : "ok")}, running={_terminal?.IsRunning ?? false})");
+                LogTrace($"/clear injection aborted: terminal not running (disposed={_isDisposed}, terminal={(_terminal == null ? "null" : "ok")}, running={_terminal?.IsRunning ?? false}){(note == null ? string.Empty : "; its continue note was lost")}");
                 return;
             }
 
@@ -866,13 +1002,15 @@ namespace MultiTerminal.Controls
 
             if (!IsRendererReady)
             {
-                LogTrace($"/clear injection failed: renderer not ready after {waitedMs}ms (renderer={(_renderer == null ? "null" : "not initialized")})");
+                LogTrace($"/clear injection failed: renderer not ready after {waitedMs}ms (renderer={(_renderer == null ? "null" : "not initialized")}){(note == null ? string.Empty : "; its continue note was lost")}");
                 return;
             }
 
-            // Quiet start (GitHub #34): the session/lineage flush above still runs, but nothing is typed.
-            // The SessionStart hook does not ask for session-start in a quiet terminal either.
-            if (QuietStart)
+            // Quiet start (GitHub #34): the session/lineage flush above still runs, but nothing is typed and no
+            // session-start runs, EXCEPT an agent's continue note (ticket cc2e51ff), typed on its own with a plain
+            // "your context was cleared" head instead of the hook's text.
+            text = ClearContinueNote.PromptAfterClear(text, note, QuietStart);
+            if (text == null)
             {
                 LogTrace("/clear injection skipped: quiet start");
                 return;

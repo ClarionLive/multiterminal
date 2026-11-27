@@ -107,7 +107,7 @@ namespace MultiTerminal.API.Controllers
                 return Problem(detail: "text is required", statusCode: 400);
 
             var (success, error) = _broker.RequestTerminalInject(
-                name, null, request.Text, "submit", request.ContinueAfterCompact);
+                name, null, request.Text, "submit", request.ContinueAfterCompact, request.ContinueAfterClear);
 
             if (!success)
                 return Problem(detail: error, statusCode: 400);
@@ -244,6 +244,9 @@ namespace MultiTerminal.API.Controllers
 
             /// <summary>True from <c>compact_my_context</c>: continue after this /compact (ticket c0ebcfd4).</summary>
             public bool ContinueAfterCompact { get; set; }
+
+            /// <summary>From <c>clear_my_context</c>'s <c>continueWith</c>: typed into the fresh session after this /clear (ticket cc2e51ff).</summary>
+            public string ContinueAfterClear { get; set; }
         }
 
         public class TerminalCompactStartingRequest

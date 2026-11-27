@@ -64,6 +64,9 @@ namespace MultiTerminal.API.Controllers
                 return Problem(detail: $"Failed to create project folder: {ex.Message}", statusCode: 400);
             }
 
+            if (!MultiTerminal.Services.ExistingProjectChoice.IsValid(request.ExistingProject))
+                return Problem(detail: "existingProject must be \"restore\" or \"new\"", statusCode: 400);
+
             var result = _broker.CreateProject(
                 name: request.Name,
                 description: request.Description,
@@ -72,7 +75,8 @@ namespace MultiTerminal.API.Controllers
                 teamLead: request.TeamLead,
                 defaultTerminal: request.DefaultTerminal,
                 projectType: request.ProjectType,
-                currentVersion: request.CurrentVersion);
+                currentVersion: request.CurrentVersion,
+                existingProject: request.ExistingProject);
 
             // An occupied folder is a conflict, not a malformed request (task 9f95ab0c). The detail
             // names the existing id (or says the project.json is unreadable); nothing is reused or overwritten.
@@ -121,6 +125,23 @@ namespace MultiTerminal.API.Controllers
             bool claudeProfileWritten = false;
             foreach (var kvp in request.Fields)
             {
+                // Extra Claude flags (ticket 5380b6fb) go onto other terminals' command lines (a --plugin-dir
+                // loads hooks into every terminal of the project), so only the Owner sets them, in the project
+                // settings form. This endpoint is what agents reach through update_project.
+                if (IsClaudeExtraArgsField(kvp.Key))
+                {
+                    rejected.Add(kvp.Key);
+                    continue;
+                }
+
+                // Icon and Icon colour get the settings form's check (GitHub #77), with the reason.
+                string iconError = IconFieldError(kvp.Key, kvp.Value);
+                if (iconError != null)
+                {
+                    rejected.Add($"{kvp.Key} ({iconError})");
+                    continue;
+                }
+
                 if (_projectDb.UpdateProjectField(projectId, kvp.Key, kvp.Value))
                 {
                     updated.Add(kvp.Key);
@@ -141,9 +162,23 @@ namespace MultiTerminal.API.Controllers
             return Ok(new { updated, rejected });
         }
 
+        private static string IconFieldError(string field, string value)
+        {
+            if (string.Equals(field, "icon", System.StringComparison.OrdinalIgnoreCase))
+                return MultiTerminal.Services.ProjectIcon.ValidateIcon(value);
+            if (string.Equals(field, "iconColor", System.StringComparison.OrdinalIgnoreCase)
+                || string.Equals(field, "icon_color", System.StringComparison.OrdinalIgnoreCase))
+                return MultiTerminal.Services.ProjectIcon.ValidateColor(value);
+            return null;
+        }
+
         private static bool IsClaudeProfileField(string field) =>
             string.Equals(field, "claudeProfile", System.StringComparison.OrdinalIgnoreCase)
             || string.Equals(field, "claude_profile", System.StringComparison.OrdinalIgnoreCase);
+
+        internal static bool IsClaudeExtraArgsField(string field) =>
+            string.Equals(field, "claudeExtraArgs", System.StringComparison.OrdinalIgnoreCase)
+            || string.Equals(field, "claude_extra_args", System.StringComparison.OrdinalIgnoreCase);
 
         private void SyncProjectJsonClaudeProfile(string projectId)
         {
@@ -227,7 +262,7 @@ namespace MultiTerminal.API.Controllers
                 AgentName = request.AgentName,
                 Role = request.Role,
                 PreferredModel = request.PreferredModel
-            });
+            }, writeExtraArgs: false); // Owner-only (ticket 5380b6fb): an existing row keeps its extra flags.
             return Ok();
         }
 
@@ -426,6 +461,12 @@ namespace MultiTerminal.API.Controllers
             public string ProjectType { get; set; }
             public string CurrentVersion { get; set; }
             public string CreatedBy { get; set; }
+
+            /// <summary>
+            /// For a folder holding an unregistered project's .claude/project.json (GitHub #102): "restore" brings
+            /// that project back, "new" sets the file aside and creates a new project. Null refuses with a 409.
+            /// </summary>
+            public string ExistingProject { get; set; }
         }
 
         public class UpdateProjectRequest

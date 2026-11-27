@@ -29,6 +29,13 @@ namespace MultiTerminal.ProjectSettings
         /// <summary>Confirms with the user and deletes the project. Returns true when it was deleted.</summary>
         public Func<IWin32Window, string, bool> DeleteProject { get; set; }
 
+        /// <summary>
+        /// Move Project (ticket 6f879683): asks where, checks, confirms, runs and reports. The bool is true for
+        /// "Move project…" (MT moves the folder) and false for "Folder was moved…". Returns true when the
+        /// project's folder changed.
+        /// </summary>
+        public Func<IWin32Window, string, bool, bool> RelocateProject { get; set; }
+
         /// <summary>Called after a save wrote something, with the project id, so the app can refresh what it shows.</summary>
         public Action<string> ProjectSaved { get; set; }
 
@@ -223,6 +230,10 @@ namespace MultiTerminal.ProjectSettings
                 case "openFolder":
                     OpenFolder();
                     break;
+                case "moveProject":
+                case "repointProject":
+                    RelocateProject(type == "moveProject");
+                    break;
                 case "syncMcp":
                     SyncMcp();
                     break;
@@ -336,10 +347,14 @@ namespace MultiTerminal.ProjectSettings
 
                 // Whether the GitHub watch can run, and its last check (task 92eeeb47).
                 var linked = all.FirstOrDefault(a => string.Equals(a.Id, project.SourceControlAccountId, StringComparison.Ordinal));
-                var repo = GitHubRepoRef.TryParse(project.GitRepoUrl);
-                var state = repo == null ? null : _context.ProjectDb.GetGitHubWatchState(project.Id, repo.FullName);
+                // Every repository on the watch list reports its own last check (ticket a923589f).
                 options.GitHubWatchStatus = GitHubWatchService.DescribeStatus(
-                    project, linked?.Provider, linked?.HasToken == true, state?.LastCheckedUtc, state?.LastError);
+                    project, linked?.Provider, linked?.HasToken == true,
+                    repoName =>
+                    {
+                        var state = _context.ProjectDb.GetGitHubWatchState(project.Id, repoName);
+                        return (state.LastCheckedUtc, state.LastError);
+                    });
             }
             catch (Exception ex) { _context.Log?.Warning("ProjectSettings", $"Source accounts unreadable: {ex.Message}"); }
 
@@ -467,6 +482,21 @@ namespace MultiTerminal.ProjectSettings
 
             if (dialog.ShowDialog(this) == DialogResult.OK)
                 Post(new { type = "folderPicked", field, path = dialog.SelectedPath });
+        }
+
+        private void RelocateProject(bool moveFolder)
+        {
+            if (_dirty)
+            {
+                Notice("Save or reload your changes first, then move the project.", "error");
+                return;
+            }
+
+            if (_context.RelocateProject == null)
+                return;
+
+            if (_context.RelocateProject(this, _projectId, moveFolder))
+                SendLoad();
         }
 
         private void OpenFolder()

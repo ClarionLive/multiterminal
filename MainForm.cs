@@ -44,7 +44,7 @@ namespace MultiTerminal
         // - *PanelDocument fields are DockContent panels registered with _dockPanel; disposed transitively via _dockPanel?.Dispose() in Dispose(bool).
         // - _lastActiveTerminal is a borrowed reference (points to whichever TerminalDocument is currently active); not owned.
         // - _mcpServer is deliberately not disposed here because OnFormClosing already called StopAsync; a second dispose would deadlock the UI thread.
-        // - _projectService, _webhookService have explicit disposal added to Dispose(bool) below; the pragma is a no-op on them.
+        // - _projectService has explicit disposal added to Dispose(bool) below; the pragma is a no-op on it.
 #pragma warning disable CA2213
         private ToolStripButton _themeButton;
         private ToolStripDropDownButton _gridDropdown;
@@ -54,6 +54,9 @@ namespace MultiTerminal
         private ProjectService _projectService;
         private ToolStripDropDownButton _recentFoldersDropdown;
         private TerminalDocument _lastActiveTerminal;
+
+        /// <summary>Floating windows already wired for <see cref="RestoreTerminalFocusOnActivate"/> (task 76a9d71a).</summary>
+        private readonly HashSet<Form> _activationHookedWindows = new HashSet<Form>();
         private Models.Project _currentProject;
 
         // REST API Server for inter-terminal communication
@@ -61,7 +64,6 @@ namespace MultiTerminal
         // MultiRemote phone-gateway in-process host (Phase 2, task ca6c5344) — second,
         // independent Kestrel on :5100 serving the PWA. Started alongside the REST server.
         private MultiTerminal.API.Gateway.MultiRemoteGatewayHost _remoteGateway;
-        private MCPServer.Services.HttpWebhookService _webhookService;
         private ChatPanelDocument _chatPanel;
         private SessionIndexingService _sessionIndexingService;
         private TaskDatabase _chatTaskDatabase; // Used for chat message persistence
@@ -525,21 +527,21 @@ namespace MultiTerminal
                     log: message => _debugLogService?.Info("GitHubWatch", message));
 #pragma warning restore CA2000
                 // Task e4924065. The service raises these on a pool thread; panes are UI objects.
-                _gitHubWatch.CountsChanged += projectId => PostGitHubUi(() => RefreshGitHubBands(projectId));
+                _gitHubWatch.CountsChanged += projectId => PostUi(() => RefreshGitHubBands(projectId));
                 // Task 81d0e597: a failed check shows (and the next good one clears) without waiting for a tick.
-                _gitHubWatch.CheckRecorded += projectId => PostGitHubUi(() => RefreshGitHubBands(projectId));
-                _gitHubWatch.NoticesQueued += projectId => PostGitHubUi(() => DeliverGitHubNotices(projectId));
+                _gitHubWatch.CheckRecorded += projectId => PostUi(() => RefreshGitHubBands(projectId));
+                _gitHubWatch.NoticesQueued += projectId => PostUi(() => DeliverGitHubNotices(projectId));
                 // Each tick also refreshes the bands: PATCH /api/projects/{id} and update_project change
                 // the Repository URL without any event MainForm hears (pipeline Run 1), so a REST or MCP
                 // edit shows within a minute.
-                _gitHubWatch.Ticked += () => PostGitHubUi(() =>
+                _gitHubWatch.Ticked += () => PostUi(() =>
                 {
                     DeliverAllGitHubNotices();
                     RefreshGitHubBands(null);
                 });
-                broker.ProjectsUpdated += (s, e) => PostGitHubUi(() => RefreshGitHubBands(null));
+                broker.ProjectsUpdated += (s, e) => PostUi(() => RefreshGitHubBands(null));
                 _gitHubWatch.Start();
-                PostGitHubUi(() => RefreshGitHubBands(null));
+                PostUi(() => RefreshGitHubBands(null));
             }
             catch (Exception ex)
             {
@@ -547,7 +549,8 @@ namespace MultiTerminal
             }
         }
 
-        private void PostGitHubUi(Action action)
+        /// <summary>Runs <paramref name="action"/> on the UI thread if the form is still alive; a closing form drops it.</summary>
+        private void PostUi(Action action)
         {
             try
             {
@@ -574,7 +577,7 @@ namespace MultiTerminal
                 var db = _sharedProjectDatabase;
                 if (db == null || _dockPanel == null) return;
 
-                var bands = new Dictionary<string, Services.GitHubBand>(StringComparer.Ordinal);
+                var bands = new Dictionary<string, Services.GitHubHeader>(StringComparer.Ordinal);
                 foreach (var doc in _dockPanel.Contents.OfType<TerminalDocument>())
                 {
                     if (doc == null || doc.IsDisposed) continue;
@@ -582,18 +585,16 @@ namespace MultiTerminal
                     if (onlyProjectId != null && !string.Equals(projectId, onlyProjectId, StringComparison.Ordinal)) continue;
                     if (string.IsNullOrEmpty(projectId))
                     {
-                        doc.SetGitHubBand(Services.GitHubBand.Hidden);
+                        doc.SetGitHubBand(Services.GitHubHeader.Hidden);
                         continue;
                     }
 
                     if (!bands.TryGetValue(projectId, out var band))
                     {
+                        // One entry per repository on the project's watch list (ticket a923589f). Watching off:
+                        // the links without counts nobody refreshes, and no failure or warning.
                         var project = db.GetRichProject(projectId);
-                        var repo = Services.GitHubRepoRef.TryParse(project?.GitRepoUrl);
-                        // Watching off: the link without counts nobody refreshes, and no failure.
-                        bool watching = repo != null && project.GitHubWatchMode != GitHubWatchMode.Off;
-                        band = Services.GitHubBandModel.Build(repo?.FullName, watching,
-                            watching ? db.GetGitHubWatchState(projectId, repo.FullName) : null);
+                        band = Services.GitHubBandModel.BuildHeader(project, repoName => db.GetGitHubWatchState(projectId, repoName));
                         bands[projectId] = band;
                     }
                     doc.SetGitHubBand(band);
@@ -631,8 +632,10 @@ namespace MultiTerminal
                     return;
                 }
 
+                // The page named a repository; it must be on THIS project's watch list, and the URL is built
+                // here from our own parsed copy of it, never from what the page sent (ticket a923589f).
                 var project = _sharedProjectDatabase?.GetRichProject(e.ProjectId);
-                string url = Services.GitHubRepoRef.TryParse(project?.GitRepoUrl)?.WebUrl(e.Target);
+                string url = Services.GitHubWatchList.ResolveLink(project, e.Target, e.Repo);
                 if (url == null) return;
                 using var browser = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
             }
@@ -920,6 +923,9 @@ namespace MultiTerminal
 
             // Handle active document changes
             _dockPanel.ActiveDocumentChanged += OnActiveDocumentChanged;
+
+            // Alt+Tab back into a floating window must give its bordered pane focus too (task 76a9d71a).
+            _dockPanel.ContentAdded += OnContentAddedForActivation;
 
             // Robustly tear a terminal down when its tab is closed. ContentRemoved is
             // DockPanelSuite's authoritative "this content left the panel" signal — unlike
@@ -1435,6 +1441,11 @@ namespace MultiTerminal
                 _mcpServer.SpawnService.OnSpawnAgentRequested = OnSpawnAgentRequested;
                 _mcpServer.SpawnService.OnCloseRequested = OnSpawnedPaneCloseRequested;
                 _mcpServer.SpawnService.Jobs.Collected += OnSpawnJobCollected;
+                if (_mcpServer.ProjectOpenService != null)
+                {
+                    _mcpServer.ProjectOpenService.OnOpenRequested = OnProjectOpenRequested;
+                    _mcpServer.ProjectOpenService.OnOpenStateRequested = OnProjectOpenStateRequested;
+                }
 
                 // The launch record (task 7d20e94c): one recorder per MT process, on the broker's
                 // database, which is open from here on. Panes are created after this (session restore
@@ -1447,22 +1458,20 @@ namespace MultiTerminal
                 _mcpServer.Broker.GlossWriterSpawner = SpawnGlossWriterAsync;
                 _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 19: All wiring complete");
 
-                // Initialize HTTP webhook service for agent ready notifications
-                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 20: Creating HttpWebhookService");
-                _webhookService = new MCPServer.Services.HttpWebhookService(_mcpServer.Broker);
-                _webhookService.AgentReady += (s, args) =>
-                {
-                    _debugLogService?.Trace("MainForm", $"Agent ready webhook received: {args.AgentName}");
-                    _debugLogService.Info("MainForm", $"Agent {args.AgentName} sent ready notification via webhook");
-                };
-                _webhookService.Start();
-                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 21: HttpWebhookService started on http://localhost:5000/");
-
                 // Start native agent team watcher
                 InitializeTeamWatcher();
 
                 // Initialize and start Oracle advisory agent (always-on, dockable/floatable)
                 InitializeOracle();
+
+                // Writes the mtclaude command and puts its folder on the user PATH once (ticket 6c688883).
+                // Independent of the REST start, not ordered with it: it runs whether or not the REST host binds,
+                // so a port conflict or a declined retry cannot leave the command missing or stale (pipeline
+                // Run 1, Codex). Nothing needs it before REST; it only has to happen at every startup.
+                _ = Task.Run(() => StandaloneLauncher.EnsureInstalled(
+                    StandaloneLauncher.ResolveBinDirectory(), addToUserPath: true,
+                    message => _debugLogService?.Info("StandaloneLauncher", message),
+                    LaunchCommandBuilder.GetMtPluginPath()));
 
                 // Start MCP server in background
                 Task.Run(async () =>
@@ -1479,35 +1488,16 @@ namespace MultiTerminal
                         }
 
                         // Crash recovery: index any unflushed sessions from previous runs
-                        // Must run after StartAsync so ProjectService is wired
-                        try
-                        {
-                            var sessionMemDb = _mcpServer.Broker.SessionMemoryDb;
-                            var projects = _mcpServer.Broker.ProjectService?.GetAllRegisteredProjects();
-                            if (sessionMemDb != null && projects != null)
-                            {
-                                // a5ac5f71: this loop runs AFTER the REST server is live, so its write
-                                // burst overlaps incoming API writes — the prime startup-contention window.
-                                // The markers bound that window in the WriteContention log stream.
-                                var recoverySw = System.Diagnostics.Stopwatch.StartNew();
-                                Services.WriteContentionDiagnostics.MarkPhase("Crash-recovery session indexing started (REST API is already accepting requests)");
-                                foreach (var project in projects)
-                                {
-                                    if (!string.IsNullOrEmpty(project.Path))
-                                        sessionMemDb.IndexProjectSessions(project.Path);
-                                }
-
-                                Services.WriteContentionDiagnostics.MarkPhase($"Crash-recovery session indexing finished in {recoverySw.ElapsedMilliseconds}ms");
-                            }
-                        }
-                        catch (Exception crEx)
-                        {
-                            _debugLogService?.Error("MainForm", $"Session memory crash recovery failed: {crEx.Message}");
-                            if (Services.WriteContentionDiagnostics.IsBusyException(crEx))
-                            {
-                                Services.WriteContentionDiagnostics.LogBusy("MainForm.CrashRecovery", crEx.Message);
-                            }
-                        }
+                        // Must run after StartAsync so ProjectService is wired.
+                        //
+                        // Runs on its OWN background task rather than inline in this (already off-UI-thread)
+                        // startup chain. Inline, every step below (activity watcher, liveness reaper, GitHub
+                        // watch, plugin check, phone gateway) waited for it, and one long-lived session that
+                        // finally went idle is indexed in one go: PR #105 reports a 45 MB transcript taking
+                        // minutes, with those services starting that much later. Nothing below reads the
+                        // session-memory index, so none of it needs to wait; search returns more as indexing
+                        // catches up. It stops when MT closes (_crashRecoveryStop).
+                        _ = Task.Run(RunCrashRecoveryIndexing);
 
                         // The REST host has assigned Broker.ActivityFeedService by now, so the
                         // attention rail's poller can actually be built (task edcdcdd5).
@@ -1519,6 +1509,9 @@ namespace MultiTerminal
 
                         // Checks projects' GitHub repos for new issues and PRs (task 92eeeb47).
                         StartGitHubWatch();
+
+                        // Shows each session's open subagents and reminds it about idle ones (ticket b3590495).
+                        StartIdleSubagentSweep();
 
                         // Once a day, asks GitHub whether a newer MultiTerminal plugin exists (task 4dc459e4).
                         StartPluginUpdateCheck();
@@ -1968,10 +1961,30 @@ namespace MultiTerminal
                     return;
                 }
 
+                // An agent-requested /clear (clear_my_context) with a continueWith note (ticket cc2e51ff): the pane
+                // holds the note BEFORE the /clear is typed, so the post-clear prompt the SessionStart hook asks for
+                // carries it into the fresh session. Every agent /clear arms, a blank note included, so an older note
+                // is never attached to this clear; a /clear that could not be typed disarms it again (pipeline Run 1).
+                bool agentClear = e.Text != null && e.Text.Trim().Equals("/clear", StringComparison.Ordinal);
+                var clearTerminal = targetDoc.Terminal;
+                if (agentClear)
+                    clearTerminal.ArmClearContinue(e.ContinueAfterClear);
+
                 _ = targetDoc.InjectInputAsync(e.Text).ContinueWith(
-                    t => _debugLogService?.Error("MainForm",
-                        $"TerminalInjectRequested(submit) for '{e.AgentName}' faulted: {t.Exception?.GetBaseException().Message}"),
-                    System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);
+                    t =>
+                    {
+                        bool typed = t.Status == System.Threading.Tasks.TaskStatus.RanToCompletion && t.Result;
+                        if (t.IsFaulted)
+                            _debugLogService?.Error("MainForm", $"TerminalInjectRequested(submit) for '{e.AgentName}' faulted: {t.Exception?.GetBaseException().Message}");
+                        if (agentClear && typed)
+                            clearTerminal.NoteClearContinueTyped();
+                        if (agentClear && !typed)
+                        {
+                            clearTerminal.DisarmClearContinue();
+                            _debugLogService?.Warning("MainForm", $"/clear for '{e.AgentName}' was not typed; its continue note was dropped");
+                        }
+                    },
+                    System.Threading.Tasks.TaskScheduler.Default);
                 return;
             }
 
@@ -2020,16 +2033,96 @@ namespace MultiTerminal
                 }
 
                 terminal.ArmCompactContinue();
-                bool delivered = await targetDoc.InjectInputAsync(e.Text);
-                if (!delivered)
+                DateTime injectedAt = DateTime.UtcNow;
+
+                // The Enter goes only if nobody typed since just before the text was written (ticket 354f1efa
+                // pipeline Run 1): an Owner who starts typing during the settle keeps their text unsent.
+                var submit = await terminal.InjectAndSubmitUnlessTypedAsync(e.Text, CompactSubmitCheck.EnterSettleMs);
+                if (submit.Outcome != GuardedSubmitOutcome.Submitted || submit.Epoch is not long epoch)
                 {
                     terminal.DisarmCompactContinue();
+                    _debugLogService?.Warning("MainForm", submit.Outcome == GuardedSubmitOutcome.OwnerTyped
+                        ? $"compact request for '{e.AgentName}': someone typed while it was being entered, so it was left unsent in the input line"
+                        : $"compact request for '{e.AgentName}' could not be submitted (the pane could not be asked)");
+                    return;
+                }
+
+                // Its own catch: a failure while verifying must not disarm a /compact that went in.
+                try
+                {
+                    await VerifyCompactSubmittedAsync(terminal, e, injectedAt, epoch);
+                }
+                catch (Exception ex)
+                {
+                    _debugLogService?.Error("MainForm", $"compact request for '{e.AgentName}': verifying the submit faulted: {ex.GetBaseException().Message}");
                 }
             }
             catch (Exception ex)
             {
                 _debugLogService?.Error("MainForm", $"TerminalInjectRequested(submit) for '{e.AgentName}' faulted: {ex.GetBaseException().Message}");
                 if (!terminal.IsDisposed) terminal.DisarmCompactContinue();
+            }
+        }
+
+        /// <summary>
+        /// Checks that the /compact just typed was submitted, and presses Enter once more when its text is
+        /// still in the input line and nobody has typed (ticket 354f1efa; the decisions are
+        /// <see cref="CompactSubmitCheck"/>'s). Never a third Enter; the continue request stays armed. UI thread.
+        /// </summary>
+        private async System.Threading.Tasks.Task VerifyCompactSubmittedAsync(Controls.TerminalControl terminal, TerminalInjectEventArgs e, DateTime injectedAt, long inputEpoch)
+        {
+            bool enterResent = false;
+            while (true)
+            {
+                await System.Threading.Tasks.Task.Delay(CompactSubmitCheck.CheckDelay);
+                if (terminal.IsDisposed || !terminal.IsLiveForInjection)
+                {
+                    return;
+                }
+
+                bool started = terminal.LastCompactionStartingUtc is DateTime startedAt && startedAt >= injectedAt;
+                bool? stillInLine = null;
+                if (!started)
+                {
+                    string screen = await terminal.ReadScreenNearCursorAsync(CompactSubmitCheck.RowsAbove);
+                    if (screen != null)
+                    {
+                        stillInLine = CompactSubmitCheck.LineStillHolds(screen, e.Text);
+                    }
+                }
+
+                bool someoneTyped = terminal.InputLineHasTypedText || (terminal.LastUserInputUtc is DateTime typedAt && typedAt >= injectedAt);
+                var step = CompactSubmitCheck.Decide(started, stillInLine, someoneTyped, enterResent);
+
+                if (step == CompactSubmitStep.Verified)
+                {
+                    string how = started ? "compaction started" : "input line cleared";
+                    string extra = enterResent ? ", after one extra Enter" : "";
+                    _debugLogService?.Info("MainForm", $"compact request for '{e.AgentName}' submitted ({how}{extra})");
+                    return;
+                }
+
+                if (step == CompactSubmitStep.NotVerified)
+                {
+                    string why;
+                    if (stillInLine == null) why = "the screen could not be read";
+                    else if (enterResent) why = "its text is still in the input line after one extra Enter";
+                    else why = "someone typed in the pane, so no Enter was sent";
+                    _debugLogService?.Warning("MainForm", $"compact request for '{e.AgentName}' not verified as submitted: {why}");
+                    return;
+                }
+
+                // SendEnterAgain: one more Enter, sent by the page only if nobody typed since the inject.
+                _debugLogService?.Warning("MainForm", $"compact request for '{e.AgentName}': the /compact is still in the input line; pressing Enter once more");
+                enterResent = true;
+                bool? sent = await terminal.SendEnterUnlessTypedSinceAsync(inputEpoch);
+                if (sent != true)
+                {
+                    _debugLogService?.Warning("MainForm", sent == false
+                        ? $"compact request for '{e.AgentName}': someone typed in the pane, so the extra Enter was not sent"
+                        : $"compact request for '{e.AgentName}': the extra Enter could not be sent");
+                    return;
+                }
             }
         }
 
@@ -2656,7 +2749,9 @@ namespace MultiTerminal
                         // hooks/deny silently stripped (the fail-closed case BuildForcedStatuslineFlag
                         // documents).
                         var spawnModel = DecideLaunchClaudeModel(ClaudeModelRole.Helper, project?.Id, workingDir, requestedModel, $"helper '{agentName}'");
-                        var launchCmd = Services.LaunchCommandBuilder.BuildCommand(kind, project, workingDirectory: workingDir, model: spawnModel.Model);
+                        var launchCmd = WithLaunchExtraArgs(
+                            Services.LaunchCommandBuilder.BuildCommand(kind, project, workingDirectory: workingDir, model: spawnModel.Model),
+                            kind, project?.Id, workingDir, agentName, $"helper '{agentName}'");
                         if (!string.IsNullOrEmpty(launchCmd.BootstrapError))
                         {
                             // Not HandleBootstrapErrorIfAny: that shows a modal MessageBox, which
@@ -4806,18 +4901,28 @@ namespace MultiTerminal
             {
                 Caption = "Delete Project",
                 Heading = $"Delete project '{name}' from MultiTerminal?",
-                Text = "The project is unregistered and its code-graph data removed. Tasks are not deleted.",
+                Text = "The project is unregistered and its code-graph data removed.",
                 Icon = TaskDialogIcon.Warning,
                 DefaultButton = cancelButton,
                 Verification = new TaskDialogVerificationCheckBox("Also delete the project's .claude/project.json config"),
             };
+
+            // GitHub #102 (Owner decision): ask about the tasks; keeping them is the default.
+            int taskCount = broker.GetTasks(projectId)?.Count ?? 0;
+            var keepTasks = new TaskDialogRadioButton($"Keep its {taskCount} task{(taskCount == 1 ? "" : "s")} (they come back if you restore the project)") { Checked = true };
+            var deleteTasks = new TaskDialogRadioButton($"Also delete its {taskCount} task{(taskCount == 1 ? "" : "s")}");
+            if (taskCount > 0)
+            {
+                page.RadioButtons.Add(keepTasks);
+                page.RadioButtons.Add(deleteTasks);
+            }
             page.Buttons.Add(deleteButton);
             page.Buttons.Add(cancelButton);
             var ownerHandle = owner?.Handle ?? Handle;
             if (TaskDialog.ShowDialog(ownerHandle, page) != deleteButton) return false;
             bool deleteLocalConfig = page.Verification.Checked;
 
-            var result = broker.DeleteProject(projectId, "ui", deleteLocalConfig: deleteLocalConfig);
+            var result = broker.DeleteProject(projectId, "ui", deleteLocalConfig: deleteLocalConfig, deleteTasks: taskCount > 0 && deleteTasks.Checked);
             if (!result.Success)
             {
                 MessageBox.Show(
@@ -4862,12 +4967,122 @@ namespace MultiTerminal
                     Gateway = () => _gatewayService,
                     SyncMcpConfig = SyncProjectMcpConfig,
                     DeleteProject = ConfirmAndDeleteProject,
+                    RelocateProject = RelocateProject,
                     ProjectSaved = RefreshAfterProjectSettingsSaved,
                     Log = _debugLogService,
                 };
             }
 
             ProjectSettings.ProjectSettingsForm.Open(this, projectId, _projectSettingsContext, _currentTheme.IsDark);
+        }
+
+        /// <summary>
+        /// Move Project (ticket 6f879683), from the settings form's Paths section. <paramref name="moveFolder"/>
+        /// true: the Owner picks where the folder goes and MT moves it. False ("Folder was moved…"): the Owner
+        /// picks where it already is. Checks first and shows every reason it cannot go ahead, confirms, runs the
+        /// move behind a progress window, then shows what was done. Returns true when the folder changed.
+        /// </summary>
+        private bool RelocateProject(System.Windows.Forms.IWin32Window owner, string projectId, bool moveFolder)
+        {
+            var project = _sharedProjectDatabase?.GetRichProject(projectId);
+            if (project == null || string.IsNullOrWhiteSpace(project.Path))
+                return false;
+
+            string currentName = Path.GetFileName(project.Path.TrimEnd('\\', '/'));
+            string newRoot;
+            using (var picker = new FolderBrowserDialog
+            {
+                UseDescriptionForTitle = true,
+                ShowNewFolderButton = true,
+                Description = moveFolder
+                    ? $"Choose where to move '{project.Name}'. It will be moved into a folder named '{currentName}' there."
+                    : $"Choose the folder '{project.Name}' is in now.",
+            })
+            {
+                if (picker.ShowDialog(owner) != DialogResult.OK || string.IsNullOrWhiteSpace(picker.SelectedPath))
+                    return false;
+                newRoot = moveFolder ? Path.Combine(picker.SelectedPath, currentName) : picker.SelectedPath;
+            }
+
+            var service = new ProjectRelocationService(BuildRelocationHost());
+            var problems = service.Check(project, newRoot, moveFolder);
+            if (problems.Count > 0)
+            {
+                MessageBox.Show(owner, string.Join(Environment.NewLine + Environment.NewLine, problems),
+                    moveFolder ? "Cannot move the project" : "Cannot use that folder", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+
+            string from = RelocationPaths.Normalize(project.Path);
+            string to = RelocationPaths.Normalize(newRoot);
+            string question = moveFolder
+                ? $"Move '{project.Name}'{Environment.NewLine}from  {from}{Environment.NewLine}to    {to}?{Environment.NewLine}{Environment.NewLine}"
+                  + (ProjectRelocationService.SameVolume(from, to)
+                      ? "Both are on the same drive, so this is a quick rename."
+                      : $"This copies the folder to the other drive and checks the copy. The original is kept, renamed to '{Path.GetFileName(from)}{ProjectRelocationService.KeptSuffix}', for you to delete later.")
+                : $"Point '{project.Name}' at{Environment.NewLine}{to}{Environment.NewLine}instead of{Environment.NewLine}{from}?";
+            if (MessageBox.Show(owner, question, moveFolder ? "Move project" : "Folder was moved", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK)
+                return false;
+
+            var result = Dialogs.MoveProjectProgressForm.Run(owner, moveFolder ? "Moving project" : "Updating project folder",
+                (progress, cancel) => moveFolder ? service.Move(project, newRoot, progress, cancel) : service.Repoint(project, newRoot, progress));
+            if (result == null)
+                return false;
+
+            _debugLogService?.Info("MoveProject", $"{project.Name} ({project.Id}) {from} -> {to}: "
+                + (result.Succeeded ? "moved" : "not moved") + ". " + string.Join(" ", result.Done.Concat(result.Refusals).Concat(result.Warnings)));
+
+            var summary = new System.Text.StringBuilder();
+            if (result.Succeeded)
+            {
+                summary.AppendLine($"'{project.Name}' is now in {to}.").AppendLine();
+                foreach (var line in result.Done) summary.AppendLine("• " + line);
+            }
+            else
+            {
+                foreach (var line in result.Refusals) summary.AppendLine(line);
+            }
+
+            if (result.Warnings.Count > 0)
+            {
+                summary.AppendLine().AppendLine("Needs a look:");
+                foreach (var line in result.Warnings) summary.AppendLine("• " + line);
+            }
+
+            MessageBox.Show(owner, summary.ToString().TrimEnd(), result.Succeeded ? "Project moved" : "Project not moved",
+                MessageBoxButtons.OK, result.Succeeded && result.Warnings.Count == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+            return result.Succeeded;
+        }
+
+        /// <summary>The running app's side of a Move Project: open panes, Claude roots, watchers and refresh.</summary>
+        private RelocationHost BuildRelocationHost()
+        {
+            // Read live on the UI thread each time, so the check the move runs after the confirmation sees a
+            // terminal opened while the dialog was up (pipeline Run 1). The worker Invokes; the UI thread is
+            // pumping the progress dialog.
+            IReadOnlyList<RelocationPane> ReadPanes() => _dockPanel.Documents.OfType<TerminalDocument>()
+                .Select(d => new RelocationPane(d.Text, d.LaunchProjectId, SafeWorkingDirectory(d)))
+                .ToList();
+
+            return new RelocationHost
+            {
+                GetPanes = () => InvokeRequired ? (IReadOnlyList<RelocationPane>)Invoke(new Func<IReadOnlyList<RelocationPane>>(ReadPanes)) : ReadPanes(),
+                ClaudeConfigRoots = ClaudeProfileResolver.GetAllRoots(),
+                PauseWatchers = () => _codeGraphWatcher?.Stop(),
+                ResumeWatchers = () => _codeGraphWatcher?.Start(),
+                ProjectChanged = id => Invoke(new Action(() =>
+                {
+                    _mcpServer?.Broker?.RefreshProjectAfterRelocation(id);
+                    _projectService?.RaiseProjectRelocated(id);
+                    RefreshAfterProjectSettingsSaved(id);
+                })),
+            };
+
+            static string SafeWorkingDirectory(TerminalDocument doc)
+            {
+                try { return doc.GetWorkingDirectory(); }
+                catch (Exception ex) when (ex is InvalidOperationException || ex is ObjectDisposedException) { return null; }
+            }
         }
 
         /// <summary>
@@ -5038,7 +5253,6 @@ namespace MultiTerminal
                 var launchCmd = resumeSession == null
                     ? Services.LaunchCommandBuilder.BuildCommand(kind, project, model: projectModel.Model)
                     : Services.LaunchCommandBuilder.BuildCommand(kind, project, resumeCwd, resumeSession.Entry.SessionId, projectModel.Model);
-
                 // Bootstrap gate — see HandleBootstrapErrorIfAny for rationale.
                 if (HandleBootstrapErrorIfAny(launchCmd, onBeforeDialog: () => doc.ShowStartScreen()))
                     return;
@@ -5206,6 +5420,11 @@ namespace MultiTerminal
 
                 _debugLogService?.Trace("StartScreen", $"Launching project '{project.Name}' in {launchDir}{(resumeSession == null ? string.Empty : $" resuming session {resumeSession.Entry.SessionId}")}");
                 _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] Calling doc.StartTerminal: doc.DocId='{doc.DocId}' launchDir='{launchDir}' terminalName='{terminalName}' projectId='{project.Id}' projectName='{project.Name}' isTeamLead={isTeamLead} taskWorktreePath='{taskWorktreePath ?? "null"}'");
+                // Extra Claude flags (ticket 5380b6fb), decided here and not where the command is built: only now is
+                // terminalName the name the broker registered (a held name comes back suffixed, Vella-2), and the
+                // agent row is picked by that name (pipeline Run 1, debugger).
+                if (kind == TerminalKind.ClaudeCode)
+                    autoRunCommand = WithLaunchExtraArgs(autoRunCommand, project.Id, null, terminalName, $"project '{project.Name}'");
                 doc.StartTerminal(launchDir, terminalName, autoRunCommand, projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile, taskWorktreePath: taskWorktreePath, claudeProfile: claudeProfile,
                     resumeSessionId: resumeSession?.Entry.SessionId, launchKind: Services.PaneLaunchKind.From(kind),
                     subagentModel: kind == TerminalKind.ClaudeCode ? projectModel.SubagentModel : null);
@@ -5294,15 +5513,185 @@ namespace MultiTerminal
             return AlreadyOpenAnswer.Switched;
         }
 
+        /// <summary>
+        /// <c>POST /api/projects/{id}/open</c> (MT Conductor, ClarionLive#83). On the UI thread: when a PM
+        /// pane has the project open, bring the first one to the front (the same pane the "already open"
+        /// question's Switch picks); otherwise post a launch on a Home tab, exactly as the header's Launch
+        /// Project does, and answer at once. The launch is posted rather than run inside this call because
+        /// it can show modal questions (the session choice, a profile refusal), and a REST caller must not
+        /// be held open until the Owner answers them.
+        /// </summary>
+        private async Task<ProjectOpenOutcome> OnProjectOpenRequested(string projectId)
+        {
+            // Posted with a time limit (review of PR #103): a stalled UI thread answers "busy" instead of
+            // holding the HTTP request, and work abandoned at the limit never runs late.
+            if (IsDisposed || !IsHandleCreated)
+                return new ProjectOpenOutcome(ProjectOpenResult.Failed, projectId, Error: "MultiTerminal's window is not ready yet.");
+            var (ran, result) = await Services.UiThreadCall.RunAsync<ProjectOpenOutcome>(
+                work => BeginInvoke(work), () => OpenProjectOnUiThread(projectId), Services.UiThreadCall.DefaultTimeout).ConfigureAwait(false);
+            return ran ? result : new ProjectOpenOutcome(ProjectOpenResult.Failed, projectId, Error: "MultiTerminal is busy; try again.");
+        }
+
+        // Launches started by POST /api/projects/{id}/open that have not finished yet (review of PR #103).
+        private readonly Services.ProjectOpenGate _restOpenLaunches = new Services.ProjectOpenGate();
+
+        /// <summary>The UI-thread half of <see cref="OnProjectOpenRequested"/>.</summary>
+        private ProjectOpenOutcome OpenProjectOnUiThread(string projectId)
+        {
+            var project = _sharedProjectDatabase?.GetRichProject(projectId);
+            if (project == null || !string.Equals(project.Id, projectId, StringComparison.Ordinal))
+                return new ProjectOpenOutcome(ProjectOpenResult.NotFound, projectId);
+
+            var open = FindPanesWithProjectOpen(project.Id, launchingDocId: null, out var panes);
+            if (open.Count > 0)
+            {
+                var target = panes.First(d => d.DocId == open[0].DocId);
+                bool floating = target.DockState == DockState.Float;
+                BringPaneToFront(target);
+                _debugLogService?.Info("MainForm", $"open project '{project.Name}' over REST: focused '{open[0].Title}' ({open.Count} pane(s))");
+                return new ProjectOpenOutcome(ProjectOpenResult.Focused, project.Id, project.Name,
+                    PaneTitle: open[0].Title, Floating: floating, OtherPanes: open.Count - 1);
+            }
+
+            string id = project.Id;
+            // One launch per project at a time (review of PR #103): the launch can wait in modal questions, whose
+            // message loop serves the next request; a second request joins the first instead of posting another
+            // launch onto the same Home tab.
+            if (!_restOpenLaunches.TryBegin(id))
+            {
+                _debugLogService?.Info("MainForm", $"open project '{project.Name}' over REST: a launch is already under way; not starting another");
+                return new ProjectOpenOutcome(ProjectOpenResult.Launching, project.Id, project.Name);
+            }
+
+            _debugLogService?.Info("MainForm", $"open project '{project.Name}' over REST: not open, launching on a Home tab");
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    bool paneLaunched = false;
+                    try
+                    {
+                        if (WindowState == FormWindowState.Minimized)
+                            WindowState = FormWindowState.Normal;
+                        Activate();
+                        FlashIfNotForeground();
+                        RunOnHomeTab((sender, _) =>
+                        {
+                            OnStartScreenProjectLaunched(sender, new StartScreenLaunchEventArgs(id));
+                            paneLaunched = sender is TerminalDocument started && !started.IsDisposed && started.IsTerminalStarted;
+                            // Give the launched pane the green border (review of PR #104): Activate() above queued the
+                            // activation focus restore, which focuses the bordered pane, and the border may still be on
+                            // the pane that had it before.
+                            if (sender is TerminalDocument launched && !launched.IsDisposed && launched.IsTerminalStarted)
+                            {
+                                foreach (var termDoc in _dockPanel.Contents.OfType<TerminalDocument>())
+                                    termDoc.SetFocusBorder(termDoc == launched);
+                                _lastActiveTerminal = launched;
+                            }
+                        });
+                    }
+                    finally
+                    {
+                        ReleaseRestOpenWhenOpen(id, paneLaunched);
+                    }
+                }));
+            }
+            catch (InvalidOperationException)
+            {
+                _restOpenLaunches.End(id);
+                throw;
+            }
+
+            return new ProjectOpenOutcome(ProjectOpenResult.Launching, project.Id, project.Name);
+        }
+
+        /// <summary>
+        /// Keeps the REST open's gate for <paramref name="projectId"/> until the launched pane counts as open (its
+        /// terminal runs), so a request queued behind the launch focuses it instead of launching a second pane
+        /// (live test N, 2026-11-27: TestB and TestB-2). Checked every half second; released at once when nothing
+        /// was launched, and after <see cref="Services.ProjectOpenGate.MaxHoldAfterLaunch"/> at the latest.
+        /// </summary>
+        private void ReleaseRestOpenWhenOpen(string projectId, bool paneLaunched)
+        {
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            // A failed pane lookup counts as "not open", so the time limit still releases the gate: an exception
+            // here would otherwise leave it held for the rest of the run (and a throwing timer ticking forever).
+            bool Ready()
+            {
+                if (IsDisposed) return true;
+                bool open;
+#pragma warning disable CA1031 // any failure of the lookup must still let the gate go
+                try { open = FindPanesWithProjectOpen(projectId, launchingDocId: null, out _).Count > 0; }
+                catch (Exception ex)
+                {
+                    open = false;
+                    _debugLogService?.Warning("MainForm", $"open project over REST: open-pane check failed ({ex.Message}); the gate is released at the time limit");
+                }
+#pragma warning restore CA1031
+                return Services.ProjectOpenGate.MayRelease(open, paneLaunched, watch.Elapsed);
+            }
+
+            if (Ready())
+            {
+                _restOpenLaunches.End(projectId);
+                return;
+            }
+
+            // Disposed by its own Tick once the gate is released; the latest is MaxHoldAfterLaunch from now.
+#pragma warning disable CA2000
+            var timer = new System.Windows.Forms.Timer { Interval = 500 };
+#pragma warning restore CA2000
+            timer.Tick += (_, _) =>
+            {
+                if (!Ready()) return;
+                timer.Stop();
+                timer.Dispose();
+                _restOpenLaunches.End(projectId);
+            };
+            timer.Start();
+        }
+
+        /// <summary>
+        /// Flashes MT's taskbar button when an Activate() did not bring it to the front (live test N, 2026-11-27).
+        /// Windows lets a background app take the foreground only in some cases; the REST open promised the
+        /// pane comes forward "or MT flashes in the taskbar", and nothing flashed. Stops once MT is in front.
+        /// </summary>
+        private void FlashIfNotForeground()
+        {
+            if (!IsHandleCreated || IsDisposed) return;
+            // Any MT window in front (the main window or a floating pane's) counts.
+            if (Terminal.NativeMethods.ForegroundBelongsToThisProcess()) return;
+            Terminal.NativeMethods.FlashTaskbarUntilForeground(Handle);
+        }
+
+        /// <summary>
+        /// <c>GET /api/projects/open-state</c>: on the UI thread, every project open in a PM pane and how many
+        /// panes, by <see cref="ProjectAlreadyOpen.FindOpenPanes"/> (the rule the open and the "already open"
+        /// question use).
+        /// </summary>
+        private async Task<IReadOnlyList<ProjectOpenState>> OnProjectOpenStateRequested()
+        {
+            // Null (the route answers 503) when the window is not ready or its UI thread does not answer in time.
+            if (IsDisposed || !IsHandleCreated)
+                return null;
+            var (ran, state) = await Services.UiThreadCall.RunAsync<IReadOnlyList<ProjectOpenState>>(
+                work => BeginInvoke(work), () => ProjectAlreadyOpen.OpenState(SnapshotOpenPaneFacts(out _)), Services.UiThreadCall.DefaultTimeout).ConfigureAwait(false);
+            return ran ? state : null;
+        }
+
         /// <summary>The panes other than <paramref name="launchingDocId"/> that have the project open
         /// (<see cref="ProjectAlreadyOpen.FindOpenPanes"/>), and every live pane they were picked from.
         /// <c>DockPanel.Contents</c> includes floating, auto-hidden and hidden panes.</summary>
         private IReadOnlyList<OpenPaneFacts> FindPanesWithProjectOpen(string projectId, string launchingDocId, out List<TerminalDocument> panes)
+            => ProjectAlreadyOpen.FindOpenPanes(projectId, launchingDocId, SnapshotOpenPaneFacts(out panes));
+
+        /// <summary>Every live pane and its <see cref="OpenPaneFacts"/>: the one snapshot the open, the
+        /// open-state and the "already open" question all read, so they cannot disagree.</summary>
+        private List<OpenPaneFacts> SnapshotOpenPaneFacts(out List<TerminalDocument> panes)
         {
             panes = _dockPanel.Contents.OfType<TerminalDocument>().Where(d => !d.IsDisposed).ToList();
-            var facts = panes.Select(d => new OpenPaneFacts(
-                d.DocId, d.LaunchProjectId, d.LaunchRole, d.Terminal?.IsRunning == true, d.IsStartScreenVisible, d.TabText));
-            return ProjectAlreadyOpen.FindOpenPanes(projectId, launchingDocId, facts);
+            return panes.Select(d => new OpenPaneFacts(
+                d.DocId, d.LaunchProjectId, d.LaunchRole, d.Terminal?.IsRunning == true, d.IsStartScreenVisible, d.TabText)).ToList();
         }
 
         /// <summary>
@@ -5315,6 +5704,7 @@ namespace MultiTerminal
             if (WindowState == FormWindowState.Minimized)
                 WindowState = FormWindowState.Normal;
             Activate();
+            FlashIfNotForeground();
 
             if (pane.DockState == DockState.Float && pane.Pane?.FloatWindow is Form floatWindow && !floatWindow.IsDisposed)
             {
@@ -5326,6 +5716,12 @@ namespace MultiTerminal
             pane.Activate();
             pane.FocusTerminal();
             _lastActiveTerminal = pane;
+
+            // Activate() raises no ActiveDocumentChanged when the pane already was the dock panel's active
+            // document (a click into another pane's terminal does not change it), so move the border here too.
+            // Contents, not Documents: a floating pane is not a document.
+            foreach (var termDoc in _dockPanel.Contents.OfType<TerminalDocument>())
+                termDoc.SetFocusBorder(termDoc == pane);
         }
 
         /// <summary>
@@ -5540,7 +5936,11 @@ namespace MultiTerminal
             return new SessionCatalog(
                 root.Root.ProjectsDir,
                 sid => agentMap != null && agentMap.TryGetValue(sid, out var agent) ? agent : null,
-                sid => taskDb?.GetSessionById(sid)?.Summary);
+                sid => taskDb?.GetSessionById(sid)?.Summary)
+            {
+                // A moved project's older transcripts record its old folder (ticket 6f879683).
+                PreviousRoots = _sharedProjectDatabase?.GetPreviousPaths(project?.Id) ?? Array.Empty<string>(),
+            };
         }
 
         /// <summary>
@@ -5569,7 +5969,14 @@ namespace MultiTerminal
             {
                 if (pmDoc == null || pmDoc.IsDisposed || project == null || helpers == null || helpers.Count == 0)
                     return report;
-                ResumeHelpersInto(pmDoc, project, helpers, placement, report);
+                // The one limit on how many helpers come back with their PM, for every resume path (dialog,
+                // Continue mode, startup restore); the ones beyond it are named in the summary (task 592ade03).
+                var kept = HelperResume.ApplyLimit(helpers, report);
+                // Task 688ad2f6: the ones beyond the limit are left behind for good, so they do not come back
+                // at a later resume (Grace, 2026-11-18: helpers the old limit of 6 dropped returned weeks on).
+                if (kept.Count < helpers.Count)
+                    _paneLaunchRecorder?.LeaveBehind(helpers.Where(h => !kept.Contains(h)).ToList());
+                ResumeHelpersInto(pmDoc, project, kept, placement, report);
                 return report;
             }
             finally
@@ -5619,14 +6026,18 @@ namespace MultiTerminal
                         catalog.LastMissReason);
                     if (!check.CanResume)
                     {
-                        _debugLogService?.Info("LaunchSession", $"Helper resume: '{helperName}' ({helper?.SessionId}) skipped: {check.SkipReason}");
+                        _debugLogService?.Info("LaunchSession", $"Helper resume: '{helperName}' ({helper?.SessionId}) skipped{(check.IsPermanent ? " for good" : "")}: {check.SkipReason}");
                         report.AddSkipped(helperName, check.SkipReason);
+                        if (check.IsPermanent && helper != null)
+                            _paneLaunchRecorder?.LeaveBehind(new[] { helper });
                         continue;
                     }
 
                     // A helper resumed with its PM is a helper: the helper branch of the decision, not the PM's.
                     var resumeModel = DecideLaunchClaudeModel(ClaudeModelRole.Helper, project.Id, null, null, $"resumed helper '{helperName}'");
-                    var launchCmd = Services.LaunchCommandBuilder.BuildCommand(TerminalKind.ClaudeCode, project, check.Cwd, entry.SessionId, resumeModel.Model);
+                    var launchCmd = WithLaunchExtraArgs(
+                        Services.LaunchCommandBuilder.BuildCommand(TerminalKind.ClaudeCode, project, check.Cwd, entry.SessionId, resumeModel.Model),
+                        TerminalKind.ClaudeCode, project.Id, null, helperName, $"resumed helper '{helperName}'");
                     if (!string.IsNullOrEmpty(launchCmd.BootstrapError))
                     {
                         report.AddSkipped(helperName, $"its launch command could not be built ({launchCmd.BootstrapError.TrimEnd('.')})");
@@ -5994,11 +6405,13 @@ namespace MultiTerminal
 
         private static OpenHelper ToOpenHelper(RestorablePane pane) => new OpenHelper
         {
+            LaunchId = pane.LaunchId, // so a restore can leave a helper behind too (task 688ad2f6, Run 2)
             SessionId = pane.SessionId,
             TerminalName = pane.TerminalName,
             Cwd = pane.Cwd,
             ProjectId = pane.ProjectId,
             Kind = Services.PaneLaunchKind.Claude,
+            Seq = pane.Seq,
         };
 
         /// <summary>
@@ -6294,7 +6707,9 @@ namespace MultiTerminal
                 // The command was built before the folder was known, so the model (a project's own, when the folder
                 // belongs to one) is added now, in the place the builder would have put it.
                 var justClaudeModel = DecideLaunchClaudeModel(ClaudeModelRole.ProjectPane, null, workingDir, null, $"Claude in '{workingDir}'");
-                doc.StartTerminal(workingDir, terminalName, Services.LaunchCommandBuilder.WithModel(launch.AutoRunCommand, justClaudeModel.Model), isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath, claudeProfile: claudeProfile,
+                string justClaudeCommand = WithLaunchExtraArgs(
+                    Services.LaunchCommandBuilder.WithModel(launch.AutoRunCommand, justClaudeModel.Model), null, workingDir, terminalName, $"Claude in '{workingDir}'");
+                doc.StartTerminal(workingDir, terminalName, justClaudeCommand, isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath, claudeProfile: claudeProfile,
                     launchKind: Services.PaneLaunchKind.Claude, launchQuietStart: true, subagentModel: justClaudeModel.SubagentModel);
 
                 doc.Activate();
@@ -6330,7 +6745,8 @@ namespace MultiTerminal
             if (wpfDialog.ShowDialog() != true) return;
 
             // The folder already had a project and the user chose Open or Rename (task 9f95ab0c).
-            if (wpfDialog.Decision != Services.NewProjectFolderDecision.CreateNew)
+            if (wpfDialog.Decision != Services.NewProjectFolderDecision.CreateNew
+                && wpfDialog.Decision != Services.NewProjectFolderDecision.StartNewHere)
             {
                 LaunchExistingFromNewProject(sourceDoc, wpfDialog);
                 return;
@@ -6340,6 +6756,7 @@ namespace MultiTerminal
             {
                 string projectFolder = wpfDialog.ProjectFolder;
                 System.IO.Directory.CreateDirectory(projectFolder); // no-op if already exists
+
 
                 // Converged creation path: the broker.CreateProject method is the shared
                 // entry point for both this UI dialog and the create_project MCP tool. It
@@ -6361,7 +6778,12 @@ namespace MultiTerminal
                         // Never reuse (task 9f95ab0c): reuse once wrote this dialog's name, an empty
                         // description and a fresh createdAt over the folder's existing project. An
                         // occupied folder is caught by the dialog; this refusal is the backstop.
-                        allowReuseExisting: false);
+                        allowReuseExisting: false,
+                        // GitHub #102 "Start a new project here": the broker sets the old project.json aside
+                        // under its create lock, and puts it back if the create fails.
+                        existingProject: wpfDialog.Decision == Services.NewProjectFolderDecision.StartNewHere
+                            ? Services.ExistingProjectChoice.New
+                            : null);
                     if (!createResult.Success || createResult.CreatedFileProject == null)
                         throw new InvalidOperationException(createResult.Error ?? "Failed to create project");
                     project = createResult.CreatedFileProject;
@@ -6393,7 +6815,9 @@ namespace MultiTerminal
                 // Build launch command for the project's default terminal (Claude Code or Codex)
                 var terminalKind = Models.TerminalKindHelper.ParseOrDefault(project.DefaultTerminal);
                 var newProjectModel = DecideLaunchClaudeModel(ClaudeModelRole.ProjectPane, project.Id, null, null, $"new project '{project.Name}'");
-                var launchCmd = Services.LaunchCommandBuilder.BuildCommand(terminalKind, project, model: newProjectModel.Model);
+                var launchCmd = WithLaunchExtraArgs(
+                    Services.LaunchCommandBuilder.BuildCommand(terminalKind, project, model: newProjectModel.Model),
+                    terminalKind, project.Id, null, null, $"new project '{project.Name}'");
 
                 // Bootstrap gate — tail message tweaked because the project was created
                 // but no terminal started, so the user can retry from the project card.
@@ -6938,6 +7362,71 @@ namespace MultiTerminal
                 _debugLogService?.Warning("ClaudeModel", $"{launchLabel}: {decision.Problem}");
             _debugLogService?.Info("ClaudeModel", $"{launchLabel}: {role} model '{decision.Model ?? "(Claude Code default)"}' (from {decision.Source}), subagent model '{decision.SubagentModel ?? "(none)"}'.");
             return decision;
+        }
+
+        /// <summary>
+        /// THE decision of which extra Claude Code flags a launch gets (ticket 5380b6fb): the project's
+        /// <c>claude_extra_args</c>, then the <c>extra_args</c> of the project's agent row for
+        /// <paramref name="agentName"/>. Rules in <see cref="ClaudeExtraArgsPolicy"/>. The rows are read fresh,
+        /// so a settings change applies at the next launch. Never throws: a failed lookup is logged and gives
+        /// no extra flags; a stored level whose text is invalid is skipped with a warning.
+        /// </summary>
+        private ClaudeExtraArgsDecision DecideLaunchExtraArgs(string projectId, string folder, string agentName, string launchLabel)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(projectId) && !string.IsNullOrWhiteSpace(folder))
+                    projectId = _projectService?.DiscoverProject(folder)?.Id;
+                if (string.IsNullOrWhiteSpace(projectId) || _sharedProjectDatabase == null)
+                    return ClaudeExtraArgsDecision.None;
+
+                var row = _sharedProjectDatabase.GetRichProject(projectId);
+                var agents = _sharedProjectDatabase.GetProjectAgents(projectId);
+                var decision = ClaudeExtraArgsPolicy.Decide(row?.ClaudeExtraArgs, agents, agentName);
+                foreach (string problem in decision.Problems)
+                    _debugLogService?.Warning("ClaudeExtraArgs", $"{launchLabel}: {problem}");
+                if (decision.Tokens.Count > 0)
+                    _debugLogService?.Info("ClaudeExtraArgs", $"{launchLabel}: extra Claude flags from {decision.Source}: {decision.DescribeForLog()}");
+                return decision;
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Warning("ClaudeExtraArgs", $"{launchLabel}: extra Claude flags lookup failed, launching without them: {ex.Message}");
+                return ClaudeExtraArgsDecision.None;
+            }
+        }
+
+        /// <summary>
+        /// <paramref name="launch"/> with the decided extra Claude flags added (ticket 5380b6fb). Only a Claude
+        /// launch that built a command gets them; Codex and PowerShell are returned as they are.
+        /// </summary>
+        private Services.LaunchCommand WithLaunchExtraArgs(Services.LaunchCommand launch, Models.TerminalKind kind, string projectId, string folder, string agentName, string launchLabel)
+        {
+            if (launch == null || kind != Models.TerminalKind.ClaudeCode || string.IsNullOrEmpty(launch.AutoRunCommand) || !string.IsNullOrEmpty(launch.BootstrapError))
+                return launch;
+            launch.AutoRunCommand = WithLaunchExtraArgs(launch.AutoRunCommand, projectId, folder, agentName, launchLabel);
+            return launch;
+        }
+
+        /// <summary>
+        /// A built Claude command with the decided extra flags added; the one place every launch site goes
+        /// through. Never throws: a command the builder cannot place them in is launched without them and
+        /// logged, like a failed lookup (code review, run 1).
+        /// </summary>
+        private string WithLaunchExtraArgs(string autoRunCommand, string projectId, string folder, string agentName, string launchLabel)
+        {
+            var extra = DecideLaunchExtraArgs(projectId, folder, agentName, launchLabel);
+            if (extra.Formatted.Length == 0)
+                return autoRunCommand;
+            try
+            {
+                return Services.LaunchCommandBuilder.WithExtraArgs(autoRunCommand, extra.Formatted);
+            }
+            catch (ArgumentException ex)
+            {
+                _debugLogService?.Warning("ClaudeExtraArgs", $"{launchLabel}: the extra Claude flags could not be placed in the command, launching without them: {ex.Message}");
+                return autoRunCommand;
+            }
         }
 
         /// <summary>What a "Claude profile" picker may offer for <paramref name="folder"/> (item 8): a
@@ -7518,7 +8007,8 @@ namespace MultiTerminal
             {
                 // Auto-register the discovered project (skipped when its id belongs to another folder)
                 _projectService.AutoRegisterDiscoveredProject(directory, discoveredProject);
-                _currentProject = discoveredProject;
+                // A project deleted in MT is not current, though its folder still holds project.json (GitHub #102).
+                _currentProject = _projectService.IsDeletedProject(discoveredProject?.Id) ? null : discoveredProject;
             }
         }
 
@@ -7881,12 +8371,159 @@ namespace MultiTerminal
                 $"'{activeDoc.TabText}' became active while you were typing in '{previous.TabText}'. Called from: {string.Join(" < ", callers)}");
         }
 
+        protected override void OnActivated(EventArgs e)
+        {
+            base.OnActivated(e);
+            OnHostWindowActivated(this);
+        }
+
+        private void OnContentAddedForActivation(object sender, DockContentEventArgs e)
+        {
+            if (e.Content is TerminalDocument doc)
+            {
+                doc.DockStateChanged -= OnTerminalDockStateChangedForActivation;
+                doc.DockStateChanged += OnTerminalDockStateChangedForActivation;
+            }
+
+            // A pane restored straight into a floating window never changes dock state, and its window
+            // may not exist yet while it is being added: look again once the layout has settled.
+            if (IsHandleCreated)
+                BeginInvoke(new Action(HookFloatWindowsForActivation));
+        }
+
+        private void OnTerminalDockStateChangedForActivation(object sender, EventArgs e) => HookFloatWindowsForActivation();
+
+        /// <summary>
+        /// Wires every floating window's Activated event once. Called when content is added, when a pane
+        /// changes dock state, and when the active pane changes (a pane dragged from one floating window into
+        /// another stays Float, so only the last of these sees its new window).
+        /// </summary>
+        private void HookFloatWindowsForActivation()
+        {
+            try
+            {
+                if (_dockPanel == null || _dockPanel.IsDisposed)
+                    return;
+                foreach (var floatWindow in _dockPanel.FloatWindows)
+                {
+                    if (floatWindow == null || floatWindow.IsDisposed || !_activationHookedWindows.Add(floatWindow))
+                        continue;
+                    floatWindow.Activated += (s, _) => OnHostWindowActivated((Form)s);
+                    floatWindow.Disposed += (s, _) => _activationHookedWindows.Remove((Form)s);
+
+                    // Activated before it was wired (Alt+Tab straight into a just-restored window): that
+                    // activation was missed, so act on it now. The usual guards still apply.
+                    if (Form.ActiveForm == floatWindow)
+                        OnHostWindowActivated(floatWindow);
+                }
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("MainForm", $"HookFloatWindowsForActivation error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// A MultiTerminal window was activated. Read the mouse now, while it still says how the window was
+        /// activated, and restore after the activation has finished moving focus (task 76a9d71a).
+        /// </summary>
+        private void OnHostWindowActivated(Form window)
+        {
+            try
+            {
+                if (window.IsDisposed || !IsHandleCreated)
+                    return;
+                bool mouseButtonDown = Control.MouseButtons != System.Windows.Forms.MouseButtons.None;
+                BeginInvoke(new Action(() => RestoreTerminalFocusOnActivate(window, mouseButtonDown)));
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("MainForm", $"OnHostWindowActivated error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Puts the keyboard focus back in the pane with the green border, if that pane is in
+        /// <paramref name="window"/> and focus is not in some other control there. See <see cref="ActivationFocus"/>.
+        /// </summary>
+        private void RestoreTerminalFocusOnActivate(Form window, bool mouseButtonDown)
+        {
+            try
+            {
+                if (window.IsDisposed || Form.ActiveForm != window)
+                    return;
+
+                // A DockContent is itself a Form, so FindForm() would return the pane: TopLevelControl
+                // is the window it sits in (the main window or a floating one).
+                // A pane showing its Home screen has no terminal to type into: it does not count.
+                TerminalDocument bordered = null;
+                // Contents, not Documents: a pane in a floating window is not a document.
+                foreach (var doc in _dockPanel.Contents.OfType<TerminalDocument>())
+                {
+                    if (doc.HasFocusBorder && !doc.IsDisposed && !doc.IsStartScreenVisible && doc.TopLevelControl == window)
+                    {
+                        bordered = doc;
+                        break;
+                    }
+                }
+
+                var focused = FocusStateOf(window, out TerminalDocument focusedPane);
+                switch (ActivationFocus.Decide(mouseButtonDown, bordered != null, focused))
+                {
+                    case ActivationFocusTarget.FocusedPane:
+                        focusedPane?.FocusTerminal();
+                        break;
+                    case ActivationFocusTarget.BorderedPane:
+                        bordered?.FocusTerminal();
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("MainForm", $"RestoreTerminalFocusOnActivate error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Follows the ActiveControl chain to the control that really has focus in the window. Only the
+        /// terminal itself counts as Terminal: a pane's agent panel, HUD or start screen is another control,
+        /// and focus there is kept. <paramref name="focusedPane"/> is the pane whose terminal has focus.
+        /// </summary>
+        private static ActivationFocusState FocusStateOf(Form window, out TerminalDocument focusedPane)
+        {
+            focusedPane = null;
+            Control c = window.ActiveControl;
+            while (c is ContainerControl cc && cc.ActiveControl != null)
+                c = cc.ActiveControl;
+
+            // Nothing active, or only a container with nothing deeper (DockPanelSuite's dock panel, a pane,
+            // or a pane's own document form): not a control you were typing in.
+            if (c == null || c is DockPanel || c is DockPane || c is TerminalDocument)
+                return ActivationFocusState.Nothing;
+
+            for (Control p = c; p != null; p = p.Parent)
+            {
+                if (p is TerminalDocument doc)
+                {
+                    var terminal = doc.Terminal;
+                    if (terminal != null && (terminal == c || terminal.Contains(c)))
+                    {
+                        focusedPane = doc;
+                        return ActivationFocusState.Terminal;
+                    }
+                    return ActivationFocusState.OtherControl;
+                }
+            }
+            return ActivationFocusState.OtherControl;
+        }
+
         private void OnActiveDocumentChanged(object sender, EventArgs e)
         {
             try
             {
                 var activeDoc = _dockPanel.ActiveDocument as TerminalDocument;
                 LogSwitchAfterTyping(activeDoc);
+                HookFloatWindowsForActivation();
 
                 // The Attention Rail's highlight has to follow focus changed by clicking a TAB,
                 // not just focus it requested itself (task 42052f0c, pipeline run 1).
@@ -7948,7 +8585,7 @@ namespace MultiTerminal
 
             // Task e4924065: the header's GitHub band follows the pane's project.
             doc.GitHubLinkRequested += OnPaneGitHubLinkRequested;
-            doc.SettingsProjectChanged += (s, projectId) => PostGitHubUi(() => RefreshGitHubBands(null));
+            doc.SettingsProjectChanged += (s, projectId) => PostUi(() => RefreshGitHubBands(null));
         }
 
         private void OnPanePromptSubmitted(TerminalDocument doc)
@@ -8398,6 +9035,8 @@ namespace MultiTerminal
             // A project pane when the folder belongs to a project, else the global project model.
             var launchAsModel = DecideLaunchClaudeModel(ClaudeModelRole.ProjectPane, null, workingDirectory, null, launchAsLabel);
             string autoRunCommand = LaunchCommandBuilder.BuildClaudeCommand(null, workingDirectory, model: launchAsModel.Model).AutoRunCommand;
+            // The registered name (a held name comes back suffixed), not the one asked for (pipeline Run 1).
+            autoRunCommand = WithLaunchExtraArgs(autoRunCommand, null, workingDirectory, terminalName, launchAsLabel);
 
             // Quiet start (GitHub #34, pipeline run 1): "Launch as..." is not a project launch, so it passes
             // no projectId (that would also set MULTITERMINAL_PROJECT_PM and the "(PM)" badge, which this
@@ -8498,6 +9137,10 @@ namespace MultiTerminal
             // the Owner closing it; without this every clean exit would mark every helper closed.
             // Idempotent, so the session-save pass's re-triggered Close() does nothing twice.
             _paneLaunches?.BeginShutdown();
+
+            // Background crash-recovery indexing stops at the next chunk (review of PR #105), so the session-memory
+            // flush below and the database's Dispose do not wait for a whole transcript.
+            _crashRecoveryStop = true;
 
             // Stop the UI timers whose ticks start async work (GitHub #38). Disposed only in Dispose,
             // they kept starting awaits while MT closed, and an await that finishes after the message
@@ -8676,14 +9319,6 @@ namespace MultiTerminal
                 await Task.Delay(3000);
                 Environment.Exit(0);
             });
-
-            // Stop HTTP webhook service (cancel, don't wait for listener task)
-            try
-            {
-                _webhookService?.Stop();
-                _webhookService?.Dispose();
-            }
-            catch { }
 
             // Stop Oracle advisory agent and digest timer
             try
@@ -9661,6 +10296,14 @@ namespace MultiTerminal
             if (layout == "DoNotShow")
                 return;
 
+            // A tailer stopped for good (its member was removed, or the team or root went away while
+            // this card waited for the UI thread) has nothing more to show (268acc24).
+            if (source is TranscriptTailer { IsShutDown: true })
+            {
+                _debugLogService?.Info("CreateAgentPanel", $"Skipping '{agentName}': its tailer has already been shut down");
+                return;
+            }
+
             // Always embed in a terminal's EmbeddedAgentPanel.
             // Priority: caller's document → exact name lookup → fuzzy name → identity scan → last active → first available.
             TerminalDocument targetTerminal = null;
@@ -9796,13 +10439,7 @@ namespace MultiTerminal
                     }
 
                     if (_embeddedAgentMap.Remove(panelKey, out var info))
-                    {
-                        info.Control?.DetachAgent();
-                        info.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(info.Slot);
-                        info.Control?.Dispose();
-                        if (info.Terminal?.EmbeddedAgentPanel?.AgentSlotCount == 0)
-                            info.Terminal.ForceCollapseAgentPanel();
-                    }
+                        TearDownAgentCard(info, collapseIfEmpty: true);
                 }
 
                 try
@@ -9819,22 +10456,24 @@ namespace MultiTerminal
             // Agent Panel > On Complete is "Keep open" (GH #89): then the panel stays, showing
             // "completed", until the Owner closes it with its X. Any other stop (a team reclaiming
             // the transcript, the watcher shutting down, an error) still removes it.
-            source.Stopped += (s, exitCode) =>
+            void OnSourceStopped(int exitCode)
             {
                 void HandleEmbeddedStopped()
                 {
+                    // Only this card: after a wake (268acc24) the key can belong to a newer card.
+                    if (!_embeddedAgentMap.TryGetValue(panelKey, out var current) || !ReferenceEquals(current.Control, control))
+                        return;
+
                     if (exitCode == 0 && _settings?.GetAgentPanelCloseMode() == "ManualClose")
                         return;
 
+                    // Complete() raises Stopped outside its lock, so a wake on another thread can get in
+                    // first: a member that is working again keeps its card.
+                    if (exitCode == 0 && source.IsActive)
+                        return;
+
                     if (_embeddedAgentMap.Remove(panelKey, out var info))
-                    {
-                        info.Control?.DetachAgent();
-                        info.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(info.Slot);
-                        info.Control?.Dispose();
-                        // Force-collapse if no remaining slots
-                        if (info.Terminal?.EmbeddedAgentPanel?.AgentSlotCount == 0)
-                            info.Terminal.ForceCollapseAgentPanel();
-                    }
+                        TearDownAgentCard(info, collapseIfEmpty: true);
                 }
 
                 try
@@ -9845,8 +10484,72 @@ namespace MultiTerminal
                         HandleEmbeddedStopped();
                 }
                 catch (ObjectDisposedException) { }
-            };
+            }
 
+            // Unsubscribed when the card goes, whichever path removes it (they all dispose the control):
+            // a woken member gets a new card, and the old card's handler must not outlive it (268acc24).
+            EventHandler<int> stoppedHandler = (s, exitCode) => OnSourceStopped(exitCode);
+            source.Stopped += stoppedHandler;
+            control.Disposed += (s, e) => source.Stopped -= stoppedHandler;
+
+            // The agent may have finished between being announced and this card being built (the
+            // announcement is queued to the UI thread): its Stopped(0) went to nobody, so apply it now.
+            if (source is TranscriptTailer { IsCompleted: true })
+                OnSourceStopped(0);
+        }
+
+        /// <summary>
+        /// Take down one embedded agent card that the caller has already removed from
+        /// <c>_embeddedAgentMap</c> (925c8cff: the one teardown every card-removal path uses). Detaches
+        /// the agent first, so its Stopped cannot reach the card again; then removes the slot, disposes
+        /// the control and, when <paramref name="collapseIfEmpty"/>, collapses the pane's agent panel
+        /// once it holds no card.
+        /// <para>A stale entry is allowed for: a card whose pane or control was already disposed (its
+        /// terminal closed) skips the parts that need it, rather than touching a disposed object.</para>
+        /// <para>Does not stop the agent. The removal paths used to call <c>StopAgentAsync</c> after
+        /// <c>DetachAgent</c>, which did nothing: <c>StopAgentAsync</c> acts on the attached agent, and
+        /// <c>DetachAgent</c> has just cleared it. Team and subagent tailers are stopped by the watcher
+        /// that removed them.</para>
+        /// </summary>
+        private static void TearDownAgentCard((AgentPanelControl Control, Panel Slot, TerminalDocument Terminal) card, bool collapseIfEmpty)
+        {
+            bool controlLive = card.Control != null && !card.Control.IsDisposed;
+            bool terminalLive = card.Terminal != null && !card.Terminal.IsDisposed;
+
+            if (controlLive)
+                card.Control.DetachAgent();
+            if (terminalLive)
+                card.Terminal.EmbeddedAgentPanel?.RemoveAgentSlot(card.Slot);
+            if (controlLive)
+                card.Control.Dispose();
+            if (collapseIfEmpty && terminalLive && card.Terminal.EmbeddedAgentPanel?.AgentSlotCount == 0)
+                card.Terminal.ForceCollapseAgentPanel();
+        }
+
+        /// <summary>What to do with a team member's card when the member is announced.</summary>
+        internal enum TeamCardAction
+        {
+            /// <summary>No card for this key yet: build one.</summary>
+            Create,
+            /// <summary>This agent already has its card: leave it.</summary>
+            Keep,
+            /// <summary>This agent's card is still showing after it completed, and it woke: re-attach it.</summary>
+            Reattach,
+            /// <summary>The card is stale (its pane closed) or holds another agent: remove it, build a new one.</summary>
+            Replace
+        }
+
+        /// <summary>
+        /// The card decision for an announced team member (268acc24). <paramref name="sameAgent"/>: the
+        /// existing, live card is attached to the announced tailer. A card left from a closed pane, or
+        /// a card kept open (On Complete = Keep open) for an earlier agent of the same name, gives way
+        /// whatever <paramref name="isWake"/> says; before, it blocked the new member's card for good.
+        /// </summary>
+        internal static TeamCardAction DecideTeamCard(bool hasEntry, bool stale, bool sameAgent, bool isWake)
+        {
+            if (!hasEntry) return TeamCardAction.Create;
+            if (stale || !sameAgent) return TeamCardAction.Replace;
+            return isWake ? TeamCardAction.Reattach : TeamCardAction.Keep;
         }
 
         /// <summary>
@@ -9904,8 +10607,38 @@ namespace MultiTerminal
 
                     void DoCreate()
                     {
-                        if (!_embeddedAgentMap.ContainsKey(panelKey))
-                            CreateAgentPanel(e.Tailer, $"{e.MemberName} ({e.TeamName})", panelKey, resolvedSpawner, e.TaskDescription, e.SubagentType, isTeamAgent: true, preferredTarget: spawnerDoc);
+                        // A late announcement from a tailer already stopped for good (a member removed and
+                        // replaced while its wake was on the way) must not touch the map: Replace would
+                        // dispose the replacement's card, and CreateAgentPanel would then refuse this one.
+                        if (e.Tailer is TranscriptTailer { IsShutDown: true })
+                            return;
+
+                        string cardName = $"{e.MemberName} ({e.TeamName})";
+                        bool hasEntry = _embeddedAgentMap.TryGetValue(panelKey, out var existing);
+                        bool stale = hasEntry && (existing.Control == null || existing.Control.IsDisposed
+                            || existing.Terminal == null || existing.Terminal.IsDisposed);
+                        bool sameAgent = hasEntry && !stale && ReferenceEquals(existing.Control.AttachedAgent, e.Tailer);
+
+                        var action = DecideTeamCard(hasEntry, stale, sameAgent, e.IsWake);
+                        if (action == TeamCardAction.Keep)
+                        {
+                            _debugLogService?.Trace("MainForm", $"{e.MemberName} ({e.TeamName}) already has its card; announcement ignored");
+                            return;
+                        }
+                        if (action == TeamCardAction.Reattach)
+                        {
+                            existing.Control.AttachAgent(e.Tailer, cardName, e.TaskDescription, e.SubagentType, isTeamAgent: true);
+                            return;
+                        }
+                        if (action == TeamCardAction.Replace)
+                        {
+                            _embeddedAgentMap.Remove(panelKey);
+                            // No collapse: the new card is added next, possibly to the same pane.
+                            TearDownAgentCard(existing, collapseIfEmpty: false);
+                            _debugLogService?.Info("MainForm", $"Replacing the {(stale ? "stale" : "earlier")} card of {e.MemberName} with the new agent's card");
+                        }
+
+                        CreateAgentPanel(e.Tailer, cardName, panelKey, resolvedSpawner, e.TaskDescription, e.SubagentType, isTeamAgent: true, preferredTarget: spawnerDoc);
                     }
 
                     // Asynchronous (not wait) to prevent deadlocks when multiple terminals discover
@@ -9932,17 +10665,18 @@ namespace MultiTerminal
 
                     void CloseAgentPanel()
                     {
-                        if (_embeddedAgentMap.Remove(panelKey, out var embedded))
+                        // A member that finished cleanly keeps its card under On Complete = Keep open,
+                        // even when the lead then stops it: the removal is not a failure (268acc24).
+                        if (_settings?.GetAgentPanelCloseMode() == "ManualClose"
+                            && _embeddedAgentMap.TryGetValue(panelKey, out var kept)
+                            && kept.Control?.AttachedAgent is TranscriptTailer { IsCompleted: true })
                         {
-                            embedded.Control?.DetachAgent();
-                            if (embedded.Control != null)
-                                _ = embedded.Control.StopAgentAsync();
-                            embedded.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(embedded.Slot);
-                            embedded.Control?.Dispose();
-                            // Force-collapse if no remaining slots
-                            if (embedded.Terminal?.EmbeddedAgentPanel?.AgentSlotCount == 0)
-                                embedded.Terminal.ForceCollapseAgentPanel();
+                            _debugLogService?.Info("MainForm", $"Keeping the finished card of {e.MemberName} open (On Complete = Keep open)");
+                            return;
                         }
+
+                        if (_embeddedAgentMap.Remove(panelKey, out var embedded))
+                            TearDownAgentCard(embedded, collapseIfEmpty: true);
                     }
 
                     // Queued behind any pending creation of this panel, as for TeamRemoved above.
@@ -9979,9 +10713,8 @@ namespace MultiTerminal
                         if (_embeddedAgentMap.TryGetValue(panelKey, out var held) && held.Control?.HasActiveAgent != true
                             && _embeddedAgentMap.Remove(panelKey, out var finished))
                         {
-                            finished.Control?.DetachAgent();
-                            finished.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(finished.Slot);
-                            finished.Control?.Dispose();
+                            // No collapse: the new agent's card is added next.
+                            TearDownAgentCard(finished, collapseIfEmpty: false);
                         }
 
                         if (!_embeddedAgentMap.ContainsKey(panelKey))
@@ -10193,13 +10926,8 @@ namespace MultiTerminal
                 {
                     if (info.Terminal != null)
                         affectedTerminals.Add(info.Terminal);
-                    // Detach before stopping to prevent the Stopped event from
-                    // trying to remove an already-removed key (race condition)
-                    info.Control?.DetachAgent();
-                    if (info.Control != null)
-                        _ = info.Control.StopAgentAsync();
-                    info.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(info.Slot);
-                    info.Control?.Dispose();
+                    // Collapsed below, once per terminal, after all of the team's cards are gone.
+                    TearDownAgentCard(info, collapseIfEmpty: false);
                 }
             }
 
@@ -10410,6 +11138,54 @@ namespace MultiTerminal
             catch (Exception ex)
             {
                 _debugLogService?.Info("PaneAttention", $"Refresh failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Startup crash recovery: indexes every registered project's session transcripts that
+        /// the session-memory index has not seen yet (files idle for 2+ minutes; already-indexed
+        /// sessions are skipped by <c>IsSessionIndexed</c>).
+        /// Called on a background task from <c>InitializeMcpServerAndChatPanel</c> so that one
+        /// large transcript cannot hold up the services started after it. Concurrent writers are
+        /// already expected: the REST API is live throughout, and each file's write goes through
+        /// <c>SqliteWriteGate</c>. Never throws; failures are logged as before.
+        /// </summary>
+        // Set once MT is really closing (OnFormClosing, after the exit confirmation); read by the background
+        // crash-recovery indexing (review of PR #105).
+        private volatile bool _crashRecoveryStop;
+
+        private void RunCrashRecoveryIndexing()
+        {
+            try
+            {
+                var sessionMemDb = _mcpServer?.Broker?.SessionMemoryDb;
+                var projects = _mcpServer?.Broker?.ProjectService?.GetAllRegisteredProjects();
+                if (sessionMemDb == null || projects == null) return;
+
+                // a5ac5f71: this loop runs AFTER the REST server is live, so its write
+                // burst overlaps incoming API writes — the prime startup-contention window.
+                // The markers bound that window in the WriteContention log stream.
+                var recoverySw = System.Diagnostics.Stopwatch.StartNew();
+                Services.WriteContentionDiagnostics.MarkPhase("Crash-recovery session indexing started in background (REST API is already accepting requests)");
+                foreach (var project in projects)
+                {
+                    // MT is closing (set in OnFormClosing after the exit confirmation): stop. The indexer checks
+                    // the same flag per file and per chunk, so a large transcript cannot hold up the close.
+                    if (_crashRecoveryStop) return;
+
+                    if (!string.IsNullOrEmpty(project.Path))
+                        sessionMemDb.IndexProjectSessions(project.Path, () => _crashRecoveryStop);
+                }
+
+                Services.WriteContentionDiagnostics.MarkPhase($"Crash-recovery session indexing finished in {recoverySw.ElapsedMilliseconds}ms");
+            }
+            catch (Exception crEx)
+            {
+                _debugLogService?.Error("MainForm", $"Session memory crash recovery failed: {crEx.Message}");
+                if (Services.WriteContentionDiagnostics.IsBusyException(crEx))
+                {
+                    Services.WriteContentionDiagnostics.LogBusy("MainForm.CrashRecovery", crEx.Message);
+                }
             }
         }
 
@@ -11137,7 +11913,9 @@ namespace MultiTerminal
                     {
                         _projectService.AutoRegisterDiscoveredProject(workingDir, project);
                     }
-                    _currentProject = project;
+
+                    // A project deleted in MT is not current, though its folder still holds project.json (GitHub #102).
+                    _currentProject = _projectService.IsDeletedProject(project.Id) ? null : project;
                     return;
                 }
             }
@@ -11268,8 +12046,9 @@ namespace MultiTerminal
             {
                 _oracleDigestTimer?.Stop();
                 _oracleDigestTimer?.Dispose();
+                _idleSubagentTimer?.Stop();
+                _idleSubagentTimer?.Dispose();
                 _oracleService?.Dispose();
-                _webhookService?.Dispose();
                 _projectService?.Dispose();
 
                 _messageQueueTimer?.Stop();

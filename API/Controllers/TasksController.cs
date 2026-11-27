@@ -215,6 +215,27 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
+        /// Answers a stale-task reminder (ticket 28845a5f; used by the respond_to_stale MCP tool).
+        /// <c>still_relevant</c> clears the flag and restarts the 7-day clock, <c>reprioritize</c> moves the
+        /// task back to To Do, <c>will_close</c> records the answer and keeps the flag.
+        /// </summary>
+        [HttpPost("{taskId}/stale-response")]
+        public IActionResult RespondToStale(string taskId, [FromBody] StaleResponseRequest request)
+        {
+            if (request == null || !StaleResponseRequest.Allowed.Contains(request.Response ?? string.Empty))
+                return Problem(detail: "response must be one of: " + string.Join(", ", StaleResponseRequest.Allowed), statusCode: 400);
+
+            if (_broker.GetTask(taskId) == null)
+                return Problem(detail: $"Task {taskId} not found", statusCode: 404);
+
+            var result = _broker.RespondToStale(taskId, request.Response, request.RespondedBy);
+            if (!result.Success)
+                return Problem(detail: result.Error, statusCode: 500); // the task exists, so this is a write failure
+
+            return Ok(new { taskId, response = request.Response, message = result.Message });
+        }
+
+        /// <summary>
         /// Title-only rename. Narrow-surface companion to the WebView2 edit_task
         /// path — used by the rename_task MCP tool so agents can rename a task
         /// without going through the full edit_task message (which requires the
@@ -948,6 +969,15 @@ namespace MultiTerminal.API.Controllers
     {
         public string Status { get; set; }
         public string UpdatedBy { get; set; }
+    }
+
+    public class StaleResponseRequest
+    {
+        /// <summary>The answers TaskService.RespondToStale acts on.</summary>
+        public static readonly IReadOnlyList<string> Allowed = new[] { "still_relevant", "reprioritize", "will_close" };
+
+        public string Response { get; set; }
+        public string RespondedBy { get; set; }
     }
 
     public class RenameTaskRequest

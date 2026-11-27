@@ -320,6 +320,23 @@
   </Target>
 
   <!--
+    Stage the MCP server that matches these binaries into <staged>\mcp-server,
+    with a .mcp-stamp.json (commit, tool names), so deploy.ps1 installs exactly
+    this server into %APPDATA%\multiterminal\mcp alongside the binaries (ticket
+    9ce606e0). Before this, a deploy of a worktree or trial build left agents on
+    whatever server the last root build had synced, because SyncMcpServer below
+    skips worktree sources. Runs after CopyToStaged: its robocopy /MIR removes
+    anything the build output lacks, this folder included. Non-fatal, like the
+    other dev-only staging targets; deploy.ps1 says so loudly if it is missing.
+  -->
+  <Target Name="StageMcpServer" AfterTargets="WriteBuildInfo">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(ProjectDir)scripts\sync-mcp-server.ps1&quot;"
+          EnvironmentVariables="SMS_SOURCE_DIR=$(ProjectDir)mcp;SMS_DEST_DIR=$(SharedStagedPath.TrimEnd('\'))\mcp-server;SMS_STAGE_ONLY=true"
+          IgnoreExitCode="true"
+          WorkingDirectory="$(ProjectDir)" />
+  </Target>
+
+  <!--
     Push the canonical repo MCP server (mcp/) to the live copy the Node MCP
     child processes actually run from: %APPDATA%\multiterminal\mcp. Ticket
     ec97c446 made the repo the single source of truth; before this, that APPDATA

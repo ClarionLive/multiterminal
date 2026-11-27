@@ -326,6 +326,22 @@ namespace MultiTerminal.Services
         internal static bool ParseConfirmExit(string raw) =>
             !string.Equals(raw?.Trim(), "false", StringComparison.OrdinalIgnoreCase);
 
+        // ── Remote Control for every Claude terminal (ticket d096464f) ─────────────
+        private const string RemoteControlAllTerminalsKey = "RemoteControlAllTerminals";
+
+        /// <summary>
+        /// Whether MT launches every Claude Code terminal with <c>--remote-control</c>, so each is reachable,
+        /// under its terminal name, from claude.ai/code and the Claude app. Off unless turned on. Read at each
+        /// launch: panes already running keep what they started with.
+        /// </summary>
+        public bool GetRemoteControlAllTerminals() => ParseRemoteControlAllTerminals(Get(RemoteControlAllTerminalsKey));
+
+        public void SetRemoteControlAllTerminals(bool on) => Set(RemoteControlAllTerminalsKey, on ? "true" : "false");
+
+        /// <summary>Only a stored "true" (any case, trimmed) turns it on; blank or anything else is off.</summary>
+        internal static bool ParseRemoteControlAllTerminals(string raw) =>
+            string.Equals(raw?.Trim(), "true", StringComparison.OrdinalIgnoreCase);
+
         // ── Start screen (Home) preferences (ticket e20e2ce0 item 8) ──────────────
         private const string StartScreenHomeViewKey = "StartScreenHomeView";
         private const string StartScreenSortKey = "StartScreenSort";

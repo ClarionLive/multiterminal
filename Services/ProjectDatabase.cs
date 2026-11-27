@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Data.SQLite;
 using System.IO;
+using System.Linq;
 // Use fully-qualified names to distinguish two Project classes:
 //   MultiTerminal.MCPServer.Models.Project  — lightweight kanban-grouping model used by MessageBroker
 //   MultiTerminal.Models.Project            — rich file-based project model with all new fields
@@ -60,6 +61,7 @@ namespace MultiTerminal.Services
             // Run migrations for schema changes (additive, non-destructive)
             MigrateAddNewProjectColumns();
             MigrateAddAssociationTables();
+            MigrateAddProjectAgentExtraArgs();
 
             // Drop the mcp_registry table — gateway is now the source of truth for server catalog
             MigrateDropMcpRegistry();
@@ -214,7 +216,16 @@ namespace MultiTerminal.Services
                 // Per-project Claude model (ticket b0d2f090). No DEFAULT: NULL = use the global setting
                 // (Settings > General), so every existing project keeps the machine-wide choice.
                 ("claude_model",          "TEXT"),
-                ("claude_helper_model",   "TEXT")
+                ("claude_helper_model",   "TEXT"),
+                // Extra GitHub repositories to watch besides git_repo_url (ticket a923589f): one per line,
+                // free text. NULL = none. SQLite-only, not in project.json or the SaveRichProject UPSERT.
+                ("github_extra_repos",    "TEXT"),
+                // Folders the project lived in before a Move Project (ticket 6f879683), newline-separated,
+                // oldest first. Written only by ProjectRelocationStore; read so old Claude sessions stay
+                // resumable. SQLite-only, not in project.json or the SaveRichProject UPSERT.
+                ("previous_paths",        "TEXT"),
+                // Extra Claude Code flags (ticket 5380b6fb). NULL = none.
+                ("claude_extra_args",     "TEXT")
             };
 
             foreach (var (colName, colDef) in newColumns)
@@ -228,6 +239,30 @@ namespace MultiTerminal.Services
                     #pragma warning restore CA2100
                     alterCommand.ExecuteNonQuery();
                 }
+            }
+        }
+
+        /// <summary>
+        /// Adds <c>project_agents.extra_args</c> (ticket 5380b6fb): extra Claude Code flags for one agent's
+        /// terminals. Nullable, no DEFAULT: NULL = none, so every existing agent row launches as before.
+        /// </summary>
+        private void MigrateAddProjectAgentExtraArgs()
+        {
+            bool has = false;
+            using (var info = new SQLiteCommand("PRAGMA table_info(project_agents)", _connection))
+            using (var reader = info.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    if (string.Equals(reader.GetString(1), "extra_args", StringComparison.OrdinalIgnoreCase))
+                        has = true;
+                }
+            }
+
+            if (!has)
+            {
+                using var alter = new SQLiteCommand("ALTER TABLE project_agents ADD COLUMN extra_args TEXT", _connection);
+                alter.ExecuteNonQuery();
             }
         }
 
@@ -272,6 +307,15 @@ namespace MultiTerminal.Services
                     UNIQUE(project_id, agent_type)
                 );
                 CREATE INDEX IF NOT EXISTS idx_project_specialist_agents_project ON project_specialist_agents(project_id);
+
+                -- Projects deleted in MT (GitHub #102, ticket da0fcff8): a leftover .claude/project.json
+                -- carrying one of these ids is never re-adopted silently; New Project offers Restore or New.
+                CREATE TABLE IF NOT EXISTS deleted_projects (
+                    id TEXT PRIMARY KEY COLLATE NOCASE, -- the reads also say COLLATE NOCASE, whatever this table was created with
+                    name TEXT,
+                    path TEXT,
+                    deleted_at DATETIME NOT NULL
+                );
 
                 -- Important paths for a project
                 CREATE TABLE IF NOT EXISTS project_paths (
@@ -386,6 +430,203 @@ namespace MultiTerminal.Services
                 using var alter = new SQLiteCommand($"ALTER TABLE github_watch_state ADD COLUMN {name} {definition}", _connection);
 #pragma warning restore CA2100
                 alter.ExecuteNonQuery();
+            }
+
+            // The typed-case repository name of a queued notice (ticket a923589f, pipeline Run 1): the key
+            // columns are lowercase, the notice text keeps the case the Owner typed.
+            bool hasDisplay = false;
+            using (var info = new SQLiteCommand("SELECT name FROM pragma_table_info('github_watch_pending')", _connection))
+            using (var reader = info.ExecuteReader())
+            {
+                while (reader.Read()) hasDisplay |= string.Equals(reader.GetString(0), "repo_display", StringComparison.OrdinalIgnoreCase);
+            }
+            if (!hasDisplay)
+            {
+                using var alter = new SQLiteCommand("ALTER TABLE github_watch_pending ADD COLUMN repo_display TEXT", _connection);
+                alter.ExecuteNonQuery();
+            }
+
+            MigrateGitHubWatchRepoKeys();
+        }
+
+        /// <summary>
+        /// The one key every github_watch_* table is read and written under (ticket a923589f, pipeline
+        /// Run 1): the repository name in invariant lowercase. GitHub treats owner and name in any case as
+        /// the same repository, and the watch list already compares that way, so the state must too. A
+        /// typed-case name is kept separately where text needs it (github_watch_pending.repo_display).
+        /// </summary>
+        internal static string RepoKey(string repo) => repo?.ToLowerInvariant();
+
+        /// <summary>
+        /// Lowercases <c>repo</c> in github_watch_state, _seen and _pending, merging rows that differ only
+        /// in case, in ONE transaction. Safe to run again: it only touches a group that has a row whose
+        /// repo is not already its lowercase form, so a migrated database does nothing. State keeps the
+        /// highest baseline and the newest times, error and counts; seen and pending keep one row per
+        /// item and never lose a task id.
+        /// </summary>
+        internal void MigrateGitHubWatchRepoKeys()
+        {
+            lock (_dbLock)
+            {
+                // Cheap exit for the normal case (already migrated): no row with an upper-case letter in repo.
+                bool needed = false;
+                foreach (string table in new[] { "github_watch_state", "github_watch_pending", "github_watch_seen" })
+                {
+                    // CA2100: the table name comes from the literal list above.
+#pragma warning disable CA2100
+                    using var probe = new SQLiteCommand($"SELECT COUNT(*) FROM {table} WHERE repo <> lower(repo) OR repo GLOB '*[A-Z]*'", _connection);
+#pragma warning restore CA2100
+                    if (Convert.ToInt64(probe.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) > 0) { needed = true; break; }
+                }
+                if (!needed) return;
+
+                using var tx = _connection.BeginTransaction();
+                try
+                {
+                    MigrateStateRepoKeys(tx);
+                    MigrateSeenRepoKeys(tx);
+                    MigratePendingRepoKeys(tx);
+                    tx.Commit();
+                }
+                catch
+                {
+                    tx.Rollback();
+                    throw;
+                }
+            }
+        }
+
+        private static string LowerOf(string repo) => repo.ToLowerInvariant();
+
+        private void MigrateStateRepoKeys(SQLiteTransaction tx)
+        {
+            var rows = new List<(string Project, string Repo, int? Baseline, DateTime? Checked, DateTime? Success, string Error, int? Issues, int? Prs, DateTime? CountsAt)>();
+            using (var read = new SQLiteCommand(
+                "SELECT project_id, repo, baseline_number, last_checked_at, last_success_at, last_error, open_issues, open_prs, counts_at FROM github_watch_state", _connection, tx))
+            using (var r = read.ExecuteReader())
+            {
+                while (r.Read())
+                    rows.Add((r.GetString(0), r.GetString(1),
+                        r.IsDBNull(2) ? (int?)null : r.GetInt32(2),
+                        r.IsDBNull(3) ? (DateTime?)null : r.GetDateTime(3),
+                        r.IsDBNull(4) ? (DateTime?)null : r.GetDateTime(4),
+                        r.IsDBNull(5) ? null : r.GetString(5),
+                        r.IsDBNull(6) ? (int?)null : r.GetInt32(6),
+                        r.IsDBNull(7) ? (int?)null : r.GetInt32(7),
+                        r.IsDBNull(8) ? (DateTime?)null : r.GetDateTime(8)));
+            }
+
+            foreach (var group in rows.GroupBy(x => (x.Project, Key: LowerOf(x.Repo))))
+            {
+                if (group.All(x => x.Repo == group.Key.Key)) continue;   // already canonical, nothing to merge
+
+                int? baseline = group.Where(x => x.Baseline.HasValue).Select(x => x.Baseline).DefaultIfEmpty(null).Max();
+                DateTime? checkedAt = group.Where(x => x.Checked.HasValue).Select(x => x.Checked).DefaultIfEmpty(null).Max();
+                DateTime? success = group.Where(x => x.Success.HasValue).Select(x => x.Success).DefaultIfEmpty(null).Max();
+                // The error and the counts come from the newest row that has them.
+                var newest = group.OrderByDescending(x => x.Checked ?? DateTime.MinValue).First();
+                var counted = group.Where(x => x.Issues.HasValue && x.Prs.HasValue)
+                                   .OrderByDescending(x => x.CountsAt ?? DateTime.MinValue).ToList();
+                bool hasCounts = counted.Count > 0;
+
+                using (var del = new SQLiteCommand("DELETE FROM github_watch_state WHERE project_id = @p AND lower(repo) = @k", _connection, tx))
+                {
+                    del.Parameters.AddWithValue("@p", group.Key.Project);
+                    del.Parameters.AddWithValue("@k", group.Key.Key);
+                    del.ExecuteNonQuery();
+                }
+                using var ins = new SQLiteCommand(@"
+                    INSERT INTO github_watch_state (project_id, repo, baseline_number, last_checked_at, last_success_at, last_error, open_issues, open_prs, counts_at)
+                    VALUES (@p, @k, @b, @c, @s, @e, @i, @pr, @ca)", _connection, tx);
+                ins.Parameters.AddWithValue("@p", group.Key.Project);
+                ins.Parameters.AddWithValue("@k", group.Key.Key);
+                ins.Parameters.AddWithValue("@b", baseline.HasValue ? (object)baseline.Value : DBNull.Value);
+                ins.Parameters.AddWithValue("@c", checkedAt.HasValue ? (object)checkedAt.Value : DBNull.Value);
+                ins.Parameters.AddWithValue("@s", success.HasValue ? (object)success.Value : DBNull.Value);
+                ins.Parameters.AddWithValue("@e", (object)newest.Error ?? DBNull.Value);
+                ins.Parameters.AddWithValue("@i", hasCounts ? (object)counted[0].Issues.Value : DBNull.Value);
+                ins.Parameters.AddWithValue("@pr", hasCounts ? (object)counted[0].Prs.Value : DBNull.Value);
+                ins.Parameters.AddWithValue("@ca", hasCounts && counted[0].CountsAt.HasValue ? (object)counted[0].CountsAt.Value : DBNull.Value);
+                ins.ExecuteNonQuery();
+            }
+        }
+
+        private void MigrateSeenRepoKeys(SQLiteTransaction tx)
+        {
+            var rows = new List<(string Project, string Repo, int Number, int IsPr, string TaskId, DateTime SeenAt)>();
+            using (var read = new SQLiteCommand("SELECT project_id, repo, number, is_pr, task_id, seen_at FROM github_watch_seen", _connection, tx))
+            using (var r = read.ExecuteReader())
+            {
+                while (r.Read())
+                    rows.Add((r.GetString(0), r.GetString(1), r.GetInt32(2), r.GetInt32(3), r.IsDBNull(4) ? null : r.GetString(4), r.GetDateTime(5)));
+            }
+
+            foreach (var group in rows.GroupBy(x => (x.Project, Key: LowerOf(x.Repo), x.Number)))
+            {
+                if (group.All(x => x.Repo == group.Key.Key)) continue;
+
+                string taskId = group.Select(x => x.TaskId).FirstOrDefault(t => !string.IsNullOrEmpty(t));
+                int isPr = group.Max(x => x.IsPr);
+                DateTime seenAt = group.Min(x => x.SeenAt);
+
+                using (var del = new SQLiteCommand("DELETE FROM github_watch_seen WHERE project_id = @p AND lower(repo) = @k AND number = @n", _connection, tx))
+                {
+                    del.Parameters.AddWithValue("@p", group.Key.Project);
+                    del.Parameters.AddWithValue("@k", group.Key.Key);
+                    del.Parameters.AddWithValue("@n", group.Key.Number);
+                    del.ExecuteNonQuery();
+                }
+                using var ins = new SQLiteCommand(
+                    "INSERT INTO github_watch_seen (project_id, repo, number, is_pr, task_id, seen_at) VALUES (@p, @k, @n, @pr, @t, @at)", _connection, tx);
+                ins.Parameters.AddWithValue("@p", group.Key.Project);
+                ins.Parameters.AddWithValue("@k", group.Key.Key);
+                ins.Parameters.AddWithValue("@n", group.Key.Number);
+                ins.Parameters.AddWithValue("@pr", isPr);
+                ins.Parameters.AddWithValue("@t", (object)taskId ?? DBNull.Value);
+                ins.Parameters.AddWithValue("@at", seenAt);
+                ins.ExecuteNonQuery();
+            }
+        }
+
+        private void MigratePendingRepoKeys(SQLiteTransaction tx)
+        {
+            var rows = new List<(long Id, string Project, string Repo, string Display, int Number, int IsPr, string TaskId, string Url, DateTime CreatedAt)>();
+            using (var read = new SQLiteCommand("SELECT id, project_id, repo, repo_display, number, is_pr, task_id, url, created_at FROM github_watch_pending", _connection, tx))
+            using (var r = read.ExecuteReader())
+            {
+                while (r.Read())
+                    rows.Add((r.GetInt64(0), r.GetString(1), r.GetString(2), r.IsDBNull(3) ? null : r.GetString(3), r.GetInt32(4), r.GetInt32(5),
+                        r.IsDBNull(6) ? null : r.GetString(6), r.IsDBNull(7) ? null : r.GetString(7), r.GetDateTime(8)));
+            }
+
+            foreach (var group in rows.GroupBy(x => (x.Project, Key: LowerOf(x.Repo), x.Number)))
+            {
+                if (group.All(x => x.Repo == group.Key.Key)) continue;
+
+                // The lowest id stays (a delivery already counted by id keeps matching it); it takes any task id / url / typed name the others had.
+                var keep = group.OrderBy(x => x.Id).First();
+                string taskId = group.Select(x => x.TaskId).FirstOrDefault(t => !string.IsNullOrEmpty(t));
+                string url = group.Select(x => x.Url).FirstOrDefault(u => !string.IsNullOrEmpty(u));
+                string display = group.Select(x => x.Display ?? (x.Repo != group.Key.Key ? x.Repo : null)).FirstOrDefault(d => !string.IsNullOrEmpty(d));
+                int isPr = group.Max(x => x.IsPr);
+                DateTime created = group.Min(x => x.CreatedAt);
+
+                foreach (var other in group.Where(x => x.Id != keep.Id))
+                {
+                    using var del = new SQLiteCommand("DELETE FROM github_watch_pending WHERE id = @id", _connection, tx);
+                    del.Parameters.AddWithValue("@id", other.Id);
+                    del.ExecuteNonQuery();
+                }
+                using var upd = new SQLiteCommand(
+                    "UPDATE github_watch_pending SET repo = @k, repo_display = @d, is_pr = @pr, task_id = @t, url = @u, created_at = @at WHERE id = @id", _connection, tx);
+                upd.Parameters.AddWithValue("@k", group.Key.Key);
+                upd.Parameters.AddWithValue("@d", (object)display ?? DBNull.Value);
+                upd.Parameters.AddWithValue("@pr", isPr);
+                upd.Parameters.AddWithValue("@t", (object)taskId ?? DBNull.Value);
+                upd.Parameters.AddWithValue("@u", (object)url ?? DBNull.Value);
+                upd.Parameters.AddWithValue("@at", created);
+                upd.Parameters.AddWithValue("@id", keep.Id);
+                upd.ExecuteNonQuery();
             }
         }
 
@@ -505,22 +746,25 @@ namespace MultiTerminal.Services
 
         // Whitelist of project columns that are safe to update via UpdateProjectField.
         // Boolean fields are stored as INTEGER 0/1 in SQLite.
+        // "path" is deliberately absent (ticket 6f879683): it is the project's identity folder, and notes,
+        // sessions, worktrees and Claude history are filed under it, so it changes only through Move
+        // Project (ProjectRelocationService), which repoints all of them. A raw write here left them behind.
         private static readonly HashSet<string> _allowedProjectFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "name", "description", "path", "source_path", "deploy_path", "build_output_path",
+            "name", "description", "source_path", "deploy_path", "build_output_path",
             "build_command", "deploy_command", "launch_command", "project_type", "current_version",
             "change_log", "icon", "icon_color", "git_repo_url", "git_default_branch", "git_auto_commit",
             "is_pinned", "status", "created_by", "last_opened_at", "team_lead", "default_terminal",
             "source_control_account_id", "quiet_start", "claude_profile",
             "github_watch_mode", "github_check_on_start", "github_check_interval",
-            "claude_model", "claude_helper_model"
+            "claude_model", "claude_helper_model", "github_extra_repos", "claude_extra_args"
         };
 
         // Map camelCase JS field names to snake_case SQLite column names.
         // JS sends data-field attributes in camelCase; SQLite columns are snake_case.
         private static readonly Dictionary<string, string> _fieldNameMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["name"] = "name", ["description"] = "description", ["path"] = "path",
+            ["name"] = "name", ["description"] = "description",
             ["sourcePath"] = "source_path", ["deployPath"] = "deploy_path",
             ["buildOutputPath"] = "build_output_path", ["buildCommand"] = "build_command",
             ["deployCommand"] = "deploy_command", ["launchCommand"] = "launch_command",
@@ -538,6 +782,8 @@ namespace MultiTerminal.Services
             ["gitHubCheckInterval"] = "github_check_interval",
             ["claudeModel"] = "claude_model",
             ["claudeHelperModel"] = "claude_helper_model",
+            ["gitHubExtraRepos"] = "github_extra_repos",
+            ["claudeExtraArgs"] = "claude_extra_args",
         };
 
         // Fields that map to INTEGER 0/1 booleans in the database.
@@ -553,7 +799,13 @@ namespace MultiTerminal.Services
         /// or "1"/"0" and convert to INTEGER automatically.
         /// </summary>
         /// <returns>True if updated, false if project not found or field not allowed.</returns>
-        public bool UpdateProjectField(string projectId, string fieldName, string value)
+        public bool UpdateProjectField(string projectId, string fieldName, string value) =>
+            UpdateProjectField(projectId, fieldName, value, pruneWatchList: true);
+
+        /// <param name="pruneWatchList">False only for a caller that writes several watch-list fields in one
+        /// save (ProjectSettingsService): it prunes once afterwards with <see cref="PruneGitHubWatchList"/>, so
+        /// a repo that moves between Repository URL and Also watch is not dropped by the half-way state.</param>
+        internal bool UpdateProjectField(string projectId, string fieldName, string value, bool pruneWatchList)
         {
             if (string.IsNullOrWhiteSpace(projectId) || string.IsNullOrWhiteSpace(fieldName))
                 return false;
@@ -580,15 +832,6 @@ namespace MultiTerminal.Services
                 bool boolVal = value == "true" || value == "1";
                 paramValue = boolVal ? 1 : 0;
             }
-            else if (string.Equals(fieldName, "path", StringComparison.OrdinalIgnoreCase))
-            {
-                // Guard the canonical path column: a worktree path must never be persisted here
-                // (task 19d0d867). Load the row's existing source_path so a csproj-in-subfolder
-                // project canonicalizes to its real subfolder (within the repo) instead of the bare,
-                // unwatchable repo root. projectName is unavailable here; the id traces the correction.
-                string existingSourcePath = ReadProjectSourcePath(projectId);
-                paramValue = (object)CanonicalizeProjectPath(value, existingSourcePath, projectId, projectId) ?? DBNull.Value;
-            }
             else if (string.Equals(fieldName, "claude_profile", StringComparison.OrdinalIgnoreCase))
             {
                 // Blank or "Default" clears the column, the same as SetClaudeProfile.
@@ -604,8 +847,11 @@ namespace MultiTerminal.Services
 
             lock (_dbLock)
             {
-                bool watchField = fieldName == "github_watch_mode" || fieldName == "git_repo_url";
+                bool listField = fieldName == "git_repo_url" || fieldName == "github_extra_repos";
+                bool watchField = fieldName == "github_watch_mode";
                 string oldValue = watchField ? ReadProjectText(projectId, fieldName) : null;
+                // The watch list as it was, for the repos this write takes off it (ticket a923589f).
+                var listBefore = listField && pruneWatchList ? ReadWatchList(projectId) : null;
 
                 // CA2100 / CA3001: fieldName is whitelist-validated against _allowedProjectFields above (rejected if not present);
                 // all user-supplied values (projectId, paramValue) flow through SQLiteParameter.
@@ -623,6 +869,10 @@ namespace MultiTerminal.Services
                 // tool all write through this method (task 92eeeb47, pipeline Run 2).
                 if (updated && watchField && ShouldResetGitHubWatch(fieldName, oldValue, value))
                     ResetGitHubWatchState(projectId);
+                // Only a repo that LEFT the list loses its baseline; the others keep theirs, and an edit that
+                // leaves a repo on the list (the ssh form of the same one, another line) changes nothing.
+                if (updated && listBefore != null)
+                    PruneGitHubWatchList(projectId, listBefore);
                 // Watching turned off: the Owner no longer wants to hear, so drop what was waiting for
                 // the agent (task e4924065, pipeline Run 1).
                 if (updated && fieldName == "github_watch_mode"
@@ -637,20 +887,16 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Whether a write to a GitHub watch field starts the watch from a fresh baseline (task 92eeeb47):
-        /// watching turned on from Off, or the Repository URL now names another repository. A baseline
-        /// left from before covers a gap nobody watched, and everything created in it would become
-        /// cards. The URL is compared as the parsed <c>owner/name</c>, so writing the same repository
-        /// another way (ssh form, a trailing .git) keeps the baseline. Pure.
+        /// Whether a write to a GitHub watch field starts EVERY repository from a fresh baseline (task
+        /// 92eeeb47): watching turned on from Off. A baseline left from before covers a gap nobody
+        /// watched, and everything created in it would become cards. A change to the watch LIST is not
+        /// decided here: a repository that leaves it loses only its own state (<see cref="PruneGitHubWatchList"/>). Pure.
         /// </summary>
         internal static bool ShouldResetGitHubWatch(string column, string oldValue, string newValue)
         {
             if (column == "github_watch_mode")
                 return MultiTerminal.Models.GitHubWatchSettings.ParseMode(oldValue) == MultiTerminal.Models.GitHubWatchMode.Off
                     && MultiTerminal.Models.GitHubWatchSettings.ParseMode(newValue) != MultiTerminal.Models.GitHubWatchMode.Off;
-            if (column == "git_repo_url")
-                return !string.Equals(GitHubRepoRef.TryParse(oldValue)?.FullName, GitHubRepoRef.TryParse(newValue)?.FullName,
-                    StringComparison.OrdinalIgnoreCase);
             return false;
         }
 
@@ -662,6 +908,7 @@ namespace MultiTerminal.Services
             {
                 "github_watch_mode" => "SELECT github_watch_mode FROM projects WHERE id = @id",
                 "git_repo_url" => "SELECT git_repo_url FROM projects WHERE id = @id",
+                "github_extra_repos" => "SELECT github_extra_repos FROM projects WHERE id = @id",
                 _ => throw new ArgumentOutOfRangeException(nameof(column), column, "Not a GitHub watch column."),
             };
             // Re-entrant: both callers already hold _dbLock.
@@ -671,6 +918,88 @@ namespace MultiTerminal.Services
                 command.Parameters.AddWithValue("@id", projectId);
                 var result = command.ExecuteScalar();
                 return result == null || result is DBNull ? null : Convert.ToString(result, System.Globalization.CultureInfo.InvariantCulture);
+            }
+        }
+
+        /// <summary>The project's stored watch list: Repository URL plus Also watch (ticket a923589f).</summary>
+        internal GitHubWatchList ReadWatchList(string projectId)
+        {
+            lock (_dbLock)
+            {
+                return GitHubWatchList.Of(ReadProjectText(projectId, "git_repo_url"), ReadProjectText(projectId, "github_extra_repos"));
+            }
+        }
+
+        /// <summary>
+        /// Drops the watch state of every repository that was on <paramref name="before"/> and is no longer
+        /// on the project's stored list (ticket a923589f), so adding it back later is a baseline-only check
+        /// and a stale row cannot let it dump its backlog. Repositories still on the list keep their
+        /// baselines. Its queued notices go too. Claims (github_watch_seen) are kept, as in <see cref="ResetGitHubWatchState"/>.
+        /// </summary>
+        internal void PruneGitHubWatchList(string projectId, GitHubWatchList before)
+        {
+            if (before == null || string.IsNullOrEmpty(projectId)) return;
+            lock (_dbLock)
+            {
+                var after = ReadWatchList(projectId);
+                foreach (string repo in GitHubWatchList.Removed(before, after))
+                {
+                    // State and queued notices go; claims (github_watch_seen) stay.
+                    foreach (string table in new[] { "github_watch_state", "github_watch_pending" })
+                    {
+                        // CA2100: the table name comes from the literal list above.
+#pragma warning disable CA2100
+                        using var command = new SQLiteCommand($"DELETE FROM {table} WHERE project_id = @p AND repo = @r", _connection);
+#pragma warning restore CA2100
+                        command.Parameters.AddWithValue("@p", projectId);
+                        command.Parameters.AddWithValue("@r", RepoKey(repo));
+                        command.ExecuteNonQuery();
+                    }
+                }
+            }
+        }
+
+        /// <summary>Remembers that a project was deleted in MT (GitHub #102). A later delete of the same id replaces it.</summary>
+        public void RecordDeletedProject(string projectId, string name, string path)
+        {
+            if (string.IsNullOrWhiteSpace(projectId)) return;
+            using var writeGate = SqliteWriteGate.EnterWrite("ProjectDatabase.RecordDeletedProject", projectId);
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand(
+                    "INSERT OR REPLACE INTO deleted_projects (id, name, path, deleted_at) VALUES (@id, @name, @path, @at)", _connection);
+                command.Parameters.AddWithValue("@id", projectId);
+                command.Parameters.AddWithValue("@name", (object)name ?? DBNull.Value);
+                command.Parameters.AddWithValue("@path", (object)path ?? DBNull.Value);
+                command.Parameters.AddWithValue("@at", DateTime.UtcNow);
+                command.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>When the project with this id was deleted in MT (UTC), or null if it never was.</summary>
+        public DateTime? GetDeletedAt(string projectId)
+        {
+            if (string.IsNullOrWhiteSpace(projectId)) return null;
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand("SELECT deleted_at FROM deleted_projects WHERE id = @id COLLATE NOCASE", _connection);
+                command.Parameters.AddWithValue("@id", projectId);
+                var value = command.ExecuteScalar();
+                // deleted_at is only ever written as DateTime.UtcNow (RecordDeletedProject), so it is UTC.
+                return value == null || value == DBNull.Value ? null : DateTime.SpecifyKind(Convert.ToDateTime(value, System.Globalization.CultureInfo.InvariantCulture), DateTimeKind.Utc);
+            }
+        }
+
+        /// <summary>Forgets a deletion: the project with this id was restored (GitHub #102).</summary>
+        public void ForgetDeletedProject(string projectId)
+        {
+            if (string.IsNullOrWhiteSpace(projectId)) return;
+            using var writeGate = SqliteWriteGate.EnterWrite("ProjectDatabase.ForgetDeletedProject", projectId);
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand("DELETE FROM deleted_projects WHERE id = @id COLLATE NOCASE", _connection);
+                command.Parameters.AddWithValue("@id", projectId);
+                command.ExecuteNonQuery();
             }
         }
 
@@ -810,7 +1139,7 @@ namespace MultiTerminal.Services
                            team_lead, default_terminal, source_control_account_id, status, quiet_start,
                            claude_profile, launch_mode,
                            github_watch_mode, github_check_on_start, github_check_interval,
-                           claude_model, claude_helper_model
+                           claude_model, claude_helper_model, github_extra_repos, claude_extra_args
                     FROM projects
                     WHERE id = @id
                 ";
@@ -845,7 +1174,7 @@ namespace MultiTerminal.Services
                            team_lead, default_terminal, source_control_account_id, status, quiet_start,
                            claude_profile, launch_mode,
                            github_watch_mode, github_check_on_start, github_check_interval,
-                           claude_model, claude_helper_model
+                           claude_model, claude_helper_model, github_extra_repos, claude_extra_args
                     FROM projects
                     ORDER BY is_pinned DESC, created_at DESC
                 ";
@@ -878,22 +1207,6 @@ namespace MultiTerminal.Services
         /// (<c>get_active_worktree</c>). A correction is logged (not silent) so the original
         /// injecting caller can be traced. Task 19d0d867.
         /// </summary>
-        /// <summary>
-        /// Reads a project's stored <c>source_path</c> by id (null if unset/not found). Used by the
-        /// single-field <see cref="UpdateProjectField"/> path-guard so a worktree path can be
-        /// canonicalized to the project's real subfolder, not just the bare repo root. Task 19d0d867.
-        /// </summary>
-        private string ReadProjectSourcePath(string projectId)
-        {
-            lock (_dbLock)
-            {
-                using var command = new SQLiteCommand("SELECT source_path FROM projects WHERE id = @id", _connection);
-                command.Parameters.AddWithValue("@id", projectId);
-                var result = command.ExecuteScalar();
-                return (result == null || result == DBNull.Value) ? null : (string)result;
-            }
-        }
-
         private static string CanonicalizeProjectPath(string path, string sourcePath, string projectId, string projectName)
         {
             if (WorktreeLayout.TryResolveStableProjectPath(path, sourcePath, out var stable))
@@ -1020,12 +1333,12 @@ namespace MultiTerminal.Services
 
                 // A null URL keeps the stored one (COALESCE), so only a non-null one can repoint the
                 // watch; the same reset rule as UpdateProjectField (task 92eeeb47, pipeline Run 2).
-                string oldRepoUrl = project.GitRepoUrl != null ? ReadProjectText(project.Id, "git_repo_url") : null;
+                var listBefore = project.GitRepoUrl != null ? ReadWatchList(project.Id) : null;
 
                 command.ExecuteNonQuery();
 
-                if (project.GitRepoUrl != null && ShouldResetGitHubWatch("git_repo_url", oldRepoUrl, project.GitRepoUrl))
-                    ResetGitHubWatchState(project.Id);
+                if (listBefore != null)
+                    PruneGitHubWatchList(project.Id, listBefore);
             }
         }
 
@@ -1186,7 +1499,7 @@ namespace MultiTerminal.Services
                     "SELECT baseline_number, last_checked_at, last_success_at, last_error, open_issues, open_prs FROM github_watch_state WHERE project_id = @p AND repo = @r",
                     _connection);
                 command.Parameters.AddWithValue("@p", projectId);
-                command.Parameters.AddWithValue("@r", repo);
+                command.Parameters.AddWithValue("@r", RepoKey(repo));
                 using var reader = command.ExecuteReader();
                 var row = new GitHubWatchStateRow();
                 if (!reader.Read()) return row;
@@ -1214,7 +1527,7 @@ namespace MultiTerminal.Services
                     "UPDATE github_watch_state SET open_issues = @i, open_prs = @pr, counts_at = @at WHERE project_id = @p AND repo = @r",
                     _connection);
                 command.Parameters.AddWithValue("@p", projectId);
-                command.Parameters.AddWithValue("@r", repo);
+                command.Parameters.AddWithValue("@r", RepoKey(repo));
                 command.Parameters.AddWithValue("@i", openIssues);
                 command.Parameters.AddWithValue("@pr", openPullRequests);
                 command.Parameters.AddWithValue("@at", DateTime.UtcNow);
@@ -1241,11 +1554,12 @@ namespace MultiTerminal.Services
                 foreach (var n in notices)
                 {
                     using var command = new SQLiteCommand(@"
-                        INSERT OR IGNORE INTO github_watch_pending (project_id, repo, number, is_pr, task_id, url, created_at)
-                        SELECT @p, @r, @n, @pr, @t, @u, @at
+                        INSERT OR IGNORE INTO github_watch_pending (project_id, repo, repo_display, number, is_pr, task_id, url, created_at)
+                        SELECT @p, @r, @d, @n, @pr, @t, @u, @at
                         WHERE EXISTS (SELECT 1 FROM projects WHERE id = @p AND lower(trim(github_watch_mode)) IN ('notify', 'board'))", _connection, tx);
                     command.Parameters.AddWithValue("@p", projectId);
-                    command.Parameters.AddWithValue("@r", repo);
+                    command.Parameters.AddWithValue("@r", RepoKey(repo));
+                    command.Parameters.AddWithValue("@d", (object)repo ?? DBNull.Value);   // typed case, for the notice text
                     command.Parameters.AddWithValue("@n", n.Number);
                     command.Parameters.AddWithValue("@pr", n.IsPullRequest ? 1 : 0);
                     command.Parameters.AddWithValue("@t", (object)n.TaskId ?? DBNull.Value);
@@ -1264,7 +1578,7 @@ namespace MultiTerminal.Services
             lock (_dbLock)
             {
                 using var command = new SQLiteCommand(
-                    "SELECT id, repo, number, is_pr, task_id, url FROM github_watch_pending WHERE project_id = @p ORDER BY repo, number",
+                    "SELECT id, COALESCE(repo_display, repo), number, is_pr, task_id, url FROM github_watch_pending WHERE project_id = @p ORDER BY repo, number",
                     _connection);
                 command.Parameters.AddWithValue("@p", projectId);
                 using var reader = command.ExecuteReader();
@@ -1343,7 +1657,7 @@ namespace MultiTerminal.Services
                 using var command = new SQLiteCommand(
                     "DELETE FROM github_watch_seen WHERE project_id = @p AND repo = @r AND number = @n AND task_id IS NULL", _connection);
                 command.Parameters.AddWithValue("@p", projectId);
-                command.Parameters.AddWithValue("@r", repo);
+                command.Parameters.AddWithValue("@r", RepoKey(repo));
                 command.Parameters.AddWithValue("@n", number);
                 command.ExecuteNonQuery();
             }
@@ -1375,7 +1689,7 @@ namespace MultiTerminal.Services
                         last_success_at = COALESCE(excluded.last_success_at, github_watch_state.last_success_at),
                         last_error = excluded.last_error", _connection);
                 command.Parameters.AddWithValue("@p", projectId);
-                command.Parameters.AddWithValue("@r", repo);
+                command.Parameters.AddWithValue("@r", RepoKey(repo));
                 command.Parameters.AddWithValue("@b", baseline.HasValue ? (object)baseline.Value : DBNull.Value);
                 command.Parameters.AddWithValue("@at", DateTime.UtcNow);
                 command.Parameters.AddWithValue("@err", (object)error ?? DBNull.Value);
@@ -1396,7 +1710,7 @@ namespace MultiTerminal.Services
                     INSERT OR IGNORE INTO github_watch_seen (project_id, repo, number, is_pr, seen_at)
                     VALUES (@p, @r, @n, @pr, @at)", _connection);
                 command.Parameters.AddWithValue("@p", projectId);
-                command.Parameters.AddWithValue("@r", repo);
+                command.Parameters.AddWithValue("@r", RepoKey(repo));
                 command.Parameters.AddWithValue("@n", number);
                 command.Parameters.AddWithValue("@pr", isPullRequest ? 1 : 0);
                 command.Parameters.AddWithValue("@at", DateTime.UtcNow);
@@ -1413,9 +1727,22 @@ namespace MultiTerminal.Services
                     "UPDATE github_watch_seen SET task_id = @t WHERE project_id = @p AND repo = @r AND number = @n", _connection);
                 command.Parameters.AddWithValue("@t", taskId);
                 command.Parameters.AddWithValue("@p", projectId);
-                command.Parameters.AddWithValue("@r", repo);
+                command.Parameters.AddWithValue("@r", RepoKey(repo));
                 command.Parameters.AddWithValue("@n", number);
                 command.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// The folders the project lived in before a Move Project, oldest first (ticket 6f879683,
+        /// <c>previous_paths</c>). Empty when it never moved or the project is unknown.
+        /// </summary>
+        public IReadOnlyList<string> GetPreviousPaths(string projectId)
+        {
+            if (string.IsNullOrWhiteSpace(projectId)) return Array.Empty<string>();
+            lock (_dbLock)
+            {
+                return ProjectRelocationStore.GetPreviousPaths(_connection, projectId);
             }
         }
 
@@ -1489,7 +1816,9 @@ namespace MultiTerminal.Services
                 GitHubCheckInterval = MultiTerminal.Models.GitHubWatchSettings.ParseInterval(
                     reader.IsDBNull(32) ? null : reader.GetString(32)),
                 ClaudeModel = reader.IsDBNull(33) ? null : reader.GetString(33),
-                ClaudeHelperModel = reader.IsDBNull(34) ? null : reader.GetString(34)
+                ClaudeHelperModel = reader.IsDBNull(34) ? null : reader.GetString(34),
+                GitHubExtraRepos = reader.IsDBNull(35) ? null : reader.GetString(35),
+                ClaudeExtraArgs = reader.IsDBNull(36) ? null : reader.GetString(36)
             };
         }
 
@@ -1574,7 +1903,7 @@ namespace MultiTerminal.Services
             lock (_dbLock)
             {
                 const string sql = @"
-                    SELECT id, project_id, agent_name, role, preferred_model
+                    SELECT id, project_id, agent_name, role, preferred_model, extra_args
                     FROM project_agents
                     WHERE project_id = @projectId
                     ORDER BY agent_name
@@ -1592,7 +1921,8 @@ namespace MultiTerminal.Services
                         ProjectId = reader.GetString(1),
                         AgentName = reader.GetString(2),
                         Role = reader.IsDBNull(3) ? null : reader.GetString(3),
-                        PreferredModel = reader.IsDBNull(4) ? null : reader.GetString(4)
+                        PreferredModel = reader.IsDBNull(4) ? null : reader.GetString(4),
+                        ExtraArgs = reader.IsDBNull(5) ? null : reader.GetString(5)
                     });
                 }
             }
@@ -1602,12 +1932,24 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Save (upsert) a project agent. Updates role and preferred_model if already present.
+        /// <paramref name="writeExtraArgs"/> false (the REST endpoint agents reach) leaves an existing row's
+        /// <c>extra_args</c> as it is and gives a new row none: only the Owner's settings form sets them
+        /// (ticket 5380b6fb).
         /// </summary>
-        public void SaveProjectAgent(MultiTerminal.Models.ProjectAgent agent)
+        public void SaveProjectAgent(MultiTerminal.Models.ProjectAgent agent, bool writeExtraArgs = true)
         {
             lock (_dbLock)
             {
-                const string sql = @"
+                string sql = writeExtraArgs
+                    ? @"
+                    INSERT INTO project_agents (project_id, agent_name, role, preferred_model, extra_args)
+                    VALUES (@projectId, @agentName, @role, @preferredModel, @extraArgs)
+                    ON CONFLICT(project_id, agent_name) DO UPDATE SET
+                        role = @role,
+                        preferred_model = @preferredModel,
+                        extra_args = @extraArgs
+                "
+                    : @"
                     INSERT INTO project_agents (project_id, agent_name, role, preferred_model)
                     VALUES (@projectId, @agentName, @role, @preferredModel)
                     ON CONFLICT(project_id, agent_name) DO UPDATE SET
@@ -1620,6 +1962,8 @@ namespace MultiTerminal.Services
                 command.Parameters.AddWithValue("@agentName", agent.AgentName);
                 command.Parameters.AddWithValue("@role", (object)agent.Role ?? DBNull.Value);
                 command.Parameters.AddWithValue("@preferredModel", (object)agent.PreferredModel ?? DBNull.Value);
+                if (writeExtraArgs)
+                    command.Parameters.AddWithValue("@extraArgs", string.IsNullOrWhiteSpace(agent.ExtraArgs) ? (object)DBNull.Value : agent.ExtraArgs.Trim());
                 command.ExecuteNonQuery();
             }
         }

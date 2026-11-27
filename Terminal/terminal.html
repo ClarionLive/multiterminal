@@ -296,6 +296,7 @@
             // Handle user input - send to C#
             // Use TextEncoder to properly encode multi-byte (UTF-8) characters before Base64
             term.onData((data) => {
+                if (!isTerminalReport(data)) userInputEpoch++;
                 sendToHost({ type: 'input', data: utf8ToBase64(data) });
             });
 
@@ -828,6 +829,42 @@
             return (term && term.hasSelection()) ? term.getSelection() : '';
         }
         window.terminalGetSelection = getSelectedText;
+
+        // The rows from rowsAbove above the cursor down to the cursor row, trailing spaces trimmed (ticket
+        // 354f1efa): the host checks whether an injected /compact is still sitting in the input line.
+        function readNearCursor(rowsAbove) {
+            if (!term) return null;
+            const buf = term.buffer.active;
+            const cursorRow = buf.baseY + buf.cursorY;
+            const from = Math.max(0, cursorRow - Math.max(0, rowsAbove | 0));
+            const lines = [];
+            for (let y = from; y <= cursorRow && y < buf.length; y++) {
+                const line = buf.getLine(y);
+                lines.push(line ? line.translateToString(true) : '');
+            }
+            return lines.join('\n');
+        }
+        window.terminalReadNearCursor = readNearCursor;
+
+        // Keystrokes and pastes a person sent through xterm.js (ticket 354f1efa). MT's own text does not come
+        // through onData (the raw write, the typing queue and sendEnter all post to the host directly), and
+        // terminal reports are not a person typing.
+        let userInputEpoch = 0;
+        function isTerminalReport(data) {
+            return /^\x1b\[[IO]$/.test(data)          // focus in / out
+                || /^\x1b\[[<M]/.test(data)            // mouse
+                || /^\x1b\[[?>][\d;]*c$/.test(data);  // device attributes reply
+        }
+        window.terminalInputEpoch = () => userInputEpoch;
+
+        // Presses Enter only if nobody typed since epoch was read. The check and the send are one step on
+        // the page's single thread, so no keystroke can come between them: an injected /compact is never
+        // submitted together with text the Owner started typing.
+        window.terminalSendEnterIfNoInputSince = (epoch) => {
+            if (!term || userInputEpoch !== epoch) return false;
+            sendToHost({ type: 'input', data: btoa('\r') });
+            return true;
+        };
 
         // Listen for messages from C#
         if (window.chrome && window.chrome.webview) {

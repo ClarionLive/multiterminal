@@ -35,30 +35,8 @@ namespace MultiTerminal.Services
         /// </summary>
         public static GitHubRepoRef TryParse(string url)
         {
-            if (string.IsNullOrWhiteSpace(url)) return null;
-            string s = url.Trim();
-
-            string path;
-            var scp = Regex.Match(s, @"^git@github\.com:(?<p>.+)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-            if (scp.Success)
-            {
-                path = scp.Groups["p"].Value;
-            }
-            else if (Uri.TryCreate(s, UriKind.Absolute, out var uri)
-                     && (uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == "ssh" || uri.Scheme == "git"))
-            {
-                string host = uri.Host.ToLowerInvariant();
-                if (host != "github.com" && host != "www.github.com") return null;
-                path = uri.AbsolutePath;
-            }
-            else if (!s.Contains(":") && !s.StartsWith('/') && !s.Contains("\\"))
-            {
-                path = s; // bare owner/name
-            }
-            else
-            {
-                return null;
-            }
+            string path = ExtractPath(url);
+            if (path == null) return null;
 
             var parts = path.Trim('/').Split('/');
             if (parts.Length < 2) return null;
@@ -71,6 +49,44 @@ namespace MultiTerminal.Services
             if (name == "." || name == "..") return null;
 
             return new GitHubRepoRef(owner, name);
+        }
+
+        /// <summary>
+        /// True for a github.com URL that names an account and no repository (ticket a923589f), such as
+        /// <c>https://github.com/positivesoftware</c>: it does not parse, and the warning says why. A bare
+        /// word is not claimed, since it could be anything.
+        /// </summary>
+        public static bool NamesOnlyAnAccount(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url) || url.IndexOf("github.com", StringComparison.OrdinalIgnoreCase) < 0) return false;
+            string path = ExtractPath(url);
+            if (path == null) return false;
+            var parts = path.Trim('/').Split('/');
+            return parts.Length == 1 && OwnerPattern.IsMatch(parts[0]);
+        }
+
+        // The path part of a github.com URL, or null when the text is not one of the accepted forms.
+        private static string ExtractPath(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return null;
+            string s = url.Trim();
+
+            var scp = Regex.Match(s, @"^git@github\.com:(?<p>.+)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (scp.Success)
+                return scp.Groups["p"].Value;
+
+            if (Uri.TryCreate(s, UriKind.Absolute, out var uri)
+                && (uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == "ssh" || uri.Scheme == "git"))
+            {
+                string host = uri.Host.ToLowerInvariant();
+                if (host != "github.com" && host != "www.github.com") return null;
+                return uri.AbsolutePath;
+            }
+
+            if (!s.Contains(":") && !s.StartsWith('/') && !s.Contains("\\"))
+                return s; // bare owner/name
+
+            return null;
         }
 
         /// <summary>

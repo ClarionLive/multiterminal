@@ -28,6 +28,7 @@ namespace MultiTerminal.API
         private System.Threading.Timer _staleAgentTimer;
         private StaleTaskService _staleService;
         private SpawnService _spawnService;
+        private ProjectOpenService _projectOpenService;
         private TerminalStreamService _terminalStreamService;
         private CompanionProcessManager _companionProcessManager;
         // G8: MainForm's ProjectService instance, supplied so the REST DI shares the ONE instance the
@@ -51,6 +52,9 @@ namespace MultiTerminal.API
         /// The spawn service for programmatic terminal spawning.
         /// </summary>
         public SpawnService SpawnService => _spawnService;
+
+        /// <summary>Backs <c>POST /api/projects/{id}/open</c>; MainForm registers its callback.</summary>
+        public ProjectOpenService ProjectOpenService => _projectOpenService;
 
         /// <summary>
         /// The pool coordinator for multi-instance state management.
@@ -104,6 +108,7 @@ namespace MultiTerminal.API
             _broker = new MessageBroker();
             _poolCoordinator = new PoolCoordinator();
             _spawnService = new SpawnService();
+            _projectOpenService = new ProjectOpenService();
             _companionProcessManager = new CompanionProcessManager();
             // Required (G8): the REST DI must share MainForm's single ProjectService instance so
             // project-creation events reach the CodeGraphWatcher. Fail fast rather than silently
@@ -143,6 +148,7 @@ namespace MultiTerminal.API
                 builder.Services.AddSingleton(_broker);
                 builder.Services.AddSingleton(_poolCoordinator);
                 builder.Services.AddSingleton(_spawnService);
+                builder.Services.AddSingleton(_projectOpenService);
                 builder.Services.AddSingleton<TerminalStreamService>();
 
                 // Ticket 0ff1b520 items 3-4. Register the BROKER'S INSTANCE, never the type: the
@@ -154,6 +160,9 @@ namespace MultiTerminal.API
                 // Ticket 9a731cda item 2: GET /api/health's capabilities, answered from the broker's
                 // runtime state on every request (see CaEmbeddedCapabilityProvider).
                 builder.Services.AddSingleton<ICapabilityProvider>(new CaEmbeddedCapabilityProvider(_broker));
+                // POST /api/projects/{projectId}/open exists in this build (MT Conductor, ClarionLive#83).
+                builder.Services.AddSingleton<ICapabilityProvider>(new ProjectOpenCapabilityProvider());
+                builder.Services.AddSingleton<ICapabilityProvider>(new ProjectOpenStateCapabilityProvider());
                 // SessionDatabase removed — sessions now stored in multiterminal.db via SessionLineageService
                 builder.Services.AddSingleton<PlanDatabase>();
                 builder.Services.AddSingleton<TaskDatabase>();
@@ -373,6 +382,8 @@ namespace MultiTerminal.API
 
                 // Get stale service for timer
                 _staleService = app.Services.GetRequiredService<StaleTaskService>();
+                if (_broker != null)
+                    _staleService.ApplyLevel = _broker.FlagTaskStale; // through the task write path (ticket 28845a5f)
 
                 // Expose TerminalStreamService for MainForm wiring
                 _terminalStreamService = app.Services.GetRequiredService<TerminalStreamService>();

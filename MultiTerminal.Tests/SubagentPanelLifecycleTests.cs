@@ -307,6 +307,275 @@ namespace MultiTerminal.Tests
             Assert.Empty(exits);
         }
 
+        // ── 268acc24: members of the session's implicit team finish like subagents ─
+
+        private static string SubagentStopLine() =>
+            "{\"type\":\"progress\",\"uuid\":\"stop1\",\"message\":{\"type\":\"progress\",\"hookType\":\"SubagentStop\"}}";
+
+        private static string TeammateMessage(string uuid) =>
+            "{\"type\":\"user\",\"uuid\":\"" + uuid + "\",\"sessionId\":\"" + SessionId + "\",\"message\":{\"role\":\"user\",\"content\":\"<teammate-message teammate_id=\\\"team-lead\\\">send the rest</teammate-message>\"}}";
+
+        [Fact]
+        public void An_implicit_team_member_whose_turn_ended_and_went_quiet_completes()
+        {
+            var main = WriteTranscript(TranscriptIn("F--repo"),
+                Assistant("u1", "working", "tool_use"),
+                ToolResult("u2"),
+                Assistant("u3", "done", "end_turn"));
+
+            using var tailer = new TranscriptTailer(main, "inbox.json", "probe-A") { IsTeamAgent = true, IsImplicitTeamMember = true };
+            var exits = new List<int>();
+            tailer.Stopped += (s, code) => exits.Add(code);
+            tailer.StartAsync();
+
+            tailer.CheckQuietCompletion(DateTime.UtcNow);
+            Assert.Empty(exits);
+
+            tailer.CheckQuietCompletion(DateTime.UtcNow.AddMinutes(2));
+            Assert.Equal(new[] { 0 }, exits);
+            Assert.False(tailer.IsActive);
+        }
+
+        [Fact]
+        public void An_implicit_team_member_completes_on_the_SubagentStop_line()
+        {
+            var main = WriteTranscript(TranscriptIn("F--repo"),
+                Assistant("u1", "working", "tool_use"),
+                SubagentStopLine());
+
+            using var tailer = new TranscriptTailer(main, "inbox.json", "probe-A") { IsTeamAgent = true, IsImplicitTeamMember = true };
+            var exits = new List<int>();
+            tailer.Stopped += (s, code) => exits.Add(code);
+            tailer.StartAsync();
+
+            Assert.Equal(new[] { 0 }, exits);
+        }
+
+        [Fact]
+        public void An_implicit_team_member_woken_by_a_message_after_its_turn_ended_is_not_completed()
+        {
+            // The pipeline lead's "your report was cut off, send the rest", seconds after the member idled.
+            var main = WriteTranscript(TranscriptIn("F--repo"),
+                Assistant("u1", "report part one", "end_turn"),
+                TeammateMessage("u2"));
+
+            using var tailer = new TranscriptTailer(main, "inbox.json", "Security-Auditor") { IsTeamAgent = true, IsImplicitTeamMember = true };
+            var exits = new List<int>();
+            tailer.Stopped += (s, code) => exits.Add(code);
+            tailer.StartAsync();
+
+            tailer.CheckQuietCompletion(DateTime.UtcNow.AddHours(1));
+            Assert.Empty(exits);
+        }
+
+        [Fact]
+        public void A_created_team_member_ignores_the_SubagentStop_line_too()
+        {
+            var main = WriteTranscript(TranscriptIn("F--repo"),
+                Assistant("u1", "idle between turns", "end_turn"),
+                SubagentStopLine());
+
+            using var tailer = new TranscriptTailer(main, "inbox.json", "Verifier") { IsTeamAgent = true };
+            var exits = new List<int>();
+            tailer.Stopped += (s, code) => exits.Add(code);
+            tailer.StartAsync();
+
+            tailer.CheckQuietCompletion(DateTime.UtcNow.AddHours(1));
+            Assert.Empty(exits);
+            Assert.True(tailer.IsActive);
+        }
+
+        /// <summary>Polls <paramref name="condition"/> for up to 10 s; returns its final value (never hangs).</summary>
+        private static bool Eventually(Func<bool> condition)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (DateTime.UtcNow < deadline)
+            {
+                if (condition()) return true;
+                System.Threading.Thread.Sleep(50);
+            }
+            return condition();
+        }
+
+        private static TranscriptTailer CompletedImplicitMember(string path, List<int> exits, List<string> wakes)
+        {
+            var tailer = new TranscriptTailer(path, "inbox.json", "probe-A") { IsTeamAgent = true, IsImplicitTeamMember = true };
+            tailer.Stopped += (s, code) => { lock (exits) exits.Add(code); };
+            tailer.Reactivated += (s, e) => { lock (wakes) wakes.Add("woke"); };
+            tailer.StartAsync();
+            tailer.CheckQuietCompletion(DateTime.UtcNow.AddMinutes(2));
+            Assert.Equal(new[] { 0 }, exits);
+            Assert.True(tailer.IsCompleted);
+            return tailer;
+        }
+
+        [Fact]
+        public void A_completed_implicit_member_woken_in_the_same_file_after_the_quiet_window_is_active_again()
+        {
+            var main = WriteTranscript(TranscriptIn("F--repo"), Assistant("u1", "report", "end_turn"));
+            var exits = new List<int>();
+            var wakes = new List<string>();
+            using var tailer = CompletedImplicitMember(main, exits, wakes);
+
+            // Minutes later the lead sends more work: it lands in the same transcript.
+            File.AppendAllLines(main, new[] { TeammateMessage("u2"), Assistant("u3", "more work", "tool_use") });
+
+            Assert.True(Eventually(() => { lock (wakes) return wakes.Count == 1; }), "no Reactivated after the same-file append");
+            Assert.True(tailer.IsActive);
+            Assert.False(tailer.IsCompleted);
+            Assert.Contains(tailer.Messages, m => m.Content == "more work");
+
+            // And it can finish again, raising a second exit 0.
+            File.AppendAllLines(main, new[] { Assistant("u4", "done again", "end_turn") });
+            Assert.True(Eventually(() => tailer.Messages.Any(m => m.Content == "done again")));
+            tailer.CheckQuietCompletion(DateTime.UtcNow.AddMinutes(5));
+            lock (exits) Assert.Equal(new[] { 0, 0 }, exits);
+        }
+
+        [Fact]
+        public void A_completed_implicit_member_woken_in_a_new_file_after_the_quiet_window_is_active_again()
+        {
+            var main = WriteTranscript(TranscriptIn("F--repo"), Assistant("u1", "report", "end_turn"));
+            var exits = new List<int>();
+            var wakes = new List<string>();
+            using var tailer = CompletedImplicitMember(main, exits, wakes);
+
+            // The watcher hands the tailer a new transcript of the same member (TeamWatcherService, wake-up file).
+            var next = WriteTranscript(TranscriptIn("F--repo", agentFile: "agent-a507d26986ef907e4.jsonl"),
+                TeammateMessage("u2"), Assistant("u3", "more work", "tool_use"));
+            tailer.AddTranscriptFile(next);
+
+            lock (wakes) Assert.Single(wakes);
+            Assert.True(tailer.IsActive);
+            Assert.Contains(tailer.Messages, m => m.Content == "more work");
+        }
+
+        [Fact]
+        public void A_completed_implicit_member_is_not_woken_once_disposed()
+        {
+            var main = WriteTranscript(TranscriptIn("F--repo"), Assistant("u1", "report", "end_turn"));
+            var exits = new List<int>();
+            var wakes = new List<string>();
+            var tailer = CompletedImplicitMember(main, exits, wakes);
+            tailer.Dispose();
+
+            var next = WriteTranscript(TranscriptIn("F--repo", agentFile: "agent-a507d26986ef907e4.jsonl"), TeammateMessage("u2"));
+            tailer.AddTranscriptFile(next);
+
+            Assert.Empty(wakes);
+            Assert.False(tailer.IsActive);
+            Assert.Equal(new[] { 0 }, exits); // the dispose of a finished member sends no failing stop
+        }
+
+        [Fact]
+        public void A_transcript_already_finished_when_found_is_completed_by_StartAsync()
+        {
+            // What MT finds after a restart: the finish is already in the file, so the tailer is
+            // completed before any card subscribes to it.
+            var stopped = WriteTranscript(TranscriptIn("F--repo"), Assistant("u1", "done", "tool_use"), SubagentStopLine());
+            using var a = new TranscriptTailer(stopped, "inbox.json", "probe-A") { IsTeamAgent = true, IsImplicitTeamMember = true };
+            a.StartAsync();
+            Assert.True(a.IsCompleted);
+
+            // An ended turn whose file was last written long ago counts the same, for a plain subagent too.
+            var quiet = WriteTranscript(TranscriptIn("F--repo", agentFile: "agent-b000000000000000.jsonl"), Assistant("u1", "done", "end_turn"));
+            File.SetLastWriteTimeUtc(quiet, DateTime.UtcNow.AddHours(-2));
+            using var b = new TranscriptTailer(quiet, null, "Subagent b0000000");
+            b.StartAsync();
+            Assert.True(b.IsCompleted);
+
+            // But a member of a created team never is.
+            using var c = new TranscriptTailer(quiet, "inbox.json", "Verifier") { IsTeamAgent = true };
+            c.StartAsync();
+            Assert.False(c.IsCompleted);
+            Assert.True(c.IsActive);
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void A_finish_line_followed_by_a_new_unfinished_turn_in_one_catch_up_read_leaves_the_agent_working(bool implicitMember)
+        {
+            // Pipeline run 2, item A: the finish was set aside for the end of the read pass, and the
+            // later work in the same pass did not cancel it, so a working agent was marked completed
+            // (and, at start-up, got no card).
+            var main = WriteTranscript(TranscriptIn("F--repo"),
+                Assistant("u1", "first job", "tool_use"),
+                SubagentStopLine(),
+                TeammateMessage("u2"),
+                Assistant("u3", "second job, still working", "tool_use"));
+
+            using var tailer = implicitMember
+                ? new TranscriptTailer(main, "inbox.json", "probe-A") { IsTeamAgent = true, IsImplicitTeamMember = true }
+                : new TranscriptTailer(main, null, "Subagent a507d269");
+            var exits = new List<int>();
+            tailer.Stopped += (s, code) => exits.Add(code);
+            tailer.StartAsync();
+
+            Assert.Empty(exits);
+            Assert.True(tailer.IsActive);
+            Assert.False(tailer.IsCompleted);
+        }
+
+        [Fact]
+        public void A_finish_line_followed_by_a_new_unfinished_turn_in_one_live_append_leaves_the_member_working()
+        {
+            var main = WriteTranscript(TranscriptIn("F--repo"), Assistant("u1", "first job", "tool_use"));
+            using var tailer = new TranscriptTailer(main, "inbox.json", "probe-A") { IsTeamAgent = true, IsImplicitTeamMember = true };
+            tailer.StartAsync();
+
+            // One write, so one read pass sees all three lines.
+            File.AppendAllText(main, SubagentStopLine() + "\n" + TeammateMessage("u2") + "\n" + Assistant("u3", "second job, still working", "tool_use") + "\n");
+
+            Assert.True(Eventually(() => tailer.Messages.Any(m => m.Content == "second job, still working")), "the append was never read");
+            Assert.True(tailer.IsActive);
+            Assert.False(tailer.IsCompleted);
+        }
+
+        [Fact]
+        public void A_tailer_stopped_for_good_is_not_made_active_by_a_new_file()
+        {
+            var main = WriteTranscript(TranscriptIn("F--repo"), Assistant("u1", "working", "tool_use"));
+            using var tailer = new TranscriptTailer(main, "inbox.json", "probe-A") { IsTeamAgent = true, IsImplicitTeamMember = true };
+            tailer.StartAsync();
+            tailer.StopAsync();
+
+            tailer.AddTranscriptFile(WriteTranscript(TranscriptIn("F--repo", agentFile: "agent-a507d26986ef907e4.jsonl"), TeammateMessage("u2")));
+
+            Assert.True(tailer.IsShutDown);
+            Assert.False(tailer.IsActive);
+        }
+
+        // Pipeline run 2, item B: an announced member and the card already under its key.
+        [Theory]
+        [InlineData(false, false, false, false, MainForm.TeamCardAction.Create)]
+        [InlineData(false, false, false, true, MainForm.TeamCardAction.Create)]
+        [InlineData(true, false, true, false, MainForm.TeamCardAction.Keep)]       // a repeat announcement
+        [InlineData(true, false, true, true, MainForm.TeamCardAction.Reattach)]    // woke, card kept open
+        [InlineData(true, false, false, false, MainForm.TeamCardAction.Replace)]   // kept card of an earlier same-named member
+        [InlineData(true, false, false, true, MainForm.TeamCardAction.Replace)]
+        [InlineData(true, true, false, false, MainForm.TeamCardAction.Replace)]    // entry left by a closed pane
+        [InlineData(true, true, false, true, MainForm.TeamCardAction.Replace)]
+        internal void A_team_card_gives_way_unless_it_is_already_this_agents(bool hasEntry, bool stale, bool sameAgent, bool isWake, MainForm.TeamCardAction expected)
+        {
+            Assert.Equal(expected, MainForm.DecideTeamCard(hasEntry, stale, sameAgent, isWake));
+        }
+
+        [Theory]
+        [InlineData("session-554a88f1", "554a88f1-9a09-467d-8ea1-14d4a93157a5", true)]
+        [InlineData("SESSION-554A88F1", "554a88f1-9a09-467d-8ea1-14d4a93157a5", true)]
+        [InlineData("session-3e0dea71", "554a88f1-9a09-467d-8ea1-14d4a93157a5", false)] // another session's id
+        [InlineData("session-554a88f", "554a88f1-9a09-467d-8ea1-14d4a93157a5", false)]  // prefix too short
+        [InlineData("session-554a88f1-x", "554a88f1-9a09-467d-8ea1-14d4a93157a5", false)]
+        [InlineData("my-review-team", "554a88f1-9a09-467d-8ea1-14d4a93157a5", false)]   // a created team
+        [InlineData("session-554a88f1", null, false)]
+        [InlineData("session-554a88f1", "554a88f", false)]
+        [InlineData(null, "554a88f1-9a09-467d-8ea1-14d4a93157a5", false)]
+        public void The_implicit_session_team_is_named_session_plus_the_lead_session_id_prefix(string teamName, string leadSessionId, bool expected)
+        {
+            Assert.Equal(expected, TeamWatcherService.IsImplicitSessionTeam(teamName, leadSessionId));
+        }
+
         // ── A team whose lead moved into a worktree ────────────────────────
 
         [Fact]

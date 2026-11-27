@@ -269,6 +269,36 @@ namespace MultiTerminal.Dialogs
                 return choice == differentFolder ? NewProjectFolderDecision.ChooseDifferentFolder : NewProjectFolderDecision.Cancel;
             }
 
+            // GitHub #102: a project.json whose project MT does not have (deleted here, or copied) is never
+            // re-adopted silently. Say what it is and offer Restore or Start new.
+            if (existing.IsUnregisteredProjectFile)
+            {
+                var restore = new System.Windows.Forms.TaskDialogCommandLinkButton(
+                    "Restore it",
+                    $"Bring '{existing.ProjectName}' back as it was: its id, pin, settings and any tasks still kept for it.");
+                var startNew = new System.Windows.Forms.TaskDialogCommandLinkButton(
+                    "Start a new project here",
+                    $"Create '{newName}' with a new id. The old file is kept as .claude\\project.json.old.");
+                var unregistered = new System.Windows.Forms.TaskDialogPage
+                {
+                    Caption = "Project file found",
+                    Heading = "This folder holds a project MultiTerminal does not have",
+                    Text = ExistingProjectDetector.DescribeUnregistered(existing) + "\n\n" + existing.ProjectPath,
+                    Icon = System.Windows.Forms.TaskDialogIcon.Information,
+                    AllowCancel = true,
+                    DefaultButton = cancel,
+                };
+                unregistered.Buttons.Add(restore);
+                unregistered.Buttons.Add(startNew);
+                unregistered.Buttons.Add(differentFolder);
+                unregistered.Buttons.Add(cancel);
+                var picked = System.Windows.Forms.TaskDialog.ShowDialog(new WindowInteropHelper(this).Handle, unregistered);
+                if (picked == restore) return NewProjectFolderDecision.OpenExisting;
+                if (picked == startNew) return NewProjectFolderDecision.StartNewHere;
+                if (picked == differentFolder) return NewProjectFolderDecision.ChooseDifferentFolder;
+                return NewProjectFolderDecision.Cancel;
+            }
+
             string text = $"{existing.ProjectPath}\nProject id: {existing.ProjectId}";
             if (existing.DatabaseIds.Count > 1)
                 text += $"\n\n{existing.DatabaseIds.Count} projects in MultiTerminal point at this folder ({string.Join(", ", existing.DatabaseIds)}). Open and Rename act on {existing.ProjectId}.";

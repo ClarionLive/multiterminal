@@ -3493,6 +3493,33 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// The "still relevant" answer to a stale reminder (ticket 28845a5f): clears the stale tracking like
+        /// <see cref="ClearStaleTracking"/> AND restarts the 7-day clock, so the hourly check does not flag the
+        /// task again at once. paused_at moves to <paramref name="now"/> only while the task is still paused.
+        /// TaskService.RespondToStale mirrors exactly this in its cached clone.
+        /// </summary>
+        public bool ClearStaleTrackingAndRestartClock(string taskId, DateTime now)
+        {
+            using var gate = LockConn();
+            const string sql = @"
+                UPDATE tasks
+                SET stale_level = 0,
+                    flagged_stale_at = NULL,
+                    stale_notified_at = NULL,
+                    stale_response = NULL,
+                    paused_at = CASE WHEN sub_status = 'paused' THEN @now ELSE paused_at END,
+                    updated_at = @now
+                WHERE id = @taskId
+            ";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@taskId", taskId);
+            command.Parameters.AddWithValue("@now", now);
+
+            return command.ExecuteNonQuery() > 0;
+        }
+
+        /// <summary>
         /// Clear stale tracking when a task is un-paused or becomes active again.
         /// Resets stale_level to 0 and clears stale_response.
         /// </summary>
@@ -8101,6 +8128,29 @@ namespace MultiTerminal.Services
             cmd.Parameters.AddWithValue("@id", launchId);
             cmd.Parameters.AddWithValue("@reason", reason);
             cmd.Parameters.AddWithValue("@now", FormatPaneLaunchTime(DateTime.UtcNow));
+            return cmd.ExecuteNonQuery() > 0;
+        }
+
+        /// <summary>
+        /// Marks one launch <c>left_behind</c> (task 688ad2f6) when it is still resumable as a helper: ended
+        /// <c>mt_exit</c> or <c>closed_with_pm</c>, or open in ANOTHER run than <paramref name="currentRunId"/>
+        /// (a crashed run). A row open in the current run is a live pane and is left alone, as is any row that
+        /// ended closed. An open row gets <paramref name="utcNow"/> as its end; an ended one keeps its time.
+        /// </summary>
+        /// <returns>Whether the row was marked.</returns>
+        public bool LeavePaneLaunchBehind(string launchId, string currentRunId, DateTime utcNow)
+        {
+            if (string.IsNullOrEmpty(launchId)) return false;
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.LeavePaneLaunchBehind", launchId);
+            using var gate = LockConn();
+            using var cmd = new SQLiteCommand(
+                "UPDATE pane_launches SET end_reason = 'left_behind', ended_at = COALESCE(ended_at, @now) " +
+                "WHERE id = @id AND (" +
+                "(ended_at IS NOT NULL AND end_reason IN ('mt_exit', 'closed_with_pm')) " +
+                "OR (ended_at IS NULL AND mt_run_id <> @run))", _connection);
+            cmd.Parameters.AddWithValue("@id", launchId);
+            cmd.Parameters.AddWithValue("@run", currentRunId ?? string.Empty);
+            cmd.Parameters.AddWithValue("@now", FormatPaneLaunchTime(utcNow));
             return cmd.ExecuteNonQuery() > 0;
         }
 

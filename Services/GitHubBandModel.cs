@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using MultiTerminal.Models;
 
 namespace MultiTerminal.Services
 {
@@ -53,6 +55,48 @@ namespace MultiTerminal.Services
         public bool CountsStale => Failure != GitHubCheckFailure.None && OpenIssues.HasValue && OpenPullRequests.HasValue;
     }
 
+    /// <summary>One watched repository's entry in the header's GitHub row (ticket a923589f).</summary>
+    public sealed class GitHubHeaderEntry
+    {
+        public GitHubHeaderEntry(string label, GitHubBand band)
+        {
+            Label = label;
+            Band = band;
+        }
+
+        /// <summary>The text of the repository link: <c>owner/name</c> for a single repository, else the short name.</summary>
+        public string Label { get; }
+
+        /// <summary>The repository's counts and failure; <see cref="GitHubBand.Repo"/> is its <c>owner/name</c>.</summary>
+        public GitHubBand Band { get; }
+    }
+
+    /// <summary>
+    /// A pane header's whole GitHub row for a project that may watch several repositories (ticket
+    /// a923589f): one entry per repository, each with its own counts and failure, and one warning line
+    /// when something the Owner listed cannot be read (item 3).
+    /// </summary>
+    public sealed class GitHubHeader
+    {
+        public static readonly GitHubHeader Hidden = new GitHubHeader(Array.Empty<GitHubHeaderEntry>(), null);
+
+        public GitHubHeader(IReadOnlyList<GitHubHeaderEntry> entries, string warning)
+        {
+            Entries = entries ?? Array.Empty<GitHubHeaderEntry>();
+            Warning = string.IsNullOrEmpty(warning) ? null : warning;
+        }
+
+        public IReadOnlyList<GitHubHeaderEntry> Entries { get; }
+
+        /// <summary>MT's own sentence about a line that cannot be read, or null. Shown only while the watch is on.</summary>
+        public string Warning { get; }
+
+        /// <summary>The fixed target the warning link sends (the project settings form), or null.</summary>
+        public string WarningTarget => Warning == null ? null : GitHubBandModel.ProjectTarget;
+
+        public bool IsHidden => Entries.Count == 0 && Warning == null;
+    }
+
     /// <summary>
     /// What a pane header's GitHub row shows, from the project's watch settings and its stored watch
     /// state (task 81d0e597). Pure. The stored error is only CLASSIFIED, never shown: it can carry
@@ -84,6 +128,34 @@ namespace MultiTerminal.Services
             return new GitHubBand(repoFullName, state.OpenIssues, state.OpenPullRequests,
                 lastAttemptFailed ? Classify(state.LastError) : GitHubCheckFailure.None);
         }
+
+        /// <summary>
+        /// The header row for a project (ticket a923589f): an entry for every repository on its watch list,
+        /// built by <see cref="Build"/> from that repository's own stored state, so one repository's failure
+        /// shows against it and never against another. <paramref name="stateOf"/> reads a repository's state
+        /// by <c>owner/name</c>. With the watch off, the repository links only and no warning.
+        /// </summary>
+        public static GitHubHeader BuildHeader(Project project, Func<string, ProjectDatabase.GitHubWatchStateRow> stateOf)
+        {
+            if (project == null) return GitHubHeader.Hidden;
+            var list = GitHubWatchList.Of(project);
+            bool watching = project.GitHubWatchMode != GitHubWatchMode.Off;
+
+            var labels = list.Labels();
+            var entries = new List<GitHubHeaderEntry>();
+            for (int i = 0; i < list.Repos.Count; i++)
+            {
+                string repo = list.Repos[i].FullName;
+                entries.Add(new GitHubHeaderEntry(labels[i], Build(repo, watching, watching ? stateOf(repo) : null)));
+            }
+
+            string warning = watching && list.HasProblems ? WarningPrefix + list.WarningBody() : null;
+            var header = new GitHubHeader(entries, warning);
+            return header.IsHidden ? GitHubHeader.Hidden : header;
+        }
+
+        /// <summary>The start of the header's warning sentence.</summary>
+        internal const string WarningPrefix = "GitHub watch: ";
 
         /// <summary>
         /// The class of a stored check error. Matched against the exact texts MT writes

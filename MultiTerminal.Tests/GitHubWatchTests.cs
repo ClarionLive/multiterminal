@@ -292,6 +292,18 @@ namespace MultiTerminal.Tests
             /// <summary>The body of GET /search/issues (the open PR count).</summary>
             public string SearchBody { get; set; } = "{}";
 
+            /// <summary>Page 1 of the issue list for one repository (owner/name); others use Body (ticket a923589f).</summary>
+            public Dictionary<string, string> BodyByRepo { get; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            /// <summary>A status for one repository's requests; others use Status.</summary>
+            public Dictionary<string, HttpStatusCode> StatusByRepo { get; } = new Dictionary<string, HttpStatusCode>(StringComparer.OrdinalIgnoreCase);
+
+            private static string RepoOf(string path)
+            {
+                var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                return parts.Length >= 3 && parts[0] == "repos" ? parts[1] + "/" + parts[2] : null;
+            }
+
             /// <summary>Only the issue-list requests, without the count reads.</summary>
             public List<HttpRequestMessage> IssueRequests =>
                 Requests.Where(r => r.RequestUri.AbsolutePath.EndsWith("/issues", StringComparison.Ordinal)).ToList();
@@ -302,15 +314,18 @@ namespace MultiTerminal.Tests
                 OnRequest?.Invoke();
                 string path = request.RequestUri.AbsolutePath;
                 if (path == "/search/issues") return Respond(SearchBody);
-                if (!path.EndsWith("/issues", StringComparison.Ordinal)) return Respond(RepoBody);
+                if (!path.EndsWith("/issues", StringComparison.Ordinal)) return Respond(RepoBody, RepoOf(path));
                 var query = System.Web.HttpUtility.ParseQueryString(request.RequestUri.Query);
                 int page = int.TryParse(query["page"], out var p) ? p : 1;
-                string body = page == 1 ? Body : (MorePages.TryGetValue(page, out var b) ? b : "[]");
-                return Respond(body);
+                string repo = RepoOf(path);
+                string page1 = repo != null && BodyByRepo.TryGetValue(repo, out var own) ? own : Body;
+                string body = page == 1 ? page1 : (MorePages.TryGetValue(page, out var b) ? b : "[]");
+                return Respond(body, repo);
             }
 
-            private Task<HttpResponseMessage> Respond(string body) =>
-                Task.FromResult(new HttpResponseMessage(Status) { Content = new StringContent(body, Encoding.UTF8, "application/json") });
+            private Task<HttpResponseMessage> Respond(string body, string repo = null) =>
+                Task.FromResult(new HttpResponseMessage(repo != null && StatusByRepo.TryGetValue(repo, out var st) ? st : Status)
+                { Content = new StringContent(body, Encoding.UTF8, "application/json") });
         }
 
         private static string Range(int newest, int oldest) =>
@@ -536,10 +551,6 @@ namespace MultiTerminal.Tests
         [InlineData("github_watch_mode", "off", "notify", true)]
         [InlineData("github_watch_mode", "notify", "board", false)]
         [InlineData("github_watch_mode", "board", "off", false)]
-        [InlineData("git_repo_url", "https://github.com/o/r", "git@github.com:o/r.git", false)]
-        [InlineData("git_repo_url", "https://github.com/o/r", "https://github.com/O/R/", false)]
-        [InlineData("git_repo_url", "https://github.com/o/r", "https://github.com/o/other", true)]
-        [InlineData("git_repo_url", null, "https://github.com/o/r", true)]
         public void Only_turning_watching_on_or_naming_another_repository_resets_the_baseline(string column, string oldValue, string newValue, bool reset)
         {
             Assert.Equal(reset, ProjectDatabase.ShouldResetGitHubWatch(column, oldValue, newValue));
@@ -1152,6 +1163,740 @@ namespace MultiTerminal.Tests
             github.Status = HttpStatusCode.OK;
             await service.CheckProjectAsync(project, "good");
             Assert.Equal(new[] { project.Id, project.Id }, recorded);
+        }
+
+        // ── Ticket a923589f: several repositories per project ────────────────────
+
+        private static string PageOf(string repo, params int[] numbers) =>
+            "[" + string.Join(",", numbers.Select(n =>
+                $"{{\"number\":{n},\"title\":\"Item {n}\",\"html_url\":\"https://github.com/{repo}/issues/{n}\",\"user\":{{\"login\":\"u\"}}}}")) + "]";
+
+        // A project watching o/r (its Repository URL) and o/second, in memory and in the database.
+        private (GitHubWatchService Service, StubGitHub GitHub, List<string> Cards, List<string> Pushes, Project Project) BuildTwo(
+            GitHubWatchMode mode = GitHubWatchMode.Board, string extras = "o/second")
+        {
+            var built = Build(mode);
+            built.Project.GitHubExtraRepos = extras;
+            Assert.True(_db.UpdateProjectField(built.Project.Id, "gitHubExtraRepos", extras));
+            return built;
+        }
+
+        [Fact]
+        public void The_watch_list_is_the_Repository_URL_then_Also_watch_without_duplicates()
+        {
+            var list = GitHubWatchList.Of("https://github.com/o/a", "b/c\r\nO/A, https://github.com/x/y.git ,\n\n b/C");
+
+            Assert.Equal(new[] { "o/a", "b/c", "x/y" }, list.Repos.Select(r => r.FullName));
+            Assert.Empty(list.Problems);
+            Assert.False(list.HasProblems);
+            Assert.True(list.Contains("B/C"));
+            Assert.Null(list.WarningBody());
+        }
+
+        [Fact]
+        public void The_watch_list_keeps_what_it_cannot_read_and_names_an_account_without_a_repository()
+        {
+            var list = GitHubWatchList.Of("https://github.com/positivesoftware", "o/r\nnot a repo, https://gitlab.com/o/r");
+
+            Assert.Equal(new[] { "o/r" }, list.Repos.Select(r => r.FullName));
+            Assert.Equal(3, list.Problems.Count);
+            Assert.True(list.Problems[0].IsPrimary);
+            Assert.True(list.Problems[0].NamesAccountOnly);
+            Assert.False(list.Problems[1].NamesAccountOnly);
+
+            string body = list.WarningBody();
+            Assert.Contains("the Repository URL \"https://github.com/positivesoftware\" names an account, not a repository", body);
+            Assert.Contains("(and 2 more cannot be read)", body);
+        }
+
+        [Fact]
+        public void A_project_can_watch_at_most_ten_repositories_and_the_rest_are_counted_not_silently_dropped()
+        {
+            string extras = string.Join("\n", Enumerable.Range(1, 11).Select(i => "o/r" + i));
+            var list = GitHubWatchList.Of("o/primary", extras);
+
+            Assert.Equal(GitHubWatchList.MaxRepos, list.Repos.Count);
+            Assert.Equal("o/primary", list.Repos[0].FullName);
+            Assert.Equal(2, list.OverLimit);
+            Assert.Contains("only the first 10 repositories are watched; 2 more were left out", list.WarningBody());
+        }
+
+        [Fact]
+        public void Text_the_Owner_typed_is_made_safe_before_it_goes_into_a_sentence()
+        {
+            string shown = GitHubWatchList.Shown("a‮b\u0007c\r\nd" + new string('x', 80));
+            Assert.DoesNotContain('‮', shown);
+            Assert.DoesNotContain('\u0007', shown);
+            Assert.DoesNotContain('\n', shown);
+            Assert.True(shown.Length <= 51);
+        }
+
+        [Fact]
+        public async Task Two_repositories_with_the_same_item_numbers_are_both_reported_each_under_its_own_name()
+        {
+            var (service, github, cards, pushes, project) = BuildTwo();
+            github.BodyByRepo["o/r"] = PageOf("o/r", 30);
+            github.BodyByRepo["o/second"] = PageOf("o/second", 30);
+            Assert.Equal(0, await service.CheckProjectAsync(project, "baseline"));
+            Assert.Equal(30, _db.GetGitHubWatchState(project.Id, "o/r").Baseline);
+            Assert.Equal(30, _db.GetGitHubWatchState(project.Id, "o/second").Baseline);
+
+            github.BodyByRepo["o/r"] = PageOf("o/r", 31, 30);
+            github.BodyByRepo["o/second"] = PageOf("o/second", 31, 30);
+            Assert.Equal(2, await service.CheckProjectAsync(project, "check"));
+
+            Assert.Equal(new[] { "GitHub issue #31 in o/r", "GitHub issue #31 in o/second" }, cards);
+            Assert.Equal(2, pushes.Count);
+            Assert.Contains("(o/r)", pushes[0]);
+            Assert.Contains("(o/second)", pushes[1]);
+            Assert.Equal(2, _db.GetGitHubPendingNotices(project.Id).Count);
+            // Reported once each: another check adds nothing.
+            Assert.Equal(0, await service.CheckProjectAsync(project, "again"));
+        }
+
+        [Fact]
+        public async Task A_repository_that_fails_does_not_stop_the_others_and_shows_its_own_failure()
+        {
+            var (service, github, cards, _, project) = BuildTwo();
+            github.BodyByRepo["o/r"] = PageOf("o/r", 30);
+            github.BodyByRepo["o/second"] = PageOf("o/second", 30);
+            await service.CheckProjectAsync(project, "baseline");
+
+            github.StatusByRepo["o/r"] = HttpStatusCode.NotFound;
+            github.BodyByRepo["o/second"] = PageOf("o/second", 31, 30);
+            Assert.Equal(1, await service.CheckProjectAsync(project, "check"));
+
+            Assert.Equal(new[] { "GitHub issue #31 in o/second" }, cards);
+            Assert.Equal(GitHubCheckFailure.RepoNotFound, GitHubBandModel.Build("o/r", true, _db.GetGitHubWatchState(project.Id, "o/r")).Failure);
+            Assert.Equal(GitHubCheckFailure.None, GitHubBandModel.Build("o/second", true, _db.GetGitHubWatchState(project.Id, "o/second")).Failure);
+            Assert.Equal(30, _db.GetGitHubWatchState(project.Id, "o/r").Baseline);
+        }
+
+        [Fact]
+        public async Task A_repository_added_to_the_list_gets_a_baseline_check_first_so_its_backlog_is_not_added()
+        {
+            var (service, github, cards, _, project) = BuildTwo();
+            github.BodyByRepo["o/r"] = PageOf("o/r", 30);
+            github.BodyByRepo["o/second"] = PageOf("o/second", 30);
+            await service.CheckProjectAsync(project, "baseline");
+
+            project.GitHubExtraRepos = "o/second\no/third";
+            _db.UpdateProjectField(project.Id, "gitHubExtraRepos", project.GitHubExtraRepos);
+            github.BodyByRepo["o/third"] = PageOf("o/third", 9, 8, 7);
+            Assert.Equal(0, await service.CheckProjectAsync(project, "added"));
+
+            Assert.Empty(cards);
+            Assert.Equal(9, _db.GetGitHubWatchState(project.Id, "o/third").Baseline);
+            Assert.Equal(30, _db.GetGitHubWatchState(project.Id, "o/r").Baseline);   // the others kept theirs
+            Assert.Equal(30, _db.GetGitHubWatchState(project.Id, "o/second").Baseline);
+        }
+
+        [Fact]
+        public void A_repository_taken_off_the_list_loses_its_baseline_and_adding_it_back_starts_fresh()
+        {
+            var (_, _, _, _, project) = BuildTwo();
+            _db.RecordGitHubWatchCheck(project.Id, "o/r", 40, null);
+            _db.RecordGitHubWatchCheck(project.Id, "o/second", 50, null);
+
+            Assert.True(_db.UpdateProjectField(project.Id, "gitHubExtraRepos", null));
+            Assert.Null(_db.GetGitHubWatchState(project.Id, "o/second").Baseline);   // gone
+            Assert.Equal(40, _db.GetGitHubWatchState(project.Id, "o/r").Baseline);   // untouched
+
+            Assert.True(_db.UpdateProjectField(project.Id, "gitHubExtraRepos", "o/second"));
+            Assert.Null(_db.GetGitHubWatchState(project.Id, "o/second").Baseline);   // so the next check is baseline-only
+            Assert.Equal(40, _db.GetGitHubWatchState(project.Id, "o/r").Baseline);
+        }
+
+        [Fact]
+        public void Editing_the_Repository_URL_resets_only_the_repository_it_replaced()
+        {
+            var (_, _, _, _, project) = BuildTwo();
+            _db.RecordGitHubWatchCheck(project.Id, "o/r", 40, null);
+            _db.RecordGitHubWatchCheck(project.Id, "o/second", 50, null);
+
+            Assert.True(_db.UpdateProjectField(project.Id, "gitRepoUrl", "git@github.com:o/second.git"));   // second is already listed
+            Assert.Null(_db.GetGitHubWatchState(project.Id, "o/r").Baseline);
+            Assert.Equal(50, _db.GetGitHubWatchState(project.Id, "o/second").Baseline);
+
+            // The same repository written another way, or a line moved around, resets nothing.
+            Assert.True(_db.UpdateProjectField(project.Id, "gitHubExtraRepos", "https://github.com/O/Second\n"));
+            Assert.Equal(50, _db.GetGitHubWatchState(project.Id, "o/second").Baseline);
+        }
+
+        [Fact]
+        public void Turning_the_watch_off_and_on_still_resets_every_repository()
+        {
+            var (_, _, _, _, project) = BuildTwo(GitHubWatchMode.Off);
+            _db.RecordGitHubWatchCheck(project.Id, "o/r", 40, null);
+            _db.RecordGitHubWatchCheck(project.Id, "o/second", 50, null);
+
+            Assert.True(_db.UpdateProjectField(project.Id, "github_watch_mode", "notify"));
+            Assert.Null(_db.GetGitHubWatchState(project.Id, "o/r").Baseline);
+            Assert.Null(_db.GetGitHubWatchState(project.Id, "o/second").Baseline);
+        }
+
+        [Fact]
+        public void A_project_json_resave_does_not_wipe_Also_watch()
+        {
+            var (_, _, _, _, project) = BuildTwo();
+            project.GitRepoUrl = "https://github.com/o/r";
+            _db.SaveRichProject(project);
+            Assert.Equal("o/second", _db.GetRichProject(project.Id).GitHubExtraRepos);
+        }
+
+        [Fact]
+        public void An_unrelated_edit_to_the_list_does_not_make_a_check_stale_but_removing_its_own_repository_does()
+        {
+            var started = Project.Create("P", Path.GetTempPath());
+            started.GitRepoUrl = "https://github.com/o/r";
+            started.GitHubExtraRepos = "o/second";
+            started.GitHubWatchMode = GitHubWatchMode.Board;
+
+            var now = Project.Create("P", Path.GetTempPath());
+            now.GitRepoUrl = "https://github.com/o/r";
+            now.GitHubExtraRepos = "o/second\no/third";
+            now.GitHubWatchMode = GitHubWatchMode.Board;
+            Assert.False(GitHubWatchService.IsStale(started, now, "o/r", 5, 5));
+            Assert.False(GitHubWatchService.IsStale(started, now, "o/second", 5, 5));
+
+            now.GitHubExtraRepos = "o/third";
+            Assert.True(GitHubWatchService.IsStale(started, now, "o/second", 5, 5));
+            Assert.False(GitHubWatchService.IsStale(started, now, "o/r", 5, 5));
+            Assert.True(GitHubWatchService.IsStale(started, now, "o/r", 5, 6));   // its baseline moved
+        }
+
+        [Fact]
+        public async Task A_check_for_a_repository_removed_while_it_ran_writes_nothing()
+        {
+            var (service, github, cards, _, project) = BuildTwo();
+            github.BodyByRepo["o/r"] = PageOf("o/r", 30);
+            github.BodyByRepo["o/second"] = PageOf("o/second", 30);
+            await service.CheckProjectAsync(project, "baseline");
+
+            github.BodyByRepo["o/second"] = PageOf("o/second", 32, 31, 30);
+            github.OnRequest = () =>
+            {
+                project.GitHubExtraRepos = null;
+                _db.UpdateProjectField(project.Id, "gitHubExtraRepos", null);
+            };
+            Assert.Equal(0, await service.CheckProjectAsync(project, "removed"));
+
+            Assert.Empty(cards);
+            Assert.Null(_db.GetGitHubWatchState(project.Id, "o/second").Baseline);   // not written back after the removal
+        }
+
+        [Fact]
+        public async Task A_Repository_URL_that_cannot_be_read_still_lets_the_Also_watch_repositories_be_checked()
+        {
+            var (service, github, cards, _, project) = BuildTwo(extras: "o/second");
+            project.GitRepoUrl = "https://github.com/positivesoftware";
+            github.BodyByRepo["o/second"] = PageOf("o/second", 30);
+            await service.CheckProjectAsync(project, "baseline");
+
+            Assert.Equal(30, _db.GetGitHubWatchState(project.Id, "o/second").Baseline);
+            Assert.Empty(cards);
+            Assert.DoesNotContain(github.IssueRequests, r => r.RequestUri.AbsolutePath.Contains("/positivesoftware"));
+        }
+
+        [Fact]
+        public void The_form_names_each_repository_and_says_what_cannot_be_read()
+        {
+            var p = Project.Create("P", Path.GetTempPath());
+            p.GitRepoUrl = "https://github.com/o/r";
+            p.GitHubExtraRepos = "o/second\nnonsense";
+            p.GitHubWatchMode = GitHubWatchMode.Notify;
+
+            string status = GitHubWatchService.DescribeStatus(p, "github", true,
+                name => name == "o/second" ? (DateTime.UtcNow, "GitHub returned 500.") : ((DateTime?)null, (string)null));
+
+            Assert.StartsWith("Watching o/r, o/second.", status);
+            Assert.Contains("o/r: not checked yet.", status);
+            Assert.Contains("o/second: last check", status);
+            Assert.Contains("failed: GitHub returned 500.", status);
+            Assert.Contains("Warning: the Also watch line \"nonsense\" is not a github.com repository.", status);
+
+            p.GitHubWatchMode = GitHubWatchMode.Off;
+            Assert.DoesNotContain("Warning", GitHubWatchService.DescribeStatus(p, "github", true, _ => (null, null)));
+        }
+
+        [Fact]
+        public void The_form_says_when_the_Repository_URL_names_only_an_account()
+        {
+            var p = Project.Create("P", Path.GetTempPath());
+            p.GitRepoUrl = "https://github.com/positivesoftware";
+            p.GitHubWatchMode = GitHubWatchMode.Board;
+            Assert.Equal("Not watchable: the Repository URL above names an account, not a repository.",
+                GitHubWatchService.DescribeStatus(p, "github", true, null, null));
+        }
+
+        // ── Ticket a923589f item 2: the header's GitHub row with several repositories ──
+
+        private static Project WatchedProject(string primary, string extras, GitHubWatchMode mode = GitHubWatchMode.Board)
+        {
+            var p = Project.Create("P", Path.GetTempPath());
+            p.GitRepoUrl = primary;
+            p.GitHubExtraRepos = extras;
+            p.GitHubWatchMode = mode;
+            return p;
+        }
+
+        private GitHubHeader HeaderOf(Project p) =>
+            GitHubBandModel.BuildHeader(p, name => _db.GetGitHubWatchState("hdr", name));
+
+        [Fact]
+        public void A_single_repository_looks_as_it_always_did()
+        {
+            _db.RecordGitHubWatchCheck("hdr", "o/r", 5, null);
+            _db.RecordGitHubOpenCounts("hdr", "o/r", 4, 2);
+            var header = HeaderOf(WatchedProject("https://github.com/o/r", null));
+
+            var entry = Assert.Single(header.Entries);
+            Assert.Equal("o/r", entry.Label);   // the full name, as before
+            Assert.Equal("o/r", entry.Band.Repo);
+            Assert.Equal(4, entry.Band.OpenIssues);
+            Assert.Equal(2, entry.Band.OpenPullRequests);
+            Assert.Null(header.Warning);
+        }
+
+        [Fact]
+        public void Three_repositories_get_one_entry_each_with_the_short_name_and_their_own_counts()
+        {
+            _db.RecordGitHubWatchCheck("hdr", "acme/web", 5, null);
+            _db.RecordGitHubOpenCounts("hdr", "acme/web", 4, 2);
+            _db.RecordGitHubWatchCheck("hdr", "acme/api", 9, null);
+            _db.RecordGitHubOpenCounts("hdr", "acme/api", 0, 7);
+            var header = HeaderOf(WatchedProject("https://github.com/acme/web", "acme/api\nacme/docs"));
+
+            Assert.Equal(new[] { "web", "api", "docs" }, header.Entries.Select(e => e.Label));
+            Assert.Equal(new[] { "acme/web", "acme/api", "acme/docs" }, header.Entries.Select(e => e.Band.Repo));
+            Assert.Equal(7, header.Entries[1].Band.OpenPullRequests);
+            Assert.Null(header.Entries[2].Band.OpenIssues);   // never checked yet: no counts
+        }
+
+        [Fact]
+        public void Two_repositories_with_the_same_name_keep_their_owner_in_the_label()
+        {
+            var header = HeaderOf(WatchedProject("https://github.com/a/site", "b/site\nb/other"));
+            Assert.Equal(new[] { "a/site", "b/site", "other" }, header.Entries.Select(e => e.Label));
+        }
+
+        [Fact]
+        public void One_repositorys_failure_shows_against_that_repository_only()
+        {
+            _db.RecordGitHubWatchCheck("hdr", "o/r", 5, null);
+            _db.RecordGitHubWatchCheck("hdr", "o/second", null, GitHubIssueFeed.TokenRefusedError);
+            var header = HeaderOf(WatchedProject("https://github.com/o/r", "o/second"));
+
+            Assert.Equal(GitHubCheckFailure.None, header.Entries[0].Band.Failure);
+            Assert.Equal(GitHubCheckFailure.TokenRefused, header.Entries[1].Band.Failure);
+            Assert.Equal("accounts", header.Entries[1].Band.FailureTarget);
+        }
+
+        [Fact]
+        public void With_the_watch_off_every_repository_is_a_link_without_counts()
+        {
+            _db.RecordGitHubWatchCheck("hdr", "o/second", null, GitHubIssueFeed.TokenRefusedError);
+            var header = HeaderOf(WatchedProject("https://github.com/o/r", "o/second", GitHubWatchMode.Off));
+
+            Assert.Equal(2, header.Entries.Count);
+            Assert.All(header.Entries, e => Assert.Equal(GitHubCheckFailure.None, e.Band.Failure));
+            Assert.All(header.Entries, e => Assert.Null(e.Band.OpenIssues));
+        }
+
+        [Fact]
+        public void A_project_with_nothing_to_watch_has_no_header_row()
+        {
+            Assert.Same(GitHubHeader.Hidden, HeaderOf(WatchedProject(null, null)));
+            Assert.Same(GitHubHeader.Hidden, HeaderOf(WatchedProject("https://bitbucket.org/o/r", null, GitHubWatchMode.Off)));
+            Assert.Same(GitHubHeader.Hidden, GitHubBandModel.BuildHeader(null, _ => null));
+        }
+
+        [Fact]
+        public void A_header_link_opens_a_repository_only_if_it_is_on_this_projects_watch_list()
+        {
+            var p = WatchedProject("https://github.com/o/r", "o/second");
+
+            Assert.Equal("https://github.com/o/second/issues", GitHubWatchList.ResolveLink(p, "issues", "o/second"));
+            Assert.Equal("https://github.com/o/r/pulls", GitHubWatchList.ResolveLink(p, "pulls", "o/r"));
+            // Matched ignoring case, but the URL is built from the project's own parsed name.
+            Assert.Equal("https://github.com/o/second", GitHubWatchList.ResolveLink(p, "repo", "O/SECOND"));
+
+            Assert.Null(GitHubWatchList.ResolveLink(p, "issues", "someone/else"));
+            Assert.Null(GitHubWatchList.ResolveLink(p, "issues", "https://evil.example/o/r"));
+            Assert.Null(GitHubWatchList.ResolveLink(p, "issues", "o/r/../../x"));
+            Assert.Null(GitHubWatchList.ResolveLink(p, "settings", "o/r"));       // not one of the three pages
+            Assert.Null(GitHubWatchList.ResolveLink(p, "issues", null));          // several repos: ambiguous, so nothing
+            Assert.Null(GitHubWatchList.ResolveLink(null, "issues", "o/r"));
+        }
+
+        [Fact]
+        public void An_older_page_that_names_no_repository_still_opens_the_only_one()
+        {
+            var p = WatchedProject("https://github.com/o/r", null);
+            Assert.Equal("https://github.com/o/r/issues", GitHubWatchList.ResolveLink(p, "issues", null));
+            Assert.Null(GitHubWatchList.ResolveLink(p, "issues", "o/other"));
+        }
+
+        [Fact]
+        public void A_repository_removed_from_the_list_can_no_longer_be_opened_from_a_stale_header()
+        {
+            var p = WatchedProject("https://github.com/o/r", "o/second");
+            Assert.NotNull(GitHubWatchList.ResolveLink(p, "issues", "o/second"));
+            p.GitHubExtraRepos = null;
+            Assert.Null(GitHubWatchList.ResolveLink(p, "issues", "o/second"));
+        }
+
+        // ── Ticket a923589f item 3: say so when the watch is on and something cannot be read ──
+
+        [Fact]
+        public void A_Repository_URL_naming_only_an_account_is_called_out_in_the_header_instead_of_checking_nothing_in_silence()
+        {
+            // The POSitiveAnywhereV2 case: the account, no repository, watch on.
+            var header = HeaderOf(WatchedProject("https://github.com/positivesoftware", null, GitHubWatchMode.Board));
+
+            Assert.False(header.IsHidden);
+            Assert.Empty(header.Entries);
+            Assert.Equal("GitHub watch: the Repository URL \"https://github.com/positivesoftware\" names an account, not a repository", header.Warning);
+            Assert.Equal("project", header.WarningTarget);
+        }
+
+        [Fact]
+        public void The_warning_is_shown_only_while_the_watch_is_on()
+        {
+            Assert.Same(GitHubHeader.Hidden, HeaderOf(WatchedProject("https://github.com/positivesoftware", null, GitHubWatchMode.Off)));
+
+            var off = HeaderOf(WatchedProject("https://github.com/o/r", "garbage", GitHubWatchMode.Off));
+            Assert.Single(off.Entries);   // the readable repo still has its link
+            Assert.Null(off.Warning);
+
+            Assert.NotNull(HeaderOf(WatchedProject("https://github.com/o/r", "garbage", GitHubWatchMode.Notify)).Warning);
+        }
+
+        [Fact]
+        public void An_unreadable_Repository_URL_still_shows_the_readable_Also_watch_repositories_and_the_warning()
+        {
+            var header = HeaderOf(WatchedProject("https://example.com/o/r", "o/second\nsecond-line-nonsense"));
+
+            Assert.Equal(new[] { "o/second" }, header.Entries.Select(e => e.Band.Repo));
+            Assert.Contains("the Repository URL \"https://example.com/o/r\" is not a github.com repository", header.Warning);
+            Assert.Contains("(and 1 more cannot be read)", header.Warning);
+        }
+
+        [Fact]
+        public void An_unreadable_Also_watch_line_is_named_as_such()
+        {
+            var header = HeaderOf(WatchedProject("https://github.com/o/r", "https://github.com/someaccount"));
+            Assert.Equal("GitHub watch: the Also watch line \"https://github.com/someaccount\" names an account, not a repository", header.Warning);
+            Assert.Single(header.Entries);
+        }
+
+        [Fact]
+        public void More_repositories_than_the_limit_is_said_not_silently_dropped()
+        {
+            string extras = string.Join("\n", Enumerable.Range(1, 11).Select(i => "o/extra" + i));
+            var header = HeaderOf(WatchedProject("https://github.com/o/r", extras));
+
+            Assert.Equal(GitHubWatchList.MaxRepos, header.Entries.Count);
+            Assert.Contains("only the first 10 repositories are watched; 2 more were left out", header.Warning);
+        }
+
+        [Fact]
+        public void The_warning_quotes_the_Owners_line_but_strips_control_and_direction_characters_and_cuts_a_long_one()
+        {
+            string hostile = "bad‮line\u0007" + new string('z', 200);
+            var header = HeaderOf(WatchedProject("https://github.com/o/r", hostile));
+
+            Assert.DoesNotContain('‮', header.Warning);
+            Assert.DoesNotContain('\u0007', header.Warning);
+            Assert.True(header.Warning.Length < 200);
+            Assert.Contains("…", header.Warning);
+        }
+
+        [Fact]
+        public void A_stored_check_error_is_never_copied_into_the_warning_or_the_header()
+        {
+            _db.RecordGitHubWatchCheck("hdr", "o/second", null, "Network error: <img src=x onerror=alert(1)> 203.0.113.9");
+            var header = HeaderOf(WatchedProject("https://github.com/o/r", "o/second\nnonsense"));
+
+            Assert.DoesNotContain("203.0.113.9", header.Warning);
+            Assert.DoesNotContain("<img", header.Warning);
+            Assert.Equal("GitHub check failed. See the project's settings for details.", header.Entries[1].Band.FailureText);
+        }
+
+        [Fact]
+        public void A_project_with_a_blank_Repository_URL_and_no_Also_watch_has_nothing_to_warn_about()
+        {
+            Assert.Same(GitHubHeader.Hidden, HeaderOf(WatchedProject("  ", "  \n ", GitHubWatchMode.Board)));
+        }
+
+        [Fact]
+        public void The_form_says_an_unreadable_line_is_there_even_when_the_account_is_not_linked()
+        {
+            var p = WatchedProject("https://github.com/o/r", "nonsense", GitHubWatchMode.Board);
+            string status = GitHubWatchService.DescribeStatus(p, null, false, null, null);
+            Assert.Contains("link a GitHub source control account", status);
+            Assert.Contains("Warning: the Also watch line \"nonsense\" is not a github.com repository.", status);
+        }
+
+        // ── Pipeline run 1 on a923589f: one canonical repository key ─────────────
+
+        // CA2100: the SQL in these two helpers is literal test text; nothing reaches it from input.
+#pragma warning disable CA2100
+        private void RawSql(string sql, params (string Name, object Value)[] args)
+        {
+            using var raw = new SQLiteConnection($"Data Source={_dbPath}");
+            raw.Open();
+            using var cmd = new SQLiteCommand(sql, raw);
+            foreach (var (name, value) in args) cmd.Parameters.AddWithValue(name, value ?? DBNull.Value);
+            cmd.ExecuteNonQuery();
+        }
+
+        private long RawCount(string sql)
+        {
+            using var raw = new SQLiteConnection($"Data Source={_dbPath}");
+            raw.Open();
+            using var cmd = new SQLiteCommand(sql, raw);
+            return Convert.ToInt64(cmd.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+        }
+#pragma warning restore CA2100
+
+        [Fact]
+        public async Task A_case_only_edit_of_the_repository_keeps_the_baseline_and_reports_what_arrived_in_between_once()
+        {
+            var (service, github, cards, _, project) = Build(GitHubWatchMode.Board, repoUrl: "https://github.com/Owner/Repo");
+            github.Body = PageOf("Owner/Repo", 30);
+            await service.CheckProjectAsync(project, "baseline");
+            Assert.Equal(30, _db.GetGitHubWatchState(project.Id, "owner/repo").Baseline);   // any case reads the same row
+            Assert.Equal(30, _db.GetGitHubWatchState(project.Id, "OWNER/REPO").Baseline);
+
+            // The Owner retypes the URL in lower case; two items arrive meanwhile.
+            project.GitRepoUrl = "https://github.com/owner/repo";
+            Assert.True(_db.UpdateProjectField(project.Id, "gitRepoUrl", project.GitRepoUrl));
+            Assert.Equal(30, _db.GetGitHubWatchState(project.Id, "owner/repo").Baseline);   // not pruned: the same repository
+
+            github.Body = PageOf("owner/repo", 32, 31, 30);
+            Assert.Equal(2, await service.CheckProjectAsync(project, "after the edit"));
+            Assert.Equal(2, cards.Count);
+            Assert.Equal(0, await service.CheckProjectAsync(project, "again"));   // once
+
+            // And back again: the same row, nothing dumped.
+            project.GitRepoUrl = "https://github.com/Owner/Repo";
+            Assert.True(_db.UpdateProjectField(project.Id, "gitRepoUrl", project.GitRepoUrl));
+            github.Body = PageOf("Owner/Repo", 33, 32, 31, 30);
+            Assert.Equal(1, await service.CheckProjectAsync(project, "edited back"));
+            Assert.Equal(3, cards.Count);
+            Assert.Equal(1, RawCount("SELECT COUNT(*) FROM github_watch_state"));
+        }
+
+        [Fact]
+        public void Every_table_is_keyed_on_the_lowercase_name_whatever_case_the_caller_uses()
+        {
+            _db.RecordGitHubWatchCheck("p", "Owner/Repo", 5, null);
+            _db.RecordGitHubOpenCounts("p", "OWNER/repo", 3, 1);
+            Assert.True(_db.TryClaimGitHubItem("p", "Owner/Repo", 9, false));
+            Assert.False(_db.TryClaimGitHubItem("p", "owner/REPO", 9, false));
+            _db.SetGitHubItemTask("p", "OWNER/REPO", 9, "task-9");
+
+            var state = _db.GetGitHubWatchState("p", "owner/repo");
+            Assert.Equal(5, state.Baseline);
+            Assert.Equal(3, state.OpenIssues);
+            Assert.Equal(1, RawCount("SELECT COUNT(*) FROM github_watch_state WHERE repo = 'owner/repo'"));
+            Assert.Equal(1, RawCount("SELECT COUNT(*) FROM github_watch_seen WHERE repo = 'owner/repo' AND task_id = 'task-9'"));
+        }
+
+        [Fact]
+        public void The_notice_text_keeps_the_case_the_Owner_typed_while_the_key_is_lowercase()
+        {
+            var (_, _, _, _, project) = Build(GitHubWatchMode.Notify, repoUrl: "https://github.com/Owner/Repo");
+            _db.AddGitHubPendingNotices(project.Id, "Owner/Repo", new[] { new ProjectDatabase.GitHubPendingNotice { Number = 4, Url = "https://github.com/Owner/Repo/issues/4" } });
+
+            var notice = Assert.Single(_db.GetGitHubPendingNotices(project.Id));
+            Assert.Equal("Owner/Repo", notice.Repo);
+            Assert.Equal(1, RawCount("SELECT COUNT(*) FROM github_watch_pending WHERE repo = 'owner/repo'"));
+        }
+
+        [Fact]
+        public void The_migration_merges_variants_that_differ_only_in_case_and_can_run_again()
+        {
+            var t0 = DateTime.UtcNow.AddHours(-3);
+            var t1 = DateTime.UtcNow.AddHours(-2);
+            var t2 = DateTime.UtcNow.AddHours(-1);
+            RawSql("INSERT INTO github_watch_state (project_id, repo, baseline_number, last_checked_at, last_success_at, last_error, open_issues, open_prs, counts_at) VALUES ('p','Owner/Repo',10,@t0,@t0,'old error',1,1,@t0)",
+                ("@t0", t0));
+            RawSql("INSERT INTO github_watch_state (project_id, repo, baseline_number, last_checked_at, last_success_at, last_error, open_issues, open_prs, counts_at) VALUES ('p','owner/repo',20,@t2,@t1,NULL,5,6,@t2)",
+                ("@t1", t1), ("@t2", t2));
+            RawSql("INSERT INTO github_watch_state (project_id, repo, baseline_number) VALUES ('p','x/y',7)");
+
+            RawSql("INSERT INTO github_watch_seen (project_id, repo, number, is_pr, task_id, seen_at) VALUES ('p','Owner/Repo',5,0,NULL,@t0)", ("@t0", t0));
+            RawSql("INSERT INTO github_watch_seen (project_id, repo, number, is_pr, task_id, seen_at) VALUES ('p','owner/repo',5,1,'task-5',@t1)", ("@t1", t1));
+            RawSql("INSERT INTO github_watch_seen (project_id, repo, number, is_pr, task_id, seen_at) VALUES ('p','OWNER/REPO',6,0,'task-6',@t1)", ("@t1", t1));
+
+            RawSql("INSERT INTO github_watch_pending (project_id, repo, number, is_pr, task_id, url, created_at) VALUES ('p','Owner/Repo',7,0,NULL,'https://github.com/Owner/Repo/issues/7',@t0)", ("@t0", t0));
+            RawSql("INSERT INTO github_watch_pending (project_id, repo, number, is_pr, task_id, url, created_at) VALUES ('p','owner/repo',7,0,'task-7',NULL,@t1)", ("@t1", t1));
+            RawSql("INSERT INTO github_watch_pending (project_id, repo, number, is_pr, task_id, url, created_at) VALUES ('p','Other/Thing',8,1,NULL,NULL,@t1)", ("@t1", t1));
+
+            _db.MigrateGitHubWatchRepoKeys();
+
+            var merged = _db.GetGitHubWatchState("p", "owner/repo");
+            Assert.Equal(20, merged.Baseline);                       // the highest
+            Assert.Null(merged.LastError);                           // the newest check's
+            Assert.Equal(5, merged.OpenIssues);
+            Assert.Equal(6, merged.OpenPullRequests);
+            Assert.Equal(7, _db.GetGitHubWatchState("p", "x/y").Baseline);   // untouched
+            Assert.Equal(2, RawCount("SELECT COUNT(*) FROM github_watch_state"));
+            Assert.Equal(0, RawCount("SELECT COUNT(*) FROM github_watch_state WHERE repo <> lower(repo)"));
+
+            Assert.Equal(2, RawCount("SELECT COUNT(*) FROM github_watch_seen"));
+            Assert.Equal(1, RawCount("SELECT COUNT(*) FROM github_watch_seen WHERE number = 5 AND task_id = 'task-5' AND is_pr = 1"));   // no task id lost
+            Assert.Equal(1, RawCount("SELECT COUNT(*) FROM github_watch_seen WHERE number = 6 AND task_id = 'task-6' AND repo = 'owner/repo'"));
+            Assert.False(_db.TryClaimGitHubItem("p", "Owner/Repo", 5, false));
+
+            var notices = _db.GetGitHubPendingNotices("p");
+            Assert.Equal(2, notices.Count);
+            var seven = notices.Single(n => n.Number == 7);
+            Assert.Equal("task-7", seven.TaskId);
+            Assert.Equal("https://github.com/Owner/Repo/issues/7", seven.Url);
+            Assert.Equal("Owner/Repo", seven.Repo);
+            Assert.Equal(0, RawCount("SELECT COUNT(*) FROM github_watch_pending WHERE repo <> lower(repo)"));
+
+            // Run again, and reopen the database: nothing more to do, nothing changes.
+            _db.MigrateGitHubWatchRepoKeys();
+            Assert.Equal(20, _db.GetGitHubWatchState("p", "owner/repo").Baseline);
+            Assert.Equal(2, RawCount("SELECT COUNT(*) FROM github_watch_state"));
+            Assert.Equal(2, RawCount("SELECT COUNT(*) FROM github_watch_seen"));
+            Assert.Equal(2, RawCount("SELECT COUNT(*) FROM github_watch_pending"));
+        }
+
+        [Fact]
+        public async Task A_mixed_case_row_from_before_the_upgrade_keeps_its_baseline_so_upgrading_dumps_nothing()
+        {
+            var (service, github, cards, _, project) = Build(GitHubWatchMode.Board, repoUrl: "https://github.com/POSitive-Software/POSitiveAnywhereV2");
+            RawSql("INSERT INTO github_watch_state (project_id, repo, baseline_number, last_checked_at, last_success_at) VALUES (@p,'POSitive-Software/POSitiveAnywhereV2',30,@t,@t)",
+                ("@p", project.Id), ("@t", DateTime.UtcNow.AddHours(-1)));
+
+            _db.MigrateGitHubWatchRepoKeys();   // what opening the upgraded database does
+
+            Assert.Equal(30, _db.GetGitHubWatchState(project.Id, "POSitive-Software/POSitiveAnywhereV2").Baseline);
+            github.Body = PageOf("POSitive-Software/POSitiveAnywhereV2", 30, 29, 28);
+            Assert.Equal(0, await service.CheckProjectAsync(project, "after the upgrade"));
+            Assert.Empty(cards);
+            Assert.Equal(30, _db.GetGitHubWatchState(project.Id, "positive-software/positiveanywherev2").Baseline);
+        }
+
+        [Fact]
+        public void A_repository_taken_off_the_list_also_loses_its_queued_notices_and_keeps_its_claims()
+        {
+            var (_, _, _, _, project) = BuildTwo();
+            _db.AddGitHubPendingNotices(project.Id, "o/second", new[] { new ProjectDatabase.GitHubPendingNotice { Number = 3 } });
+            _db.AddGitHubPendingNotices(project.Id, "o/r", new[] { new ProjectDatabase.GitHubPendingNotice { Number = 4 } });
+            Assert.True(_db.TryClaimGitHubItem(project.Id, "o/second", 3, false));
+
+            Assert.True(_db.UpdateProjectField(project.Id, "gitHubExtraRepos", null));
+
+            var left = Assert.Single(_db.GetGitHubPendingNotices(project.Id));
+            Assert.Equal("o/r", left.Repo);
+            Assert.False(_db.TryClaimGitHubItem(project.Id, "o/second", 3, false));   // the claim stays
+        }
+
+        // ── Pipeline run 1: an unexpected failure is shown, not just logged ──────
+
+        [Fact]
+        public async Task An_unexpected_exception_in_a_check_is_recorded_as_a_failure_and_the_next_repository_is_still_checked()
+        {
+            var (_, github, _, _, project) = BuildTwo();
+            var cards = new List<string>();
+            var recorded = new List<string>();
+            bool tokenThrowsOnce = false;
+            // CA2000: the service owns the feed; it is disposed with the test class.
+#pragma warning disable CA2000
+            var service = new GitHubWatchService(_db, () => new[] { project },
+                _ =>
+                {
+                    // The seam: an exception out of a callback, on the first repository's check only.
+                    if (!tokenThrowsOnce) return "tok";
+                    tokenThrowsOnce = false;
+                    throw new InvalidOperationException("boom <img src=x onerror=alert(1)> 203.0.113.9");
+                },
+                new GitHubIssueFeed(github),
+                (title, description, projectId) => { cards.Add(title); return "task-" + cards.Count; },
+                (_, _) => { }, _ => { });
+#pragma warning restore CA2000
+            _services.Add(service);
+            service.CheckRecorded += recorded.Add;
+
+            github.BodyByRepo["o/r"] = PageOf("o/r", 30);
+            github.BodyByRepo["o/second"] = PageOf("o/second", 30);
+            await service.CheckProjectAsync(project, "baseline");
+
+            recorded.Clear();
+            github.BodyByRepo["o/r"] = PageOf("o/r", 31, 30);
+            github.BodyByRepo["o/second"] = PageOf("o/second", 31, 30);
+            tokenThrowsOnce = true;
+            await service.CheckProjectAsync(project, "check");
+
+            var failed = _db.GetGitHubWatchState(project.Id, "o/r");
+            Assert.Equal(GitHubWatchService.UnexpectedError, failed.LastError);
+            Assert.DoesNotContain("boom", failed.LastError);
+            Assert.DoesNotContain("203.0.113.9", failed.LastError);
+            Assert.NotNull(failed.LastCheckedUtc);   // the retry delay counts from here
+            Assert.False(GitHubWatchService.IsDue(GitHubCheckInterval.Minutes15, failed.LastSuccessUtc, failed.LastCheckedUtc, DateTime.UtcNow));
+            Assert.Equal(30, failed.Baseline);       // a failure learns nothing and invents nothing
+
+            var band = GitHubBandModel.Build("o/r", true, failed);
+            Assert.Equal(GitHubCheckFailure.Other, band.Failure);
+            Assert.Equal("GitHub check failed. See the project's settings for details.", band.FailureText);
+            Assert.Contains(project.Id, recorded);   // the header was told
+
+            // The next repository was still checked, and shows no failure.
+            Assert.Equal(new[] { "GitHub issue #31 in o/second" }, cards);
+            Assert.Null(_db.GetGitHubWatchState(project.Id, "o/second").LastError);
+            Assert.Equal(31, _db.GetGitHubWatchState(project.Id, "o/second").Baseline);
+        }
+
+        [Fact]
+        public async Task A_push_that_throws_leaves_the_notices_queued_and_does_not_mark_the_repository_failed()
+        {
+            var (_, github, _, _, project) = BuildTwo();
+            var cards = new List<string>();
+            var queuedEvents = new List<string>();
+            var recorded = new List<string>();
+            int pushes = 0;
+            // CA2000: the service owns the feed; it is disposed with the test class.
+#pragma warning disable CA2000
+            var service = new GitHubWatchService(_db, () => new[] { project }, _ => "tok", new GitHubIssueFeed(github),
+                (title, description, projectId) => { cards.Add(title); return "task-" + cards.Count; },
+                (_, _) => { pushes++; throw new InvalidOperationException("push service is down"); },
+                _ => { });
+#pragma warning restore CA2000
+            _services.Add(service);
+            service.NoticesQueued += queuedEvents.Add;
+            service.CheckRecorded += recorded.Add;
+
+            github.BodyByRepo["o/r"] = PageOf("o/r", 30);
+            github.BodyByRepo["o/second"] = PageOf("o/second", 30);
+            await service.CheckProjectAsync(project, "baseline");
+
+            recorded.Clear();
+            github.BodyByRepo["o/r"] = PageOf("o/r", 32, 31, 30);
+            Assert.Equal(2, await service.CheckProjectAsync(project, "check"));
+
+            Assert.Equal(1, pushes);
+            // The agent still hears of both items, with their tickets.
+            var notices = _db.GetGitHubPendingNotices(project.Id);
+            Assert.Equal(new[] { 31, 32 }, notices.Select(n => n.Number));
+            Assert.All(notices, n => Assert.Equal("o/r", n.Repo));
+            Assert.All(notices, n => Assert.False(string.IsNullOrEmpty(n.TaskId)));
+            Assert.Contains(project.Id, queuedEvents);
+
+            // The check worked: no failure is stored or shown, and the baseline moved.
+            var state = _db.GetGitHubWatchState(project.Id, "o/r");
+            Assert.Null(state.LastError);
+            Assert.Equal(32, state.Baseline);
+            Assert.Equal(GitHubCheckFailure.None, GitHubBandModel.Build("o/r", true, state).Failure);
+
+            // And a later check does not offer them again.
+            Assert.Equal(0, await service.CheckProjectAsync(project, "again"));
+            Assert.Equal(2, _db.GetGitHubPendingNotices(project.Id).Count);
         }
     }
 }

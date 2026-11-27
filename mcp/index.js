@@ -728,6 +728,29 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: "respond_to_stale",
+        description: "Answer a stale-task reminder (\"⏰ Stale task check: ... Use respond_to_stale\"), sent when a task you own has been paused for 7+ days. still_relevant keeps the task as it is and restarts the 7-day clock; reprioritize moves it back to To Do; will_close records that you will close it and keeps the flag. Ask the Owner first unless the answer is obvious from the board.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            taskId: {
+              type: "string",
+              description: "Task ID from the reminder",
+            },
+            response: {
+              type: "string",
+              enum: ["still_relevant", "reprioritize", "will_close"],
+              description: "still_relevant, reprioritize or will_close",
+            },
+            respondedBy: {
+              type: "string",
+              description: "Your name",
+            },
+          },
+          required: ["taskId", "response", "respondedBy"],
+        },
+      },
+      {
         name: "delete_task",
         description: "Delete a kanban task",
         inputSchema: {
@@ -1188,7 +1211,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "clear_my_context",
-        description: "Clear YOUR OWN context by submitting /clear into your terminal (types '/clear' + Enter). ⚠️ This WIPES the conversation. BEFORE calling: write continuation notes (update_task_continuation) capturing where to resume — SessionStart then rebuilds you from those notes + the session summary. Only call at a clean continuation point YOU chose, never mid-step, and make it the LAST action of your turn. Two-step guard: call once to get a reminder, then again with acknowledge:true to actually clear. Use check_my_context to decide when (≥70% is the nudge threshold). This tool targets your OWN terminal ONLY: agentName defaults to $MULTITERMINAL_NAME, and an explicit agentName that isn't you is REJECTED with an error (omit agentName to self-target). Clearing a DIFFERENT agent is a separate authorized tool, not this one — same self-only standard as compact_my_context.",
+        description: "Clear YOUR OWN context by submitting /clear into your terminal (types '/clear' + Enter). ⚠️ This WIPES the conversation. BEFORE calling: write continuation notes (update_task_continuation) capturing where to resume — SessionStart then rebuilds you from those notes + the session summary. Only call at a clean continuation point YOU chose, never mid-step, and make it the LAST action of your turn. Two-step guard: call once to get a reminder, then again with acknowledge:true to actually clear. Use check_my_context to decide when (≥70% is the nudge threshold). This tool targets your OWN terminal ONLY: agentName defaults to $MULTITERMINAL_NAME, and an explicit agentName that isn't you is REJECTED with an error (omit agentName to self-target). Clearing a DIFFERENT agent is a separate authorized tool, not this one — same self-only standard as compact_my_context. If you have a next step that is NOT on an active task (e.g. your PM said 'clear, then claim card X'), pass it as continueWith: the fresh session gets nothing else of this conversation, and continuation notes are only shown for an active task.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1199,6 +1222,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             acknowledge: {
               type: "boolean",
               description: "Set true to confirm you have written continuation notes and are at a clean stopping point. Without it, the tool returns a reminder instead of clearing (guards against an accidental wipe).",
+            },
+            continueWith: {
+              type: "string",
+              description: "What the fresh session should do next, e.g. 'Claim card 9b57140c (PROMPT designer offset) and code it through; Grace approved it.' MultiTerminal types it into your terminal right after the clear, as part of the first prompt. One line, at most 1500 characters (longer is cut).",
             },
           },
         },
@@ -1512,6 +1539,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "Initial semantic version (default '0.1.0').",
             },
+            existingProject: {
+              type: "string",
+              enum: ["restore", "new"],
+              description: "Only when a create was refused because the folder holds the .claude/project.json of a project that is not registered (deleted in MT, or copied). Ask the Owner, then pass \"restore\" to bring that project back (its id, settings and tasks) or \"new\" to start a new project there (new id; the old file is kept as .claude\\project.json.old).",
+            },
             createdBy: {
               type: "string",
               description: "Agent name attributed as the creator. Defaults to 'api' when omitted.",
@@ -1558,7 +1590,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "update_project",
-        description: "Update one or more project fields. Accepts a fields object with camelCase keys (e.g., deployPath, buildCommand, projectType, description, icon, iconColor, teamLead, gitRepoUrl, gitDefaultBranch, gitAutoCommit, currentVersion, isPinned).",
+        description: "Update one or more project fields. Accepts a fields object with camelCase keys (e.g., deployPath, buildCommand, projectType, description, icon, iconColor, teamLead, gitRepoUrl, gitDefaultBranch, currentVersion, isPinned). icon: an emoji or a known icon name (terminal, code, folder, web, database, cloud, star, rocket, gear, bug, package, extension, smartphone, hub, apps), blank for the first letter; iconColor: a CSS colour such as #4FC3F7, blank for automatic; other values are rejected with the reason. gitRepoUrl is the GitHub repository MT watches for issues and PRs, never where code is pushed (pushes use the folder's own git remote). gitDefaultBranch is the branch task branches merge into. gitAutoCommit is stored but has no effect.",
         inputSchema: {
           type: "object",
           properties: {
@@ -3188,6 +3220,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "respond_to_stale": {
+        const r = await apiCall(`/api/tasks/${seg(args.taskId)}/stale-response`, "POST", {
+          response: args.response,
+          respondedBy: args.respondedBy,
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: `✅ Stale reminder for task ${args.taskId} answered: ${args.response}${r && r.message ? ` (${r.message})` : ""}`,
+            },
+          ],
+        };
+      }
+
       case "delete_task": {
         await apiCall(`/api/tasks/${seg(args.taskId)}?deletedBy=${encodeURIComponent(args.deletedBy)}`, "DELETE");
         return {
@@ -3781,12 +3828,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!args.acknowledge) {
           return { content: [{ type: "text", text: `⚠️ clear_my_context will WIPE your conversation. Before clearing:\n1. Write continuation notes: update_task_continuation (where to resume, current file, next step).\n2. Make sure you're at a clean stopping point (not mid-step).\nThen call clear_my_context again with acknowledge:true — as the LAST action of your turn. SessionStart will rebuild you from your notes + the session summary.` }] };
         }
-        await apiCall(`/api/terminals/${seg(clrName)}/submit`, "POST", { text: "/clear" });
+        // continueWith (ticket cc2e51ff): MT holds it for this pane and types it after the clear, so a brief like
+        // "clear, then claim card X" keeps its second half. MT sanitizes it (one line, capped).
+        const clrContinue = typeof args.continueWith === "string" && args.continueWith.trim() ? args.continueWith : undefined;
+        await apiCall(`/api/terminals/${seg(clrName)}/submit`, "POST", { text: "/clear", continueAfterClear: clrContinue });
         // Honest best-effort wording: the inject is fire-and-forget (TerminalsController.Submit
         // returns OK once the inject is REQUESTED; MainForm fires InjectInputAsync without
         // awaiting, and it can no-op for a stale/renamed/uninitialized terminal). Do not claim
         // it definitely cleared. (Mirrors compact_my_context's reword, 99af6a92; unified in 6d406e84.)
-        return { content: [{ type: "text", text: `🧹 Requested '/clear' for '${clrName}' — submitted best-effort (the inject is fire-and-forget; a stale/renamed terminal or renderer hiccup can silently no-op). If it landed, your context clears and SessionStart reloads from your continuation notes + session summary — verify on your next turn. Make sure you already wrote continuation notes (update_task_continuation).` }] };
+        return { content: [{ type: "text", text: `🧹 Requested '/clear' for '${clrName}' — submitted best-effort (the inject is fire-and-forget; a stale/renamed terminal or renderer hiccup can silently no-op). If it landed, your context clears and SessionStart reloads from your continuation notes + session summary — verify on your next turn. Make sure you already wrote continuation notes (update_task_continuation).${clrContinue ? " Your continueWith text will be typed into the fresh session after the clear." : ""}` }] };
       }
 
       case "compact_my_context": {
@@ -4501,6 +4551,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           projectType: args.projectType || null,
           currentVersion: args.currentVersion || null,
           createdBy: args.createdBy || null,
+          existingProject: args.existingProject || null,
         };
         const result = await apiCall("/api/projects", "POST", body);
         let text = `✅ Project created.\n`;
@@ -6377,6 +6428,15 @@ async function getProcessImageName(pid, run = runExecFile) {
 //    then given up with one stderr line. A definitive answer is never retried: the wrong service
 //    marker, a parent that is not claude.exe, or a refused registration.
 //
+// 3. A standalone session (ticket 6c688883): started outside MT with `mtclaude <Name>`, which sets
+//    MULTITERMINAL_NAME and MULTITERMINAL_STANDALONE=1 and clears MULTITERMINAL_DOC_ID. Same shape as a
+//    ClarionAssistant tab: MT did not launch it and holds no row for it, so it takes the same name-only
+//    path with the same conditions (MT's marker and the ca-embedded-v1 capability, a claude.exe parent,
+//    an accepted registration before any credentials). The capability is what makes this safe for any
+//    name-only session, not only a CA tab: MT advertises it only while reaping a dead owner clears its
+//    credentials, so a closed standalone window does not leave a row routing to a dead pipe.
+//    STANDALONE with a MULTITERMINAL_DOC_ID skips, as EMBEDDED does: the variable leaked into an MT pane.
+//
 // EMBEDDED together with MULTITERMINAL_DOC_ID skips entirely: that is the Clarion IDE having inherited
 // an MT shell's environment, and it must not claim that pane. The shared placeholder name "Unassigned"
 // is never self-registered in either case: many panes hold it, and binding an ownerPid to it would make
@@ -6395,6 +6455,19 @@ const CA_EMBEDDED_CAPABILITY = "ca-embedded-v1";
 const MT_HEALTH_SERVICE_MARKER = "multiterminal-rest-api";
 // Waits between health attempts: 6 attempts over 59s.
 const CA_HEALTH_RETRY_DELAYS_MS = [2000, 4000, 8000, 15000, 30000];
+
+/**
+ * Is this a standalone session started with `mtclaude <Name>` (ticket 6c688883)? True iff
+ * MULTITERMINAL_STANDALONE is a non-empty string whose trimmed, lower-cased value is not "0" or "false",
+ * the same truth table as isClarionEmbedded.
+ */
+function isStandaloneSession(env) {
+  if (!env || typeof env !== "object") return false;
+  const v = env.MULTITERMINAL_STANDALONE;
+  if (typeof v !== "string" || v === "") return false;
+  const norm = v.trim().toLowerCase();
+  return norm !== "" && norm !== "0" && norm !== "false";
+}
 
 /**
  * Is this session a ClarionAssistant tab? True iff CLARION_ASSISTANT_EMBEDDED is a non-empty string
@@ -6434,7 +6507,7 @@ async function selfRegisterTerminal(env, ppid, post, deps = {}) {
   if (!name) return "skipped";
   // A deny-only guard: trimming here can only skip more, never register a name the broker keys differently.
   if (String(name).trim().toUpperCase() === PLACEHOLDER_TERMINAL_NAME.toUpperCase()) return "skipped";
-  if (isClarionEmbedded(env)) {
+  if (isClarionEmbedded(env) || isStandaloneSession(env)) {
     if (env.MULTITERMINAL_DOC_ID) return "skipped";
     return registerEmbeddedTab(name, env, ppid, post, deps);
   }
@@ -6474,11 +6547,14 @@ async function probeCaHealth(deps, step) {
   return { kind: "ok" };
 }
 
-// Case 2 above. Never throws. Returns a status word; logs a reason, never a credential.
+// Cases 2 and 3 above: a ClarionAssistant tab or a standalone session (ticket 6c688883). The CA-specific
+// names here and in probeCaHealth / CA_HEALTH_RETRY_DELAYS_MS are historical; both kinds take this path.
+// Never throws. Returns a status word; logs a reason, never a credential.
 async function registerEmbeddedTab(name, env, ppid, post, deps) {
   const step = deps.stepTimeoutMs;
   const sleep = deps.sleep || unrefSleep;
-  const tag = `[self-register] ClarionAssistant tab '${name}'`;
+  const kind = isClarionEmbedded(env) ? "ClarionAssistant tab" : "Standalone session";
+  const tag = `[self-register] ${kind} '${name}'`;
   try {
     let probe;
     for (let attempt = 0; ; attempt++) {

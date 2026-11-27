@@ -79,7 +79,7 @@ namespace MultiTerminal.MCPServer.Services
         // Message queue persistence for reliable delivery
         private readonly MessageQueueDatabase _messageQueueDb;
 
-        // HTTP client for webhook delivery
+        // HTTP client for the gateway notification forward (ForwardMessagePushAsync)
         private static readonly HttpClient _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
 
         // Terminal colors for chat UI
@@ -2140,7 +2140,7 @@ namespace MultiTerminal.MCPServer.Services
                             && !t.Name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
 
                             // Ordered by when the OWNER was bound, not by LastActiveAt: the latter is
-                            // an activity clock that SendMessage/Broadcast/MarkAgentReady bump on the
+                            // an activity clock that SendMessage/Broadcast bump on the
                             // sender's row, so "newest wins" could run backwards after ordinary
                             // traffic and resolve to a stale identity.
                 .OrderByDescending(t => t.OwnerBoundAt ?? DateTime.MinValue)
@@ -3327,56 +3327,6 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
-        /// Mark an agent as ready (initialized and able to receive work).
-        /// Called by HttpWebhookService when agent sends ready notification.
-        /// </summary>
-        /// <param name="agentName">Name of the agent</param>
-        /// <param name="docId">Document ID (optional, for validation)</param>
-        /// <returns>True if agent was found and marked ready, false otherwise</returns>
-        public bool MarkAgentReady(string agentName, string docId = null)
-        {
-            var terminal = _terminals.Values.FirstOrDefault(t =>
-                t.Name.Equals(agentName, StringComparison.OrdinalIgnoreCase) &&
-                t.IsConnected);
-
-            if (terminal == null)
-            {
-                DebugLogService?.Warning("MessageBroker.MarkAgentReady", $"Agent not found: {agentName}");
-                return false;
-            }
-
-            // Validate docId if provided
-            if (!string.IsNullOrEmpty(docId) &&
-                !string.IsNullOrEmpty(terminal.DocId) &&
-                !terminal.DocId.Equals(docId, StringComparison.OrdinalIgnoreCase))
-            {
-                DebugLogService?.Warning("MessageBroker.MarkAgentReady", $"DocId mismatch for {agentName}: expected {terminal.DocId}, got {docId}");
-                return false;
-            }
-
-            terminal.IsReady = true;
-            terminal.LastActiveAt = DateTime.UtcNow;
-
-            DebugLogService?.Trace("MessageBroker.MarkAgentReady", $"Agent {agentName} marked as ready");
-
-            return true;
-        }
-
-        /// <summary>
-        /// Check if an agent is ready (initialized and able to receive work).
-        /// </summary>
-        /// <param name="agentName">Name of the agent</param>
-        /// <returns>True if agent is registered, connected, and ready</returns>
-        public bool IsAgentReady(string agentName)
-        {
-            var terminal = _terminals.Values.FirstOrDefault(t =>
-                t.Name.Equals(agentName, StringComparison.OrdinalIgnoreCase) &&
-                t.IsConnected);
-
-            return terminal?.IsReady ?? false;
-        }
-
-        /// <summary>
         /// Unregister a terminal.
         /// </summary>
         public void UnregisterTerminal(string terminalId)
@@ -4283,49 +4233,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
             }
 
-            // **TIER 1: Webhook delivery DISABLED — using inbox file delivery (Tier 2) instead.
-            // To re-enable, uncomment the block below.
             bool deliverySuccess = false;
-            /*
-            try
-            {
-                LogInfo($"TIER 1: Attempting webhook delivery for message {message.Id}");
-                deliverySuccess = await SendViaWebhook(message.Id, toTerminal.Name, fromTerminal.Name, content);
-
-                if (deliverySuccess)
-                {
-                    LogInfo($"TIER 1: SUCCESS - Webhook delivered message {message.Id}");
-
-                    // Mark as delivered in database
-                    if (queuedMessageId > 0)
-                    {
-                        try
-                        {
-                            _messageQueueDb.MarkDelivered(queuedMessageId);
-                            DebugLogService?.Trace("MessageBroker", $"Message {queuedMessageId} marked as delivered after webhook delivery");
-                        }
-                        catch (Exception ex)
-                        {
-                            LogError($"Failed to mark message as delivered: {ex.Message}");
-                        }
-                    }
-
-                    return new SendResult
-                    {
-                        Success = true,
-                        MessageId = message.Id
-                    };
-                }
-                else
-                {
-                    LogInfo($"TIER 1: FAILED - Falling back to Tier 2 (callback) for message {message.Id}");
-                }
-            }
-            catch (Exception ex)
-            {
-                LogError($"TIER 1: EXCEPTION - {ex.Message}, falling back to Tier 2");
-            }
-            */
 
             // **TIER 2: Try callback delivery (existing code)**
             try
@@ -4397,102 +4305,6 @@ namespace MultiTerminal.MCPServer.Services
                 MessageId = message.Id,
                 Delivered = false
             };
-        }
-
-        /// <summary>
-        /// Deliver a message via webhook. Called by HttpWebhookService.
-        /// </summary>
-        public async Task<bool> DeliverMessageViaWebhook(string messageId, string toTerminalName, string fromTerminalName, string content)
-        {
-            LogTrace($"DeliverMessageViaWebhook: messageId={messageId}, to={toTerminalName}, from={fromTerminalName}");
-
-            // Find recipient terminal
-            var toTerminal = GetTerminal(toTerminalName);
-            if (toTerminal == null)
-            {
-                LogError($"DeliverMessageViaWebhook: Recipient {toTerminalName} not found");
-                return false;
-            }
-
-            // Attempt delivery via OnMessageDelivery callback
-            bool deliverySuccess = false;
-            try
-            {
-                if (OnMessageDelivery != null)
-                {
-                    LogInfo($"DeliverMessageViaWebhook: Calling OnMessageDelivery for message {messageId} to {toTerminal.Id}");
-                    deliverySuccess = await OnMessageDelivery(messageId, toTerminal.Id, fromTerminalName, content);
-                    LogInfo($"DeliverMessageViaWebhook: OnMessageDelivery returned {deliverySuccess}");
-                }
-                else
-                {
-                    LogInfo("DeliverMessageViaWebhook: OnMessageDelivery callback is null");
-                }
-            }
-            catch (Exception ex)
-            {
-                LogError($"DeliverMessageViaWebhook: Delivery failed - {ex.Message}");
-                return false;
-            }
-
-            if (deliverySuccess)
-            {
-                // Mark as delivered in database
-                if (long.TryParse(messageId, out long msgId))
-                {
-                    try
-                    {
-                        _messageQueueDb.MarkDelivered(msgId);
-                        LogInfo($"DeliverMessageViaWebhook: Message {messageId} marked as delivered");
-                    }
-                    catch (Exception ex)
-                    {
-                        LogError($"DeliverMessageViaWebhook: Failed to mark as delivered - {ex.Message}");
-                    }
-                }
-
-                return true;
-            }
-
-            return false;
-        }
-
-        /// <summary>
-        /// Attempt to deliver message via webhook POST.
-        /// </summary>
-        private async Task<bool> SendViaWebhook(string messageId, string toTerminalName, string fromTerminalName, string content)
-        {
-            try
-            {
-                LogTrace($"SendViaWebhook: Attempting webhook delivery for message {messageId}");
-
-                // Build POST data (form-encoded for simplicity)
-                var postData = $"messageId={Uri.EscapeDataString(messageId)}" +
-                              $"&to={Uri.EscapeDataString(toTerminalName)}" +
-                              $"&from={Uri.EscapeDataString(fromTerminalName)}" +
-                              $"&content={Uri.EscapeDataString(content)}";
-
-                using var httpContent = new StringContent(postData, Encoding.UTF8, "application/x-www-form-urlencoded");
-
-                var response = await _httpClient.PostAsync("http://localhost:5000/message", httpContent);
-
-                if (response.IsSuccessStatusCode)
-                {
-                    var responseBody = await response.Content.ReadAsStringAsync();
-                    LogInfo($"SendViaWebhook: SUCCESS - {responseBody}");
-                    return true;
-                }
-                else
-                {
-                    LogInfo($"SendViaWebhook: FAILED - Status {response.StatusCode}");
-                    return false;
-                }
-            }
-            catch (Exception ex)
-            {
-                LogError($"SendViaWebhook: EXCEPTION - {ex.Message}");
-                return false;
-            }
         }
 
         /// <summary>
@@ -5208,7 +5020,7 @@ namespace MultiTerminal.MCPServer.Services
             // Generate appropriate notification message based on stale level
             string content = staleLevel >= 2
                 ? $"\u26a0\ufe0f ATTENTION: '{taskTitle}' paused for {daysPaused} days. Please close or re-prioritize."
-                : $"\u23f0 Stale task check: '{taskTitle}' paused for {daysPaused} days. Still relevant? Use respond_to_stale to confirm.";
+                : $"\u23f0 Stale task check: '{taskTitle}' (task {taskId}) paused for {daysPaused} days. Still relevant? Answer with the respond_to_stale tool: still_relevant (keep it, restart the clock), reprioritize (back to To Do) or will_close.";
 
             // Persist to SQLite with notification type
             long queuedMessageId = 0;
@@ -6047,6 +5859,9 @@ namespace MultiTerminal.MCPServer.Services
         public RespondStaleResult RespondToStale(string taskId, string response, string terminalName)
             => _taskService.RespondToStale(taskId, response, terminalName);
 
+        /// <summary>Sets a task's stale level through the task write path (ticket 28845a5f).</summary>
+        public bool FlagTaskStale(string taskId, int level) => _taskService.FlagStale(taskId, level);
+
         /// <summary>
         /// Get helpers for a task.
         /// </summary>
@@ -6093,7 +5908,8 @@ namespace MultiTerminal.MCPServer.Services
             string defaultTerminal = null,
             string projectType = null,
             string currentVersion = null,
-            bool allowReuseExisting = false)
+            bool allowReuseExisting = false,
+            string existingProject = null)
         {
             if (string.IsNullOrWhiteSpace(name))
             {
@@ -6108,6 +5924,56 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     var existing = FindExistingProjectAtPath(path);
                     TestHookAfterFolderCheck?.Invoke();
+
+                    if (existing.Exists && !allowReuseExisting && existing.IsUnregisteredProjectFile)
+                    {
+                        // GitHub #102: a leftover project.json of a deleted (or copied) project is never adopted
+                        // silently. The caller must say which: restore it, or start a new project here.
+                        if (string.Equals(existingProject, ExistingProjectChoice.Restore, StringComparison.Ordinal))
+                        {
+                            result = AdoptExistingProjectLocked(existing, createdBy, out activity);
+                            return;
+                        }
+
+                        if (string.Equals(existingProject, ExistingProjectChoice.New, StringComparison.Ordinal))
+                        {
+                            string folderWithFile = existing.ProjectPath ?? path;
+                            string kept;
+                            try { kept = SetAsideProjectFile(folderWithFile); }
+                            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                            {
+                                result = new CreateProjectResult { Success = false, FolderOccupied = true, ExistingProjectId = existing.ProjectId, Error = $"Could not set the old project.json aside: {ex.Message}" };
+                                return;
+                            }
+
+                            // A failed create puts the old file back, so the folder is not left with only
+                            // project.json.old (pipeline Run 1, debugger + Codex).
+                            bool created = false;
+                            try
+                            {
+                                result = CreateNewProjectLocked(name, description, createdBy, path, teamLead, defaultTerminal,
+                                    projectType, currentVersion, out activity);
+                                created = result != null && result.Success;
+                            }
+                            finally
+                            {
+                                if (!created) RestoreSetAsideProjectFile(folderWithFile, kept);
+                            }
+
+                            return;
+                        }
+
+                        result = new CreateProjectResult
+                        {
+                            Success = false,
+                            FolderOccupied = true,
+                            ExistingProjectId = existing.ProjectId,
+                            Error = ExistingProjectDetector.DescribeUnregistered(existing) +
+                                " Ask the Owner, then call again with existingProject=\"restore\" (brings it back with its id, settings and tasks) " +
+                                "or existingProject=\"new\" (a new project with a new id; the old file is kept as .claude\\project.json.old).",
+                        };
+                        return;
+                    }
 
                     if (existing.Exists)
                     {
@@ -6536,7 +6402,47 @@ namespace MultiTerminal.MCPServer.Services
                 rows = _projects.Values.Select(p => (p.Id, p.Name, p.Path)).ToList();
             }
 
-            return ExistingProjectDetector.Detect(folder, fileState, projectJson, rows);
+            var match = ExistingProjectDetector.Detect(folder, fileState, projectJson, rows);
+            if (match.Source == ExistingProjectSource.ProjectJson && match.ProjectId != null)
+            {
+                try { match.DeletedAt = _projectDb.GetDeletedAt(match.ProjectId); }
+                catch (Exception ex) { LogError($"FindExistingProjectAtPath: reading deleted_projects failed: {ex.Message}"); }
+            }
+
+            return match;
+        }
+
+        /// <summary>
+        /// Puts a project.json set aside by <see cref="SetAsideProjectFile"/> back, when a create after it
+        /// failed. Never overwrites a project.json that exists again by then. Best-effort: logs and returns.
+        /// </summary>
+        private void RestoreSetAsideProjectFile(string folder, string kept)
+        {
+            try
+            {
+                string file = System.IO.Path.Combine(folder, ".claude", "project.json");
+                if (!System.IO.File.Exists(file) && System.IO.File.Exists(kept))
+                    System.IO.File.Move(kept, file);
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                LogError($"Could not put {kept} back as project.json after a failed create: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Sets a folder's .claude/project.json aside as project.json.old (project.json.old2, ... when taken),
+        /// so a new project can be created in the folder (GitHub #102, "Start a new project here"). Returns
+        /// the backup's path. Throws when the file cannot be moved; nothing is created then.
+        /// </summary>
+        public static string SetAsideProjectFile(string folder)
+        {
+            string file = System.IO.Path.Combine(folder, ".claude", "project.json");
+            string target = file + ".old";
+            for (int n = 2; System.IO.File.Exists(target); n++)
+                target = file + ".old" + n;
+            System.IO.File.Move(file, target);
+            return target;
         }
 
         /// <summary>
@@ -6549,6 +6455,19 @@ namespace MultiTerminal.MCPServer.Services
         /// a rename target that lives somewhere else.
         /// </summary>
         private CreateProjectResult AdoptExistingProjectLocked(ExistingProjectMatch existing, string createdBy, out ActivityEvent activity)
+        {
+            var adopted = AdoptExistingProjectCoreLocked(existing, createdBy, out activity);
+            if (adopted != null && adopted.Success && !string.IsNullOrEmpty(existing?.ProjectId))
+            {
+                // Restored: it is no longer a deleted project (GitHub #102).
+                try { _projectDb.ForgetDeletedProject(existing.ProjectId); }
+                catch (Exception ex) { LogError($"Failed to forget the deletion of project {existing.ProjectId}: {ex.Message}"); }
+            }
+
+            return adopted;
+        }
+
+        private CreateProjectResult AdoptExistingProjectCoreLocked(ExistingProjectMatch existing, string createdBy, out ActivityEvent activity)
         {
             activity = null;
             string id = existing.ProjectId;
@@ -6831,10 +6750,13 @@ namespace MultiTerminal.MCPServer.Services
         ///    the root's FileSystemWatcher) AND deletes .claude/project.json when asked;
         ///  - its stale code-graph rows evicted via the gated <see cref="CodeGraphIndexCoordinator"/>;
         ///  - broadcast + recorded in the activity feed.
-        /// Associated tasks are intentionally NOT deleted. <paramref name="deleteLocalConfig"/> also
-        /// removes the on-disk .claude/project.json (default false = unregister only).
+        /// The deletion is recorded in deleted_projects BEFORE the unregister, and the delete fails if it
+        /// cannot be, so a leftover project.json is never re-adopted silently (GitHub #102).
+        /// Tasks are kept unless <paramref name="deleteTasks"/> is set (the delete dialog asks; a kept
+        /// task comes back with a restore). <paramref name="deleteLocalConfig"/> also removes the on-disk
+        /// .claude/project.json (default false = unregister only).
         /// </summary>
-        public DeleteProjectResult DeleteProject(string projectId, string deletedBy, bool deleteLocalConfig = false)
+        public DeleteProjectResult DeleteProject(string projectId, string deletedBy, bool deleteLocalConfig = false, bool deleteTasks = false)
         {
             if (string.IsNullOrWhiteSpace(projectId))
                 return new DeleteProjectResult { Success = false, Error = "Project id is required" };
@@ -6848,6 +6770,17 @@ namespace MultiTerminal.MCPServer.Services
 
             string projectName = rich?.Name ?? cached?.Name ?? projectId;
 
+            // GitHub #102: remember the deletion FIRST, so there is no moment when the row is gone and the
+            // tombstone is not there (auto-add on cd would re-adopt the leftover project.json then). If it
+            // cannot be recorded, the project is not deleted (pipeline Run 1, Codex).
+            try { _projectDb.RecordDeletedProject(projectId, projectName, rich?.Path ?? cached?.Path); }
+            catch (Exception ex)
+            {
+                LogError($"Failed to record the deletion of project {projectId}: {ex.Message}");
+                if (cached != null) _projects.TryAdd(projectId, cached);
+                return new DeleteProjectResult { Success = false, Error = $"Failed to delete project: could not record the deletion ({ex.Message})" };
+            }
+
             // Canonical unregister: DB delete + optional .claude/project.json + fires
             // ProjectRemoved/RegistryChangedExternally (CodeGraphWatcher reconciles and drops the
             // watcher). Falls back to a bare DB delete only if ProjectService isn't wired.
@@ -6857,15 +6790,48 @@ namespace MultiTerminal.MCPServer.Services
             try
             {
                 if (ProjectService != null)
-                    ProjectService.UnregisterProject(projectId, deleteLocalConfig);
+                {
+                    foreach (var failure in ProjectService.UnregisterProject(projectId, deleteLocalConfig))
+                        LogError($"Project {projectId} was deleted, but a listener of its removal failed: {failure.Message}");
+                }
                 else
                     _projectDb.DeleteProject(projectId);
             }
             catch (Exception ex)
             {
-                LogError($"Failed to delete project {projectId}: {ex.Message}");
-                if (cached != null) _projects.TryAdd(projectId, cached);
-                return new DeleteProjectResult { Success = false, Error = $"Failed to delete project: {ex.Message}" };
+                // UnregisterProject deletes the row and THEN raises its events, so an exception does not mean
+                // the project is still there (pipeline Run 2, Codex). Only a row that is still there undoes
+                // the delete; a committed delete keeps its tombstone and carries on. Unknown keeps it too: a
+                // tombstone beside a registered row changes nothing (auto-add and create check the row first).
+                bool rowStillThere;
+                try { rowStillThere = _projectDb.GetRichProject(projectId) != null; }
+                catch (Exception checkEx)
+                {
+                    LogError($"Failed to delete project {projectId}: {ex.Message}; could not check its row: {checkEx.Message}");
+                    if (cached != null) _projects.TryAdd(projectId, cached);
+                    return new DeleteProjectResult { Success = false, Error = $"Failed to delete project: {ex.Message}" };
+                }
+
+                if (rowStillThere)
+                {
+                    LogError($"Failed to delete project {projectId}: {ex.Message}");
+                    if (cached != null) _projects.TryAdd(projectId, cached);
+                    try { _projectDb.ForgetDeletedProject(projectId); } // not deleted after all
+                    catch (Exception forgetEx) { LogError($"Failed to forget the deletion of project {projectId}: {forgetEx.Message}"); }
+                    return new DeleteProjectResult { Success = false, Error = $"Failed to delete project: {ex.Message}" };
+                }
+
+                LogError($"Project {projectId} was deleted, but a listener of its removal failed: {ex.Message}");
+            }
+
+            // The Owner chose in the delete dialog (GitHub #102): kept tasks come back with a restore.
+            int tasksDeleted = 0;
+            if (deleteTasks)
+            {
+                foreach (var task in GetTasks(projectId).ToList())
+                {
+                    if (DeleteTask(task.Id, deletedBy ?? "System").Success) tasksDeleted++;
+                }
             }
 
             // Best-effort: evict the project's code-graph rows, serialized through the index gate so
@@ -6881,7 +6847,7 @@ namespace MultiTerminal.MCPServer.Services
                 Terminal = deletedBy ?? "System",
                 Type = "project",
                 Action = "deleted",
-                Content = $"Deleted project: {projectName}",
+                Content = deleteTasks ? $"Deleted project: {projectName} and {tasksDeleted} of its tasks" : $"Deleted project: {projectName}",
                 RelatedId = projectId
             });
 
@@ -7122,6 +7088,17 @@ namespace MultiTerminal.MCPServer.Services
             var row = _projectDb.GetAllProjects().FirstOrDefault(p => string.Equals(p.Id, projectId, StringComparison.Ordinal));
             if (row != null)
                 _projects[row.Id] = row;
+        }
+
+        /// <summary>
+        /// After Move Project (ticket 6f879683) rewrote the project's row itself: re-reads the row into the
+        /// cache and tells every listener the projects changed. Seeds FROM the database; not a mutation.
+        /// </summary>
+        public void RefreshProjectAfterRelocation(string projectId)
+        {
+            if (string.IsNullOrWhiteSpace(projectId)) return;
+            RecacheProjectRowFromDb(projectId);
+            NotifyProjectsChanged();
         }
 
         private Project InsertProjectInternal(Project project)
@@ -7869,7 +7846,7 @@ namespace MultiTerminal.MCPServer.Services
         /// (task be599e08). Best-effort: the event is raised synchronously, but delivery/injection
         /// is the subscriber's responsibility — a missing terminal is a no-op, not an error here.
         /// </summary>
-        public (bool success, string error) RequestTerminalInject(string agentName, string sessionId, string text, string kind = "clear-trigger", bool continueAfterCompact = false)
+        public (bool success, string error) RequestTerminalInject(string agentName, string sessionId, string text, string kind = "clear-trigger", bool continueAfterCompact = false, string continueAfterClear = null)
         {
             if (string.IsNullOrWhiteSpace(agentName))
                 return (false, "agentName is required");
@@ -7882,7 +7859,8 @@ namespace MultiTerminal.MCPServer.Services
                 SessionId = sessionId,
                 Text = text,
                 Kind = string.IsNullOrEmpty(kind) ? "clear-trigger" : kind,
-                ContinueAfterCompact = continueAfterCompact
+                ContinueAfterCompact = continueAfterCompact,
+                ContinueAfterClear = continueAfterClear
             });
 
             return (true, null);
@@ -8687,6 +8665,13 @@ namespace MultiTerminal.MCPServer.Services
         /// pane to continue once the compaction finishes (ticket c0ebcfd4).
         /// </summary>
         public bool ContinueAfterCompact { get; set; }
+
+        /// <summary>
+        /// Kind <c>"submit"</c> with <see cref="Text"/> <c>/clear</c> only: what <c>clear_my_context</c> was asked to
+        /// carry into the fresh session (<c>continueWith</c>, ticket cc2e51ff). The pane holds it and adds it to the
+        /// prompt typed after the clear. Null for none.
+        /// </summary>
+        public string ContinueAfterClear { get; set; }
 
         /// <summary>Kinds <c>"compact-starting"</c> and <c>"compact-continue"</c>: the pane (MULTITERMINAL_DOC_ID) that is compacting.</summary>
         public string DocId { get; set; }

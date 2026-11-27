@@ -365,6 +365,50 @@ namespace MultiTerminal.Terminal
             }
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FLASHWINFO
+        {
+            public uint cbSize;
+            public IntPtr hwnd;
+            public uint dwFlags;
+            public uint uCount;
+            public uint dwTimeout;
+        }
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool FlashWindowEx(ref FLASHWINFO pwfi);
+
+        private const uint FLASHW_TRAY = 0x2;
+        private const uint FLASHW_TIMERNOFG = 0xC;
+
+        /// <summary>
+        /// Flashes <paramref name="windowHandle"/>'s taskbar button until the window comes to the foreground
+        /// (FLASHW_TRAY | FLASHW_TIMERNOFG): Windows' way to ask for attention when SetForegroundWindow is refused.
+        /// </summary>
+        public static bool FlashTaskbarUntilForeground(IntPtr windowHandle)
+        {
+            if (windowHandle == IntPtr.Zero) return false;
+            var info = new FLASHWINFO
+            {
+                cbSize = (uint)Marshal.SizeOf<FLASHWINFO>(),
+                hwnd = windowHandle,
+                dwFlags = FLASHW_TRAY | FLASHW_TIMERNOFG,
+                uCount = uint.MaxValue,
+                dwTimeout = 0,
+            };
+            return FlashWindowEx(ref info);
+        }
+
+        /// <summary>Whether the foreground window belongs to this process (MT's main window or one of its floating windows).</summary>
+        public static bool ForegroundBelongsToThisProcess()
+        {
+            IntPtr foreground = GetForegroundWindow();
+            if (foreground == IntPtr.Zero) return false;
+            GetWindowThreadProcessId(foreground, out uint pid);
+            return pid == (uint)Environment.ProcessId;
+        }
+
         /// <summary>
         /// Gets the current foreground window handle.
         /// </summary>

@@ -12,11 +12,12 @@ namespace MultiTerminal.Services
     /// </summary>
     public sealed class HelperResumeCheck
     {
-        private HelperResumeCheck(LaunchSessionCandidate candidate, string cwd, string skipReason)
+        private HelperResumeCheck(LaunchSessionCandidate candidate, string cwd, string skipReason, bool permanent = false)
         {
             Candidate = candidate;
             Cwd = cwd;
             SkipReason = skipReason;
+            IsPermanent = permanent;
         }
 
         public LaunchSessionCandidate Candidate { get; }
@@ -29,7 +30,18 @@ namespace MultiTerminal.Services
 
         public bool CanResume => SkipReason == null;
 
+        /// <summary>
+        /// The skip can never turn into a resume: nothing usable was recorded, the transcript is gone, or the
+        /// folder it ran in is not the project's or no longer exists (task 688ad2f6). Such a helper is left
+        /// behind (<see cref="PaneLaunchRecorder.LeaveBehind"/>), so it is not offered and reported again at
+        /// every later resume. A skip that may pass next time (already open, may be open elsewhere, a re-check
+        /// or a profile refusal) is not permanent, and the helper stays offered.
+        /// </summary>
+        public bool IsPermanent { get; }
+
         internal static HelperResumeCheck Skip(string reason) => new HelperResumeCheck(null, null, reason);
+
+        internal static HelperResumeCheck SkipForGood(string reason) => new HelperResumeCheck(null, null, reason, permanent: true);
 
         internal static HelperResumeCheck Ok(LaunchSessionCandidate candidate, string cwd) => new HelperResumeCheck(candidate, cwd, null);
     }
@@ -41,6 +53,46 @@ namespace MultiTerminal.Services
     /// </summary>
     public static class HelperResume
     {
+        /// <summary>
+        /// How many helpers come back with their PM (Owner decision, task 592ade03; it was 6, and a PM with
+        /// 8 lost its 2 oldest without a word).
+        /// </summary>
+        public const int MaxHelpersWithPm = 12;
+
+        /// <summary>
+        /// How many open helpers <see cref="PaneLaunchRecorder.GetOpenHelpers"/> looks up by default: a bound on
+        /// that lookup's work (one query per candidate, on the UI thread), well above <see cref="MaxHelpersWithPm"/>
+        /// so the helpers left out can still be named (pipeline Run 1, Codex).
+        /// </summary>
+        public const int LookupLimit = 40;
+
+        /// <summary>At most this many left-out helpers are named in the summary; the rest are counted.</summary>
+        internal const int NamedLeftOutLimit = 10;
+
+        /// <summary>
+        /// The helpers to resume: the <see cref="MaxHelpersWithPm"/> NEWEST of <paramref name="helpers"/> by
+        /// <see cref="OpenHelper.Seq"/>, whatever order they arrive in (pipeline Run 1: the startup restore
+        /// passes them oldest first, and an order-based cut kept the oldest). Ties keep the given order. Each
+        /// helper left out is recorded in <paramref name="report"/> by name (up to <see cref="NamedLeftOutLimit"/>,
+        /// then a count), so the summary says who did not come back and where to find them.
+        /// </summary>
+        public static IReadOnlyList<OpenHelper> ApplyLimit(IReadOnlyList<OpenHelper> helpers, HelperResumeReport report)
+        {
+            if (helpers == null || helpers.Count <= MaxHelpersWithPm)
+                return helpers ?? Array.Empty<OpenHelper>();
+
+            var newestFirst = helpers.OrderByDescending(h => h?.Seq ?? long.MinValue).ToList();
+            var left = newestFirst.Skip(MaxHelpersWithPm).ToList();
+            string reason = $"only the {MaxHelpersWithPm} newest helpers reopen with their PM; resume this one from the project's past sessions";
+            foreach (var helper in left.Take(NamedLeftOutLimit))
+                report?.AddSkipped(helper?.TerminalName, reason);
+            if (left.Count > NamedLeftOutLimit)
+                report?.AddSkipped($"{left.Count - NamedLeftOutLimit} more", reason);
+
+            var kept = new HashSet<OpenHelper>(newestFirst.Take(MaxHelpersWithPm));
+            return helpers.Where(kept.Contains).ToList(); // the caller's order, minus the ones left out
+        }
+
         /// <summary>
         /// Whether a pane created for <paramref name="requestedName"/> came up as that helper:
         /// <paramref name="resolvedName"/> is the name or a suffixed form of it (a held name),
@@ -81,12 +133,19 @@ namespace MultiTerminal.Services
             PriorLaunchState prior = PriorLaunchState.NoRecord,
             string catalogMissReason = null)
         {
-            if (helper == null) return HelperResumeCheck.Skip("nothing was recorded for it");
-            if (string.IsNullOrWhiteSpace(helper.TerminalName)) return HelperResumeCheck.Skip("it has no recorded name");
+            if (helper == null) return HelperResumeCheck.SkipForGood("nothing was recorded for it");
+            if (string.IsNullOrWhiteSpace(helper.TerminalName)) return HelperResumeCheck.SkipForGood("it has no recorded name");
             if (!string.IsNullOrEmpty(helper.Kind) && !string.Equals(helper.Kind, "claude", StringComparison.OrdinalIgnoreCase))
-                return HelperResumeCheck.Skip("it is not a Claude session, and only Claude sessions can be resumed");
+                return HelperResumeCheck.SkipForGood("it is not a Claude session, and only Claude sessions can be resumed");
             if (entry == null)
-                return HelperResumeCheck.Skip("its session cannot be resumed: " + (catalogMissReason ?? "the session catalog did not find it"));
+            {
+                // Only a transcript that is not there is for good; any other catalog refusal (already open,
+                // a read that failed) may pass next time.
+                string why = "its session cannot be resumed: " + (catalogMissReason ?? "the session catalog did not find it");
+                return string.Equals(catalogMissReason, SessionCatalog.TranscriptNotFoundReason, StringComparison.Ordinal)
+                    ? HelperResumeCheck.SkipForGood(why)
+                    : HelperResumeCheck.Skip(why);
+            }
 
             var panes = (livePanes ?? Enumerable.Empty<PaneSessionState>()).ToList();
             var model = new LaunchSessionChoiceModel(new[] { entry }, panes, _ => prior);
@@ -108,9 +167,9 @@ namespace MultiTerminal.Services
 
             string cwd = SessionCatalog.ValidateResumeCwd(projectRoot, entry.Cwd, entry.WorktreeBase);
             if (cwd == null)
-                return HelperResumeCheck.Skip("it ran in a folder that is not this project's folder or one of its worktrees");
+                return HelperResumeCheck.SkipForGood("it ran in a folder that is not this project's folder or one of its worktrees");
             if (directoryExists == null || !directoryExists(cwd))
-                return HelperResumeCheck.Skip($"the folder it ran in no longer exists ({cwd})");
+                return HelperResumeCheck.SkipForGood($"the folder it ran in no longer exists ({cwd})");
 
             return HelperResumeCheck.Ok(candidate, cwd);
         }

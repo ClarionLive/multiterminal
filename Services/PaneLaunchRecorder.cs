@@ -66,6 +66,15 @@ namespace MultiTerminal.Services
         /// <see cref="PriorLaunchState.ClosedWithPm"/>, which waives the recent-write flag.
         /// </summary>
         public const string ClosedWithPm = "closed_with_pm";
+
+        /// <summary>
+        /// A resume of the helper's PM decided not to bring it back, for good (task 688ad2f6): it was beyond
+        /// <see cref="HelperResume.MaxHelpersWithPm"/>, or its skip can never pass (<see cref="HelperResumeCheck.IsPermanent"/>).
+        /// Written over an <see cref="MtExit"/> or <see cref="ClosedWithPm"/> end, or on a crashed run's open row,
+        /// never on a live pane's. Counts as closed, so <see cref="PaneLaunchRecorder.GetOpenHelpers"/> stops
+        /// offering it. Before this, such a helper stayed "open" and came back at a later resume, weeks on.
+        /// </summary>
+        public const string LeftBehind = "left_behind";
     }
 
     /// <summary>
@@ -216,12 +225,22 @@ namespace MultiTerminal.Services
     /// <summary>A helper session a PM session left open, as returned by <see cref="PaneLaunchRecorder.GetOpenHelpers"/>.</summary>
     public sealed class OpenHelper
     {
+        /// <summary>The <c>pane_launches.id</c> of the helper's newest launch, the row <see cref="PaneLaunchRecorder.LeaveBehind"/> ends.</summary>
+        public string LaunchId { get; set; }
+
         public string SessionId { get; set; }
         public string TerminalName { get; set; }
         public string Cwd { get; set; }
         public string ProjectId { get; set; }
         public string Kind { get; set; }
         public DateTime LastStartedAt { get; set; }
+
+        /// <summary>
+        /// The helper's launch order (<c>pane_launches.seq</c>): higher is newer. <see cref="HelperResume.ApplyLimit"/>
+        /// keeps the newest by this, whatever order a caller passes the helpers in (task 592ade03: the startup
+        /// restore passes them oldest first).
+        /// </summary>
+        public long Seq { get; set; }
     }
 
     /// <summary>
@@ -385,6 +404,45 @@ namespace MultiTerminal.Services
             }
         }
 
+        /// <summary>
+        /// Marks each helper's newest launch <see cref="PaneLaunchEndReason.LeftBehind"/> (task 688ad2f6), so later
+        /// resumes of its PM stop offering it. Only a resumable row changes (open from an earlier run, or ended
+        /// <see cref="PaneLaunchEndReason.MtExit"/> or <see cref="PaneLaunchEndReason.ClosedWithPm"/>); a pane open
+        /// in this run is live and is never touched. Never throws.
+        /// </summary>
+        /// <returns>How many rows were marked.</returns>
+        public int LeaveBehind(IEnumerable<OpenHelper> helpers)
+        {
+            int marked = 0;
+            foreach (var helper in helpers ?? Enumerable.Empty<OpenHelper>())
+            {
+                if (string.IsNullOrEmpty(helper?.LaunchId)) continue;
+                try
+                {
+                    // Pipeline Run 2 (Codex): a row's run id alone does not prove its process is gone. A helper
+                    // still running, here or under a previous MT that cannot be shown to have exited, is never
+                    // left behind; the same fail-closed probe as the "may be open elsewhere" rule decides.
+                    var state = GetPriorLaunchState(helper.SessionId);
+                    if (state == PriorLaunchState.OpenInCurrentRun || state == PriorLaunchState.OpenElsewhere)
+                    {
+                        Log($"Not left behind: helper '{helper.TerminalName}' session {helper.SessionId} may still be running ({state})");
+                        continue;
+                    }
+
+                    if (_db.LeavePaneLaunchBehind(helper.LaunchId, MtRunId, _utcNow()))
+                    {
+                        marked++;
+                        Log($"Left behind: helper '{helper.TerminalName}' session {helper.SessionId} (launch {helper.LaunchId})");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"LeaveBehind failed for launch {helper.LaunchId}: {ex.Message}");
+                }
+            }
+            return marked;
+        }
+
         /// <summary>Ends a launch with one of <see cref="PaneLaunchEndReason"/>. An already-ended launch keeps its first reason.</summary>
         public void End(string launchId, string reason)
         {
@@ -414,7 +472,11 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// The helper sessions <paramref name="pmSessionId"/> left open, newest first, at most
-        /// <paramref name="max"/> (Owner-approved rule, task 7d20e94c). "Newest" and "later" are by
+        /// <paramref name="max"/> (by default <see cref="HelperResume.LookupLimit"/>, a bound on the work done here, one
+        /// query per candidate on the UI thread). The limit on how many come back WITH the PM is
+        /// <see cref="HelperResume.MaxHelpersWithPm"/>, applied by <see cref="HelperResume.ApplyLimit"/> where
+        /// the helpers are resumed, so the ones beyond it can be named to the Owner (task 592ade03; a default
+        /// of 6 here used to drop the oldest silently). "Newest" and "later" are by
         /// <see cref="PaneLaunchRecord.Seq"/> (pipeline Run 1), never by start time, which can tie.
         /// <list type="number">
         /// <item>Every launch of the PM session, including earlier resumes (a resume keeps the session id)
@@ -429,7 +491,7 @@ namespace MultiTerminal.Services
         /// (a later <c>closed_with_pm</c> or <c>mt_exit</c> is not closed).</item>
         /// </list>
         /// </summary>
-        public IReadOnlyList<OpenHelper> GetOpenHelpers(string pmSessionId, int max = 6)
+        public IReadOnlyList<OpenHelper> GetOpenHelpers(string pmSessionId, int max = HelperResume.LookupLimit)
         {
             if (string.IsNullOrEmpty(pmSessionId) || max <= 0) return Array.Empty<OpenHelper>();
             try
@@ -457,12 +519,14 @@ namespace MultiTerminal.Services
 
                     result.Add(new OpenHelper
                     {
+                        LaunchId = child.Id,
                         SessionId = child.SessionId,
                         TerminalName = child.TerminalName,
                         Cwd = child.Cwd,
                         ProjectId = child.ProjectId,
                         Kind = child.Kind,
                         LastStartedAt = child.StartedAt,
+                        Seq = child.Seq,
                     });
                 }
                 return result;

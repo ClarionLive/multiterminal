@@ -105,6 +105,58 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void A_missing_projects_root_is_not_reported_as_a_transcript_that_is_not_there()
+        {
+            // Task 688ad2f6 (pipeline Run 2): TranscriptNotFoundReason leaves a helper behind for good, so a
+            // search that could not run (the profile's projects folder missing or unreachable) must say so instead.
+            var id = WriteRepoWorktreeSession();
+            var catalog = new SessionCatalog(Path.Combine(_base, "no-such-projects"), null, null);
+
+            Assert.Null(catalog.TryGetEntry(_projectRoot, id, new HashSet<string>(), Now));
+            Assert.NotEqual(SessionCatalog.TranscriptNotFoundReason, catalog.LastMissReason);
+            Assert.Contains("could not be looked for", catalog.LastMissReason);
+        }
+
+        [Fact]
+        public void A_projects_root_that_exists_but_cannot_be_listed_is_not_a_transcript_that_is_not_there()
+        {
+            // Codex re-verify (task 688ad2f6): GetCandidateFolders swallowed a listing failure and returned
+            // nothing, which read as a complete search. Deny listing the projects root to this user.
+            var id = WriteRepoWorktreeSession();
+            var dir = new DirectoryInfo(_projectsRoot);
+            var me = System.Security.Principal.WindowsIdentity.GetCurrent().User;
+            var deny = new System.Security.AccessControl.FileSystemAccessRule(me,
+                System.Security.AccessControl.FileSystemRights.ListDirectory, System.Security.AccessControl.AccessControlType.Deny);
+            var acl = dir.GetAccessControl();
+            acl.AddAccessRule(deny);
+            dir.SetAccessControl(acl);
+            try
+            {
+                Assert.True(Directory.Exists(_projectsRoot), "the root must still exist for this fact to mean anything");
+                Assert.ThrowsAny<UnauthorizedAccessException>(() => Directory.EnumerateDirectories(_projectsRoot).ToList());
+
+                var catalog = Catalog();
+                Assert.Null(catalog.TryGetEntry(_projectRoot, id, new HashSet<string>(), Now));
+                Assert.NotEqual(SessionCatalog.TranscriptNotFoundReason, catalog.LastMissReason);
+                Assert.Contains("could not be looked for", catalog.LastMissReason);
+            }
+            finally
+            {
+                acl = dir.GetAccessControl();
+                acl.RemoveAccessRule(deny);
+                dir.SetAccessControl(acl);
+            }
+        }
+
+        [Fact]
+        public void A_complete_search_that_finds_nothing_is_a_transcript_that_is_not_there()
+        {
+            var catalog = Catalog();
+            Assert.Null(catalog.TryGetEntry(_projectRoot, Guid.NewGuid().ToString("D"), new HashSet<string>(), Now));
+            Assert.Equal(SessionCatalog.TranscriptNotFoundReason, catalog.LastMissReason);
+        }
+
+        [Fact]
         public void The_validated_cwd_accepts_a_repo_root_worktree_only_with_that_repo_root()
         {
             Assert.Equal(_repoWorktree, SessionCatalog.ValidateResumeCwd(_projectRoot, _repoWorktree, _repoRoot), ignoreCase: true);

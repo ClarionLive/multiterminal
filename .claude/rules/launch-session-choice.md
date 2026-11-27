@@ -196,12 +196,93 @@ Sonnet for helpers, Sonnet for subagents; they are settings, because Anthropic's
   `--resume`, were not run. Check by resuming a session last run on another model and reading the model
   of its new turns in the transcript.
 
+## Extra Claude flags per project and per agent (ticket 5380b6fb)
+
+Owner request 2026-11-23: one agent working on mrtStudio needs `--plugin-dir "C:\scratch\cc-plugin-1123"`
+(a plugin for the new Clarion IDE) on its command line only. Owner decision: a project-wide field AND a
+per-agent one.
+
+- **Where.** Project settings form, Launch section: "Extra Claude flags" (`projects.claude_extra_args`),
+  every Claude terminal of the project, helpers included. Agents table: "Extra Claude flags"
+  (`project_agents.extra_args`), that agent only, added AFTER the project's. Both apply at the next launch.
+- **One decision.** `ClaudeExtraArgsPolicy.Decide` (pure), reached through `MainForm.DecideLaunchExtraArgs`
+  (reads the row and the agent rows fresh; never throws) and `WithLaunchExtraArgs` (Claude kind only).
+  Sites: spawn_helper (the requested name), project launch (new and resume), a helper resumed with its
+  PM (its original name), Just Claude, New Project (no agent row), Launch as. The project launch and Launch
+  as decide right before `StartTerminal`, by the name the broker REGISTERED (a held name comes back
+  suffixed), so a `Vella-2` row is found for a pane that became Vella-2. A project is found by id,
+  else discovered from the folder. Which agent row: an exact name match (ignore case), else the name
+  without a trailing `-<number>` (Vella-2 uses Vella's row when there is no Vella-2 row).
+- **The text is untrusted for the command line.** It ends up inside `-Command "..."` of `CreateProcess`
+  (`ConPtyTerminal.StartProcess`) and then PowerShell. So it is split into tokens (whitespace separates,
+  double quotes group and are removed) and each token is written as a PowerShell single-quoted literal
+  (`'` doubled): nothing in it is evaluated. Refused: a `"` left open, a control character, the
+  typographic quotes PowerShell also treats as quotes (U+2018 to U+201F), an empty `""`, over 2000
+  characters, a value with a space that ends in a backslash (Windows PowerShell 5.1, a pane's fallback
+  shell, would pass it as `"...\"` and the backslash would escape the quote), and flags MT sets itself or that change what MT expects (`ClaudeExtraArgsPolicy.ReservedFlags`:
+  --resume/-r, --continue/-c, --session-id, --fork-session, --mcp-config, --strict-mcp-config, --settings,
+  --setting-sources, --dangerously-skip-permissions, --allow-dangerously-skip-permissions, --permission-mode,
+  --model, -n/--name, -p/--print, --output-format, --input-format, the print-and-exit -h/--help and
+  -v/--version (`ClaudeStartupDetector`'s list), flags that start the session elsewhere or end it at once
+  (--bg/--background, --cloud, --desktop, --environment, --teleport, --tmux), flags that strip what MT
+  installs (--bare, --safe-mode, --restricted, --disable-slash-commands) and flags that change the
+  session or folder MT tracks (--from-pr, -w/--worktree, --no-session-persistence); a `--flag=value` form
+  counts). It is a deny list taken from `claude --help` (2026-11-23): a flag a later Claude Code adds is
+  accepted until it is listed. A bare word is not
+  refused: after MT's flags Claude Code reads it as the opening prompt, which is the Owner's choice.
+- **Owner-only.** The settings form refuses invalid text with the reason (nothing saved). An invalid
+  STORED level is skipped at launch with a warning in the "ClaudeExtraArgs" debug log; the launch is
+  not refused. Agents cannot set either field: `PATCH /api/projects/{id}` (`update_project`) refuses
+  `claudeExtraArgs` / `claude_extra_args`, and `POST /api/projects/{id}/agents` (`add_project_agent`)
+  saves with `writeExtraArgs: false`, so an existing row keeps its flags and a new one gets none. A
+  `--plugin-dir` loads hooks into every matching terminal, which is why.
+- **Placement.** `LaunchCommandBuilder.WithExtraArgs` inserts after MT's flags and before `--model`,
+  `--resume` and `--dangerously-skip-permissions`, so the command still starts with bare `claude` for
+  `ApplySessionName`. The place is found by a pattern anchored at the END of the command (the builder's
+  own tail), never by searching MT's flags, whose quoted paths could contain the same text; `WithModel`
+  uses the same anchor. A command it cannot place them in is launched without them (logged), through the
+  one MainForm helper every site uses. Claude Code accepts `--plugin-dir` more than once, so MT's plugin still loads.
+- **Not covered.** Headless agents (`AgentProcess`), the gloss writer, Oracle, Codex and PowerShell panes,
+  ClarionAssistant IDE tabs. The launch log ("ClaudeExtraArgs") names the flags only, never their values
+  (`ClaudeExtraArgsDecision.DescribeForLog`), but the pane's full command line is still traced by
+  `ConPtyTerminal`, values included, so do not put a secret in them. A skipped level or a failed lookup is
+  only logged; nothing in the pane says the flags are missing.
+- **Not executed live.** Tests cover the parse, the refusals, a real PowerShell round trip of hostile
+  values through the same `-Command "..."` layer, placement, the save path and both REST refusals. That
+  each MainForm site applies the decision, and that Claude Code loads a second `--plugin-dir`, were not run.
+
 ## Helpers resume with their PM (task 7d20e94c)
 
 Resuming a PM session also reopens the helper panes it had open when it last ended. Owner decisions:
 Continue mode (no dialog) resumes all of them and reports what it skipped; a helper whose Claude
 process exited while its pane stayed open counts as CLOSED; one level only (no helpers of helpers),
-at most 6. A new session never resumes helpers. Closing a PM's tab can close its helpers with it,
+at most 12 (task 592ade03; it was 6, and a PM with 8 silently lost its 2 oldest). The limit is
+`HelperResume.MaxHelpersWithPm`, applied once by `HelperResume.ApplyLimit` in `MainForm.ResumeHelpersFor`, so every
+path (dialog, Continue mode, startup restore) obeys it. It keeps the 12 NEWEST by `OpenHelper.Seq`, whatever
+order they arrive in (the startup restore passes them oldest first), and the summary names each one left out
+(10 by name, then a count). `PaneLaunchRecorder.GetOpenHelpers` looks up at most `HelperResume.LookupLimit` (40),
+a bound on its per-helper queries. A new session never resumes helpers.
+
+**Left behind for good (task 688ad2f6).** A helper of ANY launch of the PM session stays offered until a
+resume decides about it, so a crash mid-resume, a transient skip or a helper still running loses nothing.
+Two decisions end it for good, writing `left_behind` on the helper's newest launch row
+(`PaneLaunchRecorder.LeaveBehind` → `TaskDatabase.LeavePaneLaunchBehind`): it was beyond the limit
+(`MainForm.ResumeHelpersFor`, after `ApplyLimit`), or its skip can never pass (`HelperResumeCheck.IsPermanent`:
+nothing usable recorded, not Claude, `SessionCatalog.TranscriptNotFoundReason`, a cwd outside the project, a
+folder that no longer exists). `left_behind` counts as closed. Only a resumable row changes (`mt_exit`,
+`closed_with_pm`, or open in an earlier, crashed run); a row open in this run is a live pane and is never
+touched. A run id alone does not prove a process gone, so `LeaveBehind` first asks `GetPriorLaunchState`
+and skips `OpenInCurrentRun` and `OpenElsewhere` (an earlier MT that cannot be shown to have exited; pipeline
+Run 2, Codex). `TranscriptNotFoundReason` is given only after a COMPLETE search (projects root present, every
+candidate folder listed, no file of that name); a search that could not run is "could not be looked for" and
+an unreadable file "could not be read", both passing skips. The startup restore's helpers carry `LaunchId`
+too (`MainForm.ToOpenHelper`). Known gaps: with more than `LookupLimit` (40) open helpers, the ones past it are
+not seen and so not left behind; a left-behind row reads `Ended` to `ClassifyPriorLaunch`, so a manual resume
+of it within ~2 minutes of its last write shows "may be open elsewhere"; marking a helper's newest row also
+drops it from another PM's offer (`closedLater`), which only matters for a helper re-linked under two PMs. Unticked helpers are NOT left behind: the dialog remembers the untick and keeps showing them. Before
+this, Grace (2026-11-18) got back three helpers the old limit of 6 had dropped weeks earlier, plus two
+reported "not found" at every resume. A first fix, "the newest PM launch only", was dropped in review: it lost
+helpers whenever a resume did not finish re-linking them. Closing a PM's tab can close its helpers with it,
 and they come back when the PM is resumed (item 8, below).
 
 ### The launch record

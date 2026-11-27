@@ -101,7 +101,9 @@ namespace MultiTerminal.Tests
                 "OnChatInjectRequested",          // Chat panel + board Inject button
                 "OnChatReplyRequested",           // reply prompt (see ticket 1fcb266c)
                 "OnBrokerTerminalInjectRequested",// the self-clear submit tool
-                "InjectCompactWhenLineClearAsync",// compact_my_context; waits for an empty, quiet input line (c0ebcfd4 TEST 4)
+                // InjectCompactWhenLineClearAsync (compact_my_context) left this path in ticket 354f1efa: it goes
+                // through TerminalControl.InjectAndSubmitUnlessTypedAsync, whose Enter the page sends only if
+                // nobody typed since the write (GuardedSubmit).
                 "ProcessNextMessage",             // message-injection fallback (tier 3)
                 "OnStartScreenNewProject",        // /new-project onboarding
                 "OnTaskDroppedOnTerminal",        // drag a card onto a pane
