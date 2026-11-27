@@ -7,8 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.1] — 2026-11-27
+
 ### Fixed
 
+- **Opening a project from another program opens it once, and MT shows itself.**
+  Two quick open requests for a closed project gave two panes; and when MT was
+  behind another window nothing showed. Now the second request joins the first,
+  and MT's taskbar button flashes when Windows will not let it come forward.
+- **A deleted project is never brought back silently** (GitHub #102). Its
+  leftover `.claude\project.json` used to restore the old project (same id, pin,
+  settings and tasks) when the folder was opened again. New Project on that
+  folder now asks: restore it, or start a new project there. Deleting a project
+  offers to keep or delete its tasks.
+- **A PM resume stops bringing back helpers it already left behind,** and up to
+  12 helpers come back with their PM.
+- **Subagent cards close when the subagent finishes** (PR #100, msarson), come
+  back when it is messaged again, and do not reappear after a restart.
+- **MT starts its services at once after a crash** (PR #105, olumidedar-gif).
+  Indexing old session transcripts now runs in the background instead of holding
+  up the attention rail, the phone gateway and GitHub watch for minutes; quitting
+  during it no longer hangs.
+- **An agent's /compact is checked for submission,** with one guarded extra
+  Enter, and never submits text you are typing.
+- **Alt+Tab back to MT types into the pane with the green border** without a
+  click (PR #104, msarson).
 - **Project Settings says what Icon and Icon colour accept, and refuses what
   they cannot show** (GitHub #77). Icon takes an emoji or a named icon (now
   listed under the field); an image path used to be saved and silently shown as
@@ -43,6 +66,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Move Project.** Project Settings > Paths can move a project's folder, on the
+  same drive or to another, and updates its notes, sessions, task worktrees and
+  Claude Code history to match. "Folder was moved…" re-points a project whose
+  folder you already moved.
+- **Extra Claude Code flags per project and per agent** (for example a
+  `--plugin-dir` for one agent), in Project Settings. Flags MT sets itself are
+  refused.
+- **Open a project from another program:** `POST /api/projects/{id}/open`
+  focuses the pane that has it, or launches it; `GET /api/projects/open-state`
+  lists what is open (PR #103, msarson). Local only, not on the phone gateway.
+- **GitHub watch can follow several repositories** per project ("Also watch").
+- **`mtclaude <Name>`** starts a Claude session outside MT that messages like an
+  MT terminal and loads MT's plugin; `mtclaude <Name> -c` continues that name's
+  own last session in the folder.
+- **Each pane shows its open subagents,** and an agent is reminded once to stop
+  the ones that have been idle for 30 minutes.
+- **Stale-task reminders can be answered** (still relevant, back to To Do, or
+  will close) and stop repeating.
+- **`clear_my_context` takes `continueWith`:** the agent's next step is typed
+  after the clear, so a helper keeps its brief.
+- **`deploy.ps1` also installs the MCP server the build used,** and refuses a
+  change that would drop a tool.
 - **Remote Control for every Claude terminal.** A new option in Settings >
   General starts each Claude terminal with Claude Code's Remote Control, so you
   can follow and drive it from claude.ai/code or the Claude app, where it is
