@@ -38,6 +38,21 @@ namespace MultiTerminal.Services
                 _launching.Remove(projectId);
         }
 
+        /// <summary>
+        /// How long a launch holds the gate at most after its code returned (live test N, 2026-11-27). A launched
+        /// pane does not count as open until its terminal process runs, about a second later; releasing the gate
+        /// when the launch code returned let a second request, queued behind it, see no open pane and launch
+        /// TestB-2.
+        /// </summary>
+        public static readonly TimeSpan MaxHoldAfterLaunch = TimeSpan.FromSeconds(15);
+
+        /// <summary>
+        /// Whether a launch that has returned may release its gate now: the pane counts as open, no pane was
+        /// launched at all (the Owner cancelled a question), or <see cref="MaxHoldAfterLaunch"/> has passed.
+        /// </summary>
+        public static bool MayRelease(bool projectOpenNow, bool paneLaunched, TimeSpan sinceLaunchReturned) =>
+            projectOpenNow || !paneLaunched || sinceLaunchReturned >= MaxHoldAfterLaunch;
+
         /// <summary>Whether a launch of <paramref name="projectId"/> is under way.</summary>
         public bool IsLaunching(string projectId)
         {
