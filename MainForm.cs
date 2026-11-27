@@ -5568,14 +5568,17 @@ namespace MultiTerminal
             {
                 BeginInvoke(new Action(() =>
                 {
+                    bool paneLaunched = false;
                     try
                     {
                         if (WindowState == FormWindowState.Minimized)
                             WindowState = FormWindowState.Normal;
                         Activate();
+                        FlashIfNotForeground();
                         RunOnHomeTab((sender, _) =>
                         {
                             OnStartScreenProjectLaunched(sender, new StartScreenLaunchEventArgs(id));
+                            paneLaunched = sender is TerminalDocument started && !started.IsDisposed && started.IsTerminalStarted;
                             // Give the launched pane the green border (review of PR #104): Activate() above queued the
                             // activation focus restore, which focuses the bordered pane, and the border may still be on
                             // the pane that had it before.
@@ -5589,7 +5592,7 @@ namespace MultiTerminal
                     }
                     finally
                     {
-                        _restOpenLaunches.End(id);
+                        ReleaseRestOpenWhenOpen(id, paneLaunched);
                     }
                 }));
             }
@@ -5600,6 +5603,51 @@ namespace MultiTerminal
             }
 
             return new ProjectOpenOutcome(ProjectOpenResult.Launching, project.Id, project.Name);
+        }
+
+        /// <summary>
+        /// Keeps the REST open's gate for <paramref name="projectId"/> until the launched pane counts as open (its
+        /// terminal runs), so a request queued behind the launch focuses it instead of launching a second pane
+        /// (live test N, 2026-11-27: TestB and TestB-2). Checked every half second; released at once when nothing
+        /// was launched, and after <see cref="Services.ProjectOpenGate.MaxHoldAfterLaunch"/> at the latest.
+        /// </summary>
+        private void ReleaseRestOpenWhenOpen(string projectId, bool paneLaunched)
+        {
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            bool Ready() => IsDisposed || Services.ProjectOpenGate.MayRelease(
+                FindPanesWithProjectOpen(projectId, launchingDocId: null, out _).Count > 0, paneLaunched, watch.Elapsed);
+
+            if (Ready())
+            {
+                _restOpenLaunches.End(projectId);
+                return;
+            }
+
+            // Disposed by its own Tick once the gate is released; the latest is MaxHoldAfterLaunch from now.
+#pragma warning disable CA2000
+            var timer = new System.Windows.Forms.Timer { Interval = 500 };
+#pragma warning restore CA2000
+            timer.Tick += (_, _) =>
+            {
+                if (!Ready()) return;
+                timer.Stop();
+                timer.Dispose();
+                _restOpenLaunches.End(projectId);
+            };
+            timer.Start();
+        }
+
+        /// <summary>
+        /// Flashes MT's taskbar button when an Activate() did not bring it to the front (live test N, 2026-11-27).
+        /// Windows lets a background app take the foreground only in some cases; the REST open promised the
+        /// pane comes forward "or MT flashes in the taskbar", and nothing flashed. Stops once MT is in front.
+        /// </summary>
+        private void FlashIfNotForeground()
+        {
+            if (!IsHandleCreated || IsDisposed) return;
+            // Any MT window in front (the main window or a floating pane's) counts.
+            if (Terminal.NativeMethods.ForegroundBelongsToThisProcess()) return;
+            Terminal.NativeMethods.FlashTaskbarUntilForeground(Handle);
         }
 
         /// <summary>
@@ -5642,6 +5690,7 @@ namespace MultiTerminal
             if (WindowState == FormWindowState.Minimized)
                 WindowState = FormWindowState.Normal;
             Activate();
+            FlashIfNotForeground();
 
             if (pane.DockState == DockState.Float && pane.Pane?.FloatWindow is Form floatWindow && !floatWindow.IsDisposed)
             {
